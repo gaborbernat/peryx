@@ -73,6 +73,9 @@ velox does not build these at all (as opposed to the phased plan, which delivers
   draft). The filename and endpoint parsers tolerate these rather than implement them.
 - A dynamic plugin system (pluggy/entry-points). velox uses compile-time traits for the real extension seams (storage,
   auth, upstream adapter, indexer).
+- Other package ecosystems (npm, crates, Maven, …). velox implements only Python. Ecosystem-specific logic is namespaced
+  under a `pypi` module (`velox-core::pypi`) so another ecosystem could be added beside it later without reworking the
+  dependent crates, but none is built now.
 
 ## 2. Compatibility surface: standards and endpoints
 
@@ -731,11 +734,29 @@ bumps `pyproject.toml` and the Cargo manifests together [uv rooster / bump-works
 
 ## 13. Testing and conformance
 
-100% coverage via `cargo llvm-cov`, with the documented carve-outs (closing braces of multi-branch conditionals,
-`.expect()` on proven invariants) that toml-fmt uses [toml-fmt CONTRIBUTING]. Unit tests live in
-`src/tests/<module>_tests.rs`; `insta` inline snapshots pin byte-for-byte PEP 503 HTML and PEP 691 JSON; `proptest`
-fuzzes version/specifier/filename parsing; `wiremock` mocks upstream indexes (pypi.org, a degraded Artifactory-like
-server, timeouts, 404s, redirects, 200-HTML-error pages). CI enforces the 100% gate.
+velox runs a layered test suite through `cargo nextest` (one process per test, scheduled in parallel across binaries;
+the integration tests share a single binary to keep link time down). Coverage runs through `cargo llvm-cov` and gates at
+**100% lines and functions**. Region and branch coverage is reported but not gated: it counts compiler- and
+macro-generated branches (`tracing` expansions, drop glue, panic edges) that no test reaches on stable, and the
+entrypoint shell (`main.rs`) is excluded. This matches the practice of cargo-llvm-cov, tokio, and nextest.
+
+The layers, fast to slow:
+
+- **Unit.** Pure domain (PEP 440/508, PEP 503 normalization, filename parsing) with tests in
+  `src/tests/<module>_tests.rs`, `proptest` for round-trip/idempotence/ordering invariants plus the PyPA corpus as fixed
+  cases, and `insta` snapshots that pin byte-for-byte PEP 503 HTML and PEP 691 JSON.
+- **Integration.** axum handlers driven through `tower`'s `oneshot` with no socket, real `redb` in a `tempfile`
+  directory, and `wiremock` upstreams for the degraded modes (HTML-only, no hashes, no PEP 658, 200-HTML-on-404,
+  auth-dropping redirects, ETag/304, timeouts). A real ephemeral port is used only for range requests and
+  redirect-follow. Single-flight is asserted with `wiremock`'s `.expect(1)` under concurrent load, and TTL/staleness
+  with `tokio`'s paused clock.
+- **End-to-end.** Real `pip`/`uv`/`twine` driven by `assert_cmd` against a running velox whose upstream is an in-process
+  mock that synthesizes tiny wheels and sdists in memory (uv's own model), with pinned upload times for deterministic
+  snapshots.
+- **Fuzz.** `cargo-fuzz` targets for the multipart upload parser, the wheel/zip archive validator (zip bombs, path
+  traversal, malformed `RECORD`), and the version/specifier/filename parsers.
+
+The fast lint-and-unit job blocks every other job; e2e and container tests run in a gated CI job, sharded with nextest.
 
 ### Conformance harness: the real acceptance bar
 
@@ -759,6 +780,16 @@ so velox builds its own, modeled on `packse` [uv's resolver test tool].
 - **Upstream degradation tests.** Spin up a no-PEP-658 upstream and confirm velox synthesizes `.metadata` whose hash
   matches the wheel METADATA; a no-hash upstream, and confirm sha256 is computed and stable; a no-serial upstream, and
   confirm TTL revalidation fires; the capability probe detects each.
+
+### Final validation: devpi vs velox
+
+The release bar is a side-by-side against devpi, the closest existing tool. A harness bootstraps both a devpi server and
+velox pointed at the same upstream, then runs one integration workload against each: install a set of popular PyPI
+packages and their dependency trees (numpy, pandas, requests, flask, cryptography, boto3, …) with pip and uv, upload and
+re-download private packages, and exercise the overlay and promotion flow. It compares two axes. Functionality:
+identical resolution, hashes, and install success, and matching simple-index and JSON output modulo host rewriting.
+Performance: cold and warm cache latency, memory and CPU under a concurrent install load, and on-disk cache size. The
+target is functional parity with devpi and a clear win on latency and resource use.
 
 ## 14. What velox changes vs devpi
 

@@ -43,6 +43,7 @@ kind. velodex rejects unknown keys.
 | `volatile`             | local      | Allow delete and overwrite                                        | `true`            |
 | `layers`               | overlay    | Ordered index names to compose; first match per filename wins     |                   |
 | `upload`               | overlay    | Local layer that receives uploads                                 | first local layer |
+| `webhook`              | all        | Signed delivery targets for upload and index-change events        | none              |
 
 A `route` is a raw URL path prefix. It must be one or more non-empty path segments separated by `/`; each segment may
 contain only ASCII letters, digits, `-`, `.`, `_`, and `~`. Startup rejects routes with a leading or trailing `/`, empty
@@ -110,6 +111,40 @@ name = "pypi"
 mirror = "https://pypi.org/simple/"
 upstream_concurrency = 4
 ```
+
+## `[[index.webhook]]`
+
+Put webhook tables under the index that should emit them. A target on an overlay receives events for requests made
+through the overlay route; the payload also names the local layer that stored the change.
+
+```toml
+[[index]]
+name = "root/pypi"
+layers = ["local", "pypi"]
+upload = "local"
+
+[[index.webhook]]
+name = "ci"
+url = "https://ci.example/hooks/velodex"
+secret_env = "VELODEX_WEBHOOK_SECRET"
+events = ["upload", "delete", "restore"]
+```
+
+| Key          | Meaning                                                                                           | Default |
+| ------------ | ------------------------------------------------------------------------------------------------- | ------- |
+| `name`       | Stable target name used in delivery logs                                                          |         |
+| `url`        | HTTP or HTTPS endpoint that receives JSON payloads; credentials, query, and fragment are rejected |         |
+| `secret`     | Literal HMAC signing secret                                                                       |         |
+| `secret_env` | Environment variable that contains the HMAC signing secret                                        |         |
+| `events`     | Event names to send; omit or leave empty for all supported event names                            | all     |
+
+Use one of `secret` or `secret_env`. Supported event names are `upload`, `yank`, `unyank`, `delete`, `restore`,
+`promote`, `project-status`, and `management`. Velodex emits `upload`, `yank`, `unyank`, `delete`, and `restore` from
+the write endpoints in this release; the other names reserve the contract for management surfaces that use this runtime.
+
+Velodex stores pending deliveries in the metadata database and sends them outside the request path. A failed delivery
+retries up to five attempts with capped backoff of 5, 15, 45, and 135 seconds. The delivery log stores the payload,
+target name, attempt count, next retry time, response status, and last error. It does not store webhook secrets.
 
 ## `[log]`
 

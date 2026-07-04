@@ -43,6 +43,7 @@ kind. velodex rejects unknown keys.
 | `volatile`             | local      | Allow delete and overwrite                                        | `true`            |
 | `layers`               | overlay    | Ordered index names to compose; first match per filename wins     |                   |
 | `upload`               | overlay    | Local layer that receives uploads                                 | first local layer |
+| `policy`               | all        | Nested repository policy table                                    | empty             |
 | `webhook`              | all        | Signed delivery targets for upload and index-change events        | none              |
 
 A `route` is a raw URL path prefix. It must be one or more non-empty path segments separated by `/`; each segment may
@@ -69,6 +70,48 @@ upload = "local"
 
 Startup rejects duplicate names, duplicate routes, invalid routes, `layers` entries that name no index, and an `upload`
 target that is not a local index.
+
+### `[index.policy]`
+
+Policy rules apply to the index that owns the table. A mirror policy filters that mirror; a local policy filters direct
+uploads and local-route reads; an overlay policy filters the merged repository clients use. Project names are compared
+after PEP 503 normalization.
+
+```toml
+[[index]]
+name = "root/pypi"
+layers = ["local", "pypi"]
+upload = "local"
+
+[index.policy]
+allow_projects = ["flask", "requests"]
+block_projects = ["bad-package"]
+allow_versions = ">=1,<3"
+allow_package_types = ["wheel"]
+block_package_types = ["sdist"]
+allow_wheel_pythons = ["py3", "cp313"]
+block_wheel_platforms = ["win_amd64"]
+max_file_size_bytes = 104857600
+max_project_size_bytes = 1073741824
+```
+
+| Key                      | Meaning                                                                       |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| `allow_projects`         | Only these normalized projects may be served, mirrored, or uploaded           |
+| `block_projects`         | These normalized projects are denied                                          |
+| `allow_versions`         | PEP 440 specifier set accepted for parsed distribution filenames              |
+| `allow_package_types`    | Accepted parsed file types: `wheel`, `sdist`                                  |
+| `block_package_types`    | Denied parsed file types: `wheel`, `sdist`                                    |
+| `allow_wheel_pythons`    | Accepted wheel Python tags, matched against each dot-compressed tag segment   |
+| `block_wheel_pythons`    | Denied wheel Python tags                                                      |
+| `allow_wheel_platforms`  | Accepted wheel platform tags, matched against each dot-compressed tag segment |
+| `block_wheel_platforms`  | Denied wheel platform tags                                                    |
+| `max_file_size_bytes`    | Maximum file size from the Simple API `size` field or from an uploaded file   |
+| `max_project_size_bytes` | Maximum sum of retained file sizes for one project detail page                |
+
+File and project size rules require declared sizes. A file without `size` is denied by `max_file_size_bytes`; a project
+page with any retained file lacking `size` is denied by `max_project_size_bytes`. Active policies use the buffered
+Simple-page path so file lists and PEP 691 `versions` are filtered together before velodex serves bytes.
 
 ## `[rate_limit]`
 

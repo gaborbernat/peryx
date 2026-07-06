@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use axum::Router;
-use velodex_http::policy::Policy;
 use velodex_http::webhook::{WebhookRuntime, WebhookTargetConfig};
 use velodex_http::{AppState, Index, IndexKind, RuntimeOptions, path_safety, router, webhook};
+use velodex_policy::Policy;
 use velodex_storage::blob::BlobStore;
 use velodex_storage::meta::MetaStore;
 use velodex_upstream::{Auth, UpstreamClient, redact_url};
@@ -16,13 +16,13 @@ use crate::config::{Config, IndexConfig, IndexKind as ConfigKind, WebhookSecret}
 
 /// Build the velodex router from configuration.
 ///
-/// Opens the stores under the data directory and resolves the configured indexes (mirrors, local
-/// stores, and overlays) into their runtime form. Does not bind a socket, so it is testable in
+/// Opens the stores under the data directory and resolves the configured indexes (cached indexes, hosted
+/// stores, and virtual indexes) into their runtime form. Does not bind a socket, so it is testable in
 /// isolation.
 ///
 /// # Errors
 /// Returns an error if the data directory or stores cannot be opened, an upstream URL is invalid, or
-/// an overlay references an unknown or non-local index.
+/// a virtual index references an unknown or non-hosted index.
 pub fn build_router(config: &Config) -> anyhow::Result<Router> {
     Ok(router_for(build_state(config)?))
 }
@@ -32,7 +32,7 @@ pub fn build_router(config: &Config) -> anyhow::Result<Router> {
 ///
 /// # Errors
 /// Returns an error if the data directory or stores cannot be opened, an upstream URL is invalid,
-/// or an overlay references an unknown or non-local index.
+/// or a virtual index references an unknown or non-hosted index.
 pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("create data directory {}", config.data_dir.display()))?;
@@ -42,21 +42,21 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let indexes = build_indexes(&config.indexes, config.offline)?;
     let webhooks = build_webhooks(&config.indexes)?;
     let search_path = config.data_dir.join("search-v1");
-    let state = Arc::new(
-        AppState::with_search_path_and_runtime(
-            meta,
-            blobs,
-            config.cache_ttl_secs,
-            indexes,
-            &search_path,
-            RuntimeOptions {
-                rate_limit: config.rate_limit.clone(),
-                upstream_concurrency: upstream_concurrency(&config.indexes),
-                webhooks,
-            },
-        )
-        .context(format!("open search index {}", search_path.display()))?,
-    );
+    let mut state = AppState::with_search_path_and_runtime(
+        meta,
+        blobs,
+        config.cache_ttl_secs,
+        indexes,
+        &search_path,
+        RuntimeOptions {
+            rate_limit: config.rate_limit.clone(),
+            upstream_concurrency: upstream_concurrency(&config.indexes),
+            webhooks,
+        },
+    )
+    .context(format!("open search index {}", search_path.display()))?;
+    velodex_ecosystem_pypi::install(&mut state);
+    let state = Arc::new(state);
     if !state.webhooks.is_empty() {
         webhook::kick(state.clone());
     }
@@ -70,8 +70,8 @@ pub fn router_for(state: Arc<AppState>) -> Router {
     velodex_web::ssr::ui_router(state.clone()).merge(router(state))
 }
 
-/// Resolve configured indexes into their runtime form, mapping overlay layer names to positions and
-/// building each mirror's authenticated upstream client.
+/// Resolve configured indexes into their runtime form, mapping virtual-index member names to positions and
+/// building each cached index's authenticated upstream client.
 pub(crate) fn build_indexes(configs: &[IndexConfig], offline: bool) -> anyhow::Result<Vec<Index>> {
     let mut positions = HashMap::with_capacity(configs.len());
     let mut routes = HashMap::with_capacity(configs.len());
@@ -90,6 +90,7 @@ pub(crate) fn build_indexes(configs: &[IndexConfig], offline: bool) -> anyhow::R
             Ok(Index {
                 name: index.name.clone(),
                 route: index.route.clone(),
+                ecosystem: index.ecosystem,
                 kind: build_kind(index, configs, &positions, offline)?,
                 policy: Policy::compile(&index.policy).with_context(|| format!("compile policy for {}", index.name))?,
             })
@@ -129,7 +130,7 @@ fn build_kind(
     global_offline: bool,
 ) -> anyhow::Result<IndexKind> {
     match &index.kind {
-        ConfigKind::Mirror {
+        ConfigKind::Cached {
             upstream,
             username,
             password,
@@ -137,11 +138,11 @@ fn build_kind(
             offline,
             ..
         } => {
-            let auth = mirror_auth(token.as_deref(), username.as_deref(), password.as_deref());
-            Ok(IndexKind::Mirror {
+            let auth = upstream_auth(token.as_deref(), username.as_deref(), password.as_deref());
+            Ok(IndexKind::Cached {
                 client: UpstreamClient::with_auth(upstream, auth).with_context(|| {
                     format!(
-                        "build mirror index {} with upstream {}",
+                        "build cached index {} with upstream {}",
                         index.name,
                         redact_url(upstream)
                     )
@@ -149,17 +150,17 @@ fn build_kind(
                 offline: global_offline || *offline,
             })
         }
-        ConfigKind::Local { upload_token, volatile } => Ok(IndexKind::Local {
+        ConfigKind::Hosted { upload_token, volatile } => Ok(IndexKind::Hosted {
             upload_token: upload_token.clone(),
             volatile: *volatile,
         }),
-        ConfigKind::Overlay { layers, upload } => {
+        ConfigKind::Virtual { layers, upload } => {
             let layer_positions = layers
                 .iter()
                 .map(|name| resolve_name(&index.name, name, positions))
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let upload_pos = resolve_upload(index, upload.as_deref(), &layer_positions, configs, positions)?;
-            Ok(IndexKind::Overlay {
+            Ok(IndexKind::Virtual {
                 layers: layer_positions,
                 upload: upload_pos,
             })
@@ -171,22 +172,22 @@ fn upstream_concurrency(configs: &[IndexConfig]) -> Vec<(String, usize)> {
     configs
         .iter()
         .filter_map(|index| match &index.kind {
-            ConfigKind::Mirror {
+            ConfigKind::Cached {
                 upstream_concurrency, ..
             } => Some((index.name.clone(), *upstream_concurrency)),
-            ConfigKind::Local { .. } | ConfigKind::Overlay { .. } => None,
+            ConfigKind::Hosted { .. } | ConfigKind::Virtual { .. } => None,
         })
         .collect()
 }
 
-fn resolve_name(overlay: &str, name: &str, positions: &HashMap<&str, usize>) -> anyhow::Result<usize> {
+fn resolve_name(virtual_route: &str, name: &str, positions: &HashMap<&str, usize>) -> anyhow::Result<usize> {
     positions
         .get(name)
         .copied()
-        .with_context(|| format!("overlay {overlay} references unknown index {name}"))
+        .with_context(|| format!("virtual index {virtual_route} references unknown index {name}"))
 }
 
-/// The overlay's upload target: the named local index, or (when unset) the first local layer.
+/// The virtual index's upload target: the named hosted index, or (when unset) the first hosted layer.
 fn resolve_upload(
     index: &IndexConfig,
     upload: Option<&str>,
@@ -197,21 +198,24 @@ fn resolve_upload(
     match upload {
         Some(name) => {
             let pos = resolve_name(&index.name, name, positions)?;
-            if !matches!(configs[pos].kind, ConfigKind::Local { .. }) {
-                bail!("overlay {} upload target {name} is not a local index", index.name);
+            if !matches!(configs[pos].kind, ConfigKind::Hosted { .. }) {
+                bail!(
+                    "virtual index {} upload target {name} is not a hosted index",
+                    index.name
+                );
             }
             Ok(Some(pos))
         }
         None => Ok(layers
             .iter()
             .copied()
-            .find(|&pos| matches!(configs[pos].kind, ConfigKind::Local { .. }))),
+            .find(|&pos| matches!(configs[pos].kind, ConfigKind::Hosted { .. }))),
     }
 }
 
 /// Derive upstream authentication: a bearer token takes precedence over a username/password pair;
-/// otherwise the mirror is anonymous.
-pub(crate) fn mirror_auth(token: Option<&str>, username: Option<&str>, password: Option<&str>) -> Auth {
+/// otherwise the upstream is anonymous.
+pub(crate) fn upstream_auth(token: Option<&str>, username: Option<&str>, password: Option<&str>) -> Auth {
     match (token, username, password) {
         (Some(token), _, _) => Auth::Bearer(token.to_owned()),
         (None, Some(username), Some(password)) => Auth::Basic {

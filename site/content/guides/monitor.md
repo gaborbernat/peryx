@@ -26,14 +26,15 @@ curl -s 'http://127.0.0.1:4433/+stats?index=root/pypi&project=numpy' | jq .files
 ```
 
 Counters live in memory and reset on restart; for durable time series, scrape `/metrics`, which exposes the same set per
-index (`velodex_index_downloads_total{index="root/pypi"}` and friends) alongside the global request counters.
+index (`velodex_index_downloads_total{index="root/pypi",ecosystem="pypi",role="virtual"}` and friends) alongside the
+global request counter.
 
 ## Check operational status
 
 `/admin/status` combines `GET /+status?details=admin` with top-level `GET /+stats`. It shows the configured index
 topology next to the same cache-health counters listed below, plus observed project counts, upload counts, recent
-uploads, mirror URLs, and redacted token/authentication state. The page does not fetch upstreams or read artifacts while
-it renders.
+uploads, cached index URLs, and redacted token/authentication state. The page does not fetch upstreams or read artifacts
+while it renders.
 
 ## What the cache-health counters mean
 

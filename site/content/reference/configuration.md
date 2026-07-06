@@ -1,58 +1,64 @@
 +++
 title = "Configuration"
-description = "Every TOML key, flag, and default. Precedence is defaults < TOML file < flags."
+description = "Every TOML key, flag, and default. Precedence is defaults < TOML file < environment < flags."
 weight = 1
 +++
 
-velodex reads one TOML file, passed with `--config <path>`. A few operational settings double as flags, which override
-the file. Precedence is `defaults < TOML file < flags`.
+velodex reads one TOML file, passed with `--config <path>`. A few operational settings double as flags or `VELODEX_*`
+environment variables, which override the file. Precedence is `defaults < TOML file < environment < flags`.
 
 ## Top level
 
-| Setting                   | Flag              | TOML key         | Default        |
-| ------------------------- | ----------------- | ---------------- | -------------- |
-| Bind host                 | `--host`          | `host`           | `127.0.0.1`    |
-| Bind port                 | `--port`          | `port`           | `4433`         |
-| Data directory            | `--data-dir`      | `data_dir`       | `velodex-data` |
-| Offline mode              | `--offline`       | `offline`        | `false`        |
-| Config file               | `--config` / `-c` | (n/a)            | (none)         |
-| Cache freshness (seconds) | (file only)       | `cache_ttl_secs` | `300`          |
-| Indexes                   | (file only)       | `[[index]]`      | (see below)    |
-| Rate limits               | (file only)       | `[rate_limit]`   | (see below)    |
+| Setting                   | Flag              | Environment              | TOML key         | Default        |
+| ------------------------- | ----------------- | ------------------------ | ---------------- | -------------- |
+| Bind host                 | `--host`          | `VELODEX_HOST`           | `host`           | `127.0.0.1`    |
+| Bind port                 | `--port`          | `VELODEX_PORT`           | `port`           | `4433`         |
+| Data directory            | `--data-dir`      | `VELODEX_DATA_DIR`       | `data_dir`       | `velodex-data` |
+| Offline mode              | `--offline`       | `VELODEX_OFFLINE`        | `offline`        | `false`        |
+| Config file               | `--config` / `-c` | (n/a)                    | (n/a)            | (none)         |
+| Cache freshness (seconds) | (file/env only)   | `VELODEX_CACHE_TTL_SECS` | `cache_ttl_secs` | `300`          |
+| Indexes                   | (file only)       | (n/a)                    | `[[index]]`      | (see below)    |
+| Rate limits               | (file only)       | (n/a)                    | `[rate_limit]`   | (see below)    |
+
+Environment variables sit between the file and flags: a `VELODEX_*` value overrides the TOML file, and a flag overrides
+the variable. Only scalar settings are environment-configurable — the `[[index]]` topology and `[rate_limit]` block stay
+file-only, since neither maps cleanly to a flat variable. An empty variable is treated as unset. The `[log]` block also
+reads variables (`VELODEX_LOG_LEVEL`, `VELODEX_LOG_FORMAT`, `VELODEX_LOG_SINK`, `VELODEX_LOG_FILE`); see
+[`[log]`](#log).
 
 `cache_ttl_secs` is a fallback: when an upstream response carries a usable `Cache-Control` lifetime (`s-maxage` or
 `max-age`), that lifetime governs the page instead. The fallback applies when the header is absent,
 `no-cache`/`no-store`, or zero. Artifacts never expire; they are content-addressed by sha256, so a changed upstream file
 is a new entry on the page rather than a mutation.
 
-`offline = true` disables upstream network access for configured mirrors. Cached project pages, PEP 658 metadata
-siblings, and artifacts serve from disk. A cold mirror miss returns `503`; overlay routes still serve any local layer
-that can answer. Use `velodex mirror sync` before enabling offline mode on a machine that must run without network
-access.
+`offline = true` disables upstream network access for configured cached indexes. Cached project pages, PEP 658 metadata
+siblings, and artifacts serve from disk. A cold cached-index miss returns `503`; virtual-index routes still serve any
+hosted layer that can answer. Use `velodex mirror sync` before enabling offline mode on a machine that must run without
+network access.
 
 ## `[[index]]`
 
-Each `[[index]]` table declares one index. `name` is required; exactly one of `mirror`, `local`, or `layers` selects the
-kind. velodex rejects unknown keys.
+Each `[[index]]` table declares one index. `name` is required; exactly one of `cached`, `hosted`, or `layers` selects
+the role. velodex rejects unknown keys.
 
-| Key                    | Applies to | Meaning                                                           | Default           |
-| ---------------------- | ---------- | ----------------------------------------------------------------- | ----------------- |
-| `name`                 | all        | Identifier other indexes reference in `layers`                    | (required)        |
-| `route`                | all        | URL prefix the index is served under                              | same as `name`    |
-| `mirror`               | mirror     | Upstream simple-index URL                                         |                   |
-| `username`             | mirror     | Basic-auth username for the upstream                              | (none)            |
-| `password`             | mirror     | Basic-auth password for the upstream                              | (none)            |
-| `token`                | mirror     | Bearer token; takes precedence over username/password             | (none)            |
-| `upstream_concurrency` | mirror     | Concurrent upstream fetches for this mirror; `0` disables the cap | `8`               |
-| `offline`              | mirror     | Serve this mirror from cache only                                 | `false`           |
-| `prefetch`             | mirror     | Package and artifact selection for `velodex mirror`               | (see below)       |
-| `local`                | local      | `true` marks a hosted store (implied by `upload_token`)           | `false`           |
-| `upload_token`         | local      | Basic-auth password uploads must present; unset disables uploads  | (none)            |
-| `volatile`             | local      | Allow delete and overwrite                                        | `true`            |
-| `layers`               | overlay    | Ordered index names to compose; first match per filename wins     |                   |
-| `upload`               | overlay    | Local layer that receives uploads                                 | first local layer |
-| `policy`               | all        | Nested repository policy table                                    | empty             |
-| `webhook`              | all        | Signed delivery targets for upload and index-change events        | none              |
+| Key                    | Role    | Meaning                                                               | Default            |
+| ---------------------- | ------- | --------------------------------------------------------------------- | ------------------ |
+| `name`                 | all     | Identifier other indexes reference in `layers`                        | (required)         |
+| `route`                | all     | URL prefix the index is served under                                  | same as `name`     |
+| `cached`               | cached  | Upstream simple-index URL to cache                                    |                    |
+| `username`             | cached  | Basic-auth username for the upstream                                  | (none)             |
+| `password`             | cached  | Basic-auth password for the upstream                                  | (none)             |
+| `token`                | cached  | Bearer token; takes precedence over username/password                 | (none)             |
+| `upstream_concurrency` | cached  | Concurrent upstream fetches for this index; `0` disables the cap      | `8`                |
+| `offline`              | cached  | Serve this cached index from disk only                                | `false`            |
+| `prefetch`             | cached  | Package and artifact selection for `velodex mirror`                   | (see below)        |
+| `hosted`               | hosted  | `true` marks this index as a hosted store (implied by `upload_token`) | `false`            |
+| `upload_token`         | hosted  | Basic-auth password uploads must present; unset disables uploads      | (none)             |
+| `volatile`             | hosted  | Allow delete and overwrite                                            | `true`             |
+| `layers`               | virtual | Ordered index names to compose; first match per filename wins         |                    |
+| `upload`               | virtual | Hosted layer that receives uploads                                    | first hosted layer |
+| `policy`               | all     | Nested index policy table                                             | empty              |
+| `webhook`              | all     | Signed delivery targets for upload and index-change events            | none               |
 
 A `route` is a raw URL path prefix. It must be one or more non-empty path segments separated by `/`; each segment may
 contain only ASCII letters, digits, `-`, `.`, `_`, and `~`. Startup rejects routes with a leading or trailing `/`, empty
@@ -64,32 +70,32 @@ Declaring any `[[index]]` replaces the default topology, which is:
 ```toml
 [[index]]
 name = "pypi"
-mirror = "https://pypi.org/simple/"
+cached = "https://pypi.org/simple/"
 
 [[index]]
-name = "local"
-local = true
+name = "hosted"
+hosted = true
 
 [[index]]
 name = "root/pypi"
-layers = ["local", "pypi"]
-upload = "local"
+layers = ["hosted", "pypi"]
+upload = "hosted"
 ```
 
 Startup rejects duplicate names, duplicate routes, invalid routes, `layers` entries that name no index, and an `upload`
-target that is not a local index.
+target that is not a hosted index.
 
 ### `[index.policy]`
 
-Policy rules apply to the index that owns the table. A mirror policy filters that mirror; a local policy filters direct
-uploads and local-route reads; an overlay policy filters the merged repository clients use. Project names are compared
+Policy rules apply to the index that owns the table. A cached-index policy filters that cache; a hosted policy filters
+direct uploads and hosted-route reads; a virtual policy filters the merged index clients use. Project names are compared
 after PEP 503 normalization.
 
 ```toml
 [[index]]
 name = "root/pypi"
-layers = ["local", "pypi"]
-upload = "local"
+layers = ["hosted", "pypi"]
+upload = "hosted"
 
 [index.policy]
 allow_projects = ["flask", "requests"]
@@ -123,13 +129,13 @@ Simple-page path so file lists and PEP 691 `versions` are filtered together befo
 
 ### `[index.prefetch]`
 
-Mirror indexes can declare the default selection for `velodex mirror plan`, `velodex mirror sync`, and
+Cached indexes can declare the default selection for `velodex mirror plan`, `velodex mirror sync`, and
 `velodex mirror verify`. CLI flags add package selectors and override booleans or `mode` for one run.
 
 ```toml
 [[index]]
 name = "pypi"
-mirror = "https://pypi.org/simple/"
+cached = "https://pypi.org/simple/"
 
 [index.prefetch]
 mode = "selected"
@@ -179,7 +185,7 @@ Each route class is a sub-table with `requests` and `window_secs`:
 
 | Table                   | Route class                                     | Default        |
 | ----------------------- | ----------------------------------------------- | -------------- |
-| `[rate_limit.simple]`   | Simple project list and project detail pages    | `600` / `60s`  |
+| `[rate_limit.listing]`  | Project listing and detail pages                | `600` / `60s`  |
 | `[rate_limit.metadata]` | PEP 658/714 `.metadata` siblings                | `1200` / `60s` |
 | `[rate_limit.artifact]` | Artifact downloads and archive inspection       | `300` / `60s`  |
 | `[rate_limit.upload]`   | Upload, yank, restore, and delete requests      | `60` / `60s`   |
@@ -192,26 +198,26 @@ Example:
 enabled = true
 max_clients = 4096
 
-[rate_limit.simple]
+[rate_limit.listing]
 requests = 300
 window_secs = 60
 
 [[index]]
 name = "pypi"
-mirror = "https://pypi.org/simple/"
+cached = "https://pypi.org/simple/"
 upstream_concurrency = 4
 ```
 
 ## `[[index.webhook]]`
 
-Put webhook tables under the index that should emit them. A target on an overlay receives events for requests made
-through the overlay route; the payload also names the local layer that stored the change.
+Put webhook tables under the index that should emit them. A target on a virtual index receives events for requests made
+through the virtual-index route; the payload also names the hosted layer that stored the change.
 
 ```toml
 [[index]]
 name = "root/pypi"
-layers = ["local", "pypi"]
-upload = "local"
+layers = ["hosted", "pypi"]
+upload = "hosted"
 
 [[index.webhook]]
 name = "ci"
@@ -245,4 +251,6 @@ target name, attempt count, next retry time, response status, and last error. It
 | `sink`   | `stdout`, `file`, `journald`, `syslog`                                                                                                                      | `stdout` |
 | `file`   | path, required when `sink = "file"`                                                                                                                         | (none)   |
 
-The flags `--log-level`, `--log-format`, `--log-sink`, `--log-file`, `-v`, and `-vv` override these.
+The flags `--log-level`, `--log-format`, `--log-sink`, `--log-file`, `-v`, and `-vv` override these, as do the
+`VELODEX_LOG_LEVEL`, `VELODEX_LOG_FORMAT`, `VELODEX_LOG_SINK`, and `VELODEX_LOG_FILE` variables (below the flags in
+precedence).

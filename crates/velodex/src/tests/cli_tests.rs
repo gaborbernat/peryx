@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use clap::Parser as _;
-use velodex_http::discovery::SnippetKind;
+use velodex_ecosystem_pypi::discovery::SnippetKind;
 
 use crate::cli::{
-    BackupCommand, CacheCommand, CachePurgeCommand, Cli, Command, MirrorCommand, PolicyCommand, RuntimeArgs,
-    SnippetFormat,
+    BackupCommand, CacheCommand, CachePurgeCommand, Cli, Command, EcosystemArg, IndexCommand, PolicyCommand,
+    PrefetchCommand, RuntimeArgs, SnippetFormat,
 };
-use crate::config::{LogFormat, LogSink, MirrorPrefetchMode};
+use crate::config::{LogFormat, LogSink, PrefetchMode};
 
 fn parse(args: &[&str]) -> Cli {
     Cli::try_parse_from(args).unwrap()
@@ -17,14 +17,37 @@ fn runtime(cli: Cli) -> RuntimeArgs {
     match cli.command {
         Command::Serve(args) | Command::Init(args) => args,
         Command::ConfigSnippet(_) => panic!("no runtime args on config-snippet"),
+        Command::Index(_) => panic!("index commands carry nested runtime args"),
         Command::Cache(_) => panic!("cache commands carry nested runtime args"),
         Command::Backup(_) => panic!("backup commands carry nested runtime args"),
         Command::Restore(_) => panic!("restore takes explicit data-dir args"),
         Command::ImportDir(_) => panic!("import-dir carries nested runtime args"),
         Command::Policy(_) => panic!("policy commands carry nested runtime args"),
-        Command::Mirror(_) => panic!("mirror commands carry nested runtime args"),
+        Command::Prefetch(_) => panic!("prefetch commands carry nested runtime args"),
         other @ Command::Openapi => panic!("no runtime args on {other:?}"),
     }
+}
+
+#[test]
+fn test_parse_index_list_and_show() {
+    let Command::Index(list) = parse(&["velodex", "index", "list", "--ecosystem", "pypi", "--data-dir", "/d"]).command
+    else {
+        panic!("expected index command");
+    };
+    let IndexCommand::List(args) = &list else {
+        panic!("expected index list");
+    };
+    assert_eq!(args.ecosystem, Some(EcosystemArg::Pypi));
+    assert_eq!(list.runtime_args().data_dir, Some(PathBuf::from("/d")));
+
+    let Command::Index(show) = parse(&["velodex", "index", "show", "root/pypi"]).command else {
+        panic!("expected index command");
+    };
+    let IndexCommand::Show(args) = &show else {
+        panic!("expected index show");
+    };
+    assert_eq!(args.index, "root/pypi");
+    assert_eq!(show.runtime_args().data_dir, None);
 }
 
 #[test]
@@ -293,7 +316,7 @@ fn test_parse_import_dir() {
         panic!("expected import-dir");
     };
     assert_eq!(args.runtime.data_dir, Some(PathBuf::from("/d")));
-    assert_eq!(args.repo, "root/pypi");
+    assert_eq!(args.index, "root/pypi");
     assert_eq!(args.dir, PathBuf::from("/packages"));
 }
 
@@ -328,7 +351,7 @@ fn test_policy_commands_expose_runtime_args() {
 }
 
 #[test]
-fn test_parse_mirror_plan_options() {
+fn test_parse_prefetch_plan_options() {
     let cli = parse(&[
         "velodex",
         "mirror",
@@ -355,15 +378,15 @@ fn test_parse_mirror_plan_options() {
         "--max-file-size-bytes",
         "1024",
     ]);
-    let Command::Mirror(MirrorCommand::Plan(args)) = cli.command else {
-        panic!("expected mirror plan");
+    let Command::Prefetch(PrefetchCommand::Plan(args)) = cli.command else {
+        panic!("expected prefetch plan");
     };
     assert_eq!(args.options.runtime.data_dir, Some(PathBuf::from("/d")));
     assert!(args.options.runtime.offline);
-    assert_eq!(args.options.repo, "root/pypi");
+    assert_eq!(args.options.index, "root/pypi");
     assert_eq!(args.options.packages, vec!["Requests>=2,<3".to_owned()]);
     assert_eq!(args.options.requirements, vec![PathBuf::from("requirements.txt")]);
-    assert_eq!(args.options.mode, Some(MirrorPrefetchMode::MetadataOnly));
+    assert_eq!(args.options.mode, Some(PrefetchMode::MetadataOnly));
     assert!(args.options.metadata_only);
     assert!(args.options.no_wheels);
     assert!(args.options.no_sdists);
@@ -374,14 +397,14 @@ fn test_parse_mirror_plan_options() {
 }
 
 #[test]
-fn test_mirror_commands_expose_runtime_args() {
+fn test_prefetch_commands_expose_runtime_args() {
     for cli in [
         parse(&["velodex", "mirror", "plan", "--data-dir", "/plan", "pypi"]),
         parse(&["velodex", "mirror", "sync", "--data-dir", "/sync", "pypi"]),
         parse(&["velodex", "mirror", "verify", "--data-dir", "/verify", "pypi"]),
     ] {
-        let Command::Mirror(command) = cli.command else {
-            panic!("expected mirror command");
+        let Command::Prefetch(command) = cli.command else {
+            panic!("expected prefetch command");
         };
         assert!(command.runtime_args().data_dir.is_some());
     }

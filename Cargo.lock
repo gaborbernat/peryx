@@ -695,8 +695,6 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
- "zstd",
- "zstd-safe",
 ]
 
 [[package]]
@@ -4635,8 +4633,10 @@ dependencies = [
  "tracing-appender",
  "tracing-journald",
  "tracing-subscriber",
- "velodex-core",
+ "velodex-ecosystem-pypi",
+ "velodex-format",
  "velodex-http",
+ "velodex-policy",
  "velodex-storage",
  "velodex-upstream",
  "velodex-web",
@@ -4662,26 +4662,69 @@ dependencies = [
 ]
 
 [[package]]
-name = "velodex-core"
+name = "velodex-ecosystem-pypi"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "blake2",
+ "bytes",
+ "codspeed-criterion-compat",
+ "csv",
+ "flate2",
+ "futures-util",
+ "http",
+ "http-body-util",
  "insta",
+ "moka",
  "pep440_rs",
+ "redb",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "tantivy",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
  "tl",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
  "url",
+ "utoipa",
+ "velodex-format",
+ "velodex-http",
+ "velodex-identity",
+ "velodex-policy",
+ "velodex-storage",
+ "velodex-upstream",
+ "wiremock",
+ "zip",
+]
+
+[[package]]
+name = "velodex-format"
+version = "0.0.1"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
 name = "velodex-http"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "blake2",
  "bytes",
- "codspeed-criterion-compat",
  "csv",
  "flate2",
  "futures-util",
@@ -4707,12 +4750,34 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "utoipa",
- "velodex-core",
+ "velodex-format",
+ "velodex-identity",
+ "velodex-policy",
  "velodex-storage",
  "velodex-upstream",
  "wiremock",
  "zip",
 ]
+
+[[package]]
+name = "velodex-identity"
+version = "0.0.1"
+dependencies = [
+ "base64",
+]
+
+[[package]]
+name = "velodex-policy"
+version = "0.0.1"
+dependencies = [
+ "pep440_rs",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "velodex-replication"
+version = "0.0.1"
 
 [[package]]
 name = "velodex-storage"
@@ -4761,7 +4826,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower-http 0.7.0",
- "velodex-core",
+ "velodex-ecosystem-pypi",
+ "velodex-format",
  "velodex-http",
  "velodex-storage",
  "wasm-bindgen",

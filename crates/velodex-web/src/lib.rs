@@ -45,6 +45,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
+                <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
                 <script>
                     "(function () { var t = localStorage.getItem('theme'); \
                      if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; })();"
@@ -173,7 +174,7 @@ fn Suggestion(result: UiSearchResult, href: String) -> impl IntoView {
     }
 }
 
-/// The overlay-stack logo mark, inline so it needs no asset pipeline.
+/// The layered-stack logo mark, inline so it needs no asset pipeline.
 #[component]
 fn BrandMark() -> impl IntoView {
     view! {

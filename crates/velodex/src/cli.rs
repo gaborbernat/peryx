@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::config::{LogFormat, LogSink, MirrorPrefetchMode, PartialConfig, PartialLogConfig, PartialRateLimitConfig};
+use crate::config::{LogFormat, LogSink, PartialConfig, PartialLogConfig, PartialRateLimitConfig, PrefetchMode};
 
 /// uv-style help colors: bold green section headers, cyan literals and placeholders.
 const STYLES: Styles = Styles::styled()
@@ -14,7 +14,7 @@ const STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
     .placeholder(AnsiColor::Cyan.on_default());
 
-/// velodex: a PyPI-compatible read-through cache and private-index overlay.
+/// velodex: a blazing-fast artifact server: caching proxy, hosted store, and virtual index.
 #[derive(Debug, Parser)]
 #[command(
     name = "velodex",
@@ -43,6 +43,9 @@ pub enum Command {
         after_help = "Examples:\n  velodex config-snippet --base-url https://packages.example --index root/pypi pip.conf\n  velodex config-snippet --base-url https://packages.example --index root/pypi uv.toml\n  velodex config-snippet --base-url https://packages.example --index root/pypi .pypirc"
     )]
     ConfigSnippet(ConfigSnippetArgs),
+    /// List and inspect the configured indexes.
+    #[command(subcommand)]
+    Index(IndexCommand),
     /// Inspect and maintain the on-disk cache.
     #[command(subcommand)]
     Cache(CacheCommand),
@@ -51,14 +54,14 @@ pub enum Command {
     Backup(BackupCommand),
     /// Restore an offline backup into a data directory.
     Restore(RestoreArgs),
-    /// Import local wheels and sdists into a hosted repository.
+    /// Import local wheels and sdists into a hosted index.
     ImportDir(ImportDirArgs),
-    /// Preview repository policy decisions against cached records.
+    /// Preview index policy decisions against cached records.
     #[command(subcommand)]
     Policy(PolicyCommand),
-    /// Plan, sync, and verify a configured mirror set.
-    #[command(subcommand)]
-    Mirror(MirrorCommand),
+    /// Plan, sync, and verify a cached index's mirror working set.
+    #[command(subcommand, name = "mirror")]
+    Prefetch(PrefetchCommand),
     /// Print the `OpenAPI` description of the HTTP API as JSON.
     Openapi,
     /// Manage this velodex installation.
@@ -67,18 +70,75 @@ pub enum Command {
     SelfManage(SelfCommand),
 }
 
-/// Mirror synchronization commands.
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
-pub enum MirrorCommand {
-    /// Print the selected projects and files without writing cache entries.
-    Plan(MirrorPlanArgs),
-    /// Fetch selected project pages, metadata siblings, and artifacts.
-    Sync(MirrorSyncArgs),
-    /// Check cached pages, metadata siblings, and artifacts for a mirror set.
-    Verify(MirrorVerifyArgs),
+/// The ecosystem a command targets. One variant today; the axis is reserved so `OCI`, npm, and more
+/// slot in without reshaping the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum EcosystemArg {
+    Pypi,
 }
 
-impl MirrorCommand {
+impl EcosystemArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pypi => "pypi",
+        }
+    }
+}
+
+/// Inspect the configured indexes.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum IndexCommand {
+    /// List the configured indexes.
+    List(IndexListArgs),
+    /// Show one index in detail.
+    Show(IndexShowArgs),
+}
+
+impl IndexCommand {
+    #[must_use]
+    pub const fn runtime_args(&self) -> &RuntimeArgs {
+        match self {
+            Self::List(args) => &args.runtime,
+            Self::Show(args) => &args.runtime,
+        }
+    }
+}
+
+/// Options for `velodex index list`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct IndexListArgs {
+    #[command(flatten)]
+    pub runtime: RuntimeArgs,
+
+    /// Show only indexes of this ecosystem.
+    #[arg(long, value_enum)]
+    pub ecosystem: Option<EcosystemArg>,
+}
+
+/// Options for `velodex index show`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct IndexShowArgs {
+    #[command(flatten)]
+    pub runtime: RuntimeArgs,
+
+    /// Configured index name or route.
+    pub index: String,
+}
+
+/// Prefetch synchronization commands.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum PrefetchCommand {
+    /// Print the selected projects and files without writing cache entries.
+    Plan(PrefetchPlanArgs),
+    /// Fetch selected project pages, metadata siblings, and artifacts.
+    Sync(PrefetchSyncArgs),
+    /// Check cached pages, metadata siblings, and artifacts for a prefetch set.
+    Verify(PrefetchVerifyArgs),
+}
+
+impl PrefetchCommand {
     #[must_use]
     pub const fn runtime_args(&self) -> &RuntimeArgs {
         match self {
@@ -89,14 +149,14 @@ impl MirrorCommand {
     }
 }
 
-/// Options shared by mirror commands.
+/// Options shared by prefetch commands.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-pub struct MirrorOptions {
+pub struct PrefetchOptions {
     #[command(flatten)]
     pub runtime: RuntimeArgs,
 
     /// Configured index name or route to sync.
-    pub repo: String,
+    pub index: String,
 
     /// Add a package selector such as `requests>=2,<3`.
     #[arg(long = "package", short = 'p')]
@@ -108,7 +168,7 @@ pub struct MirrorOptions {
 
     /// Override the configured prefetch mode.
     #[arg(long, value_enum)]
-    pub mode: Option<MirrorPrefetchMode>,
+    pub mode: Option<PrefetchMode>,
 
     /// Fetch Simple pages and PEP 658 metadata, but skip artifacts.
     #[arg(long)]
@@ -139,25 +199,25 @@ pub struct MirrorOptions {
     pub max_file_size_bytes: Option<u64>,
 }
 
-/// Options for `velodex mirror plan`.
+/// Options for `velodex prefetch plan`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-pub struct MirrorPlanArgs {
+pub struct PrefetchPlanArgs {
     #[command(flatten)]
-    pub options: MirrorOptions,
+    pub options: PrefetchOptions,
 }
 
-/// Options for `velodex mirror sync`.
+/// Options for `velodex prefetch sync`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-pub struct MirrorSyncArgs {
+pub struct PrefetchSyncArgs {
     #[command(flatten)]
-    pub options: MirrorOptions,
+    pub options: PrefetchOptions,
 }
 
-/// Options for `velodex mirror verify`.
+/// Options for `velodex prefetch verify`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
-pub struct MirrorVerifyArgs {
+pub struct PrefetchVerifyArgs {
     #[command(flatten)]
-    pub options: MirrorOptions,
+    pub options: PrefetchOptions,
 }
 
 /// Actions on the velodex installation itself.
@@ -182,7 +242,7 @@ pub enum CacheCommand {
     Purge(CachePurgeCommand),
 }
 
-/// Repository policy commands.
+/// Index policy commands.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum PolicyCommand {
     /// Report cached projects and files the configured policy would block.
@@ -288,8 +348,8 @@ pub struct ImportDirArgs {
     #[command(flatten)]
     pub runtime: RuntimeArgs,
 
-    /// Hosted repository name or route.
-    pub repo: String,
+    /// Hosted index name or route.
+    pub index: String,
 
     /// Directory containing wheel or sdist files.
     pub dir: PathBuf,
@@ -406,7 +466,7 @@ pub enum SnippetFormat {
     Pypirc,
 }
 
-impl From<SnippetFormat> for velodex_http::discovery::SnippetKind {
+impl From<SnippetFormat> for velodex_ecosystem_pypi::discovery::SnippetKind {
     fn from(value: SnippetFormat) -> Self {
         match value {
             SnippetFormat::PipConf => Self::PipConf,
@@ -417,7 +477,7 @@ impl From<SnippetFormat> for velodex_http::discovery::SnippetKind {
 }
 
 /// Configuration flags shared by the commands that read the runtime configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
 pub struct RuntimeArgs {
     /// Path to a TOML config file.
     #[arg(long, short = 'c')]
@@ -435,7 +495,7 @@ pub struct RuntimeArgs {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 
-    /// Serve configured mirrors from cache only.
+    /// Serve configured cached indexes from cache only.
     #[arg(long)]
     pub offline: bool,
 

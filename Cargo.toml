@@ -18,7 +18,11 @@ nursery = { level = "warn", priority = -1 }
 unsafe_code = "forbid"
 
 [workspace.dependencies]
-velodex-core = { path = "crates/velodex-core" }
+velodex-format = { path = "crates/velodex-format" }
+velodex-ecosystem-pypi = { path = "crates/velodex-ecosystem-pypi", default-features = false }
+velodex-policy = { path = "crates/velodex-policy" }
+velodex-identity = { path = "crates/velodex-identity" }
+velodex-replication = { path = "crates/velodex-replication" }
 velodex-storage = { path = "crates/velodex-storage" }
 velodex-upstream = { path = "crates/velodex-upstream" }
 velodex-http = { path = "crates/velodex-http" }
@@ -35,7 +39,7 @@ tempfile = "3"
 mimalloc = "0.1"
 redb = "4.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "rustls-native-certs", "http2", "stream", "gzip", "zstd"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "rustls-native-certs", "http2", "stream", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 bytes = "1"
 futures-core = "0.3"
@@ -54,6 +58,7 @@ tl = "0.7"
 toml = "1.1"
 insta = "1"
 thiserror = "2.0"
+async-trait = "0.1"
 anyhow = "1.0"
 tracing = "0.1"
 sysinfo = "0.39"

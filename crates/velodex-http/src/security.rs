@@ -1,18 +1,16 @@
-//! Structured security-relevant repository events.
+//! Structured security-relevant index events.
 
 use axum::http::{HeaderMap, header};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 
 const UNKNOWN: &str = "unknown";
 
-pub(crate) struct Event<'a> {
+pub struct Event<'a> {
     action: &'static str,
     result: &'static str,
     actor: Option<&'a str>,
-    repository: Option<&'a str>,
-    source_repository: Option<&'a str>,
-    local_repository: Option<&'a str>,
+    index: Option<&'a str>,
+    source_index: Option<&'a str>,
+    hosted_index: Option<&'a str>,
     project: Option<&'a str>,
     version: Option<&'a str>,
     filename: Option<&'a str>,
@@ -25,14 +23,15 @@ pub(crate) struct Event<'a> {
 }
 
 impl<'a> Event<'a> {
-    pub(crate) const fn new(action: &'static str, result: &'static str) -> Self {
+    #[must_use]
+    pub const fn new(action: &'static str, result: &'static str) -> Self {
         Self {
             action,
             result,
             actor: None,
-            repository: None,
-            source_repository: None,
-            local_repository: None,
+            index: None,
+            source_index: None,
+            hosted_index: None,
             project: None,
             version: None,
             filename: None,
@@ -45,72 +44,84 @@ impl<'a> Event<'a> {
         }
     }
 
-    pub(crate) const fn actor(mut self, actor: Option<&'a str>) -> Self {
+    #[must_use]
+    pub const fn actor(mut self, actor: Option<&'a str>) -> Self {
         self.actor = actor;
         self
     }
 
-    pub(crate) const fn repository(mut self, repository: &'a str) -> Self {
-        self.repository = Some(repository);
+    #[must_use]
+    pub const fn index(mut self, index: &'a str) -> Self {
+        self.index = Some(index);
         self
     }
 
-    pub(crate) const fn source_repository(mut self, source_repository: &'a str) -> Self {
-        self.source_repository = Some(source_repository);
+    #[must_use]
+    pub const fn source_index(mut self, source_index: &'a str) -> Self {
+        self.source_index = Some(source_index);
         self
     }
 
-    pub(crate) const fn local_repository(mut self, local_repository: &'a str) -> Self {
-        self.local_repository = Some(local_repository);
+    #[must_use]
+    pub const fn hosted_index(mut self, hosted_index: &'a str) -> Self {
+        self.hosted_index = Some(hosted_index);
         self
     }
 
-    pub(crate) const fn project(mut self, project: Option<&'a str>) -> Self {
+    #[must_use]
+    pub const fn project(mut self, project: Option<&'a str>) -> Self {
         self.project = project;
         self
     }
 
-    pub(crate) const fn version(mut self, version: Option<&'a str>) -> Self {
+    #[must_use]
+    pub const fn version(mut self, version: Option<&'a str>) -> Self {
         self.version = version;
         self
     }
 
-    pub(crate) const fn filename(mut self, filename: Option<&'a str>) -> Self {
+    #[must_use]
+    pub const fn filename(mut self, filename: Option<&'a str>) -> Self {
         self.filename = filename;
         self
     }
 
-    pub(crate) const fn digest(mut self, digest: Option<&'a str>) -> Self {
+    #[must_use]
+    pub const fn digest(mut self, digest: Option<&'a str>) -> Self {
         self.digest = digest;
         self
     }
 
-    pub(crate) const fn count(mut self, count: usize) -> Self {
+    #[must_use]
+    pub const fn count(mut self, count: usize) -> Self {
         self.count = count;
         self
     }
 
-    pub(crate) const fn changed(mut self, changed: bool) -> Self {
+    #[must_use]
+    pub const fn changed(mut self, changed: bool) -> Self {
         self.changed = changed;
         self
     }
 
-    pub(crate) const fn reason(mut self, reason: Option<&'a str>) -> Self {
+    #[must_use]
+    pub const fn reason(mut self, reason: Option<&'a str>) -> Self {
         self.reason = reason;
         self
     }
 
-    pub(crate) fn request(mut self, headers: &'a HeaderMap) -> Self {
+    #[must_use]
+    pub fn request(mut self, headers: &'a HeaderMap) -> Self {
         self.request_id = request_id(headers);
         self.user_agent = user_agent(headers);
         self
     }
 
-    pub(crate) fn emit(&self) {
+    pub fn emit(&self) {
         let actor = text(self.actor);
-        let repository = text(self.repository);
-        let source_repository = text(self.source_repository);
-        let local_repository = text(self.local_repository);
+        let index = text(self.index);
+        let source_index = text(self.source_index);
+        let hosted_index = text(self.hosted_index);
         let project = text(self.project);
         let version = text(self.version);
         let filename = text(self.filename);
@@ -121,13 +132,13 @@ impl<'a> Event<'a> {
         tracing::info!(
             target: "velodex::security",
             security_event = true,
-            event = "repository_action",
+            event = "index_action",
             action = self.action,
             result = self.result,
             actor,
-            repository,
-            source_repository,
-            local_repository,
+            index,
+            source_index,
+            hosted_index,
             project,
             version,
             filename,
@@ -137,21 +148,22 @@ impl<'a> Event<'a> {
             reason,
             request_id,
             user_agent,
-            "repository security event"
+            "index security event"
         );
     }
 }
 
 #[must_use]
-pub(crate) fn actor(headers: &HeaderMap) -> Option<String> {
-    let basic = headers
+pub fn actor(headers: &HeaderMap) -> Option<String> {
+    let value = headers
         .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Basic "))?;
-    let decoded = STANDARD.decode(basic.trim()).ok()?;
-    let credentials = String::from_utf8(decoded).ok()?;
-    let (user, _) = credentials.split_once(':')?;
-    Some(if user.is_empty() { UNKNOWN } else { user }.to_owned())
+        .and_then(|value| value.to_str().ok())?;
+    let credentials = velodex_identity::parse_basic(value)?;
+    Some(if credentials.user.is_empty() {
+        UNKNOWN.to_owned()
+    } else {
+        credentials.user
+    })
 }
 
 fn request_id(headers: &HeaderMap) -> Option<&str> {
@@ -168,4 +180,25 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 fn text(value: Option<&str>) -> &str {
     value.unwrap_or("")
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+    use axum::http::header::{AUTHORIZATION, HeaderValue};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    fn basic(credentials: &str) -> HeaderValue {
+        HeaderValue::from_str(&format!("Basic {}", STANDARD.encode(credentials))).unwrap()
+    }
+
+    #[test]
+    fn test_actor_uses_username_or_unknown_when_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, basic("alice:secret"));
+        assert_eq!(super::actor(&headers).as_deref(), Some("alice"));
+        headers.insert(AUTHORIZATION, basic(":secret"));
+        assert_eq!(super::actor(&headers).as_deref(), Some("unknown"));
+    }
 }

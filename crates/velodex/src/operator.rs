@@ -11,8 +11,8 @@ use blake2::Blake2bVar;
 use blake2::digest::{Update as _, VariableOutput as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use velodex_core::pypi::{DistributionFilename, DistributionFilenameError, parse_distribution_filename};
-use velodex_http::upload::{self, StagedUpload, UploadError, UploadForm};
+use velodex_ecosystem_pypi::upload::{self, StagedUpload, UploadError, UploadForm};
+use velodex_ecosystem_pypi::{DistributionFilename, DistributionFilenameError, parse_distribution_filename};
 use velodex_storage::blob::{BlobStore, Digest};
 use velodex_storage::meta::MetaStore;
 
@@ -173,16 +173,16 @@ pub fn restore(backup: &Path, data_dir: &Path, force: bool, out: &mut dyn Write)
     Ok(())
 }
 
-/// Import local wheel and sdist files into a hosted repository.
+/// Import local wheel and sdist files into a hosted index.
 ///
 /// # Errors
-/// Returns an error if the data directory cannot be opened, the repository cannot accept imported
+/// Returns an error if the data directory cannot be opened, the index cannot accept imported
 /// files, or output fails.
-pub fn import_dir(config: &Config, repo: &str, dir: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+pub fn import_dir(config: &Config, selector: &str, dir: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     if !dir.is_dir() {
         bail!("import directory {} does not exist", dir.display());
     }
-    let target = import_target(config, repo)?;
+    let target = import_target(config, selector)?;
     std::fs::create_dir_all(&config.data_dir)
         .context(format!("create data directory {}", config.data_dir.display()))?;
     let open_context = format!("open metadata store {}", config.data_dir.join("velodex.redb").display());
@@ -270,7 +270,7 @@ struct SnapshotIndex {
     name: String,
     route: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    mirror: Option<String>,
+    cached: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -280,7 +280,7 @@ struct SnapshotIndex {
     #[serde(skip_serializing_if = "Option::is_none")]
     upstream_concurrency: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    local: Option<bool>,
+    hosted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     upload_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -548,20 +548,20 @@ fn prepare_restore_dir(data_dir: &Path, force: bool) -> anyhow::Result<()> {
     std::fs::create_dir_all(data_dir).context(format!("create restore target {}", data_dir.display()))
 }
 
-fn import_target(config: &Config, repo: &str) -> anyhow::Result<ImportTarget> {
+fn import_target(config: &Config, selector: &str) -> anyhow::Result<ImportTarget> {
     let indexes = crate::server::build_indexes(&config.indexes, config.offline)?;
     let position = indexes
         .iter()
-        .position(|index| index.name == repo)
-        .or_else(|| indexes.iter().position(|index| index.route == repo))
-        .context(format!("unknown repository {repo:?}"))?;
+        .position(|index| index.name == selector)
+        .or_else(|| indexes.iter().position(|index| index.route == selector))
+        .context(format!("unknown index {selector:?}"))?;
     let index = &indexes[position];
     match &index.kind {
-        velodex_http::IndexKind::Local { .. } => Ok(ImportTarget {
+        velodex_http::IndexKind::Hosted { .. } => Ok(ImportTarget {
             name: index.name.clone(),
             route: index.route.clone(),
         }),
-        velodex_http::IndexKind::Overlay {
+        velodex_http::IndexKind::Virtual {
             upload: Some(upload), ..
         } => {
             let target = &indexes[*upload];
@@ -570,10 +570,10 @@ fn import_target(config: &Config, repo: &str) -> anyhow::Result<ImportTarget> {
                 route: index.route.clone(),
             })
         }
-        velodex_http::IndexKind::Overlay { upload: None, .. } => {
-            bail!("repository {repo:?} has no local upload target")
+        velodex_http::IndexKind::Virtual { upload: None, .. } => {
+            bail!("index {selector:?} has no hosted upload target")
         }
-        velodex_http::IndexKind::Mirror { .. } => bail!("repository {repo:?} is read-only"),
+        velodex_http::IndexKind::Cached { .. } => bail!("index {selector:?} is read-only"),
     }
 }
 
@@ -797,7 +797,7 @@ fn config_snapshot(config: &Config) -> anyhow::Result<String> {
 
 fn snapshot_index(index: &crate::config::IndexConfig) -> SnapshotIndex {
     match &index.kind {
-        IndexKind::Mirror {
+        IndexKind::Cached {
             upstream,
             username,
             password,
@@ -807,40 +807,40 @@ fn snapshot_index(index: &crate::config::IndexConfig) -> SnapshotIndex {
         } => SnapshotIndex {
             name: index.name.clone(),
             route: index.route.clone(),
-            mirror: Some(upstream.clone()),
+            cached: Some(upstream.clone()),
             username: username.clone(),
             password: password.clone(),
             token: token.clone(),
             upstream_concurrency: Some(*upstream_concurrency),
-            local: None,
+            hosted: None,
             upload_token: None,
             volatile: None,
             layers: None,
             upload: None,
         },
-        IndexKind::Local { upload_token, volatile } => SnapshotIndex {
+        IndexKind::Hosted { upload_token, volatile } => SnapshotIndex {
             name: index.name.clone(),
             route: index.route.clone(),
-            mirror: None,
+            cached: None,
             username: None,
             password: None,
             token: None,
             upstream_concurrency: None,
-            local: Some(true),
+            hosted: Some(true),
             upload_token: upload_token.clone(),
             volatile: Some(*volatile),
             layers: None,
             upload: None,
         },
-        IndexKind::Overlay { layers, upload } => SnapshotIndex {
+        IndexKind::Virtual { layers, upload } => SnapshotIndex {
             name: index.name.clone(),
             route: index.route.clone(),
-            mirror: None,
+            cached: None,
             username: None,
             password: None,
             token: None,
             upstream_concurrency: None,
-            local: None,
+            hosted: None,
             upload_token: None,
             volatile: None,
             layers: Some(layers.clone()),
@@ -895,7 +895,7 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use velodex_http::upload::UploadError;
+    use velodex_ecosystem_pypi::upload::UploadError;
 
     use super::upload_error_reason;
 

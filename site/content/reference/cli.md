@@ -15,24 +15,25 @@ velodex <COMMAND>
 | `serve`          | Run the server                                                                        |
 | `init`           | Create the data directory and its stores, then exit                                   |
 | `config-snippet` | Print `pip.conf`, `uv.toml`, or `.pypirc` for one configured index                    |
+| `index`          | List and inspect the configured indexes                                               |
 | `cache`          | Inspect, validate, and clean the on-disk cache                                        |
 | `backup`         | Create and verify offline backups                                                     |
 | `restore`        | Restore an offline backup into a data directory                                       |
-| `import-dir`     | Import local wheels and sdists into a hosted repository                               |
-| `policy`         | Preview repository policy decisions against cached records                            |
+| `import-dir`     | Import local wheels and sdists into a hosted index                                    |
+| `policy`         | Preview index policy decisions against cached records                                 |
 | `mirror`         | Plan, populate, and verify mirror cache contents                                      |
 | `openapi`        | Print the OpenAPI description of the HTTP API as JSON                                 |
 | `self update`    | Replace the binary with the newest release (installer-managed builds only; see below) |
 
 ## `serve` and `init` options
 
-| Flag                | Meaning                                    | Default        |
-| ------------------- | ------------------------------------------ | -------------- |
-| `--config <path>`   | TOML configuration file                    | (none)         |
-| `--host <addr>`     | Bind address                               | `127.0.0.1`    |
-| `--port <port>`     | Bind port                                  | `4433`         |
-| `--data-dir <path>` | Data directory (redb store and blob cache) | `velodex-data` |
-| `--offline`         | Serve configured mirrors from cache only   | `false`        |
+| Flag                | Meaning                                         | Default        |
+| ------------------- | ----------------------------------------------- | -------------- |
+| `--config <path>`   | TOML configuration file                         | (none)         |
+| `--host <addr>`     | Bind address                                    | `127.0.0.1`    |
+| `--port <port>`     | Bind port                                       | `4433`         |
+| `--data-dir <path>` | Data directory (redb store and blob cache)      | `velodex-data` |
+| `--offline`         | Serve configured cached indexes from cache only | `false`        |
 
 ### Logging
 
@@ -46,6 +47,18 @@ velodex <COMMAND>
 
 Flags override the config file; see [Configuration](@/reference/configuration.md) for the full precedence and the
 `[[index]]` schema.
+
+## `index`
+
+Read the configured topology without starting the server. `list` prints one tab-separated row per index (name, route,
+ecosystem, kind, uploads); `show` prints one index's details, including a virtual index's layer stack and upload target
+or a cached index's upstream. `--ecosystem` filters `list` to one ecosystem (only `pypi` today; the flag reserves the
+axis for future ecosystems).
+
+```
+velodex index list [--ecosystem pypi] [--config <path>] [--data-dir <path>]
+velodex index show <index> [--config <path>] [--data-dir <path>]
+```
 
 ## `config-snippet`
 
@@ -63,13 +76,13 @@ velodex config-snippet --base-url https://packages.example --index root/pypi .py
 ```
 
 `pip.conf` and `uv.toml` are available for read-only and writable indexes. `.pypirc` is available only when the route
-has a configured local upload target with an `upload_token`; the output uses `<upload-token>` instead of the configured
+has a configured hosted upload target with an `upload_token`; the output uses `<upload-token>` instead of the configured
 secret.
 
 ## `mirror`
 
-Mirror commands read the same config, `--data-dir`, and logging flags as `serve`. The repository argument is a
-configured index name or route. It may point at a mirror directly, or at an overlay with one mirror layer.
+Mirror commands read the same config, `--data-dir`, and logging flags as `serve`. The index argument is a configured
+index name or route. It may point at a cached index directly, or at a virtual index with one cached layer.
 
 ```shell
 velodex mirror plan root/pypi --package "requests>=2,<3"
@@ -169,13 +182,13 @@ It warns when the config snapshot in the backup names a different `data_dir` tha
 
 ```shell
 velodex import-dir root/pypi ./dist --data-dir /var/lib/velodex
-velodex import-dir local ./dist --config velodex.toml
+velodex import-dir hosted ./dist --config velodex.toml
 ```
 
-The repository argument may be a local index name, a local route, or an overlay route with a local upload target.
+The index argument may be a hosted index name, a hosted route, or a virtual-index route with a hosted upload target.
 `import-dir` walks the directory tree, validates `.whl` and `.tar.gz` files through the same archive and metadata checks
-used for uploads, and stores accepted artifacts in the hosted repository. Unsupported files are skipped; invalid
-distribution files are rejected.
+used for uploads, and stores accepted artifacts in the hosted index. Unsupported files are skipped; invalid distribution
+files are rejected.
 
 Output is tab-separated:
 

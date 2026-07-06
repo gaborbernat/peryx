@@ -54,7 +54,7 @@
           "search"
         ],
         "summary": "Search cached packages",
-        "description": "Searches the derived package index built from cached simple pages, local uploads, and cached core metadata. `q` uses substring matching; prefix it with `re:` for a regex. Repository policy removes denied packages before indexing. Results are sorted by display name and paged without collecting every match.",
+        "description": "Searches the derived package index built from cached simple pages, local uploads, and cached core metadata. `q` uses substring matching; prefix it with `re:` for a regex. Index policy removes denied packages before indexing. Results are sorted by display name and paged without collecting every match.",
         "parameters": [
           {
             "name": "q",
@@ -66,9 +66,9 @@
           {
             "name": "type",
             "in": "query",
-            "description": "`hosted`, `upstream`, or `upstream-overrides`; omit for all sources.",
+            "description": "`uploaded`, `cached`, or `override`; omit for all sources.",
             "required": false,
-            "example": "upstream-overrides"
+            "example": "override"
           },
           {
             "name": "page",
@@ -97,11 +97,11 @@
                   "results": [
                     {
                       "display_name": "Flask",
+                      "index": "root/pypi",
                       "normalized_name": "flask",
-                      "repository": "root/pypi",
                       "route": "root/pypi",
                       "summary": "A simple framework for building complex web applications.",
-                      "type": "upstream"
+                      "type": "cached"
                     }
                   ],
                   "total": 1,
@@ -129,7 +129,7 @@
           "operations"
         ],
         "summary": "Usage statistics",
-        "description": "Counters aggregated off the request path, drillable: no parameters for per-index totals, `?index={route}` for one index's projects, `&project={name}` for one project's files. Counters cover pages, downloads (with bytes), metadata, uploads, refreshes, upstream changes, stale fallbacks, upstream errors, and rejected downloads.",
+        "description": "Counters aggregated off the request path, drillable: no parameters for per-index totals, `?index={route}` for one index's projects, `&project={name}` for one project's files. Counters are grouped by the role that owns them: a neutral `base` group every index reports, a `cached` group only a caching index fills, a `hosted` group only an upload store fills, and an `ecosystem` map of the driver's own counters (PyPI's PEP 658 sibling under `metadata`).",
         "parameters": [
           {
             "name": "index",
@@ -153,16 +153,24 @@
               "application/json": {
                 "example": {
                   "root/pypi": {
-                    "bytes": 64733247,
-                    "changed": 1,
-                    "downloads": 6,
-                    "metadata": 6,
-                    "pages": 12,
-                    "refreshes": 2,
-                    "rejected": 0,
-                    "stale_served": 0,
-                    "uploads": 0,
-                    "upstream_errors": 0
+                    "base": {
+                      "bytes": 64733247,
+                      "downloads": 6,
+                      "pages": 12,
+                      "rejected": 0
+                    },
+                    "cached": {
+                      "changed": 1,
+                      "refreshes": 2,
+                      "stale_served": 0,
+                      "upstream_errors": 0
+                    },
+                    "ecosystem": {
+                      "metadata": 6
+                    },
+                    "hosted": {
+                      "uploads": 0
+                    }
                   }
                 }
               }
@@ -193,11 +201,24 @@
             "content": {
               "application/json": {
                 "example": {
+                  "by_ecosystem": [
+                    {
+                      "bytes": 64733247,
+                      "downloads": 6,
+                      "ecosystem": "pypi",
+                      "families": {
+                        "metadata": 37
+                      },
+                      "pages": 128,
+                      "rejected": 0,
+                      "uploads": 4
+                    }
+                  ],
                   "indexes": [
                     {
-                      "kind": "mirror",
+                      "hosted": null,
+                      "kind": "cached",
                       "layers": [],
-                      "local": null,
                       "name": "pypi",
                       "project_count": 128,
                       "recent_uploads": [],
@@ -217,16 +238,16 @@
                       "volatile_deletes": false
                     },
                     {
-                      "kind": "local",
-                      "layers": [],
-                      "local": {
+                      "hosted": {
                         "upload_token": {
                           "configured": true,
                           "redacted": "<redacted>"
                         },
                         "volatile": true
                       },
-                      "name": "local",
+                      "kind": "hosted",
+                      "layers": [],
+                      "name": "hosted",
                       "project_count": 2,
                       "recent_uploads": [
                         {
@@ -237,7 +258,7 @@
                           "version": "1.0"
                         }
                       ],
-                      "route": "local",
+                      "route": "hosted",
                       "upload_count": 4,
                       "upload_to": null,
                       "uploads": true,
@@ -245,24 +266,34 @@
                       "volatile_deletes": true
                     },
                     {
-                      "kind": "overlay",
+                      "hosted": null,
+                      "kind": "virtual",
                       "layers": [
-                        "local",
+                        "hosted",
                         "pypi"
                       ],
-                      "local": null,
                       "name": "root/pypi",
                       "project_count": 0,
                       "recent_uploads": [],
                       "route": "root/pypi",
                       "upload_count": 0,
-                      "upload_to": "local",
+                      "upload_to": "hosted",
                       "uploads": true,
                       "upstream": null,
                       "volatile_deletes": true
                     }
                   ],
-                  "metadata_requests": 37,
+                  "metric_families": [
+                    {
+                      "key": "metadata",
+                      "label": "PEP 658 metadata hits",
+                      "roles": [
+                        "cached",
+                        "hosted",
+                        "virtual"
+                      ]
+                    }
+                  ],
                   "requests": 128,
                   "serial": 42,
                   "version": "0.0.1"
@@ -300,7 +331,7 @@
             "description": "Prometheus text exposition",
             "content": {
               "text/plain; version=0.0.4": {
-                "example": "# HELP velodex_requests_total Total HTTP requests served.\n# TYPE velodex_requests_total counter\nvelodex_requests_total 128\n# HELP velodex_metadata_requests_total PEP 658 .metadata siblings served.\n# TYPE velodex_metadata_requests_total counter\nvelodex_metadata_requests_total 37\n"
+                "example": "# HELP velodex_requests_total Total HTTP requests served.\n# TYPE velodex_requests_total counter\nvelodex_requests_total 128\n# HELP velodex_index_metadata_total PEP 658 metadata siblings served.\n# TYPE velodex_index_metadata_total counter\nvelodex_index_metadata_total{index=\"root/pypi\",ecosystem=\"pypi\",role=\"virtual\"} 37\n"
               }
             }
           }
@@ -361,7 +392,7 @@
             "description": "Missing or wrong token"
           },
           "403": {
-            "description": "Uploads disabled, project status rejects uploads, or repository policy denied the upload",
+            "description": "Uploads disabled, project status rejects uploads, or index policy denied the upload",
             "content": {
               "application/json": {
                 "example": {
@@ -427,14 +458,14 @@
                       "pip.conf": "[global]\nindex-url = http://127.0.0.1:4433/root/pypi/simple/\n",
                       "uv.toml": "publish-url = \"http://127.0.0.1:4433/root/pypi/\"\n\n[[index]]\nname = \"velodex\"\nurl = \"http://127.0.0.1:4433/root/pypi/simple/\"\ndefault = true\n\n[pip]\nindex-url = \"http://127.0.0.1:4433/root/pypi/simple/\"\n"
                     },
-                    "kind": "overlay",
+                    "kind": "virtual",
                     "layers": [
-                      "local",
+                      "hosted",
                       "pypi"
                     ],
                     "name": "root/pypi",
                     "route": "root/pypi",
-                    "upload_to": "local",
+                    "upload_to": "hosted",
                     "uploads": true,
                     "urls": {
                       "api": "http://127.0.0.1:4433/root/pypi/+api",
@@ -463,7 +494,7 @@
           "search"
         ],
         "summary": "Search one index route",
-        "description": "Searches the derived package index built from cached simple pages, local uploads, and cached core metadata. `q` uses substring matching; prefix it with `re:` for a regex. Repository policy removes denied packages before indexing. Results are sorted by display name and paged without collecting every match.",
+        "description": "Searches the derived package index built from cached simple pages, local uploads, and cached core metadata. `q` uses substring matching; prefix it with `re:` for a regex. Index policy removes denied packages before indexing. Results are sorted by display name and paged without collecting every match.",
         "parameters": [
           {
             "name": "q",
@@ -475,9 +506,9 @@
           {
             "name": "type",
             "in": "query",
-            "description": "`hosted`, `upstream`, or `upstream-overrides`; omit for all sources.",
+            "description": "`uploaded`, `cached`, or `override`; omit for all sources.",
             "required": false,
-            "example": "upstream-overrides"
+            "example": "override"
           },
           {
             "name": "page",
@@ -513,11 +544,11 @@
                   "results": [
                     {
                       "display_name": "Flask",
+                      "index": "root/pypi",
                       "normalized_name": "flask",
-                      "repository": "root/pypi",
                       "route": "root/pypi",
                       "summary": "A simple framework for building complex web applications.",
-                      "type": "upstream"
+                      "type": "cached"
                     }
                   ],
                   "total": 1,
@@ -545,7 +576,7 @@
           "files"
         ],
         "summary": "Download an artifact",
-        "description": "Serves the blob if cached; otherwise fetches it from its source mirror, verifies the sha256, caches it, and serves it. The `{filename}` segment is display context and must be percent-encoded as one path segment. Responses are immutable (`Cache-Control: max-age=31536000`).",
+        "description": "Serves the blob if cached; otherwise fetches it from its upstream cache, verifies the sha256, caches it, and serves it. The `{filename}` segment is display context and must be percent-encoded as one path segment. Responses are immutable (`Cache-Control: max-age=31536000`).",
         "parameters": [
           {
             "name": "route",
@@ -580,7 +611,7 @@
             "description": "The digest is not 64 lowercase hex, or the filename is not a safe path segment"
           },
           "403": {
-            "description": "Project status or repository policy does not allow downloads",
+            "description": "Project status or index policy does not allow downloads",
             "content": {
               "application/json": {
                 "example": {
@@ -599,7 +630,7 @@
             "description": "No file with this digest is known"
           },
           "502": {
-            "description": "The source mirror failed or the bytes did not match the digest"
+            "description": "The upstream cache failed or the bytes did not match the digest"
           }
         }
       }
@@ -644,7 +675,7 @@
             }
           },
           "403": {
-            "description": "Project status or repository policy does not allow downloads",
+            "description": "Project status or index policy does not allow downloads",
             "content": {
               "application/json": {
                 "example": {
@@ -841,7 +872,7 @@
           "simple"
         ],
         "summary": "List projects",
-        "description": "The projects velodex has observed on this index: everything uploaded, plus every mirrored project a client has asked for. An overlay unions its layers. Repository policy filters denied projects before serialization. JSON or HTML by `Accept`.",
+        "description": "The projects velodex has observed on this index: everything uploaded, plus every mirrored project a client has asked for. A virtual index unions its layers. Index policy filters denied projects before serialization. JSON or HTML by `Accept`.",
         "parameters": [
           {
             "name": "route",
@@ -891,7 +922,7 @@
           "simple"
         ],
         "summary": "Project detail",
-        "description": "All files of one project, merged across overlay layers (first match per filename wins, versions union). File URLs point back at velodex's own `files/` route; `core-metadata` advertises the PEP 658 sibling. Repository policy filters denied files and their versions before serialization.",
+        "description": "All files of one project, merged across virtual-index layers (first match per filename wins, versions union). File URLs point back at velodex's own `files/` route; `core-metadata` advertises the PEP 658 sibling. Index policy filters denied files and their versions before serialization.",
         "parameters": [
           {
             "name": "route",
@@ -955,7 +986,7 @@
             }
           },
           "403": {
-            "description": "Repository policy denied the project detail",
+            "description": "Index policy denied the project detail",
             "content": {
               "application/json": {
                 "example": {
@@ -1149,7 +1180,7 @@
           "publish"
         ],
         "summary": "Delete a version",
-        "description": "Removes the version's uploaded files outright. Requires the local layer to be `volatile`; for an overlay, the upstream files become visible again.",
+        "description": "Removes the version's uploaded files outright. Requires the local layer to be `volatile`; for a virtual index, the upstream files become visible again.",
         "parameters": [
           {
             "name": "route",
@@ -1369,7 +1400,7 @@
           "publish"
         ],
         "summary": "Restore hidden files",
-        "description": "Clears the hidden marker a DELETE leaves on files served from a read-only mirror, making them visible on the overlay again. Omit `{version}/` to restore the whole project.",
+        "description": "Clears the hidden marker a DELETE leaves on files served from a read-only cache, making them visible on the virtual index again. Omit `{version}/` to restore the whole project.",
         "parameters": [
           {
             "name": "route",
@@ -1425,7 +1456,7 @@
           "publish"
         ],
         "summary": "Yank files",
-        "description": "Marks the version's files yanked (PEP 592): resolvers skip them, exact-pin installs still succeed. Uploaded files get their record updated; files served from a read-only mirror get a reversible override on the overlay's local layer, so upstream releases can be yanked too. Omit `{version}/` (i.e. `PUT /{route}/{project}/yank`) to yank the whole project. Add `?reason=...` to preserve a resolver-visible reason.",
+        "description": "Marks the version's files yanked (PEP 592): resolvers skip them, exact-pin installs still succeed. Uploaded files get their record updated; files served from a read-only cache get a reversible override on the virtual index's hosted layer, so upstream releases can be yanked too. Omit `{version}/` (i.e. `PUT /{route}/{project}/yank`) to yank the whole project. Add `?reason=...` to preserve a resolver-visible reason.",
         "parameters": [
           {
             "name": "route",
@@ -1542,7 +1573,7 @@
       "uploadToken": {
         "type": "http",
         "scheme": "basic",
-        "description": "Any username; the password is the local index's `upload_token` (the pypi.org `__token__` convention)"
+        "description": "Any username; the password is the hosted index's `upload_token` (the pypi.org `__token__` convention)"
       }
     }
   }

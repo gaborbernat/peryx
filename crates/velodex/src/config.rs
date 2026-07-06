@@ -7,8 +7,9 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use velodex_http::policy::PolicyConfig;
+use velodex_format::Ecosystem;
 use velodex_http::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
+use velodex_policy::PolicyConfig;
 
 /// A fully resolved configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,12 +17,12 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub data_dir: PathBuf,
-    /// Disable upstream network access and serve only cached mirror data.
+    /// Disable upstream network access and serve only cached data.
     pub offline: bool,
     /// Fallback freshness for cached simple pages, in seconds. Upstream `Cache-Control` lifetimes
     /// take precedence; this applies only when the server granted none.
     pub cache_ttl_secs: i64,
-    /// The configured indexes: mirrors, local (hosted) stores, and overlays that compose them.
+    /// The configured indexes: caches, hosted stores, and virtual indexes that compose them.
     pub indexes: Vec<IndexConfig>,
     pub log: LogConfig,
     pub rate_limit: RateLimitConfig,
@@ -34,47 +35,49 @@ pub struct IndexConfig {
     pub name: String,
     /// URL prefix the index is served under, for example `root/pypi`.
     pub route: String,
+    /// The package ecosystem this index serves. Immutable once created.
+    pub ecosystem: Ecosystem,
     pub kind: IndexKind,
     pub policy: PolicyConfig,
     pub webhooks: Vec<WebhookConfig>,
 }
 
-/// The three composable index shapes: a read-through mirror, a writable local store, or an overlay
-/// that layers other indexes under one route.
+/// The three composable index roles: a read-through cache, a writable hosted store, or a virtual
+/// index that aggregates other indexes under one route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexKind {
-    /// Proxy and cache an upstream simple index.
-    Mirror {
+    /// Cache an upstream simple index, fetching on demand.
+    Cached {
         upstream: String,
         username: Option<String>,
         password: Option<String>,
         /// Bearer token; takes precedence over username/password.
         token: Option<String>,
-        /// Concurrent upstream fetches allowed for this mirror in this process; `0` disables the cap.
+        /// Concurrent upstream fetches allowed for this cached index in this process; `0` disables the cap.
         upstream_concurrency: usize,
-        /// Serve only cached data for this mirror.
+        /// Serve only cached data for this index.
         offline: bool,
-        /// Optional package set and artifact filters for `velodex mirror`.
-        prefetch: Box<MirrorPrefetchConfig>,
+        /// Optional package set and artifact filters for `velodex prefetch`.
+        prefetch: Box<PrefetchConfig>,
     },
     /// A hosted store that accepts uploads. `upload_token` is the Basic-auth password an upload must
     /// present (`None` disables uploads); `volatile` allows delete and overwrite.
-    Local {
+    Hosted {
         upload_token: Option<String>,
         volatile: bool,
     },
-    /// An ordered composition of other indexes (by name). Resolution merges layers first-match; a
-    /// file in an earlier layer shadows a later one. Uploads target `upload` (a local layer name).
-    Overlay {
+    /// An ordered aggregation of other indexes (its members, by name, in `layers`). Resolution merges
+    /// members first-match; a file in an earlier member shadows a later one. Uploads target `upload`.
+    Virtual {
         layers: Vec<String>,
         upload: Option<String>,
     },
 }
 
-/// Mirror prefetch behavior configured under `[index.prefetch]`.
+/// Prefetch behavior configured under `[index.prefetch]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MirrorPrefetchConfig {
-    pub mode: MirrorPrefetchMode,
+pub struct PrefetchConfig {
+    pub mode: PrefetchMode,
     pub packages: Vec<String>,
     pub requirements: Vec<PathBuf>,
     pub include_wheels: bool,
@@ -86,10 +89,10 @@ pub struct MirrorPrefetchConfig {
     pub metadata_only: bool,
 }
 
-impl Default for MirrorPrefetchConfig {
+impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
-            mode: MirrorPrefetchMode::Selected,
+            mode: PrefetchMode::Selected,
             packages: Vec::new(),
             requirements: Vec::new(),
             include_wheels: true,
@@ -103,10 +106,10 @@ impl Default for MirrorPrefetchConfig {
     }
 }
 
-/// Which projects `velodex mirror` selects before artifact filters apply.
+/// Which projects `velodex prefetch` selects before artifact filters apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
-pub enum MirrorPrefetchMode {
+pub enum PrefetchMode {
     All,
     Selected,
     MetadataOnly,
@@ -114,8 +117,8 @@ pub enum MirrorPrefetchMode {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct RawMirrorPrefetch {
-    pub mode: Option<MirrorPrefetchMode>,
+pub struct RawPrefetchConfig {
+    pub mode: Option<PrefetchMode>,
     pub packages: Option<Vec<String>>,
     pub requirements: Option<Vec<PathBuf>>,
     pub include_wheels: Option<bool>,
@@ -127,11 +130,11 @@ pub struct RawMirrorPrefetch {
     pub metadata_only: Option<bool>,
 }
 
-impl RawMirrorPrefetch {
+impl RawPrefetchConfig {
     #[must_use]
-    pub fn resolve(self) -> MirrorPrefetchConfig {
-        let mode = self.mode.unwrap_or(MirrorPrefetchMode::Selected);
-        MirrorPrefetchConfig {
+    pub fn resolve(self) -> PrefetchConfig {
+        let mode = self.mode.unwrap_or(PrefetchMode::Selected);
+        PrefetchConfig {
             mode,
             packages: self.packages.unwrap_or_default(),
             requirements: self.requirements.unwrap_or_default(),
@@ -141,9 +144,7 @@ impl RawMirrorPrefetch {
             abi_tags: self.abi_tags.unwrap_or_default(),
             platform_tags: self.platform_tags.unwrap_or_default(),
             max_file_size_bytes: self.max_file_size_bytes,
-            metadata_only: self
-                .metadata_only
-                .unwrap_or(matches!(mode, MirrorPrefetchMode::MetadataOnly)),
+            metadata_only: self.metadata_only.unwrap_or(matches!(mode, PrefetchMode::MetadataOnly)),
         }
     }
 }
@@ -177,16 +178,17 @@ impl Default for Config {
     }
 }
 
-/// The out-of-the-box topology: a pypi.org mirror with a local store overlaid in front of it, served
-/// together at `root/pypi`. Uploads to `root/pypi` land in the local layer once a token is set.
+/// The out-of-the-box topology: a pypi.org cache and a hosted store, combined by a virtual index
+/// served at `root/pypi`. Uploads to `root/pypi` land in the hosted layer once a token is set.
 fn default_indexes() -> Vec<IndexConfig> {
     vec![
         IndexConfig {
             name: "pypi".to_owned(),
             route: "pypi".to_owned(),
+            ecosystem: Ecosystem::Pypi,
             policy: PolicyConfig::default(),
             webhooks: Vec::new(),
-            kind: IndexKind::Mirror {
+            kind: IndexKind::Cached {
                 upstream: "https://pypi.org/simple/".to_owned(),
                 username: None,
                 password: None,
@@ -197,11 +199,12 @@ fn default_indexes() -> Vec<IndexConfig> {
             },
         },
         IndexConfig {
-            name: "local".to_owned(),
-            route: "local".to_owned(),
+            name: "hosted".to_owned(),
+            route: "hosted".to_owned(),
+            ecosystem: Ecosystem::Pypi,
             policy: PolicyConfig::default(),
             webhooks: Vec::new(),
-            kind: IndexKind::Local {
+            kind: IndexKind::Hosted {
                 upload_token: None,
                 volatile: true,
             },
@@ -209,11 +212,12 @@ fn default_indexes() -> Vec<IndexConfig> {
         IndexConfig {
             name: "root/pypi".to_owned(),
             route: "root/pypi".to_owned(),
+            ecosystem: Ecosystem::Pypi,
             policy: PolicyConfig::default(),
             webhooks: Vec::new(),
-            kind: IndexKind::Overlay {
-                layers: vec!["local".to_owned(), "pypi".to_owned()],
-                upload: Some("local".to_owned()),
+            kind: IndexKind::Virtual {
+                layers: vec!["hosted".to_owned(), "pypi".to_owned()],
+                upload: Some("hosted".to_owned()),
             },
         },
     ]
@@ -224,7 +228,7 @@ impl Config {
     ///
     /// # Errors
     /// Returns [`ConfigError::Index`] if the partial defines indexes but one is not classifiable as a
-    /// mirror, local, or overlay.
+    /// cached, hosted, or virtual.
     pub fn apply(mut self, partial: PartialConfig) -> Result<Self, ConfigError> {
         if let Some(host) = partial.host {
             self.host = host;
@@ -250,17 +254,24 @@ impl Config {
     }
 }
 
-/// Turn a raw `[[index]]` table into a classified [`IndexConfig`]: `layers` makes an overlay, else
-/// `mirror` makes a mirror, else `local`/`upload_token` makes a local store.
+/// Turn a raw `[[index]]` table into a classified [`IndexConfig`]: `layers` makes a virtual index, else
+/// `cached` makes a cached index, else `hosted`/`upload_token` makes a hosted store.
 fn classify_index(raw: RawIndex) -> Result<IndexConfig, ConfigError> {
     let route = raw.route.clone().unwrap_or_else(|| raw.name.clone());
+    let ecosystem = match &raw.ecosystem {
+        Some(value) => value.parse().map_err(|_| ConfigError::Index {
+            name: raw.name.clone(),
+            reason: "unknown ecosystem",
+        })?,
+        None => Ecosystem::default(),
+    };
     let kind = if let Some(layers) = raw.layers {
-        IndexKind::Overlay {
+        IndexKind::Virtual {
             layers,
             upload: raw.upload,
         }
-    } else if let Some(upstream) = raw.mirror {
-        IndexKind::Mirror {
+    } else if let Some(upstream) = raw.cached {
+        IndexKind::Cached {
             upstream,
             username: raw.username,
             password: raw.password,
@@ -269,20 +280,21 @@ fn classify_index(raw: RawIndex) -> Result<IndexConfig, ConfigError> {
             offline: raw.offline.unwrap_or(false),
             prefetch: Box::new(raw.prefetch.unwrap_or_default().resolve()),
         }
-    } else if raw.local == Some(true) || raw.upload_token.is_some() {
-        IndexKind::Local {
+    } else if raw.hosted == Some(true) || raw.upload_token.is_some() {
+        IndexKind::Hosted {
             upload_token: raw.upload_token,
             volatile: raw.volatile.unwrap_or(true),
         }
     } else {
         return Err(ConfigError::Index {
             name: raw.name,
-            reason: "index needs one of `mirror`, `local`, or `layers`",
+            reason: "index needs one of `cached`, `hosted`, or `layers`",
         });
     };
     Ok(IndexConfig {
         name: raw.name,
         route,
+        ecosystem,
         kind,
         policy: raw.policy,
         webhooks: raw
@@ -401,23 +413,24 @@ pub struct PartialConfig {
     pub rate_limit: PartialRateLimitConfig,
 }
 
-/// A raw `[[index]]` table before classification. Exactly one of `mirror`, `local`, or `layers`
+/// A raw `[[index]]` table before classification. Exactly one of `cached`, `hosted`, or `layers`
 /// selects the kind; [`classify_index`] enforces that.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawIndex {
     pub name: String,
     pub route: Option<String>,
+    pub ecosystem: Option<String>,
     #[serde(default)]
     pub policy: PolicyConfig,
-    pub mirror: Option<String>,
+    pub cached: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
     pub token: Option<String>,
     pub upstream_concurrency: Option<usize>,
     pub offline: Option<bool>,
-    pub prefetch: Option<RawMirrorPrefetch>,
-    pub local: Option<bool>,
+    pub prefetch: Option<RawPrefetchConfig>,
+    pub hosted: Option<bool>,
     pub upload_token: Option<String>,
     pub volatile: Option<bool>,
     pub layers: Option<Vec<String>>,
@@ -453,7 +466,7 @@ pub struct PartialLogConfig {
 pub struct PartialRateLimitConfig {
     pub enabled: Option<bool>,
     pub max_clients: Option<u64>,
-    pub simple: PartialRouteLimit,
+    pub listing: PartialRouteLimit,
     pub metadata: PartialRouteLimit,
     pub artifact: PartialRouteLimit,
     pub upload: PartialRouteLimit,
@@ -474,7 +487,7 @@ const fn apply_rate_limit(mut base: RateLimitConfig, partial: PartialRateLimitCo
     if let Some(max_clients) = partial.max_clients {
         base.max_clients = max_clients;
     }
-    base.simple = apply_route_limit(base.simple, partial.simple);
+    base.listing = apply_route_limit(base.listing, partial.listing);
     base.metadata = apply_route_limit(base.metadata, partial.metadata);
     base.artifact = apply_route_limit(base.artifact, partial.artifact);
     base.upload = apply_route_limit(base.upload, partial.upload);
@@ -503,6 +516,8 @@ pub enum ConfigError {
     Index { name: String, reason: &'static str },
     #[error("webhook {name}: {reason}")]
     Webhook { name: String, reason: &'static str },
+    #[error("invalid environment variable {var}: {reason}")]
+    Env { var: &'static str, reason: String },
 }
 
 /// Parse a TOML document into a [`PartialConfig`].
@@ -512,6 +527,61 @@ pub enum ConfigError {
 /// for the error message.
 pub fn from_toml(path: PathBuf, text: &str) -> Result<PartialConfig, ConfigError> {
     toml::from_str(text).map_err(|source| ConfigError::Parse { path, source })
+}
+
+/// The overlay sourced from `VELODEX_*` environment variables — the tier between file and CLI.
+///
+/// Only scalar settings are environment-configurable; the `[[index]]` topology and rate limits stay
+/// file- and CLI-configured, since neither maps cleanly to flat variables.
+///
+/// # Errors
+/// Returns [`ConfigError::Env`] when a variable holds a value its target type rejects (a `PORT` that
+/// is not a `u16`, a `LOG_FORMAT` that names no known format, and so on).
+pub fn from_env() -> Result<PartialConfig, ConfigError> {
+    from_env_source(|var| std::env::var(var).ok())
+}
+
+pub(crate) fn from_env_source(get: impl Fn(&str) -> Option<String>) -> Result<PartialConfig, ConfigError> {
+    let get = |var: &str| get(var).filter(|value| !value.is_empty());
+    Ok(PartialConfig {
+        host: get("VELODEX_HOST"),
+        port: parse_env(&get, "VELODEX_PORT")?,
+        data_dir: get("VELODEX_DATA_DIR").map(PathBuf::from),
+        offline: parse_env(&get, "VELODEX_OFFLINE")?,
+        cache_ttl_secs: parse_env(&get, "VELODEX_CACHE_TTL_SECS")?,
+        indexes: None,
+        log: PartialLogConfig {
+            level: get("VELODEX_LOG_LEVEL"),
+            format: parse_env_enum(&get, "VELODEX_LOG_FORMAT")?,
+            sink: parse_env_enum(&get, "VELODEX_LOG_SINK")?,
+            file: get("VELODEX_LOG_FILE").map(PathBuf::from),
+        },
+        rate_limit: PartialRateLimitConfig::default(),
+    })
+}
+
+fn parse_env<T>(get: &impl Fn(&str) -> Option<String>, var: &'static str) -> Result<Option<T>, ConfigError>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    get(var)
+        .map(|value| {
+            value.parse::<T>().map_err(|err| ConfigError::Env {
+                var,
+                reason: err.to_string(),
+            })
+        })
+        .transpose()
+}
+
+fn parse_env_enum<T: clap::ValueEnum>(
+    get: &impl Fn(&str) -> Option<String>,
+    var: &'static str,
+) -> Result<Option<T>, ConfigError> {
+    get(var)
+        .map(|value| T::from_str(&value, true).map_err(|reason| ConfigError::Env { var, reason }))
+        .transpose()
 }
 
 /// Read a config file from disk into a [`PartialConfig`].

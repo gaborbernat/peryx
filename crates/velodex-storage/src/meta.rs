@@ -13,17 +13,29 @@ use redb::{Database, ReadableDatabase as _, ReadableTable as _, TableDefinition}
 use serde::{Deserialize, Serialize};
 
 const SERIAL: TableDefinition<&str, u64> = TableDefinition::new("serial");
-const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("simple_index");
-const FILE: TableDefinition<&str, &str> = TableDefinition::new("file_url");
-const METADATA: TableDefinition<&str, &str> = TableDefinition::new("metadata");
+const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("index_document");
+const FILE: TableDefinition<&str, &str> = TableDefinition::new("artifact_source");
+const METADATA: TableDefinition<&str, &str> = TableDefinition::new("metadata_sidecar");
 const PROJECTS: TableDefinition<&str, &str> = TableDefinition::new("projects");
 const PROJECT_STATUS: TableDefinition<&str, &[u8]> = TableDefinition::new("project_status");
 const UPLOAD: TableDefinition<&str, &[u8]> = TableDefinition::new("uploads");
 const OVERRIDE: TableDefinition<&str, &str> = TableDefinition::new("overrides");
 const WEBHOOK_DELIVERY: TableDefinition<&str, &[u8]> = TableDefinition::new("webhook_delivery");
 const WEBHOOK_DUE: TableDefinition<&str, &str> = TableDefinition::new("webhook_due");
+const JOURNAL: TableDefinition<u64, &[u8]> = TableDefinition::new("journal");
 const SERIAL_KEY: &str = "serial";
 const WEBHOOK_SERIAL_KEY: &str = "webhook_delivery";
+
+/// One recorded mutation in the [`MetaStore`] journal: the append-only changelog that makes velodex
+/// an origin others can replicate from. `serial` orders entries; the rest names what changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalEntry {
+    pub serial: u64,
+    pub action: String,
+    pub project: String,
+    pub version: Option<String>,
+    pub filename: Option<String>,
+}
 
 /// A cached upstream simple-index response plus the metadata needed to revalidate it. The body is
 /// the raw upstream document; velodex transforms it per request, so one cached page serves any route.
@@ -363,6 +375,57 @@ impl MetaStore {
         Ok(next)
     }
 
+    /// Append a mutation to the journal and return its serial.
+    ///
+    /// The serial is allocated and the entry recorded in one write transaction, so under redb's single
+    /// writer the journal is an append-only log whose serials are monotonic in commit order — the
+    /// changelog a replica or downstream replica replays. (Warehouse needs a Postgres advisory lock for
+    /// this guarantee; redb gives it for free.) Timestamps join the entry when replication lands.
+    ///
+    /// # Errors
+    /// Returns [`MetaError`] on a storage or encode failure.
+    pub fn append_journal(
+        &self,
+        action: &str,
+        project: &str,
+        version: Option<&str>,
+        filename: Option<&str>,
+    ) -> Result<u64, MetaError> {
+        let txn = self.db.begin_write()?;
+        let serial = {
+            let mut serials = txn.open_table(SERIAL)?;
+            let next = serials.get(SERIAL_KEY)?.map_or(0, |value| value.value()) + 1;
+            serials.insert(SERIAL_KEY, next)?;
+            let entry = JournalEntry {
+                serial: next,
+                action: action.to_owned(),
+                project: project.to_owned(),
+                version: version.map(str::to_owned),
+                filename: filename.map(str::to_owned),
+            };
+            let mut journal = txn.open_table(JOURNAL)?;
+            journal.insert(next, serde_json::to_vec(&entry)?.as_slice())?;
+            next
+        };
+        txn.commit()?;
+        Ok(serial)
+    }
+
+    /// The journal entries after serial `after`, in serial order — the changelog since a point.
+    ///
+    /// # Errors
+    /// Returns [`MetaError`] on a storage or decode failure.
+    pub fn journal_since(&self, after: u64) -> Result<Vec<JournalEntry>, MetaError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(JOURNAL)?;
+        let mut entries = Vec::new();
+        for row in table.range(after.saturating_add(1)..)? {
+            let (_, value) = row?;
+            entries.push(serde_json::from_slice(value.value())?);
+        }
+        Ok(entries)
+    }
+
     /// Insert a pending webhook delivery and return its delivery ID.
     ///
     /// # Errors
@@ -519,7 +582,7 @@ impl MetaStore {
         Ok(deliveries)
     }
 
-    /// Store everything a freshly fetched mirror page produces in one transaction: the cached page
+    /// Store everything a freshly fetched cached page produces in one transaction: the cached page
     /// record, the observed project name, every file's source URL, and every PEP 658 sibling.
     /// One commit means one fsync, where a write per file made large projects (numpy has thousands
     /// of files) take tens of seconds.
@@ -534,7 +597,7 @@ impl MetaStore {
         clippy::too_many_arguments,
         reason = "one transaction needs every table's rows together"
     )]
-    pub fn put_mirror_page(
+    pub fn put_cached_page(
         &self,
         key: &str,
         record: &CachedIndex,
@@ -776,8 +839,8 @@ impl MetaStore {
         Ok(())
     }
 
-    /// Record the upstream URL a blob digest can be fetched from, and the name of the mirror it came
-    /// from (so a fetch on a cache miss reuses that mirror's authentication).
+    /// Record the upstream URL a blob digest can be fetched from, and the name of the cached index it came
+    /// from (so a fetch on a cache miss reuses that index's authentication).
     ///
     /// # Errors
     /// Returns a store error if the write or commit fails.
@@ -792,7 +855,7 @@ impl MetaStore {
         Ok(())
     }
 
-    /// Look up the `(upstream url, mirror name)` for a blob digest.
+    /// Look up the `(upstream url, index name)` for a blob digest.
     ///
     /// # Errors
     /// Returns a store error if the read fails.
@@ -824,7 +887,7 @@ impl MetaStore {
         Ok(())
     }
 
-    /// Look up an artifact's metadata sibling: `(upstream url, metadata sha256, mirror name)`.
+    /// Look up an artifact's metadata sibling: `(upstream url, metadata sha256, index name)`.
     ///
     /// # Errors
     /// Returns a store error if the read fails.

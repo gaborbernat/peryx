@@ -7,8 +7,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use sha2::{Digest as _, Sha256};
-use velodex_core::pypi::{CoreMetadata, File, Provenance, Yanked, to_json};
-use velodex_http::upload::Uploaded;
+use velodex_ecosystem_pypi::upload::Uploaded;
+use velodex_ecosystem_pypi::{CoreMetadata, File, Provenance, Yanked, to_json};
 use velodex_storage::blob::{BlobStore, Digest};
 use velodex_storage::meta::MetaStore;
 
@@ -28,8 +28,8 @@ fn test_backup_restore_roundtrip_restores_metadata_and_blobs() {
     operator::restore(&backup, &restored, false, &mut out).unwrap();
 
     let meta = MetaStore::open_existing(restored.join("velodex.redb")).unwrap();
-    assert_eq!(meta.list_projects("local").unwrap(), vec!["Flask"]);
-    assert_eq!(meta.list_upload_entries("local", "flask").unwrap().len(), 1);
+    assert_eq!(meta.list_projects("hosted").unwrap(), vec!["Flask"]);
+    assert_eq!(meta.list_upload_entries("hosted", "flask").unwrap().len(), 1);
     let blobs = BlobStore::new(restored.join("blobs"));
     assert_eq!(blobs.read(&content_digest).unwrap(), b"wheel bytes");
     assert_eq!(blobs.read(&metadata_digest).unwrap(), b"metadata bytes");
@@ -423,8 +423,8 @@ fn test_import_dir_validates_and_reports_files() {
     assert!(text.contains("summary\t\t\t\timported=2 skipped=1 rejected=1"));
 
     let meta = MetaStore::open_existing(config.data_dir.join("velodex.redb")).unwrap();
-    assert_eq!(meta.list_upload_entries("local", "demo").unwrap().len(), 1);
-    assert_eq!(meta.list_upload_entries("local", "flask").unwrap().len(), 1);
+    assert_eq!(meta.list_upload_entries("hosted", "demo").unwrap().len(), 1);
+    assert_eq!(meta.list_upload_entries("hosted", "flask").unwrap().len(), 1);
 }
 
 #[test]
@@ -476,7 +476,7 @@ fn test_import_dir_accepts_local_repository_route() {
     };
 
     let mut out = Vec::new();
-    operator::import_dir(&config, "local", &import, &mut out).unwrap();
+    operator::import_dir(&config, "hosted", &import, &mut out).unwrap();
 
     assert!(
         String::from_utf8(out)
@@ -550,14 +550,15 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
     let root = tempfile::tempdir().unwrap();
     let import = root.path().join("import");
     std::fs::create_dir(&import).unwrap();
-    let mirror_config = Config {
-        data_dir: root.path().join("mirror-data"),
+    let cached_config = Config {
+        data_dir: root.path().join("cached-data"),
         indexes: vec![IndexConfig {
             name: "pypi".to_owned(),
             route: "pypi".to_owned(),
-            policy: velodex_http::policy::PolicyConfig::default(),
+            policy: velodex_policy::PolicyConfig::default(),
             webhooks: Vec::new(),
-            kind: IndexKind::Mirror {
+            ecosystem: velodex_format::Ecosystem::Pypi,
+            kind: IndexKind::Cached {
                 upstream: "https://pypi.org/simple/".to_owned(),
                 username: None,
                 password: None,
@@ -569,14 +570,15 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
         }],
         ..Config::default()
     };
-    let overlay_config = Config {
-        data_dir: root.path().join("overlay-data"),
+    let virtual_config = Config {
+        data_dir: root.path().join("virtual-data"),
         indexes: vec![IndexConfig {
-            name: "overlay".to_owned(),
-            route: "overlay".to_owned(),
-            policy: velodex_http::policy::PolicyConfig::default(),
+            name: "aggregate".to_owned(),
+            route: "aggregate".to_owned(),
+            policy: velodex_policy::PolicyConfig::default(),
             webhooks: Vec::new(),
-            kind: IndexKind::Overlay {
+            ecosystem: velodex_format::Ecosystem::Pypi,
+            kind: IndexKind::Virtual {
                 layers: Vec::new(),
                 upload: None,
             },
@@ -594,22 +596,22 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
         .is_err()
     );
     assert!(
-        operator::import_dir(&mirror_config, "pypi", &import, &mut Vec::new())
+        operator::import_dir(&cached_config, "pypi", &import, &mut Vec::new())
             .unwrap_err()
             .to_string()
             .contains("read-only")
     );
     assert!(
-        operator::import_dir(&overlay_config, "overlay", &import, &mut Vec::new())
+        operator::import_dir(&virtual_config, "aggregate", &import, &mut Vec::new())
             .unwrap_err()
             .to_string()
-            .contains("no local upload target")
+            .contains("no hosted upload target")
     );
     assert!(
-        operator::import_dir(&overlay_config, "missing", &import, &mut Vec::new())
+        operator::import_dir(&virtual_config, "missing", &import, &mut Vec::new())
             .unwrap_err()
             .to_string()
-            .contains("unknown repository")
+            .contains("unknown index")
     );
 }
 
@@ -622,15 +624,15 @@ fn backup_fixture() -> (tempfile::TempDir, Config, Digest, Digest) {
     let metadata_digest = blobs.write(b"metadata bytes").unwrap();
     let meta = MetaStore::open(data_dir.join("velodex.redb")).unwrap();
     meta.put_upload(
-        "local",
+        "hosted",
         "flask",
         "Flask-1.0-py3-none-any.whl",
         &uploaded_record_json(&content_digest, &metadata_digest),
     )
     .unwrap();
-    meta.put_metadata(content_digest.as_str(), "uploaded", metadata_digest.as_str(), "local")
+    meta.put_metadata(content_digest.as_str(), "uploaded", metadata_digest.as_str(), "hosted")
         .unwrap();
-    meta.put_project("local", "flask", "Flask").unwrap();
+    meta.put_project("hosted", "flask", "Flask").unwrap();
     drop(meta);
     (
         dir,

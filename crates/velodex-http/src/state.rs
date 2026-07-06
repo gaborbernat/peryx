@@ -5,12 +5,14 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use serde::Serialize;
+use velodex_format::Ecosystem;
+use velodex_policy::Policy;
 use velodex_storage::blob::BlobStore;
 use velodex_storage::meta::MetaStore;
 use velodex_upstream::UpstreamClient;
 
 use crate::metrics::Metrics;
-use crate::policy::Policy;
 use crate::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RateLimiter, UpstreamLimits};
 use crate::search::{PackageSearch, SearchError};
 use crate::webhook::WebhookRuntime;
@@ -19,32 +21,54 @@ use crate::webhook::WebhookRuntime;
 /// tests.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-/// One resolved index. `layers`/`upload` in an overlay are indices into [`AppState::indexes`], so
+/// One resolved index. `layers`/`upload` in a virtual index are indices into [`AppState::indexes`], so
 /// resolution is a plain vector walk with no name lookups at request time.
 #[derive(Debug)]
 pub struct Index {
     pub name: String,
     pub route: String,
+    pub ecosystem: Ecosystem,
     pub kind: IndexKind,
     pub policy: Policy,
 }
 
-/// The runtime shape of an index: a mirror owns its upstream client, a local store its upload
-/// policy, an overlay the resolved positions of its layers and upload target.
+/// The runtime shape of an index by role: a cached index owns its upstream client, a hosted store its
+/// upload policy, a virtual index the resolved positions of its members and upload target.
 #[derive(Debug)]
 pub enum IndexKind {
-    Mirror {
+    Cached {
         client: UpstreamClient,
         offline: bool,
     },
-    Local {
+    Hosted {
         upload_token: Option<String>,
         volatile: bool,
     },
-    Overlay {
+    Virtual {
         layers: Vec<usize>,
         upload: Option<usize>,
     },
+}
+
+/// An index's role, without the payload [`IndexKind`] carries. Metric families scope themselves to
+/// the roles that emit them, and the render layer gates counters by matching this against an index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Cached,
+    Hosted,
+    Virtual,
+}
+
+impl Role {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cached => "cached",
+            Self::Hosted => "hosted",
+            Self::Virtual => "virtual",
+        }
+    }
 }
 
 struct StateParts {
@@ -71,17 +95,13 @@ pub struct AppState {
     pub ttl_secs: i64,
     pub clock: Clock,
     pub requests: AtomicU64,
-    /// PEP 658/714 `.metadata` sibling requests served, exposed via `/metrics`. Downstream clients
-    /// only hit this when they take the metadata-only resolution fast path, so it is the server-side
-    /// proof that pip and uv resolve through velodex without downloading whole wheels.
-    pub metadata_requests: AtomicU64,
     pub indexes: Vec<Index>,
     /// One async lock per project being fetched from upstream, so concurrent cache misses for the
     /// same page share a single upstream fetch instead of each downloading and storing it.
     pub inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// One live download per blob digest: concurrent cold requests for the same file all tail the
     /// one upstream transfer as it lands instead of waiting for it to finish.
-    pub downloads: Mutex<HashMap<String, crate::cache::DownloadHandle>>,
+    pub downloads: Mutex<HashMap<String, crate::download::DownloadHandle>>,
     /// Transformed page bytes ready to serve, paired with their unix expiry: warm requests are a
     /// lookup, an expiry check, and a memcpy. Entries carry the mutation epoch in their key, so
     /// uploads and overrides invalidate by key miss; the expiry honors each page's upstream
@@ -99,10 +119,13 @@ pub struct AppState {
     pub search: PackageSearch,
     /// Per-client HTTP request limits. The bucket cache has a fixed capacity.
     pub rate_limits: RateLimiter,
-    /// Per-mirror upstream fetch gates, keyed by configured index name.
+    /// Per-cached-index upstream fetch gates, keyed by configured index name.
     pub upstream_limits: UpstreamLimits,
     /// Signed webhook delivery runtime.
     pub webhooks: WebhookRuntime,
+    /// The ecosystem serving driver requests are dispatched to. One per process today (`PyPI`); a
+    /// registry keyed by an index's ecosystem once a second ecosystem lands.
+    pub serving: Arc<dyn crate::serving::EcosystemServing>,
 }
 
 impl AppState {
@@ -112,7 +135,7 @@ impl AppState {
         Self::with_clock(meta, blobs, ttl_secs, indexes, Arc::new(system_now))
     }
 
-    /// Build the state with system time plus local abuse-control settings.
+    /// Build the state with system time plus hosted abuse-control settings.
     #[must_use]
     pub fn with_rate_limits(
         meta: MetaStore,
@@ -169,7 +192,7 @@ impl AppState {
         )
     }
 
-    /// Build the state with an on-disk search index and local abuse-control settings.
+    /// Build the state with an on-disk search index and hosted abuse-control settings.
     ///
     /// # Errors
     /// Returns an error if the search index cannot be opened.
@@ -224,7 +247,7 @@ impl AppState {
         ))
     }
 
-    /// Build the state with an injected clock plus local abuse-control settings.
+    /// Build the state with an injected clock plus hosted abuse-control settings.
     #[must_use]
     pub fn with_limits(
         meta: MetaStore,
@@ -299,14 +322,14 @@ impl AppState {
         let upstream_limits = indexes
             .iter()
             .filter_map(|index| match &index.kind {
-                IndexKind::Mirror { .. } => Some((
+                IndexKind::Cached { .. } => Some((
                     index.name.clone(),
                     configured
                         .get(&index.name)
                         .copied()
                         .unwrap_or(DEFAULT_UPSTREAM_CONCURRENCY),
                 )),
-                IndexKind::Local { .. } | IndexKind::Overlay { .. } => None,
+                IndexKind::Hosted { .. } | IndexKind::Virtual { .. } => None,
             })
             .collect::<Vec<_>>();
         Self {
@@ -315,7 +338,6 @@ impl AppState {
             ttl_secs,
             clock,
             requests: AtomicU64::new(0),
-            metadata_requests: AtomicU64::new(0),
             indexes,
             inflight: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
@@ -335,7 +357,21 @@ impl AppState {
             rate_limits: RateLimiter::new(rate_limit),
             upstream_limits: UpstreamLimits::new(upstream_limits),
             webhooks,
+            serving: default_serving(),
         }
+    }
+
+    /// Wire in the ecosystem serving driver and its search indexer. The binary calls this once at
+    /// startup with the configured ecosystem's implementations; a state built without it serves the
+    /// neutral defaults ([`UnconfiguredServing`](crate::serving::UnconfiguredServing) and
+    /// [`EmptyIndexer`](crate::search::EmptyIndexer)).
+    pub fn set_ecosystem(
+        &mut self,
+        serving: Arc<dyn crate::serving::EcosystemServing>,
+        indexer: Arc<dyn crate::search::PackageIndexer>,
+    ) {
+        self.serving = serving;
+        self.search.set_indexer(indexer);
     }
 
     /// Find the index whose route is the longest segment-aligned prefix of `path` (which has no
@@ -361,7 +397,7 @@ impl AppState {
         best
     }
 
-    /// The index at position `pos` (an overlay layer or upload target).
+    /// The index at position `pos` (a virtual-index layer or upload target).
     #[must_use]
     pub fn index_at(&self, pos: usize) -> &Index {
         &self.indexes[pos]
@@ -405,7 +441,7 @@ impl AppState {
         self.epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Describe every configured index for presentation: kind name, overlay layer names, upload
+    /// Describe every configured index for presentation: kind name, virtual-index layer names, upload
     /// access, and delete policy. Shared by `/+status` and the web UI.
     #[must_use]
     pub fn describe_indexes(&self) -> Vec<IndexDescription> {
@@ -421,23 +457,24 @@ pub fn describe_indexes(indexes: &[Index]) -> Vec<IndexDescription> {
         .collect()
 }
 
-pub(crate) fn describe_index(indexes: &[Index], position: usize) -> IndexDescription {
+#[must_use]
+pub fn describe_index(indexes: &[Index], position: usize) -> IndexDescription {
     let index = &indexes[position];
     let (kind, layers, uploads, volatile_deletes, upload_to) = match &index.kind {
-        IndexKind::Mirror { .. } => ("mirror", Vec::new(), false, false, None),
-        IndexKind::Local { upload_token, volatile } => (
-            "local",
+        IndexKind::Cached { .. } => ("cached", Vec::new(), false, false, None),
+        IndexKind::Hosted { upload_token, volatile } => (
+            "hosted",
             Vec::new(),
             upload_token.is_some(),
             upload_token.is_some() && *volatile,
             None,
         ),
-        IndexKind::Overlay { layers, upload } => {
+        IndexKind::Virtual { layers, upload } => {
             let names = layers.iter().map(|&pos| indexes[pos].name.clone()).collect();
             let uploads = upload.is_some_and(|pos| {
                 matches!(
                     &indexes[pos].kind,
-                    IndexKind::Local {
+                    IndexKind::Hosted {
                         upload_token: Some(_),
                         ..
                     }
@@ -446,18 +483,18 @@ pub(crate) fn describe_index(indexes: &[Index], position: usize) -> IndexDescrip
             let volatile_deletes = upload.is_some_and(|pos| {
                 matches!(
                     &indexes[pos].kind,
-                    IndexKind::Local {
+                    IndexKind::Hosted {
                         upload_token: Some(_),
                         volatile: true,
                     }
                 )
             });
             let upload_to = upload.map(|pos| indexes[pos].name.clone());
-            ("overlay", names, uploads, volatile_deletes, upload_to)
+            ("virtual", names, uploads, volatile_deletes, upload_to)
         }
     };
-    let (upstream, local) = match &index.kind {
-        IndexKind::Mirror { client, offline } => (
+    let (upstream, hosted) = match &index.kind {
+        IndexKind::Cached { client, offline } => (
             Some(UpstreamDescription {
                 url: client.redacted_base_url(),
                 auth: client.auth_status().as_str(),
@@ -465,25 +502,26 @@ pub(crate) fn describe_index(indexes: &[Index], position: usize) -> IndexDescrip
             }),
             None,
         ),
-        IndexKind::Local { upload_token, volatile } => (
+        IndexKind::Hosted { upload_token, volatile } => (
             None,
-            Some(LocalDescription {
+            Some(HostedDescription {
                 volatile: *volatile,
                 upload_token: SecretDescription::new(upload_token.is_some()),
             }),
         ),
-        IndexKind::Overlay { .. } => (None, None),
+        IndexKind::Virtual { .. } => (None, None),
     };
     IndexDescription {
         name: index.name.clone(),
         route: index.route.clone(),
+        ecosystem: index.ecosystem.as_str(),
         kind,
         layers,
         uploads,
         volatile_deletes,
         upload_to,
         upstream,
-        local,
+        hosted,
     }
 }
 
@@ -492,17 +530,18 @@ pub(crate) fn describe_index(indexes: &[Index], position: usize) -> IndexDescrip
 pub struct IndexDescription {
     pub name: String,
     pub route: String,
+    pub ecosystem: &'static str,
     pub kind: &'static str,
     pub layers: Vec<String>,
     pub uploads: bool,
     pub volatile_deletes: bool,
-    /// For an overlay: the layer uploads land in, whether or not a token currently enables them.
+    /// For a virtual index: the layer uploads land in, whether or not a token currently enables them.
     pub upload_to: Option<String>,
     pub upstream: Option<UpstreamDescription>,
-    pub local: Option<LocalDescription>,
+    pub hosted: Option<HostedDescription>,
 }
 
-/// Mirror status data that excludes credential material.
+/// A cached index's upstream status, with credential material excluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamDescription {
     pub url: String,
@@ -510,9 +549,9 @@ pub struct UpstreamDescription {
     pub offline: bool,
 }
 
-/// Local-store status data that excludes upload-token values.
+/// A hosted store's status, with upload-token values excluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalDescription {
+pub struct HostedDescription {
     pub volatile: bool,
     pub upload_token: SecretDescription,
 }
@@ -547,4 +586,8 @@ fn system_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+fn default_serving() -> Arc<dyn crate::serving::EcosystemServing> {
+    Arc::new(crate::serving::UnconfiguredServing)
 }

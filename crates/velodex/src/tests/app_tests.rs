@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 
-use velodex_core::pypi::{CoreMetadata, File, Provenance, Yanked};
-use velodex_http::upload::Uploaded;
+use velodex_ecosystem_pypi::upload::Uploaded;
+use velodex_ecosystem_pypi::{CoreMetadata, File, Provenance, Yanked};
 use velodex_storage::blob::{BlobStore, Digest};
 use velodex_storage::meta::{CachedIndex, MetaStore};
 
 use crate::app::{self, init_data_dir};
 use crate::cli::{
     CacheCommand, CacheListArgs, CachePurgeCommand, CachePurgeOrphanedBlobsArgs, CachePurgeProjectArgs,
-    CacheRuntimeArgs, PolicyCommand, PolicyDryRunArgs, RuntimeArgs,
+    CacheRuntimeArgs, EcosystemArg, IndexCommand, IndexListArgs, IndexShowArgs, PolicyCommand, PolicyDryRunArgs,
+    RuntimeArgs,
 };
 use crate::config::{Config, IndexKind};
 
@@ -98,13 +99,120 @@ fn test_init_logs_both_branches_when_subscriber_enabled() {
     });
 }
 
+fn index_list_command(ecosystem: Option<EcosystemArg>) -> IndexCommand {
+    IndexCommand::List(IndexListArgs {
+        runtime: RuntimeArgs::default(),
+        ecosystem,
+    })
+}
+
+#[test]
+fn test_index_list_prints_every_configured_index() {
+    let mut out = Vec::new();
+    app::index(&Config::default(), &index_list_command(None), &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.starts_with("name\troute\tecosystem\tkind\tuploads\n"));
+    assert!(text.contains("pypi\tpypi\tpypi\tcached\tfalse"));
+    assert!(text.contains("hosted\thosted\tpypi\thosted\tfalse"));
+    assert!(text.contains("root/pypi\troot/pypi\tpypi\tvirtual\tfalse"));
+}
+
+#[test]
+fn test_index_list_filters_by_ecosystem() {
+    let mut out = Vec::new();
+    app::index(
+        &Config::default(),
+        &index_list_command(Some(EcosystemArg::Pypi)),
+        &mut out,
+    )
+    .unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert_eq!(text.lines().filter(|line| line.contains("\tpypi\t")).count(), 3);
+}
+
+#[test]
+fn test_index_show_prints_virtual_detail() {
+    let command = IndexCommand::Show(IndexShowArgs {
+        runtime: RuntimeArgs::default(),
+        index: "root/pypi".to_owned(),
+    });
+    let mut out = Vec::new();
+    app::index(&Config::default(), &command, &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("kind\tvirtual"));
+    assert!(text.contains("layers\thosted, pypi"));
+    assert!(text.contains("upload_to\thosted"));
+}
+
+#[test]
+fn test_index_show_prints_cached_upstream() {
+    let command = IndexCommand::Show(IndexShowArgs {
+        runtime: RuntimeArgs::default(),
+        index: "pypi".to_owned(),
+    });
+    let mut out = Vec::new();
+    app::index(&Config::default(), &command, &mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("kind\tcached"));
+    assert!(text.contains("upstream\thttps://pypi.org/simple/"));
+    assert!(text.contains("offline\tfalse"));
+}
+
+#[test]
+fn test_index_show_rejects_unknown_index() {
+    let command = IndexCommand::Show(IndexShowArgs {
+        runtime: RuntimeArgs::default(),
+        index: "nope".to_owned(),
+    });
+    let err = app::index(&Config::default(), &command, &mut Vec::new()).unwrap_err();
+    assert!(err.to_string().contains("unknown index \"nope\""));
+}
+
+#[test]
+fn test_index_list_propagates_header_write_failure() {
+    let err = app::index(&Config::default(), &index_list_command(None), &mut FailImmediately).unwrap_err();
+    assert!(err.to_string().contains("write failed"));
+}
+
+#[test]
+fn test_index_list_propagates_row_write_failure() {
+    let err = app::index(
+        &Config::default(),
+        &index_list_command(None),
+        &mut FailOnText {
+            needle: "cached",
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("write failed"));
+}
+
+#[test]
+fn test_index_show_propagates_write_failure() {
+    let command = IndexCommand::Show(IndexShowArgs {
+        runtime: RuntimeArgs::default(),
+        index: "root/pypi".to_owned(),
+    });
+    let err = app::index(
+        &Config::default(),
+        &command,
+        &mut FailOnText {
+            needle: "layers",
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("write failed"));
+}
+
 #[test]
 fn test_config_snippet_renders_pip_conf() {
     let text = app::config_snippet(
         &Config::default(),
         "root/pypi",
         "https://packages.example/cache",
-        velodex_http::discovery::SnippetKind::PipConf,
+        velodex_ecosystem_pypi::discovery::SnippetKind::PipConf,
     )
     .unwrap();
     assert_eq!(
@@ -116,8 +224,8 @@ fn test_config_snippet_renders_pip_conf() {
 #[test]
 fn test_config_snippet_redacts_upload_token() {
     let mut config = Config::default();
-    let IndexKind::Local { upload_token, .. } = &mut config.indexes[1].kind else {
-        panic!("expected local index");
+    let IndexKind::Hosted { upload_token, .. } = &mut config.indexes[1].kind else {
+        panic!("expected hosted index");
     };
     *upload_token = Some("s3cret".to_owned());
 
@@ -125,7 +233,7 @@ fn test_config_snippet_redacts_upload_token() {
         &config,
         "root/pypi",
         "https://packages.example",
-        velodex_http::discovery::SnippetKind::Pypirc,
+        velodex_ecosystem_pypi::discovery::SnippetKind::Pypirc,
     )
     .unwrap();
 
@@ -138,8 +246,8 @@ fn test_config_snippet_redacts_upload_token() {
 #[test]
 fn test_config_snippet_renders_uv_toml_with_upload_url() {
     let mut config = Config::default();
-    let IndexKind::Local { upload_token, .. } = &mut config.indexes[1].kind else {
-        panic!("expected local index");
+    let IndexKind::Hosted { upload_token, .. } = &mut config.indexes[1].kind else {
+        panic!("expected hosted index");
     };
     *upload_token = Some("s3cret".to_owned());
 
@@ -147,7 +255,7 @@ fn test_config_snippet_renders_uv_toml_with_upload_url() {
         &config,
         "root/pypi",
         "https://packages.example",
-        velodex_http::discovery::SnippetKind::UvToml,
+        velodex_ecosystem_pypi::discovery::SnippetKind::UvToml,
     )
     .unwrap();
 
@@ -163,7 +271,7 @@ fn test_config_snippet_rejects_pypirc_for_read_only_index() {
         &Config::default(),
         "pypi",
         "https://packages.example",
-        velodex_http::discovery::SnippetKind::Pypirc,
+        velodex_ecosystem_pypi::discovery::SnippetKind::Pypirc,
     )
     .unwrap_err();
     assert!(err.to_string().contains("does not accept uploads"));
@@ -175,7 +283,7 @@ fn test_config_snippet_rejects_invalid_base_url() {
         &Config::default(),
         "root/pypi",
         "not a url",
-        velodex_http::discovery::SnippetKind::PipConf,
+        velodex_ecosystem_pypi::discovery::SnippetKind::PipConf,
     )
     .unwrap_err();
     assert!(err.to_string().contains("base URL"));
@@ -187,7 +295,7 @@ fn test_config_snippet_rejects_unknown_index_route() {
         &Config::default(),
         "missing",
         "https://packages.example",
-        velodex_http::discovery::SnippetKind::PipConf,
+        velodex_ecosystem_pypi::discovery::SnippetKind::PipConf,
     )
     .unwrap_err();
     assert!(err.to_string().contains("unknown index route"));
@@ -201,7 +309,7 @@ fn test_config_snippet_rejects_invalid_index_configuration() {
         &config,
         "root/pypi",
         "https://packages.example",
-        velodex_http::discovery::SnippetKind::PipConf,
+        velodex_ecosystem_pypi::discovery::SnippetKind::PipConf,
     )
     .unwrap_err();
     assert!(err.to_string().contains("duplicate index route"));
@@ -467,13 +575,13 @@ fn test_cache_size_counts_uploads_and_overrides() {
     let dir = tempfile::tempdir().unwrap();
     let meta = MetaStore::open(dir.path().join("velodex.redb")).unwrap();
     meta.put_upload(
-        "local",
+        "hosted",
         "pkg",
         "pkg-1.0.whl",
         &uploaded_record_json(&Digest::of(b"pkg")),
     )
     .unwrap();
-    meta.put_override("local", "pkg", "pkg-1.0.whl", "hidden").unwrap();
+    meta.put_override("hosted", "pkg", "pkg-1.0.whl", "hidden").unwrap();
     drop(meta);
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -525,11 +633,11 @@ fn test_cache_fsck_reports_metadata_problems() {
     meta.put_metadata("bad", "https://files.example/pkg.whl.metadata", "also-bad", "pypi")
         .unwrap();
     meta.put_project("", "", "").unwrap();
-    meta.put_upload("local", "pkg", "bad.whl", b"not json").unwrap();
+    meta.put_upload("hosted", "pkg", "bad.whl", b"not json").unwrap();
     meta.put_upload("", "", "", &uploaded_record_json(&Digest::of(b"missing")))
         .unwrap();
     meta.put_upload(
-        "local",
+        "hosted",
         "pkg",
         "pkg-1.0.whl",
         &uploaded_record_json(&Digest::of(b"missing")),
@@ -556,9 +664,9 @@ fn test_cache_fsck_reports_metadata_problems() {
         "metadata\tfile-url\tbad\tinvalid record\n",
         "metadata\tpep658\tbad\tinvalid record\n",
         "metadata\tproject\t/\tinvalid record\n",
-        "metadata\tupload\tlocal/pkg/bad.whl\tinvalid record\n",
+        "metadata\tupload\thosted/pkg/bad.whl\tinvalid record\n",
         "metadata\tupload\t//\tinvalid key\n",
-        "metadata\tupload\tlocal/pkg/pkg-1.0.whl\tmissing blob ",
+        "metadata\tupload\thosted/pkg/pkg-1.0.whl\tmissing blob ",
         "metadata\toverride\t//\tinvalid record\n",
         "problems\t8\n",
     ] {
@@ -573,7 +681,7 @@ fn test_cache_fsck_reports_missing_metadata_blob() {
     let digest = Digest::of(b"wheel");
     let metadata_digest = Digest::of(b"metadata");
     meta.put_upload(
-        "local",
+        "hosted",
         "pkg",
         "pkg-1.0.whl",
         &uploaded_record_json_with_metadata(&digest, &metadata_digest),
@@ -595,11 +703,11 @@ fn test_cache_fsck_reports_missing_metadata_blob() {
     .unwrap();
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains(&format!(
-        "metadata\tupload\tlocal/pkg/pkg-1.0.whl\tmissing blob {}",
+        "metadata\tupload\thosted/pkg/pkg-1.0.whl\tmissing blob {}",
         digest.as_str()
     )));
     assert!(text.contains(&format!(
-        "metadata\tupload\tlocal/pkg/pkg-1.0.whl\tmissing blob {}",
+        "metadata\tupload\thosted/pkg/pkg-1.0.whl\tmissing blob {}",
         metadata_digest.as_str()
     )));
 }
@@ -610,9 +718,9 @@ fn test_cache_fsck_accepts_valid_upload_and_override() {
     let meta = MetaStore::open(dir.path().join("velodex.redb")).unwrap();
     let blobs = BlobStore::new(dir.path().join("blobs"));
     let digest = blobs.write(b"pkg").unwrap();
-    meta.put_upload("local", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
+    meta.put_upload("hosted", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
         .unwrap();
-    meta.put_override("local", "pkg", "pkg-1.0.whl", "hidden").unwrap();
+    meta.put_override("hosted", "pkg", "pkg-1.0.whl", "hidden").unwrap();
     drop(meta);
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -693,7 +801,7 @@ fn test_cache_fsck_reports_corrupt_index_record() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("velodex.redb");
     MetaStore::open(&db_path).unwrap();
-    raw_insert_bytes(&db_path, "simple_index", "pypi/corrupt", b"not json");
+    raw_insert_bytes(&db_path, "index_document", "pypi/corrupt", b"not json");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         ..Config::default()
@@ -817,7 +925,7 @@ fn test_cache_purge_project_preserves_shared_and_uploaded_blobs() {
     )
     .unwrap();
     meta.put_upload(
-        "local",
+        "hosted",
         "pkg",
         "pkg-1.0.whl",
         &uploaded_record_json(&Digest::of(b"uploaded")),
@@ -838,7 +946,7 @@ fn test_cache_purge_project_reports_corrupt_target_record() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("velodex.redb");
     MetaStore::open(&db_path).unwrap();
-    raw_insert_bytes(&db_path, "simple_index", "pypi/flask", b"not json");
+    raw_insert_bytes(&db_path, "index_document", "pypi/flask", b"not json");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         ..Config::default()
@@ -856,7 +964,7 @@ fn test_cache_purge_project_reports_corrupt_shared_record() {
     let (_dir, config, _digest) = cache_fixture();
     raw_insert_bytes(
         &config.data_dir.join("velodex.redb"),
-        "simple_index",
+        "index_document",
         "pypi/other",
         b"not json",
     );
@@ -871,7 +979,7 @@ fn test_cache_purge_project_reports_corrupt_upload_record() {
     raw_insert_bytes(
         &config.data_dir.join("velodex.redb"),
         "uploads",
-        "local/pkg/bad.whl",
+        "hosted/pkg/bad.whl",
         b"not json",
     );
     let mut out = Vec::new();
@@ -1021,7 +1129,7 @@ fn test_cache_purge_orphaned_blobs_rejects_invalid_metadata_references() {
         let meta = MetaStore::open(&db_path).unwrap();
         if let Some(raw) = raw {
             drop(meta);
-            raw_insert_str(&db_path, "metadata", &wheel, raw);
+            raw_insert_str(&db_path, "metadata_sidecar", &wheel, raw);
         } else {
             meta.put_metadata(&wheel, "https://files.example/pkg.whl.metadata", &metadata, "pypi")
                 .unwrap();
@@ -1041,7 +1149,7 @@ fn test_cache_purge_orphaned_blobs_rejects_invalid_metadata_references() {
 fn test_cache_purge_orphaned_blobs_rejects_invalid_upload_references() {
     let dir = tempfile::tempdir().unwrap();
     let meta = MetaStore::open(dir.path().join("velodex.redb")).unwrap();
-    meta.put_upload("local", "pkg", "bad.whl", b"not json").unwrap();
+    meta.put_upload("hosted", "pkg", "bad.whl", b"not json").unwrap();
     drop(meta);
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -1058,7 +1166,7 @@ fn test_cache_purge_orphaned_blobs_keeps_referenced_upload_blobs() {
     let meta = MetaStore::open(dir.path().join("velodex.redb")).unwrap();
     let blobs = BlobStore::new(dir.path().join("blobs"));
     let digest = blobs.write(b"pkg").unwrap();
-    meta.put_upload("local", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
+    meta.put_upload("hosted", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
         .unwrap();
     drop(meta);
     let config = Config {
@@ -1160,7 +1268,7 @@ fn test_policy_dry_run_reports_blocked_upload() {
     let (_dir, mut config, digest) = cache_fixture();
     MetaStore::open(config.data_dir.join("velodex.redb"))
         .unwrap()
-        .put_upload("local", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
+        .put_upload("hosted", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
         .unwrap();
     config.indexes[1].policy.max_file_size_bytes = Some(2);
     let mut out = Vec::new();
@@ -1169,7 +1277,7 @@ fn test_policy_dry_run_reports_blocked_upload() {
         &config,
         &PolicyCommand::DryRun(PolicyDryRunArgs {
             runtime: runtime_args(),
-            index: Some("local".to_owned()),
+            index: Some("hosted".to_owned()),
             project: Some("pkg".to_owned()),
         }),
         &mut out,
@@ -1178,7 +1286,7 @@ fn test_policy_dry_run_reports_blocked_upload() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.contains("upload\tlocal\tpkg\tpkg-1.0.whl\t\tmax-file-size\tsize\tfile size 3 exceeds limit 2\n"),
+        text.contains("upload\thosted\tpkg\tpkg-1.0.whl\t\tmax-file-size\tsize\tfile size 3 exceeds limit 2\n"),
         "{text}"
     );
 }
@@ -1188,7 +1296,7 @@ fn test_policy_dry_run_skips_allowed_upload() {
     let (_dir, config, digest) = cache_fixture();
     MetaStore::open(config.data_dir.join("velodex.redb"))
         .unwrap()
-        .put_upload("local", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
+        .put_upload("hosted", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
         .unwrap();
     let mut out = Vec::new();
 
@@ -1196,7 +1304,7 @@ fn test_policy_dry_run_skips_allowed_upload() {
         &config,
         &PolicyCommand::DryRun(PolicyDryRunArgs {
             runtime: runtime_args(),
-            index: Some("local".to_owned()),
+            index: Some("hosted".to_owned()),
             project: Some("pkg".to_owned()),
         }),
         &mut out,
@@ -1244,7 +1352,7 @@ fn test_policy_dry_run_skips_unmatched_upload_records() {
         "foreign/pkg/pkg-1.0.whl",
         &uploaded_record_json(&digest),
     );
-    raw_insert_bytes(&db_path, "uploads", "local/pkg/pkg-1.0.whl", b"not json");
+    raw_insert_bytes(&db_path, "uploads", "hosted/pkg/pkg-1.0.whl", b"not json");
     let mut out = Vec::new();
 
     app::policy(
@@ -1269,7 +1377,7 @@ fn test_policy_dry_run_reports_upload_write_errors() {
     let (_dir, mut config, digest) = cache_fixture();
     MetaStore::open(config.data_dir.join("velodex.redb"))
         .unwrap()
-        .put_upload("local", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
+        .put_upload("hosted", "pkg", "pkg-1.0.whl", &uploaded_record_json(&digest))
         .unwrap();
     config.indexes[1].policy.max_file_size_bytes = Some(2);
     let mut out = FailOnText {
@@ -1281,7 +1389,7 @@ fn test_policy_dry_run_reports_upload_write_errors() {
         &config,
         &PolicyCommand::DryRun(PolicyDryRunArgs {
             runtime: runtime_args(),
-            index: Some("local".to_owned()),
+            index: Some("hosted".to_owned()),
             project: Some("pkg".to_owned()),
         }),
         &mut out,

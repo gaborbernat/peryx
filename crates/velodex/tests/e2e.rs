@@ -4,20 +4,18 @@
 //! Gated behind the `e2e` feature so they never run in the default `cargo test` or the coverage gate
 //! (they need the clients and are slower than unit tests). Two tiers:
 //!
-//! - **`e2e` (hermetic)**: velodex proxies a local fixture index that serves a couple of tiny, real,
-//!   installable wheels. No external network, so it is deterministic, flake-free, and fast — the
-//!   fixed cost is velodex spawn (~0.1s) plus in-process fetches, not a pypi.org round trip. Run with
-//!   `cargo test -p velodex --features e2e`.
-//! - **`e2e-live`**: the same client flows against the real pypi.org, to catch upstream drift. Run
-//!   with `cargo test -p velodex --features e2e-live` in a network-enabled job.
+//! - **`e2e` (hermetic)**: velodex proxies a local fixture index that serves a couple of tiny, real, installable
+//!   wheels. No external network, so it is deterministic, flake-free, and fast — the fixed cost is velodex spawn
+//!   (~0.1s) plus in-process fetches, not a pypi.org round trip. Run with `cargo test -p velodex --features e2e`.
+//! - **`e2e-live`**: the same client flows against the real pypi.org, to catch upstream drift. Run with `cargo test -p
+//!   velodex --features e2e-live` in a network-enabled job.
 //!
 //! Design goals, per the project's testing philosophy:
-//! - **Isolated**: every test owns its own velodex server (own temp data dir, own ephemeral port) and,
-//!   for hermetic tests, its own fixture upstream. No shared cache or counter state; any test runs
-//!   alone.
+//! - **Isolated**: every test owns its own velodex server (own temp data dir, own ephemeral port) and, for hermetic
+//!   tests, its own fixture upstream. No shared cache or counter state; any test runs alone.
 //! - **Parallel**: because state is per-test, the default multi-threaded runner just works.
-//! - **Proof, not assumption**: the PEP 658 fast path is asserted from velodex's own `/metrics`
-//!   counter — observed at the server, not inferred from the client exiting 0.
+//! - **Proof, not assumption**: the PEP 658 fast path is asserted from velodex's own `/metrics` counter — observed at
+//!   the server, not inferred from the client exiting 0.
 #![cfg(feature = "e2e")]
 
 use std::collections::HashMap;
@@ -42,7 +40,7 @@ use zip::write::SimpleFileOptions;
 const SIMPLE_JSON_CT: &str = "application/vnd.pypi.simple.v1+json";
 
 /// The upload token every spawned velodex is configured with, so twine and `uv publish` can push to
-/// the local layer of the `root/pypi` overlay.
+/// the hosted layer of the `root/pypi` virtual index.
 const UPLOAD_TOKEN: &str = "e2e-upload-secret";
 
 /// A minimal but genuinely pip/uv-installable distribution built in memory. `metadata` is both the
@@ -265,11 +263,11 @@ impl Velodex {
     fn start_against_with_overlay_policy(upstream_url: &str, policy_toml: &str) -> Self {
         let data = TempDir::new().expect("temp data dir");
         let config = data.path().join("velodex.toml");
-        // A mirror of the given upstream with a local store overlaid in front, served at root/pypi.
+        // A cache of the given upstream with a hosted store, combined by a virtual index at root/pypi.
         let config_toml = format!(
-            "[[index]]\nname = \"upstream\"\nroute = \"upstream\"\nmirror = \"{upstream_url}\"\n\
-             [[index]]\nname = \"local\"\nlocal = true\nupload_token = \"{UPLOAD_TOKEN}\"\n\
-             [[index]]\nname = \"root/pypi\"\nroute = \"root/pypi\"\nlayers = [\"local\", \"upstream\"]\nupload = \"local\"\n\
+            "[[index]]\nname = \"upstream\"\nroute = \"upstream\"\ncached = \"{upstream_url}\"\n\
+             [[index]]\nname = \"hosted\"\nhosted = true\nupload_token = \"{UPLOAD_TOKEN}\"\n\
+             [[index]]\nname = \"root/pypi\"\nroute = \"root/pypi\"\nlayers = [\"hosted\", \"upstream\"]\nupload = \"hosted\"\n\
              [index.policy]\n{policy_toml}"
         );
         std::fs::write(&config, config_toml).expect("write config");
@@ -304,21 +302,22 @@ impl Velodex {
         std::fs::read_to_string(self.data.path().join("velodex.log")).unwrap_or_default()
     }
 
-    /// The client-facing simple index URL for the built-in `root/pypi` mirror.
+    /// The client-facing simple index URL for the built-in `root/pypi` virtual index.
     fn index_url(&self) -> String {
         format!("http://127.0.0.1:{}/root/pypi/simple/", self.port)
     }
 
-    /// The upload endpoint (repository URL): uploads to the root/pypi overlay land in its local layer.
+    /// The upload URL: uploads to the root/pypi virtual index land in its hosted layer.
     fn upload_url(&self) -> String {
         format!("http://127.0.0.1:{}/root/pypi/", self.port)
     }
 
-    /// Read velodex's `velodex_metadata_requests_total` counter — the PEP 658 siblings it has served.
+    /// Sum velodex's per-index `velodex_index_metadata_total` counters — the PEP 658 siblings it has
+    /// served across every index.
     fn metadata_requests(&self) -> u64 {
         let (status, body) = http_get(self.port, "/metrics").expect("metrics");
         assert_eq!(status, 200);
-        parse_counter(&body, "velodex_metadata_requests_total")
+        sum_labeled_counter(&body, "velodex_index_metadata_total")
     }
 }
 
@@ -448,11 +447,12 @@ fn html_get(port: u16, path: &str) -> String {
 }
 
 /// Pull the value off a Prometheus `# TYPE ... counter` line like `name 3`.
-fn parse_counter(metrics: &str, name: &str) -> u64 {
+/// Sum every labelled sample of a per-index counter family, e.g. `name{index="a",…} 3`.
+fn sum_labeled_counter(metrics: &str, name: &str) -> u64 {
     metrics
         .lines()
-        .find_map(|line| line.strip_prefix(name)?.trim().parse().ok())
-        .unwrap_or_else(|| panic!("metric {name} not found"))
+        .filter_map(|line| line.strip_prefix(name)?.rsplit_once('}')?.1.trim().parse::<u64>().ok())
+        .sum()
 }
 
 /// Create an isolated, empty virtualenv with `uv venv` (~15ms, no seed packages). Both clients
@@ -819,16 +819,16 @@ fn e2e_web_ui_dashboard_and_project_page() {
 #[test]
 fn e2e_upstream_yank_hide_restore_round_trip() {
     let (_upstream, velodex) = hermetic();
-    // Warm the overlay so the mirror file is known.
+    // Warm the virtual index so the cached file is known.
     let (_, detail) = http_get(velodex.port, "/root/pypi/simple/velodexa/").expect("detail");
     assert!(detail.contains("velodexa-1.0-py3-none-any.whl"));
 
-    // Yank the upstream release through the overlay, then clear it.
+    // Yank the upstream release through the virtual index, then clear it.
     assert_eq!(http_verb(velodex.port, "PUT", "/root/pypi/velodexa/1.0/yank"), 200);
     let (_, yanked) = http_get(velodex.port, "/root/pypi/simple/velodexa/").expect("detail");
     assert!(
         yanked.contains("\"yanked\":true"),
-        "upstream file not yanked via overlay"
+        "upstream file not yanked via virtual index"
     );
     assert_eq!(http_verb(velodex.port, "DELETE", "/root/pypi/velodexa/1.0/yank"), 200);
 

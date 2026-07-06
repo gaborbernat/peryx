@@ -14,7 +14,7 @@ use leptos::prelude::*;
 use leptos_router::NavigateOptions;
 use leptos_router::hooks::{use_navigate, use_query_map};
 use regex::Regex;
-use velodex_core::pypi::CoreMetadataDoc;
+use velodex_ecosystem_pypi::CoreMetadataDoc;
 
 use crate::data::{
     load_admin_snapshot, load_member_chunk, load_members, load_project, load_projects, load_search, load_snapshot,
@@ -102,17 +102,20 @@ fn AdminStatusBody(data: UiSnapshot, usage: UiStats) -> impl IntoView {
             <a href="/+stats"><code>"/+stats"</code></a>
             <a href="/metrics"><code>"/metrics"</code></a>
         </div>
-        <div class="stat-row">
-            <div class="stat"><strong>{data.version.clone()}</strong><span>"version"</span></div>
-            <div class="stat"><strong>{data.serial}</strong><span>"change serial"</span></div>
-            <div class="stat"><strong>{data.requests}</strong><span>"requests served"</span></div>
-            <div class="stat"><strong>{data.metadata_requests}</strong><span>"metadata hits"</span></div>
-            <div class="stat"><strong>{indexes.len()}</strong><span>"indexes"</span></div>
-            <div class="stat"><strong>{kind_count(&indexes, "overlay")}</strong><span>"overlays"</span></div>
-            <div class="stat"><strong>{project_count}</strong><span>"observed projects"</span></div>
-            <div class="stat"><strong>{upload_count}</strong><span>"uploaded files"</span></div>
+        <div class="metrics-group">
+            <div class="metrics-label">"Global"</div>
+            <div class="stat-row">
+                <div class="stat"><strong>{data.version.clone()}</strong><span>"version"</span></div>
+                <div class="stat"><strong>{data.serial}</strong><span>"change serial"</span></div>
+                <div class="stat"><strong>{data.requests}</strong><span>"requests served"</span></div>
+                <div class="stat"><strong>{indexes.len()}</strong><span>"indexes"</span></div>
+                <div class="stat"><strong>{kind_count(&indexes, "virtual")}</strong><span>"virtual"</span></div>
+                <div class="stat"><strong>{project_count}</strong><span>"observed projects"</span></div>
+                <div class="stat"><strong>{upload_count}</strong><span>"uploaded files"</span></div>
+            </div>
         </div>
-        <h2>"Repositories"</h2>
+        {ecosystem_stats(&data)}
+        <h2>"Indexes"</h2>
         <AdminIndexTable indexes=indexes.clone() all=indexes.clone() />
         {empty.then(|| view! { <p class="dim">"No indexes configured."</p> })}
         <h2>"Recent uploads"</h2>
@@ -127,6 +130,37 @@ fn kind_count(indexes: &[UiIndex], kind: &str) -> usize {
     indexes.iter().filter(|index| index.kind == kind).count()
 }
 
+/// The per-ecosystem metric groups: one labelled block per ecosystem, so the reader can tell a
+/// PyPI-scoped counter (its listings, artifacts, and PEP 658 hits) from the global request count.
+fn ecosystem_stats(data: &UiSnapshot) -> impl IntoView + use<> {
+    let families = data.families.clone();
+    data.ecosystems
+        .clone()
+        .into_iter()
+        .map(move |summary| {
+            let badge = format!("badge ecosystem-{}", summary.ecosystem);
+            let named = families
+                .iter()
+                .map(|family| {
+                    let total = summary.families.get(&family.key).copied().unwrap_or(0);
+                    view! { <div class="stat"><strong>{total}</strong><span>{family.label.clone()}</span></div> }
+                })
+                .collect_view();
+            view! {
+                <div class="metrics-group">
+                    <div class="metrics-label"><span class=badge>{summary.ecosystem.clone()}</span>" activity"</div>
+                    <div class="stat-row">
+                        <div class="stat"><strong>{summary.pages}</strong><span>"listings served"</span></div>
+                        <div class="stat"><strong>{summary.downloads}</strong><span>"artifacts served"</span></div>
+                        <div class="stat"><strong>{summary.uploads}</strong><span>"uploads"</span></div>
+                        {named}
+                    </div>
+                </div>
+            }
+        })
+        .collect_view()
+}
+
 #[component]
 fn AdminIndexTable(indexes: Vec<UiIndex>, all: Vec<UiIndex>) -> impl IntoView {
     view! {
@@ -136,7 +170,7 @@ fn AdminIndexTable(indexes: Vec<UiIndex>, all: Vec<UiIndex>) -> impl IntoView {
                     <tr>
                         <th>"Name"</th>
                         <th>"Route"</th>
-                        <th>"Kind"</th>
+                        <th>"Type"</th>
                         <th>"Simple API"</th>
                         <th>"Projects"</th>
                         <th>"Files"</th>
@@ -151,13 +185,15 @@ fn AdminIndexTable(indexes: Vec<UiIndex>, all: Vec<UiIndex>) -> impl IntoView {
                         .map(|index| {
                             let browse = browse_index_url(&index.route);
                             let simple = simple_index_url(&index.route);
-                            let shown = simple.clone();
                             view! {
                                 <tr>
                                     <td><a href=browse>{index.name.clone()}</a></td>
                                     <td><code>{index.route.clone()}</code></td>
-                                    <td><span class=format!("badge kind-{}", index.kind)>{index.kind.clone()}</span></td>
-                                    <td><a href=simple><code>{shown}</code></a></td>
+                                    <td class="ops-type">
+                                        <span class=format!("badge ecosystem-{}", index.ecosystem)>{index.ecosystem.clone()}</span>
+                                        <span class=format!("badge kind-{}", index.kind)>{index.kind.clone()}</span>
+                                    </td>
+                                    <td><a class="ops-simple" href=simple.clone() title=simple>"simple"</a></td>
                                     <td>{index.project_count}</td>
                                     <td>{index.upload_count}</td>
                                     <td><TopologyCell index=index.clone() all=all.clone() /></td>
@@ -209,7 +245,7 @@ fn TopologyCell(index: UiIndex, all: Vec<UiIndex>) -> impl IntoView {
 
 #[component]
 fn UploadCell(index: UiIndex) -> impl IntoView {
-    if index.kind == "mirror" {
+    if index.kind == "cached" {
         return view! { <span class="dim">"none"</span> }.into_any();
     }
     let label = if index.uploads { "enabled" } else { "disabled" };
@@ -239,9 +275,9 @@ fn StatusCell(index: UiIndex) -> impl IntoView {
         }
         .into_any();
     }
-    if let Some(local) = index.local {
-        let mode = if local.volatile { "volatile" } else { "non-volatile" };
-        let token = if local.token_configured {
+    if let Some(hosted) = index.hosted {
+        let mode = if hosted.volatile { "volatile" } else { "non-volatile" };
+        let token = if hosted.token_configured {
             "token configured"
         } else {
             "no upload token"
@@ -250,7 +286,7 @@ fn StatusCell(index: UiIndex) -> impl IntoView {
             <p class="ops-detail">
                 <span>{mode}</span>
                 <span>{token}</span>
-                {local.token_redacted.map(|value| view! { <code>{value}</code> })}
+                {hosted.token_redacted.map(|value| view! { <code>{value}</code> })}
             </p>
         }
         .into_any();
@@ -415,19 +451,22 @@ fn DashboardBody(data: UiSnapshot, usage: UiStats) -> impl IntoView {
         }
     });
     view! {
-        <div class="stat-row">
-            <div class="stat"><strong>{data.version.clone()}</strong><span>"version"</span></div>
-            <div class="stat"><strong>{data.serial}</strong><span>"change serial"</span></div>
-            <div class="stat"><strong>{data.requests}</strong><span>"requests served"</span></div>
-            <div class="stat"><strong>{data.metadata_requests}</strong><span>"PEP 658 metadata hits"</span></div>
+        <div class="metrics-group">
+            <div class="metrics-label">"Global"</div>
+            <div class="stat-row">
+                <div class="stat"><strong>{data.version.clone()}</strong><span>"version"</span></div>
+                <div class="stat"><strong>{data.serial}</strong><span>"change serial"</span></div>
+                <div class="stat"><strong>{data.requests}</strong><span>"requests served"</span></div>
+            </div>
         </div>
+        {ecosystem_stats(&data)}
         <h2>"Indexes"</h2>
         <div class="index-grid">{overlay_cards}</div>
         {standalone_cards}
     }
 }
 
-/// An overlay drawn as what it is: an ordered stack of layers under one route, resolved top to
+/// A virtual index drawn as what it is: an ordered stack of layers under one route, resolved top to
 /// bottom with the first file match winning.
 #[component]
 fn OverlayCard(index: UiIndex, all: Vec<UiIndex>, counters: Option<UiCounters>) -> impl IntoView {
@@ -469,10 +508,10 @@ fn OverlayCard(index: UiIndex, all: Vec<UiIndex>, counters: Option<UiCounters>) 
         }
     });
     view! {
-        <div class="card overlay-card">
+        <div class="card virtual-card">
             <div class="card-head">
                 <a href=browse class="card-title">{index.name.clone()}</a>
-                <span class="badge kind-overlay">"overlay"</span>
+                <span class="badge kind-virtual">"virtual"</span>
                 {index.uploads.then(|| view! { <span class="badge uploads">"uploads"</span> })}
             </div>
             <p class="dim"><code>{simple}</code></p>
@@ -528,7 +567,7 @@ pub fn Search() -> impl IntoView {
         query_map
             .read()
             .get("type")
-            .filter(|value| matches!(value.as_str(), "hosted" | "upstream" | "upstream-overrides"))
+            .filter(|value| matches!(value.as_str(), "uploaded" | "cached" | "override"))
             .unwrap_or_else(|| "all".to_owned())
     });
     let page = Memo::new(move |_| {
@@ -577,9 +616,9 @@ fn SearchForm(query: String, source_type: String, page_size: usize) -> impl Into
             <input class="search" type="search" name="q" value=query placeholder="Search packages" />
             <select name="type" aria-label="Source type">
                 <option value="all" selected=source_type == "all">"All"</option>
-                <option value="hosted" selected=source_type == "hosted">"Hosted"</option>
-                <option value="upstream" selected=source_type == "upstream">"Upstream"</option>
-                <option value="upstream-overrides" selected=source_type == "upstream-overrides">"Upstream+"</option>
+                <option value="uploaded" selected=source_type == "uploaded">"Uploaded"</option>
+                <option value="cached" selected=source_type == "cached">"Cached"</option>
+                <option value="override" selected=source_type == "override">"Override"</option>
             </select>
             <select
                 name="page_size"
@@ -614,7 +653,7 @@ fn store_search_page_size(value: &str) {
 fn SearchResults(query: String, source_type: String, page_data: UiSearchPage) -> impl IntoView {
     if page_data.total == 0 {
         let message = if query.trim().is_empty() {
-            "No indexed packages yet. Mirror projects appear after their pages are cached."
+            "No indexed packages yet. Cached projects appear after their pages are fetched."
         } else {
             "No packages matched this search."
         };
@@ -635,7 +674,7 @@ fn SearchResults(query: String, source_type: String, page_data: UiSearchPage) ->
                         <th>"Package"</th>
                         <th>"Normalized"</th>
                         <th>"Source"</th>
-                        <th>"Repository"</th>
+                        <th>"Index"</th>
                         <th>"Summary"</th>
                     </tr>
                 </thead>
@@ -646,14 +685,14 @@ fn SearchResults(query: String, source_type: String, page_data: UiSearchPage) ->
                         .map(|result| {
                             let href = browse_project_url(&result.route, &result.normalized_name);
                             let source_class = format!("badge source-{}", result.source_type);
-                            let source_title = (result.source_type == "upstream-overrides")
-                                .then_some("Hosted files or local overrides affect this upstream package");
+                            let source_title = (result.source_type == "override")
+                                .then_some("Hosted files or hosted overrides affect this upstream package");
                             view! {
                                 <tr>
                                     <td><a href=href>{result.display_name}</a></td>
                                     <td><code>{result.normalized_name}</code></td>
                                     <td><span class=source_class title=source_title>{source_label(&result.source_type)}</span></td>
-                                    <td><code>{result.repository}</code></td>
+                                    <td><code>{result.index}</code></td>
                                     <td>{result.summary.unwrap_or_default()}</td>
                                 </tr>
                             }
@@ -1554,7 +1593,7 @@ fn ClassifierGroups(classifiers: Vec<String>) -> impl IntoView {
     })
 }
 
-/// Yank, un-yank, and delete for the index's local layer, driven from the browser with the upload
+/// Yank, un-yank, and delete for the index's hosted layer, driven from the browser with the upload
 /// token. The buttons only act once hydrated; the server renders them inert.
 #[component]
 fn AdminPanel(
@@ -1591,7 +1630,7 @@ fn AdminPanel(
     view! {
         <details class="admin">
             <summary>"Manage uploads"</summary>
-            <p class="dim">"Actions apply to files uploaded to this index's local layer and need its upload token."</p>
+            <p class="dim">"Actions apply to files uploaded to this index's hosted layer and need its upload token."</p>
             <input
                 class="token"
                 type="password"

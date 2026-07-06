@@ -79,9 +79,17 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .ops-title a code { color: inherit; }
 .table-scroll { overflow-x: auto; }
 .ops-table { margin-top: 0.8rem; }
-.table-scroll .ops-table { min-width: 72rem; }
+/* The admin status page is data-dense (wide topology and usage tables), so it breaks out of the
+   70rem reading column to a wider, viewport-centered width — the tables fit without scrolling on a
+   desktop, and still scroll gracefully within `.table-scroll` on narrow screens. */
+.ops-page { width: min(94rem, calc(100vw - 3rem)); margin-left: 50%; transform: translateX(-50%); }
+.table-scroll .ops-table { min-width: 48rem; }
+.ops-table th, .ops-table td { padding: 0.4rem 0.55rem; font-size: 0.85rem; }
 .ops-table th { white-space: nowrap; }
 .ops-table td { vertical-align: top; }
+.ops-table .badge { font-size: 0.78rem; padding: 0.05rem 0.4rem; }
+.ops-type { display: flex; gap: 0.3rem; flex-wrap: wrap; align-items: center; }
+.ops-simple { white-space: nowrap; }
 .ops-stack { list-style: none; margin: 0; padding: 0; }
 .ops-stack li { display: flex; align-items: center; gap: 0.4rem; min-height: 1.6rem; }
 .ops-stack li + li { margin-top: 0.2rem; }
@@ -89,6 +97,12 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .badge.upload-enabled { color: #34c496; border-color: #34c496; }
 .badge.upload-disabled { color: var(--text-soft); border-color: var(--border); }
 .badge.status-configured { color: #34c496; border-color: #34c496; }
+.metrics-group { margin: 0.75rem 0; }
+.metrics-label {
+  display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.5rem;
+  font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-soft);
+}
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1rem; }
 .stat {
   border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.2rem; background: var(--bg-soft);
@@ -108,17 +122,18 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
   border-radius: 999px; padding: 0.1rem 0.6rem; font-size: 0.75rem; font-weight: 600;
   border: 1px solid var(--border); color: var(--text-soft);
 }
-.badge.kind-mirror { color: #2f81f7; border-color: #2f81f7; }
-.badge.kind-local { color: #34c496; border-color: #34c496; }
-.badge.kind-overlay { color: var(--accent); border-color: var(--accent); }
-.badge.source-hosted { color: #34c496; border-color: #34c496; }
-.badge.source-upstream { color: #2f81f7; border-color: #2f81f7; }
-.badge.source-upstream-overrides { color: #8b5cf6; border-color: #8b5cf6; }
+.badge.kind-cached { color: #2f81f7; border-color: #2f81f7; }
+.badge.ecosystem-pypi { color: #3775a9; border-color: #3775a9; }
+.badge.kind-hosted { color: #34c496; border-color: #34c496; }
+.badge.kind-virtual { color: var(--accent); border-color: var(--accent); }
+.badge.source-uploaded { color: #34c496; border-color: #34c496; }
+.badge.source-cached { color: #2f81f7; border-color: #2f81f7; }
+.badge.source-override { color: #8b5cf6; border-color: #8b5cf6; }
 .badge.uploads { background: linear-gradient(120deg, var(--brand-a), var(--brand-b)); color: #fff; border: none; }
 .badge.yanked-badge { color: #e5484d; border-color: #e5484d; }
 .badge.meta-badge { color: #34c496; border-color: #34c496; }
 .layers code { margin-right: 0.3rem; }
-.overlay-card { grid-column: span 2; }
+.virtual-card { grid-column: span 2; }
 .layer-stack {
   list-style: none;
   margin: 0.6rem 0 0.2rem;

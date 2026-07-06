@@ -24,6 +24,7 @@ type BoxedLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
 fn resolve_config(args: &velodex::cli::RuntimeArgs) -> anyhow::Result<Config> {
     let mut cfg = resolve_config_file(args.config.as_deref())?;
+    cfg = cfg.apply(config::from_env()?)?;
     cfg = cfg.apply(args.overlay())?;
     Ok(cfg)
 }
@@ -99,7 +100,7 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
     runtime.block_on(async {
         let state = velodex::server::build_state(config)?;
         for index in &state.indexes {
-            if let velodex_http::IndexKind::Mirror { client, offline: false } = &index.kind {
+            if let velodex_http::IndexKind::Cached { client, offline: false } = &index.kind {
                 let client = client.clone();
                 tokio::spawn(async move { client.warm().await });
             }
@@ -112,16 +113,17 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                match velodex_http::cache::refresh_stale_pages(&refresher).await {
-                    Ok(summary) if summary.checked > 0 => {
+                let serving = refresher.serving.clone();
+                match serving.refresh_stale(refresher.clone()).await {
+                    Ok(sweep) if sweep.checked > 0 => {
                         tracing::info!(
-                            checked = summary.checked,
-                            changed = summary.changed,
+                            checked = sweep.checked,
+                            changed = sweep.changed,
                             "background refresh sweep"
                         );
                     }
                     Ok(_) => {}
-                    Err(err) => tracing::error!(error = ?err, "background refresh sweep failed"),
+                    Err(err) => tracing::error!(error = %err, "background refresh sweep failed"),
                 }
             }
         });
@@ -169,6 +171,10 @@ fn main() -> anyhow::Result<()> {
             app::init(&config)
         }
         velodex::cli::Command::ConfigSnippet(args) => print_config_snippet(&args),
+        velodex::cli::Command::Index(command) => {
+            let config = resolve_config(command.runtime_args())?;
+            app::index(&config, &command, &mut std::io::stdout())
+        }
         velodex::cli::Command::Cache(command) => {
             let config = resolve_config(command.runtime_args())?;
             app::cache(&config, &command, &mut std::io::stdout())
@@ -185,16 +191,16 @@ fn main() -> anyhow::Result<()> {
         }
         velodex::cli::Command::ImportDir(args) => {
             let config = resolve_config(&args.runtime)?;
-            operator::import_dir(&config, &args.repo, &args.dir, &mut std::io::stdout())
+            operator::import_dir(&config, &args.index, &args.dir, &mut std::io::stdout())
         }
         velodex::cli::Command::Policy(command) => {
             let config = resolve_config(command.runtime_args())?;
             app::policy(&config, &command, &mut std::io::stdout())
         }
-        velodex::cli::Command::Mirror(command) => {
+        velodex::cli::Command::Prefetch(command) => {
             let config = resolve_config(command.runtime_args())?;
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-            runtime.block_on(velodex::mirror::run(&config, &command, &mut std::io::stdout()))
+            runtime.block_on(velodex::prefetch::run(&config, &command, &mut std::io::stdout()))
         }
         velodex::cli::Command::Openapi => {
             print!("{}", velodex_http::api::openapi_json());

@@ -170,7 +170,7 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
 /// Prints the startup banner once, on a TTY only, so piped and CI output stays clean. Two builds,
 /// following the brand guidelines: UTF-8 locales get the Unicode block, older terminals the ASCII
 /// form; colour is truecolor or 256-colour amber, and none under `NO_COLOR` or a basic `TERM`. The
-/// structured `tracing` line still carries the machine-readable listen event regardless.
+/// structured `tracing` line still carries the machine-readable listen event.
 fn print_banner(addr: &std::net::SocketAddr, indexes: usize, scheme: &str) {
     use std::io::IsTerminal as _;
     if !std::io::stdout().is_terminal() {
@@ -210,14 +210,13 @@ fn print_banner(addr: &std::net::SocketAddr, indexes: usize, scheme: &str) {
     } else {
         (ascii, " - ", "->")
     };
-    let plural = if indexes == 1 { "" } else { "es" };
-
     println!();
     for line in art {
         println!("{colour}{line}{reset}");
     }
     println!("  the artifact vault{dot}v{}", env!("CARGO_PKG_VERSION"));
     println!();
+    let plural = if indexes == 1 { "" } else { "es" };
     println!("  {colour}{arrow}{reset} {indexes} index{plural}, listening on {scheme}://{addr}");
     println!();
 }

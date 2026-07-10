@@ -5,40 +5,47 @@ weight = 2
 +++
 
 Claims about speed are worthless without the commands behind them, so here are both. The headline: a **cold** install
-through peryx costs about what going straight to pypi.org costs, and a **warm** one is bounded by the installer's own
-CPU, not the network. This page measures that against every PyPI cache you could run instead. For why peryx behaves this
-way, see [performance and methodology](@/core/performance.md).
+through peryx costs about what going straight to pypi.org costs, and a **warm** one comes in ahead of pypi.org while
+being bounded by the installer's own CPU rather than the network. This page measures that against every PyPI cache you
+could run instead. For why peryx behaves this way, see [performance and methodology](@/core/performance.md).
 
 ## The measurement
 
-The workload installs pandas and polars (six wheels, about 64 MB, including one 47 MB wheel) into a fresh virtualenv
-with a fresh installer cache, so every byte must come through the index:
+The workload installs the 51 most-downloaded packages on PyPI, torch among them for one large wheel, into a fresh
+virtualenv with a fresh installer cache, so every byte must come through the index:
 
 ```shell
-uv venv fresh-venv
+uv venv --python 3.14 fresh-venv
 env VIRTUAL_ENV=$PWD/fresh-venv UV_CACHE_DIR=$PWD/fresh-cache \
-    UV_INDEX_URL=http://127.0.0.1:4433/root/pypi/simple/ \
-    uv pip install pandas polars
+    uv pip install --index-url http://127.0.0.1:4433/root/pypi/simple/ \
+        --only-binary :all: boto3 urllib3 botocore requests numpy pandas ... torch
 ```
 
-Setup: peryx release build and the client on the same Apple Silicon laptop, roughly 700 Mbit/s to PyPI's CDN. Each cell
-is the median over several independent rounds, each restarting the server on empty state; "cold" is that empty first
-pass, "warm" reruns against the now-full cache. See [performance and methodology](@/core/performance.md) for how the
-rounds, spread, and network-bound rows are handled.
+`--only-binary :all:` keeps the run honest. Without it a package that ships no wheel for the interpreter is compiled
+from source, and that build lands inside the measured install, dwarfing anything the index server contributes.
 
-| Scenario                  | Wall time   | What dominates                                     |
-| ------------------------- | ----------- | -------------------------------------------------- |
-| uv direct to pypi.org     | 0.94–1.03 s | the network, end to end                            |
-| through peryx, cold cache | 1.13–1.38 s | the network; peryx adds ~0.1–0.3 s                 |
-| through peryx, warm cache | 0.66–0.71 s | uv itself (0.76 s of CPU unzipping and installing) |
+Setup: peryx release build and the client on the same
+[Apple Silicon machine](@/core/performance.md#the-machine-these-numbers-come-from), roughly 700 Mbit/s to PyPI's CDN.
+Each cell is the median over three independent rounds, each restarting the server on empty state; "cold" is that empty
+first pass, "warm" reruns against the now-full cache. Every server is torn down with its whole process group between
+rounds, so a forked worker cannot outlive its round and steal CPU from whoever is measured next. See
+[performance and methodology](@/core/performance.md) for how the rounds, spread, and network-bound rows are handled.
 
-Per-request server timings from the warm runs: simple pages and cached wheels serve in 0 ms; the largest page in the set
-(numpy's, 2.6 MB of JSON) transforms in under 30 ms on its first warm hit and is a memory copy afterwards.
+| Scenario                  | Wall time | What dominates                             |
+| ------------------------- | --------- | ------------------------------------------ |
+| uv direct to pypi.org     | 3.7 s     | the network, end to end                    |
+| through peryx, cold cache | 4.4 s     | the network; peryx adds about one hop      |
+| through peryx, warm cache | 3.3 s     | uv itself, unzipping and installing wheels |
 
-The run-to-run spread on the cold numbers is the CDN, not peryx: the same 47 MB wheel arrived in anything from 0.7 to
-1.3 s across runs. And a laptop next to its cache is the *least* favorable setup for the warm numbers: the farther your
-machines sit from PyPI (CI in a private subnet, an office behind one uplink), the more the warm path wins, because it
-replaces your worst network hop instead of a loopback.
+An install is a blunt instrument for measuring an index server. uv's own resolve, unzip, and install work dominates the
+wall clock, so every cache lands within a second or two of the others, and a faster index cannot rescue a slow client.
+The rows that actually isolate the server are the request swarm and the file throughput further down, where peryx
+answers 571 requests a second against direct's 215, holds a 9 ms p95, and serves a thousand of those requests on 2.6 s
+of CPU where devpi needs 13.4 s.
+
+A laptop next to its cache is the *least* favorable setup for the warm numbers: the farther your machines sit from PyPI
+(CI in a private subnet, an office behind one uplink), the more the warm path wins, because it replaces your worst
+network hop instead of a loopback.
 
 ## The field
 
@@ -198,14 +205,48 @@ concludes the package does not exist.
 
 The request workload drives a swarm against each warm server: one user, then 32, each a client that fetches project
 pages and reads every byte of the body, the way a resolver does. The pages average ~480 KB, so this row prices full page
-transfers, not header round-trips.
+transfers, not header round-trips. Every client sends the `Accept` header pip and uv send, because peryx picks the
+representation from it: a swarm asking for `*/*` receives the PEP 503 HTML render instead, which is not the page an
+installer ever gets, and prices work no install performs.
+
+peryx answers **7,658 requests a second** to a single client at a 2.3 ms p95, and **17,707** to thirty-two at 3.8 ms;
+the next-fastest local cache manages 176 and 752. The gap is the cached page: a warm hit is a lookup and a copy of bytes
+peryx has already transformed, so it serves a thousand of those requests on **168 ms of CPU** where devpi spends 9.6 s
+and proxpi 6.3 s.
 
 {{ bench(file="load") }}
 
-Every table ends with two resource rows: the CPU seconds and peak resident memory of the server's whole process tree
-while its workload ran, compared against peryx (direct runs no server, so it cannot anchor them). Speed alone hides a
-trade: proxpi's hot-transfer lead comes from holding wheels in memory at three to five times peryx's footprint, and
-pypiserver's near-zero CPU reflects that it redirects file downloads to PyPI instead of serving them.
+Every table ends with two resource rows: the CPU the server's whole process tree burned while its workload ran, and its
+peak resident memory, compared against peryx (direct runs no server, so it cannot anchor them). The load table prices
+that CPU **per thousand requests served**, which is the only way to read it. A fixed-duration swarm hands the slowest
+server the smallest bill, and unnormalized it rewards failure: devpi answers 114 requests a second to peryx's 17,707, so
+its absolute CPU looks modest until you divide by the work done.
+
+Read the ratios against `direct` with care here. Every other party is a process on this machine, while `direct` is
+pypi.org across the internet, so its rows carry a wide-area round trip no local cache pays.
+
+Speed alone hides a trade. proxpi's eight-way transfer lead comes from holding wheels in memory at nearly seven times
+peryx's 44 MB footprint, and pypiserver's near-zero CPU reflects that it redirects file downloads to PyPI instead of
+serving them.
+
+## Every endpoint, not just the three an installer touches
+
+The workloads above drive real clients, so they exercise the three endpoints an install needs: the project page, the
+wheel, and its PEP 658 metadata sibling. Everything else peryx serves went unmeasured, and an unmeasured endpoint is
+where a regression hides. This table prices one warm request to each of them.
+
+It is peryx against itself, not against the field. A PyPI server chooses its own url shapes and decides what its index
+root contains: pypi.org answers `/pypi/{project}/json` where peryx answers `{index}/{project}/json`, devpi addresses
+files by an internal path, and a proxy's index root lists what it has cached while pypi.org's lists every project that
+exists. Rows across those servers would compare different work and read as a ranking. The comparisons live in the tables
+above, which drive one client against everyone.
+
+{{ bench(file="endpoints") }}
+
+Two rows stand out, and both are the same fact. The JSON project page is served from the transformed-page cache, so it
+costs a lookup and a copy. The HTML render and the legacy `/{project}/json` API are not cached at all: each request
+parses the stored page and renders it again, which is why HTML costs about nine times the JSON page and the legacy API
+about twenty. Installers ask for JSON, so no install pays this; a browser and an old client do.
 
 Every server is measured the same way, on the same machine, in the same run, and one command reproduces every table: see
 [run the benchmarks](@/contributing/benchmarking.md).

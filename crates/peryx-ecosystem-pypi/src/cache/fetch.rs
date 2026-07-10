@@ -72,40 +72,46 @@ pub(super) async fn fetch_and_store(
             state.remember_negative(project_negative_key(key), NEGATIVE_TTL_SECS);
             Ok(None)
         }
-        Ok(response) => cached.map_or_else(
-            || {
-                state.metrics.record(Event::UpstreamError {
-                    route: route.clone(),
-                    project: event_project.clone(),
-                });
-                Err(CacheError::Unavailable)
-            },
-            |record| {
-                tracing::warn!(%key, status = response.status, "upstream errored; serving stale page");
-                state.metrics.record(Event::StaleServed {
-                    route: route.clone(),
-                    project: event_project.clone(),
-                });
-                Ok(Some(record))
-            },
-        ),
-        Err(err) => cached.map_or_else(
-            || {
-                state.metrics.record(Event::UpstreamError {
-                    route: route.clone(),
-                    project: event_project.clone(),
-                });
-                Err(CacheError::Upstream(err))
-            },
-            |record| {
-                tracing::warn!(%key, "upstream unreachable; serving stale page");
-                state.metrics.record(Event::StaleServed {
-                    route: route.clone(),
-                    project: event_project.clone(),
-                });
-                Ok(Some(record))
-            },
-        ),
+        // Past `max_stale_secs` a stale page stops being an answer, so drop it and let the upstream
+        // failure surface rather than papering over an outage with data of unbounded age.
+        Ok(response) => cached
+            .filter(|record| super::servable_stale(state, record))
+            .map_or_else(
+                || {
+                    state.metrics.record(Event::UpstreamError {
+                        route: route.clone(),
+                        project: event_project.clone(),
+                    });
+                    Err(CacheError::Unavailable)
+                },
+                |record| {
+                    tracing::warn!(%key, status = response.status, "upstream errored; serving stale page");
+                    state.metrics.record(Event::StaleServed {
+                        route: route.clone(),
+                        project: event_project.clone(),
+                    });
+                    Ok(Some(record))
+                },
+            ),
+        Err(err) => cached
+            .filter(|record| super::servable_stale(state, record))
+            .map_or_else(
+                || {
+                    state.metrics.record(Event::UpstreamError {
+                        route: route.clone(),
+                        project: event_project.clone(),
+                    });
+                    Err(CacheError::Upstream(err))
+                },
+                |record| {
+                    tracing::warn!(%key, "upstream unreachable; serving stale page");
+                    state.metrics.record(Event::StaleServed {
+                        route: route.clone(),
+                        project: event_project.clone(),
+                    });
+                    Ok(Some(record))
+                },
+            ),
     }
 }
 
@@ -141,7 +147,7 @@ pub async fn refresh_stale_pages(state: &Arc<AppState>) -> Result<RefreshSummary
     let now = (state.clock)();
     let mut summary = RefreshSummary::default();
     for (key, fetched_at, fresh_secs) in state.meta.list_index_pages()? {
-        if now - fetched_at < fresh_secs.unwrap_or(state.ttl_secs) {
+        if now - fetched_at < super::freshness_secs(state.ttl_secs, fresh_secs) {
             continue;
         }
         let Some((index, client, offline, project)) = mirror_for_key(state, &key) else {

@@ -143,6 +143,306 @@ async fn test_proxy_tag_is_cached_within_ttl_then_revalidated() {
 }
 
 #[tokio::test]
+async fn test_unchanged_tag_revalidates_without_refetching_the_manifest() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    let digest = oci_digest(manifest);
+    // Exactly one GET: the cold pull. The revalidation after the window must be answered by the HEAD,
+    // or wiremock's expect(1) fails on drop.
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest.to_vec(), MANIFEST_TYPE))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).insert_header("docker-content-digest", digest.as_str()))
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (_state, app) = super::proxy_with_clock(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    let uri = "/v2/hub/library/nginx/manifests/latest";
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+
+    now.store(1000 + 61, Ordering::Relaxed);
+    let (status, _, body) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, manifest.to_vec());
+}
+
+#[tokio::test]
+async fn test_moved_tag_is_refetched_after_the_window() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    let first = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    let second = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","x":1}"#;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(first.to_vec(), MANIFEST_TYPE))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (_state, app) = super::proxy_with_clock(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    let uri = "/v2/hub/library/nginx/manifests/latest";
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+
+    // The tag now points somewhere else, so the HEAD's digest no longer matches and the manifest is
+    // fetched: the shortcut must never pin a moved tag.
+    server.reset().await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).insert_header("docker-content-digest", oci_digest(second).as_str()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(second.to_vec(), MANIFEST_TYPE))
+        .mount(&server)
+        .await;
+    now.store(1000 + 61, Ordering::Relaxed);
+    let (status, _, body) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, second.to_vec());
+}
+
+#[tokio::test]
+async fn test_a_tag_staler_than_the_bound_is_not_served_when_upstream_fails() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest.to_vec(), MANIFEST_TYPE))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (_state, app) = super::proxy_with_clock(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    let uri = "/v2/hub/library/nginx/manifests/latest";
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+
+    // Upstream is down and the cached tag is older than the 60s window plus the 300s stale bound, so
+    // the outage surfaces instead of a manifest of unbounded age.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    now.store(1000 + 400, Ordering::Relaxed);
+    let (status, _, _) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn test_unchanged_tag_refetches_when_the_cached_manifest_is_missing() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    let digest = oci_digest(manifest);
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest.to_vec(), MANIFEST_TYPE))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).insert_header("docker-content-digest", digest.as_str()))
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (state, app) = super::proxy_with_clock(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    let uri = "/v2/hub/library/nginx/manifests/latest";
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+
+    // The tag has not moved, so the HEAD shortcut would serve from the store; the manifest it names is
+    // gone, so it must fall through and fetch rather than answer with nothing.
+    crate::store::delete_manifest(&state.meta, &digest).unwrap();
+    now.store(1000 + 61, Ordering::Relaxed);
+    let (status, _, body) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, manifest.to_vec());
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_is_cached_within_the_window_then_revalidated() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    // Exactly two upstream lists: the cold one and the one after the window lapses. The request in
+    // between must be answered from the store, or wiremock's expect(2) fails on drop.
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(br#"{"name":"library/nginx","tags":["1"]}"#.to_vec(), "application/json"),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (_state, app) = super::proxy_with_clock(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    let uri = "/v2/hub/library/nginx/tags/list";
+    let (status, _, body) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("\"1\""));
+
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+    now.store(1000 + 61, Ordering::Relaxed);
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_survives_an_outage_within_the_stale_bound() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(br#"{"name":"library/nginx","tags":["1"]}"#.to_vec(), "application/json"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (_state, app) = super::proxy_with_clock(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    let uri = "/v2/hub/library/nginx/tags/list";
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/tags/list"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    // Stale but inside the 60s window plus the 300s bound: the last list still answers.
+    now.store(1000 + 100, Ordering::Relaxed);
+    let (status, _, body) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("\"1\""));
+
+    // Past the bound, the outage surfaces rather than a list of unbounded age.
+    now.store(1000 + 400, Ordering::Relaxed);
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn test_a_zero_stale_bound_serves_a_tag_list_of_any_age() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(br#"{"name":"library/nginx","tags":["1"]}"#.to_vec(), "application/json"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (_state, app) = super::proxy_with_stale(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+        0,
+    );
+    let uri = "/v2/hub/library/nginx/tags/list";
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/tags/list"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    // An operator mirroring a knowingly unreliable upstream asked for exactly this: no bound at all.
+    now.store(1_000_000, Ordering::Relaxed);
+    let (status, _, body) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("\"1\""));
+}
+
+#[tokio::test]
+async fn test_expired_upstream_credentials_do_not_delete_a_cached_tag() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    let uri = "/v2/hub/library/nginx/manifests/latest";
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest.to_vec(), MANIFEST_TYPE))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let (_state, app) = super::proxy_with_clock(
+        &tempfile::tempdir().unwrap(),
+        &format!("{}/", server.uri()),
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    assert_eq!(send(&app, Method::GET, uri).await.0, StatusCode::OK);
+
+    // The token expires, so the revalidation after the freshness window is answered 401. Docker Hub
+    // says that about a repository it will not discuss, not about one that is gone: the cached image
+    // must still pull rather than become `manifest unknown`.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    now.store(1000 + 61, Ordering::Relaxed);
+    let (status, _, body) = send(&app, Method::GET, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, manifest.to_vec());
+}
+
+#[tokio::test]
 async fn test_proxy_tag_revalidates_when_the_cached_manifest_is_gone() {
     let server = MockServer::start().await;
     let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
@@ -1030,6 +1330,52 @@ async fn test_catalog_lists_oci_repositories_with_pagination() {
             .unwrap()
             .contains("_catalog?n=1&last=bare")
     );
+}
+
+#[tokio::test]
+async fn test_blob_range_that_is_not_a_range_serves_the_whole_blob() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted(&dir);
+    let blob = b"0123456789";
+    let stored = state.blobs.write(blob).unwrap();
+    let uri = format!("/v2/store/app/blobs/sha256:{}", stored.as_str());
+
+    // RFC 9110 s14.2: an unparseable `Range` is ignored, never refused.
+    for header in ["bytes=abc-", "bytes=-", "bytes=5-2"] {
+        let (status, _, got) = send_with(&app, Method::GET, &uri, &[("range", header)]).await;
+        assert_eq!(status, StatusCode::OK, "{header}");
+        assert_eq!(got, &blob[..], "{header}");
+    }
+
+    // RFC 9110 s14.1.2: a suffix longer than the blob uses the whole blob.
+    let (status, headers, got) = send_with(&app, Method::GET, &uri, &[("range", "bytes=-99")]).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 0-9/{}", blob.len()));
+    assert_eq!(got, &blob[..]);
+}
+
+#[tokio::test]
+async fn test_proxy_blob_head_answers_a_range_it_has_not_cached() {
+    let server = MockServer::start().await;
+    let blob = b"a-real-layer";
+    let digest = oci_digest(blob);
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/nginx/blobs/{digest}")))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-length", blob.len().to_string().as_str()))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let uri = format!("/v2/hub/library/nginx/blobs/{digest}");
+
+    // A cached blob answers this with 206. Whether the store happens to hold the layer must not change
+    // what a client checking a range is told.
+    let (status, headers, _) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=0-3")]).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 0-3/{}", blob.len()));
+
+    let (status, _, _) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=99-100")]).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
 }
 
 #[tokio::test]

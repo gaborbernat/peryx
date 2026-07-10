@@ -33,7 +33,29 @@ pub struct RuntimeOptions<I> {
     pub rate_limit: RateLimitConfig,
     pub upstream_concurrency: I,
     pub webhooks: WebhookRuntime,
+    /// Byte budget for the transformed-page cache: memory traded against warm-serve speed. Entries
+    /// are re-derivable from the cached raw page, so a smaller budget costs hit rate, never
+    /// correctness; `0` disables the cache and every warm page pays its transform again.
+    pub hot_cache_bytes: u64,
+    /// How long past its freshness window a cached page may still answer while the upstream is
+    /// unreachable. `0` means without limit: a mirror in front of a flaky upstream can be told to
+    /// keep serving whatever it last saw, but that is an operator's explicit choice, not a default.
+    pub max_stale_secs: i64,
 }
+
+/// How long an outage may be papered over with a stale page, when an operator configures no bound.
+///
+/// One further freshness window: long enough to ride out an upstream blip or a redeploy, short enough
+/// that a lasting outage surfaces as an error rather than as quietly ancient data.
+pub const DEFAULT_MAX_STALE_SECS: i64 = 300;
+
+/// The transformed-page cache budget when an operator configures none.
+///
+/// Sized for the working set of a busy `PyPI` index, whose transformed pages are the large ones
+/// (`boto3` and `numpy` run to megabytes of JSON). Today the `PyPI` driver is the only ecosystem that
+/// populates this cache; when a second one does, this becomes a budget per ecosystem, keyed like the
+/// lexicon and serving registries already are.
+pub const DEFAULT_HOT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Everything a request handler needs. Shared as `Arc<AppState>`.
 pub struct AppState {
@@ -42,6 +64,8 @@ pub struct AppState {
     /// Fallback freshness for cached simple pages, in seconds: applies only when upstream's
     /// `Cache-Control` granted no usable lifetime.
     pub ttl_secs: i64,
+    /// The bound on stale-on-error serving; see [`RuntimeOptions::max_stale_secs`].
+    pub max_stale_secs: i64,
     pub clock: Clock,
     pub requests: AtomicU64,
     pub indexes: Vec<Index>,
@@ -175,6 +199,8 @@ impl AppState {
                 rate_limit,
                 upstream_concurrency,
                 webhooks: WebhookRuntime::disabled(),
+                hot_cache_bytes: DEFAULT_HOT_CACHE_BYTES,
+                max_stale_secs: DEFAULT_MAX_STALE_SECS,
             },
         )
     }
@@ -231,6 +257,8 @@ impl AppState {
                 rate_limit,
                 upstream_concurrency,
                 webhooks: WebhookRuntime::disabled(),
+                hot_cache_bytes: DEFAULT_HOT_CACHE_BYTES,
+                max_stale_secs: DEFAULT_MAX_STALE_SECS,
             },
         )
     }
@@ -258,6 +286,8 @@ impl AppState {
                 rate_limit: RateLimitConfig::default(),
                 upstream_concurrency: std::iter::empty(),
                 webhooks,
+                hot_cache_bytes: DEFAULT_HOT_CACHE_BYTES,
+                max_stale_secs: DEFAULT_MAX_STALE_SECS,
             },
         )
     }
@@ -277,6 +307,8 @@ impl AppState {
             rate_limit,
             upstream_concurrency,
             webhooks,
+            hot_cache_bytes,
+            max_stale_secs,
         } = runtime;
         let configured: HashMap<_, _> = upstream_concurrency.into_iter().collect();
         let upstream_limits = indexes
@@ -296,13 +328,14 @@ impl AppState {
             meta,
             blobs,
             ttl_secs,
+            max_stale_secs,
             clock,
             requests: AtomicU64::new(0),
             indexes,
             inflight: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashMap::new()),
             hot: moka::sync::Cache::builder()
-                .max_capacity(256 * 1024 * 1024)
+                .max_capacity(hot_cache_bytes)
                 .weigher(|key: &String, (_, value): &(i64, Bytes)| {
                     u32::try_from(key.len() + value.len()).unwrap_or(u32::MAX)
                 })
@@ -428,11 +461,15 @@ impl AppState {
         ((self.clock)() < expires_at).then_some(bytes)
     }
 
-    /// The hot-cache key for a page as served on `route` right now.
+    /// The hot-cache key for one representation of a page as served on `route` right now.
+    ///
+    /// `variant` separates the representations a page has: the same project answers with PEP 691 JSON,
+    /// PEP 503 HTML, or the legacy release JSON, and they are different bytes. The epoch is what makes
+    /// a mutation invalidate them all at once, since every mutation bumps it.
     #[must_use]
-    pub fn hot_key(&self, route: &str, project: &str) -> String {
+    pub fn hot_key(&self, route: &str, project: &str, variant: &str) -> String {
         let epoch = self.epoch.load(std::sync::atomic::Ordering::Relaxed);
-        format!("{route}\u{0}{project}\u{0}{epoch}")
+        format!("{route}\u{0}{project}\u{0}{variant}\u{0}{epoch}")
     }
 
     /// Whether a remembered upstream miss is still inside its injected-clock expiry.

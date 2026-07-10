@@ -23,6 +23,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::{LogCapture, field};
 use crate::cache;
 use crate::upload::Uploaded;
+use peryx_http::DEFAULT_MAX_STALE_SECS;
 use peryx_http::path_safety::local_file_url;
 use peryx_http::router;
 use peryx_http::state::{AppState, Index, IndexKind};
@@ -49,6 +50,26 @@ pub(super) async fn harness_with_policies(
     mirror_policy: Policy,
     local_policy: Policy,
     overlay_policy: Policy,
+) -> Harness {
+    harness_with_stale(
+        token,
+        volatile,
+        mirror_policy,
+        local_policy,
+        overlay_policy,
+        DEFAULT_MAX_STALE_SECS,
+    )
+    .await
+}
+
+/// A harness whose stale-on-error bound the caller chooses; `0` serves stale without limit.
+pub(super) async fn harness_with_stale(
+    token: bool,
+    volatile: bool,
+    mirror_policy: Policy,
+    local_policy: Policy,
+    overlay_policy: Policy,
+    max_stale_secs: i64,
 ) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
@@ -89,13 +110,15 @@ pub(super) async fn harness_with_policies(
             },
         },
     ];
-    let state = super::wired(AppState::with_clock(
+    let mut state = AppState::with_clock(
         meta,
         blobs,
         60,
         indexes,
         Arc::new(move || ticks.load(Ordering::Relaxed)),
-    ));
+    );
+    state.max_stale_secs = max_stale_secs;
+    let state = super::wired(state);
     Harness {
         _dir: dir,
         server,
@@ -757,6 +780,43 @@ async fn test_policy_rejects_direct_download() {
     assert_eq!(denial["rule"], "wheel-python-block-list");
 }
 
+/// A size limit reads a cached artifact's size from the stored blob. An unknown size is a denial, so
+/// serving the bytes proves the stat ran: the zero-config path skips it, and only an active policy
+/// reaches for it.
+#[tokio::test]
+async fn test_policy_sizes_a_cached_download_from_the_stored_blob() {
+    let overlay_policy = policy(|neutral, _pypi| {
+        neutral.max_file_size_bytes = Some(1024);
+    });
+    let h = harness_with_policies(true, true, Policy::default(), Policy::default(), overlay_policy).await;
+    let wheel = b"wheelcontent";
+    let digest = h.state.blobs.write(wheel).unwrap();
+    let uri = format!("/root/pypi/files/{}/flask-1.0-py3-none-any.whl", digest.as_str());
+
+    let (status, _, body) = get(&h.state, &uri, None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "wheelcontent");
+}
+
+/// The same stat drives a denial: the limit is below the stored blob's real length.
+#[tokio::test]
+async fn test_policy_denies_a_cached_download_over_the_size_limit() {
+    let overlay_policy = policy(|neutral, _pypi| {
+        neutral.max_file_size_bytes = Some(4);
+    });
+    let h = harness_with_policies(true, true, Policy::default(), Policy::default(), overlay_policy).await;
+    let digest = h.state.blobs.write(b"wheelcontent").unwrap();
+    let uri = format!("/root/pypi/files/{}/flask-1.0-py3-none-any.whl", digest.as_str());
+
+    let (status, _, body) = get(&h.state, &uri, Some("application/json")).await;
+
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(denial["rule"], "max-file-size");
+    assert_eq!(denial["reason"], "file size 12 exceeds limit 4");
+}
+
 #[tokio::test]
 async fn test_policy_rejects_project_detail() {
     let overlay_policy = policy(|neutral, _pypi| {
@@ -1086,6 +1146,196 @@ async fn test_mirror_detail_revalidate_304_serves_cached() {
     assert!(body.contains("flask"));
 }
 
+/// Build a mirror harness whose cached flask page was fetched at `fetched_at`, and whose upstream
+/// is unreachable, so the only question is whether the stale copy may still answer.
+async fn stale_page_harness(max_stale_secs: i64, fetched_at: i64) -> Harness {
+    let h = harness_with_stale(
+        true,
+        true,
+        Policy::default(),
+        Policy::default(),
+        Policy::default(),
+        max_stale_secs,
+    )
+    .await;
+    let body = crate::to_json(&crate::ProjectDetail {
+        meta: crate::Meta::default(),
+        name: "flask".to_owned(),
+        versions: vec!["1.0".to_owned()],
+        files: vec![],
+    });
+    h.state
+        .meta
+        .put_index(
+            "pypi/flask",
+            &CachedIndex {
+                etag: None,
+                last_serial: None,
+                fetched_at_unix: fetched_at,
+                content_type: None,
+                fresh_secs: None,
+                body: body.into_bytes(),
+            },
+        )
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/simple/flask/"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&h.server)
+        .await;
+    h
+}
+
+#[tokio::test]
+async fn test_mirror_detail_refuses_a_page_staler_than_the_bound() {
+    // Fetched at 0, clock at 1000: past the 60s freshness and the 300s stale bound alike.
+    let h = stale_page_harness(300, 0).await;
+    let (status, _, _) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+    assert_ne!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_mirror_detail_serves_any_age_when_the_bound_is_zero() {
+    // The same ancient page, with the bound switched off: an operator mirroring an unreliable
+    // upstream asked for exactly this.
+    let h = stale_page_harness(0, 0).await;
+    let (status, _, served) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(served.contains("flask"));
+}
+
+/// The HTML page and the legacy JSON API are rendered from the stored page, so both are cached under
+/// their own key. These pin the two things that keeps honest: the render is served again, and it stops
+/// being served the moment anything the page depends on changes.
+#[tokio::test]
+async fn test_html_page_is_rendered_once_and_then_served_from_cache() {
+    let h = harness().await;
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_detail(&h.server, Digest::of(b"wheel").as_str(), &file_url, None).await;
+
+    let (status, _, first) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert_eq!(status, StatusCode::OK);
+    // moka applies a write lazily, so a read straight after an insert may not see it yet.
+    h.state.hot.run_pending_tasks();
+    assert!(
+        h.state
+            .hot_fresh(&h.state.hot_key("pypi", "flask", crate::cache::SIMPLE_HTML))
+            .is_some()
+    );
+
+    // Serving the second one from the cache must not change a byte of it.
+    let (_, _, second) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert_eq!(first, second);
+}
+
+#[tokio::test]
+async fn test_a_mutation_retires_the_cached_html_render() {
+    let h = harness().await;
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_detail(&h.server, Digest::of(b"wheel-v1").as_str(), &file_url, None).await;
+    let (_, _, before) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert!(before.contains(Digest::of(b"wheel-v1").as_str()));
+
+    // Whatever the mutation was, it bumped the epoch the key carries. The next request may not answer
+    // with a page rendered before it.
+    let record = h.state.meta.get_index("pypi/flask").unwrap().unwrap();
+    let body = detail_json(Digest::of(b"wheel-v2").as_str(), &file_url);
+    h.state
+        .meta
+        .put_index(
+            "pypi/flask",
+            &CachedIndex {
+                body: body.into_bytes(),
+                ..record
+            },
+        )
+        .unwrap();
+    h.state.bump_epoch();
+
+    let (_, _, after) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert!(after.contains(Digest::of(b"wheel-v2").as_str()), "{after}");
+}
+
+#[tokio::test]
+async fn test_a_policy_filtered_page_still_serves_json() {
+    // An active policy sends the JSON page down the buffered path instead of the streaming one, since
+    // the stream cannot filter. That path renders the JSON itself.
+    let mirror_policy = policy(|neutral, _pypi| {
+        neutral.max_file_size_bytes = Some(1);
+    });
+    let h = harness_with_policies(true, true, mirror_policy, Policy::default(), Policy::default()).await;
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_detail(&h.server, Digest::of(b"wheel").as_str(), &file_url, None).await;
+
+    let (status, headers, body) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/vnd.pypi.simple.v1+json");
+    assert!(body.contains("flask"));
+}
+
+#[tokio::test]
+async fn test_a_policy_filtered_page_is_never_cached_as_a_render() {
+    let mirror_policy = policy(|neutral, _pypi| {
+        neutral.max_file_size_bytes = Some(1);
+    });
+    let h = harness_with_policies(true, true, mirror_policy, Policy::default(), Policy::default()).await;
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_detail(&h.server, Digest::of(b"wheel").as_str(), &file_url, None).await;
+
+    let (status, _, _) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert_eq!(status, StatusCode::OK);
+    h.state.hot.run_pending_tasks();
+    // The bytes a policy filtered are not the bytes the page renders to, and the key does not say
+    // which policy produced them.
+    assert!(
+        h.state
+            .hot_fresh(&h.state.hot_key("pypi", "flask", crate::cache::SIMPLE_HTML))
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_html_page_is_cached_then_expires_with_the_page_it_renders() {
+    let h = harness().await;
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    let first = Digest::of(b"wheel-v1");
+    mount_detail(&h.server, first.as_str(), &file_url, None).await;
+    let (status, _, body) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(first.as_str()));
+
+    // The upstream is gone; the render is cached, so the page still answers.
+    h.server.reset().await;
+    let (status, _, body) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains(first.as_str()));
+
+    // Past the freshness of the page it was rendered from, the render must not answer for it.
+    let second = Digest::of(b"wheel-v2");
+    mount_detail(&h.server, second.as_str(), &file_url, None).await;
+    h.clock.fetch_add(61, Ordering::Relaxed);
+    let (_, _, body) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
+    assert!(body.contains(second.as_str()), "a stale render outlived its page");
+}
+
+#[tokio::test]
+async fn test_legacy_json_is_cached_per_version() {
+    let h = harness().await;
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_detail(&h.server, Digest::of(b"wheel-v1").as_str(), &file_url, None).await;
+
+    let (status, _, project) = get(&h.state, "/pypi/flask/json", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, release) = get(&h.state, "/pypi/flask/1.0/json", None).await;
+    assert_eq!(status, StatusCode::OK);
+    // The release document is not the project document; one cache key cannot hold both.
+    assert_ne!(project, release);
+
+    h.server.reset().await;
+    assert_eq!(get(&h.state, "/pypi/flask/json", None).await.2, project);
+    assert_eq!(get(&h.state, "/pypi/flask/1.0/json", None).await.2, release);
+}
+
 #[tokio::test]
 async fn test_mirror_detail_stale_on_5xx() {
     let h = harness().await;
@@ -1102,7 +1352,7 @@ async fn test_mirror_detail_stale_on_5xx() {
             &CachedIndex {
                 etag: None,
                 last_serial: None,
-                fetched_at_unix: 0,
+                fetched_at_unix: 900,
                 content_type: None,
 
                 fresh_secs: None,
@@ -1157,7 +1407,7 @@ async fn test_mirror_detail_stale_on_upstream_error() {
         &CachedIndex {
             etag: None,
             last_serial: None,
-            fetched_at_unix: 0,
+            fetched_at_unix: 99_900,
             content_type: None,
 
             fresh_secs: None,

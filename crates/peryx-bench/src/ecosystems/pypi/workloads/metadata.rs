@@ -94,7 +94,7 @@ async fn metadata_urls(index_url: &str, http: &reqwest::Client) -> anyhow::Resul
     const LIMIT: usize = 16;
     let response = http
         .get(format!("{index_url}{METADATA_PROJECT}/"))
-        .header("Accept", "application/vnd.pypi.simple.v1+json, text/html;q=0.5")
+        .header("Accept", super::SIMPLE_ACCEPT)
         .send()
         .await?
         .error_for_status()?;
@@ -160,7 +160,7 @@ fn html_metadata_urls(page_url: &url::Url, body: &str) -> anyhow::Result<Vec<Str
 async fn timed_metadata_batch(urls: &[String], http: &reqwest::Client) -> anyhow::Result<f64> {
     let start = Instant::now();
     for url in urls {
-        http.get(url).send().await?.error_for_status()?.bytes().await?;
+        super::drain(http.get(url).send().await?).await?;
     }
     Ok(start.elapsed().as_secs_f64())
 }

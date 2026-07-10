@@ -14,17 +14,38 @@ use anyhow::{Context as _, bail};
 
 use crate::usage::{Cost, Usage};
 
+mod endpoints;
 mod fleet;
 mod install;
 mod load;
 mod metadata;
 mod throughput;
 
+pub use endpoints::endpoints;
 pub use fleet::fleet;
 pub use install::installs;
 pub use load::load;
 pub use metadata::metadata;
 pub use throughput::throughput;
+
+/// The interpreter every install workload builds its venv with.
+///
+/// Pinned so runs stay comparable as `uv venv`'s default interpreter moves. Installs also pass
+/// `--only-binary :all:`: without it a package that lacks a wheel for the chosen interpreter is
+/// compiled from source, and that build lands inside the measured install, dwarfing what the index
+/// server contributes and swamping the machine while it runs. A missing wheel now fails the round
+/// loudly instead of silently turning the benchmark into a compile.
+const BENCH_PYTHON: &str = "3.14";
+
+/// What pip and uv ask a simple index for, and so what any workload standing in for them must send.
+///
+/// peryx picks the representation by looking for `json` anywhere in `Accept`, so a workload sending
+/// `*/*` silently measures the PEP 503 HTML render instead of the PEP 691 JSON an installer receives.
+/// The two paths are not comparable: HTML re-parses and re-renders the page per request.
+pub(super) const SIMPLE_ACCEPT: &str = "application/vnd.pypi.simple.v1+json, text/html;q=0.5";
+
+/// The PEP 503 HTML an installer never asks for, but a browser and an old client do.
+pub(super) const SIMPLE_ACCEPT_HTML: &str = "text/html";
 
 /// One server's per-round samples for a workload: a column of numbers per sub-metric, plus the
 /// resource costs of the rounds that produced a server process.
@@ -68,5 +89,16 @@ pub(super) fn run_checked(command: &mut Command) -> anyhow::Result<()> {
     if !output.status.success() {
         bail!("{command:?} failed:\n{}", String::from_utf8_lossy(&output.stderr));
     }
+    Ok(())
+}
+
+/// Read a response body to its end and drop it, without materializing it.
+///
+/// `bytes()` copies the whole body into one buffer and `text()` also validates it as UTF-8. Both run
+/// inside the timed window and bill the client's work to the server, and every caller here wants only
+/// the status. Stream the frames past instead.
+pub(super) async fn drain(response: reqwest::Response) -> anyhow::Result<()> {
+    let mut response = response.error_for_status()?;
+    while response.chunk().await?.is_some() {}
     Ok(())
 }

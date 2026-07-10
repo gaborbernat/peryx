@@ -122,8 +122,9 @@ pub fn network_row(name: &str, values: &[Option<Summary>], baseline: usize, metr
 /// overhead (or win) a server adds on top of talking to the upstream itself. A `None` marks a party
 /// without a number; `absent` says whether that is a failure (red) or a non-entity (plain).
 ///
-/// # Panics
-/// Never in practice: the caller always measures the baseline party.
+/// A baseline that produced no number leaves the ratios out rather than aborting the run: `--only`
+/// can leave the baseline party unselected, and a baseline whose every round failed should cost the
+/// table its ratios, not the whole suite its results.
 fn build_row(
     name: &str,
     values: &[Option<Summary>],
@@ -132,16 +133,20 @@ fn build_row(
     absent: Absent,
     network_bound: bool,
 ) -> Row {
-    let reference = values[baseline]
-        .as_ref()
-        .expect("the baseline party always has a number")
-        .median;
+    let anchor = values.get(baseline).and_then(Option::as_ref);
+    let reference = anchor.map_or(f64::NAN, |summary| summary.median);
     let higher_is_better = matches!(metric, Metric::Rate(_));
     let cost = |value: f64| if higher_is_better { 1.0 / value } else { value };
     let finite: Vec<f64> = values.iter().flatten().map(|summary| cost(summary.median)).collect();
     let best = finite.iter().copied().fold(f64::INFINITY, f64::min);
     let worst = finite.iter().copied().fold(0.0f64, f64::max);
     let span = (worst / best).ln().max(MIN_SPAN);
+    // The fastest party the row actually resolved. A cell whose rounds overlap this one's is not
+    // slower than it; the run merely cannot say so.
+    let leader = values
+        .iter()
+        .flatten()
+        .min_by(|a, b| cost(a.median).total_cmp(&cost(b.median)));
     let cells = values
         .iter()
         .map(|value| {
@@ -156,10 +161,17 @@ fn build_row(
                         reason = "position is a small non-negative ladder fraction"
                     )]
                     let index = ((position * LADDER.len() as f64) as usize).min(LADDER.len() - 1);
+                    let ties_leader = leader.is_some_and(|leader| indistinguishable(summary, leader));
                     Cell {
                         text: format_value(summary.median, metric),
-                        ratio: format!("{:.2}x", summary.median / reference),
-                        tint: LADDER[index].to_owned(),
+                        ratio: if reference.is_finite() {
+                            let approximate = anchor.is_some_and(|anchor| indistinguishable(summary, anchor));
+                            let mark = if approximate { "\u{2248}" } else { "" };
+                            format!("{mark}{:.2}x", summary.median / reference)
+                        } else {
+                            "-".to_owned()
+                        },
+                        tint: if ties_leader { LADDER[0] } else { LADDER[index] }.to_owned(),
                         spread: format_spread(summary),
                         range: format_range(summary, metric),
                         noisy: summary.noisy(),
@@ -268,6 +280,54 @@ pub fn cost_rows(servers: &[Server], costs: &[Option<Vec<Cost>>]) -> Vec<Row> {
     ]
 }
 
+/// The cost rows for a closed-loop workload driven to a fixed clock, where the fastest server
+/// necessarily completes the most requests.
+///
+/// Absolute CPU ranks such a table backwards: a server answering forty-seven times the requests burns
+/// more of the processor doing it, and would score worst for being fastest. Divide by the work each
+/// party actually did. Peak memory needs no such correction; it is a high-water mark, not a total.
+#[must_use]
+pub fn cost_rows_per_request(
+    servers: &[Server],
+    costs: &[Option<Vec<Cost>>],
+    requests: &[Option<Vec<u64>>],
+) -> Vec<Row> {
+    let anchor = anchor(servers);
+    let cpu: Vec<Option<Summary>> = costs
+        .iter()
+        .zip(requests)
+        .map(|(party, served)| {
+            let (party, served) = (party.as_ref()?, served.as_ref()?);
+            #[expect(clippy::cast_precision_loss, reason = "request counts fit f64 exactly here")]
+            let per_thousand: Vec<f64> = party
+                .iter()
+                .zip(served)
+                .filter(|(_, count)| **count > 0)
+                .map(|(cost, &count)| cost.cpu_seconds / count as f64 * 1000.0)
+                .collect();
+            Summary::of(&per_thousand)
+        })
+        .collect();
+    #[expect(clippy::cast_precision_loss, reason = "resident sizes fit f64 to the byte")]
+    let rss = summaries(costs, |cost| cost.peak_rss_bytes as f64 / 1e6);
+    vec![
+        row(
+            "server CPU per 1k requests",
+            &cpu,
+            anchor,
+            Metric::Seconds,
+            Absent::NoServer,
+        ),
+        row(
+            "server peak memory",
+            &rss,
+            anchor,
+            Metric::Amount("MB"),
+            Absent::NoServer,
+        ),
+    ]
+}
+
 /// Summarize one field of each party's per-round costs.
 fn summaries(costs: &[Option<Vec<Cost>>], field: impl Fn(&Cost) -> f64) -> Vec<Option<Summary>> {
     costs
@@ -318,6 +378,16 @@ pub fn publish(name: &str, table: Table) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether the rounds behind two cells overlap, so this run cannot tell the two apart.
+///
+/// A median is one number drawn from a spread. Reading `19.2 s` as faster than `20.5 s` when both
+/// parties produced rounds covering the other's is reporting noise as a ranking, and a reader cannot
+/// see it from the medians alone. Rows that overlap get a `~` on the ratio and share the leader's
+/// colour, so only differences the run resolved are drawn as differences.
+fn indistinguishable(one: &Summary, other: &Summary) -> bool {
+    one.min <= other.max && other.min <= one.max
+}
+
 fn format_value(value: f64, metric: Metric) -> String {
     match metric {
         Metric::Seconds => format_seconds(value),
@@ -335,8 +405,14 @@ fn format_seconds(seconds: f64) -> String {
         format!("{}m {:04.1}s", (seconds / 60.0) as u64, seconds % 60.0)
     } else if seconds >= 1.0 {
         format!("{seconds:.1} s")
-    } else {
+    } else if seconds >= 0.01 {
         format!("{:.0} ms", seconds * 1000.0)
+    } else if seconds >= 0.001 {
+        format!("{:.1} ms", seconds * 1000.0)
+    } else {
+        // The per-endpoint rows land here, where rounding to whole milliseconds prints every one of
+        // them as "0 ms" and erases the differences the table exists to show.
+        format!("{:.0} µs", seconds * 1e6)
     }
 }
 

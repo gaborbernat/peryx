@@ -34,16 +34,18 @@ impl OciRegistry {
         }
         let response = match reference {
             Reference::Digest(digest) => {
-                let mut served = store::get_manifest(&state.meta, digest)?
-                    .map(|manifest| manifest_response(&manifest, digest, head));
-                for member in serving_members(state, index) {
-                    if served.is_some() {
-                        break;
-                    }
-                    if let Some(client) = proxy_client(&member.kind) {
-                        served = self
-                            .pull_manifest_by_digest(state, client, &member.name, repo, digest, head)
-                            .await?;
+                let mut served =
+                    store::get_manifest(&state.meta, digest)?.map(|manifest| manifest_response(manifest, digest, head));
+                if served.is_none() {
+                    for member in serving_members(state, index) {
+                        if let Some(client) = proxy_client(&member.kind) {
+                            served = self
+                                .pull_manifest_by_digest(state, client, &member.name, repo, digest, head)
+                                .await?;
+                            if served.is_some() {
+                                break;
+                            }
+                        }
                     }
                 }
                 served.unwrap_or_else(|| error_response(ErrorCode::ManifestUnknown, "manifest unknown"))
@@ -89,7 +91,7 @@ impl OciRegistry {
         let gate = flight_gate(state, &gate_key);
         let _guard = gate.lock().await;
         if let Some(manifest) = store::get_manifest(&state.meta, digest)? {
-            return Ok(Some(manifest_response(&manifest, digest, head)));
+            return Ok(Some(manifest_response(manifest, digest, head)));
         }
         let fetched = self
             .fetch_manifest_by_digest(state, client, index, repo, digest, head)
@@ -120,7 +122,7 @@ impl OciRegistry {
         };
         let (manifest, canonical) = store_manifest(state, index, repo, None, response).await?;
         Ok(Some(if canonical == digest {
-            manifest_response(&manifest, digest, head)
+            manifest_response(manifest, digest, head)
         } else {
             error_response(
                 ErrorCode::ManifestInvalid,
@@ -143,7 +145,7 @@ impl OciRegistry {
         let Some(client) = proxy_client(&member.kind) else {
             return Ok(match store::get_tag(&state.meta, &member.name, repo, tag)? {
                 Some(digest) => store::get_manifest(&state.meta, &digest)?
-                    .map(|manifest| manifest_response(&manifest, &digest, head)),
+                    .map(|manifest| manifest_response(manifest, &digest, head)),
                 None => None,
             });
         };
@@ -173,6 +175,9 @@ impl OciRegistry {
         tag: &str,
         head: bool,
     ) -> Result<Option<Response>, ServeError> {
+        if let Some(response) = self.unchanged_tag(state, client, index, repo, tag, head).await? {
+            return Ok(Some(response));
+        }
         match self
             .upstream
             .manifest(client.base_url(), client.auth(), repo, tag)
@@ -180,12 +185,67 @@ impl OciRegistry {
         {
             Ok(response) => {
                 let (manifest, canonical) = store_manifest(state, index, repo, Some(tag), response).await?;
-                Ok(Some(manifest_response(&manifest, &canonical, head)))
+                Ok(Some(manifest_response(manifest, &canonical, head)))
             }
-            Err(UpstreamError::Status(status)) if absent_upstream(status) => Ok(None),
-            Err(err) => Ok(Some(upstream_manifest_error(&err))),
+            // A `404` is upstream saying the tag is gone, which is an answer. Everything else is a
+            // failure to get one, and a failure to confirm a tag is not a reason to forget it: Docker
+            // Hub answers `401` for any repository it will not discuss with the credentials at hand,
+            // so an expired token would otherwise turn a cached image into `manifest unknown`.
+            Err(UpstreamError::Status(StatusCode::NOT_FOUND)) => Ok(None),
+            Err(UpstreamError::Status(status)) if absent_upstream(status) => stale_tag(state, index, repo, tag, head),
+            Err(err) => Ok(Some(
+                stale_tag(state, index, repo, tag, head)?.unwrap_or_else(|| upstream_manifest_error(&err)),
+            )),
         }
     }
+
+    /// Confirm a stale tag still points where it did, without fetching what it points at.
+    ///
+    /// A `HEAD` answers with the digest and no body, so the common revalidation — a tag that has not
+    /// moved — costs one round trip rather than a manifest. Anything unexpected (no digest header, a
+    /// moved tag, an upstream that will not answer a `HEAD`) returns `None`, and the caller fetches.
+    async fn unchanged_tag(
+        &self,
+        state: &AppState,
+        client: &UpstreamClient,
+        index: &str,
+        repo: &str,
+        tag: &str,
+        head: bool,
+    ) -> Result<Option<Response>, ServeError> {
+        let Some((_, cached)) = store::tag_freshness(&state.meta, index, repo, tag)? else {
+            return Ok(None);
+        };
+        let Ok(Some(upstream)) = self
+            .upstream
+            .manifest_digest(client.base_url(), client.auth(), repo, tag)
+            .await
+        else {
+            return Ok(None);
+        };
+        if upstream != cached {
+            return Ok(None);
+        }
+        let Some(manifest) = store::get_manifest(&state.meta, &cached)? else {
+            return Ok(None);
+        };
+        store::set_tag_freshness(&state.meta, index, repo, tag, &cached, (state.clock)())?;
+        Ok(Some(manifest_response(manifest, &cached, head)))
+    }
+}
+
+/// Serve a proxy tag past its freshness window while the upstream cannot confirm it, bounded by
+/// `max_stale_secs` exactly as a cached `PyPI` page is. `0` removes the bound.
+///
+/// Only reached once revalidation has already failed: a tag whose upstream answered is never stale.
+fn stale_tag(state: &AppState, index: &str, repo: &str, tag: &str, head: bool) -> Result<Option<Response>, ServeError> {
+    let Some((fetched_at, digest)) = store::tag_freshness(&state.meta, index, repo, tag)? else {
+        return Ok(None);
+    };
+    if !within_stale_bound(state, fetched_at) {
+        return Ok(None);
+    }
+    Ok(store::get_manifest(&state.meta, &digest)?.map(|manifest| manifest_response(manifest, &digest, head)))
 }
 
 /// Store a manifest a client pushed, mapping the tag or verifying the digest reference.
@@ -382,7 +442,7 @@ fn manifest_created(location: &str, digest: &str, subject: Option<&str>) -> Resp
 
 /// Build the response for a stored manifest, headers-only for a `HEAD`. The content length is set the
 /// same either way, so a `HEAD` reports the size a `GET` would return.
-fn manifest_response(manifest: &Manifest, digest: &str, head: bool) -> Response {
+fn manifest_response(manifest: Manifest, digest: &str, head: bool) -> Response {
     let builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, &manifest.media_type)
@@ -391,7 +451,7 @@ fn manifest_response(manifest: &Manifest, digest: &str, head: bool) -> Response 
     let body = if head {
         Body::empty()
     } else {
-        Body::from(manifest.bytes.clone())
+        Body::from(manifest.bytes)
     };
     builder
         .body(body)
@@ -448,7 +508,7 @@ fn fresh_tag(state: &AppState, index: &str, repo: &str, tag: &str, head: bool) -
     if (state.clock)().saturating_sub(fetched_at) >= state.ttl_secs {
         return Ok(None);
     }
-    Ok(store::get_manifest(&state.meta, &digest)?.map(|manifest| manifest_response(&manifest, &digest, head)))
+    Ok(store::get_manifest(&state.meta, &digest)?.map(|manifest| manifest_response(manifest, &digest, head)))
 }
 
 /// A gateway fault for an upstream manifest failure. Callers treat an "absent" status as a member

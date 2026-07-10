@@ -106,14 +106,17 @@ pub async fn stream_detail(state: Arc<AppState>, position: usize, project: Strin
         return Ok(PageOutcome::Fallback);
     }
     let route = index.route.clone();
-    let Some((cached_name, client, offline, context)) = streaming_parts(&state, index, &project)? else {
-        return Ok(PageOutcome::Fallback);
-    };
-
-    let hot_key = state.hot_key(&route, &project);
+    let hot_key = state.hot_key(&route, &project, super::SIMPLE_JSON);
+    // A hot hit is a lookup and a memcpy; take it before the per-request work in `streaming_parts`
+    // (upstream client build, upload/override scans, page context). Only a page that already streamed
+    // through the transform path can be hot, so this never shadows a Fallback the miss path would pick.
     if let Some(bytes) = state.hot_fresh(&hot_key) {
         return Ok(PageOutcome::Ready(bytes));
     }
+
+    let Some((cached_name, client, offline, context)) = streaming_parts(&state, index, &project)? else {
+        return Ok(PageOutcome::Fallback);
+    };
 
     let key = format!("{cached_name}/{project}");
     if offline {
@@ -131,7 +134,7 @@ pub async fn stream_detail(state: Arc<AppState>, position: usize, project: Strin
 
     let gate = flight_gate(&state, &key);
     let guard = gate.lock_owned().await;
-    if let Some(bytes) = state.hot_fresh(&state.hot_key(&route, &project)) {
+    if let Some(bytes) = state.hot_fresh(&state.hot_key(&route, &project, super::SIMPLE_JSON)) {
         return Ok(PageOutcome::Ready(bytes));
     }
     if let Some(record) = fresh_cached(&state, &key)? {
@@ -312,7 +315,7 @@ impl FreshJsonStream {
                     fresh_secs: max_age,
                     body: raw,
                 };
-                let expires_at = record.fetched_at_unix + record.fresh_secs.unwrap_or(self.state.ttl_secs);
+                let expires_at = record.fetched_at_unix + super::freshness_secs(self.state.ttl_secs, record.fresh_secs);
                 #[rustfmt::skip]
                 persist_streamed(&self.state, &self.key, &self.cached_name, &self.project, &record, &summary)?;
                 spawn_metadata_backfill(self.state.clone(), self.route.clone(), &summary.registrations);
@@ -600,7 +603,7 @@ fn live_stream(
                         fresh_secs: live.fresh_secs,
                         body: std::mem::take(&mut raw),
                     };
-                    let expires_at = record.fetched_at_unix + record.fresh_secs.unwrap_or(state.ttl_secs);
+                    let expires_at = record.fetched_at_unix + super::freshness_secs(state.ttl_secs, record.fresh_secs);
                     // One batched transaction, awaited before the body closes: every byte has been
                     // sent already, and a client cannot act on the page before EOF, so downloads
                     // always find their file registrations.

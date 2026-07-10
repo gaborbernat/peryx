@@ -9,26 +9,46 @@ environment variables, which override the file. Precedence is `defaults < TOML f
 
 ## Top level
 
-| Setting                   | Flag              | Environment            | TOML key         | Default      |
-| ------------------------- | ----------------- | ---------------------- | ---------------- | ------------ |
-| Bind host                 | `--host`          | `PERYX_HOST`           | `host`           | `127.0.0.1`  |
-| Bind port                 | `--port`          | `PERYX_PORT`           | `port`           | `4433`       |
-| Data directory            | `--data-dir`      | `PERYX_DATA_DIR`       | `data_dir`       | `peryx-data` |
-| Offline mode              | `--offline`       | `PERYX_OFFLINE`        | `offline`        | `false`      |
-| Config file               | `--config` / `-c` | (n/a)                  | (n/a)            | (none)       |
-| Cache freshness (seconds) | (file/env only)   | `PERYX_CACHE_TTL_SECS` | `cache_ttl_secs` | `300`        |
-| Indexes                   | (file only)       | (n/a)                  | `[[index]]`      | (see below)  |
-| Rate limits               | (file only)       | (n/a)                  | `[rate_limit]`   | (see below)  |
+| Setting                   | Flag              | Environment             | TOML key          | Default      |
+| ------------------------- | ----------------- | ----------------------- | ----------------- | ------------ |
+| Bind host                 | `--host`          | `PERYX_HOST`            | `host`            | `127.0.0.1`  |
+| Bind port                 | `--port`          | `PERYX_PORT`            | `port`            | `4433`       |
+| Data directory            | `--data-dir`      | `PERYX_DATA_DIR`        | `data_dir`        | `peryx-data` |
+| Offline mode              | `--offline`       | `PERYX_OFFLINE`         | `offline`         | `false`      |
+| Config file               | `--config` / `-c` | (n/a)                   | (n/a)             | (none)       |
+| Cache freshness (seconds) | (file/env only)   | `PERYX_CACHE_TTL_SECS`  | `cache_ttl_secs`  | `300`        |
+| Page cache budget (bytes) | (file/env only)   | `PERYX_HOT_CACHE_BYTES` | `hot_cache_bytes` | `268435456`  |
+| Stale-on-error bound (s)  | (file/env only)   | `PERYX_MAX_STALE_SECS`  | `max_stale_secs`  | `300`        |
+| Indexes                   | (file only)       | (n/a)                   | `[[index]]`       | (see below)  |
+| Rate limits               | (file only)       | (n/a)                   | `[rate_limit]`    | (see below)  |
 
 Environment variables sit between the file and flags: a `PERYX_*` value overrides the TOML file, and a flag overrides
 the variable. Only scalar settings are environment-configurable. The `[[index]]` topology and `[rate_limit]` block stay
 file-only, since neither maps to a flat variable. An empty variable is treated as unset. The `[log]` block also reads
 variables (`PERYX_LOG_LEVEL`, `PERYX_LOG_FORMAT`, `PERYX_LOG_SINK`, `PERYX_LOG_FILE`); see [`[log]`](#log).
 
-`cache_ttl_secs` is a fallback: when an upstream response carries a usable `Cache-Control` lifetime (`s-maxage` or
-`max-age`), that lifetime governs the page instead. The fallback applies when the header is absent,
-`no-cache`/`no-store`, or zero. Artifacts never expire; they are content-addressed by sha256, so a changed upstream file
-is a new entry on the page rather than a mutation.
+`cache_ttl_secs` is both a fallback and a ceiling. When an upstream response carries a usable `Cache-Control` lifetime
+(`s-maxage` or `max-age`) that is **shorter**, that lifetime governs the page; a longer one is clamped to
+`cache_ttl_secs`. The fallback applies when the header is absent, `no-cache`/`no-store`, or zero.
+
+The ceiling matters because `Cache-Control` is the upstream's opinion, not yours. An upstream — or any CDN in front of
+it — answering `max-age=31536000` would otherwise pin a page in your cache for a year with no revalidation. Raise
+`cache_ttl_secs` if you want to trust a long upstream lifetime; lower it to revalidate sooner than the upstream asks.
+
+Artifacts never expire; they are content-addressed by sha256, so a changed upstream file is a new entry on the page
+rather than a mutation.
+
+`max_stale_secs` bounds the other direction. When the upstream is unreachable or answers `5xx`, peryx keeps serving the
+last page it fetched rather than failing a build over a blip — but only for this long past the page's freshness window.
+Beyond it the upstream failure surfaces instead, because a cache that answers with whatever it last saw, forever, has
+stopped being a cache and become a fork. Set it to `0` to serve stale without limit, which is what mirroring a knowingly
+unreliable upstream asks for; `offline = true` below is the unconditional form.
+
+`hot_cache_bytes` is the memory budget for the transformed-page cache, where a warm request is a lookup, an expiry
+check, and a memcpy. It trades memory against warm-serve speed and nothing else: every entry is re-derivable from the
+cached raw page, so a smaller budget only lowers the hit rate, and `0` turns the cache off so each warm page pays its
+transform again. Lower it on a memory-tight host; raise it when a few projects with very large index pages (`boto3` and
+`numpy` run to megabytes of JSON) carry the traffic. The PyPI driver is the only ecosystem that populates it today.
 
 `offline = true` disables upstream network access for configured cached indexes. Whatever an ecosystem has cached serves
 from disk: PyPI project pages, PEP 658 metadata siblings, and wheels; OCI manifests and blobs. A cold cached-index miss

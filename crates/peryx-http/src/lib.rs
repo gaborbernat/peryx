@@ -16,7 +16,10 @@ pub mod state;
 pub mod webhook;
 
 pub use router::router;
-pub use state::{AppState, Index, IndexDescription, IndexKind, RuntimeOptions, describe_indexes};
+pub use state::{
+    AppState, DEFAULT_HOT_CACHE_BYTES, DEFAULT_MAX_STALE_SECS, Index, IndexDescription, IndexKind, RuntimeOptions,
+    describe_indexes,
+};
 
 #[cfg(test)]
 mod tests;

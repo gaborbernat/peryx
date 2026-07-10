@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::upload;
 use peryx_http::rate_limit::UpstreamPermit;
-use peryx_http::state::{AppState, IndexKind};
+use peryx_http::state::{AppState, Index, IndexKind};
 use peryx_policy::PolicyDenial;
 use peryx_storage::meta::CachedIndex;
 use peryx_upstream::UpstreamClient;
@@ -154,8 +154,57 @@ pub(crate) fn fresh_cached(state: &AppState, key: &str) -> Result<Option<CachedI
 }
 
 /// A record's freshness lifetime in seconds.
-fn freshness(state: &AppState, record: &CachedIndex) -> i64 {
-    record.fresh_secs.unwrap_or(state.ttl_secs)
+const fn freshness(state: &AppState, record: &CachedIndex) -> i64 {
+    freshness_secs(state.ttl_secs, record.fresh_secs)
+}
+
+/// The hot-cache variant holding a project's PEP 691 JSON page.
+pub(crate) const SIMPLE_JSON: &str = "simple.json";
+/// The hot-cache variant holding a project's PEP 503 HTML page.
+pub const SIMPLE_HTML: &str = "simple.html";
+/// The hot-cache variant holding a project's legacy JSON, whose release form carries its version.
+pub const LEGACY_JSON: &str = "legacy.json";
+
+/// When a rendered representation of `project` may be cached, and until when.
+///
+/// A rendered page is only safe to keep while the page it was rendered from is itself fresh, so the
+/// expiry is that page's, never a new one. `None` means do not cache: the index is not a proxy holding
+/// a cached page, or its policy filters what a project serves and the filtering is not in this key.
+///
+/// # Errors
+/// Returns a store error when the cached page cannot be read.
+pub fn rendered_expiry(state: &AppState, index: &Index, project: &str) -> Result<Option<i64>, CacheError> {
+    if index.policy.active() || !matches!(index.kind, IndexKind::Cached { .. }) {
+        return Ok(None);
+    }
+    let key = format!("{}/{project}", index.name);
+    Ok(fresh_cached(state, &key)?.map(|record| record.fetched_at_unix + freshness(state, &record)))
+}
+
+/// Whether a page past its freshness window may still answer while the upstream cannot be reached.
+///
+/// Serving something old beats serving nothing while an upstream reboots, but only for a while: a
+/// cache that answers with whatever it last saw, forever, has stopped being a cache and started being
+/// a fork. `max_stale_secs` bounds the outage a stale page papers over. `0` removes the bound, which
+/// is what an operator deliberately mirroring an unreliable upstream asks for.
+pub(crate) fn servable_stale(state: &AppState, record: &CachedIndex) -> bool {
+    if state.max_stale_secs == 0 {
+        return true;
+    }
+    (state.clock)() - record.fetched_at_unix < freshness(state, record) + state.max_stale_secs
+}
+
+/// How long a page stays fresh: the lifetime upstream granted, never longer than the configured one.
+///
+/// `Cache-Control` is the upstream's opinion, and an upstream — or any CDN that fronts it — answering
+/// `max-age=31536000` would otherwise pin a page for a year with no revalidation. `ttl_secs` is both
+/// the fallback when no lifetime is granted and the ceiling when too much is: a shorter upstream
+/// lifetime is honoured, a longer one is not.
+pub(crate) const fn freshness_secs(ttl_secs: i64, fresh_secs: Option<i64>) -> i64 {
+    match fresh_secs {
+        Some(granted) if granted < ttl_secs => granted,
+        _ => ttl_secs,
+    }
 }
 
 /// The route a cached index's pages are attributed to in metrics.

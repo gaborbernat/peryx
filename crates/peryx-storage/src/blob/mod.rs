@@ -11,6 +11,7 @@ use sha2::{Digest as _, Sha256};
 
 mod backend;
 mod error;
+mod s3;
 mod storage;
 mod store;
 
@@ -19,6 +20,7 @@ pub use backend::{
     BlobTail, BlobWrite,
 };
 pub use error::{BlobError, BlobErrorContext, BlobErrorKind, BlobOperation, BlobScanError};
+pub use s3::{S3Addressing, S3Backend, S3Client, S3Config, S3ConfigError, S3Credentials, S3Error, S3Settings};
 pub use storage::{BlobBlocking, BlobStorage};
 pub use store::{BlobEntry, BlobStore, PendingBlob, StagedBlob};
 

@@ -3965,21 +3965,28 @@ dependencies = [
 name = "peryx-storage"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "bytes",
  "flate2",
  "fs4",
  "futures-util",
+ "percent-encoding",
  "peryx-identity",
  "peryx-policy",
  "redb",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokio",
+ "tracing",
  "uuid",
+ "wiremock",
  "zip",
 ]
 

@@ -121,6 +121,10 @@ impl BlobStore {
         self.root.join(".leases")
     }
 
+    pub(crate) fn staging_dir(&self) -> PathBuf {
+        self.root.clone()
+    }
+
     /// Whether the blob is present.
     #[must_use]
     pub fn exists(&self, digest: &Digest) -> bool {

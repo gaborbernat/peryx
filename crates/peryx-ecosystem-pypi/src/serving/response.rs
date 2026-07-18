@@ -146,6 +146,22 @@ pub fn file_response(result: Result<bytes::Bytes, CacheError>, context: CacheCon
     }
 }
 
+/// Map a provenance-bytes result to a response, tagged with the PEP 740 integrity media type and the
+/// same immutable caching a distribution's other digest-addressed representations carry.
+pub fn provenance_response(result: Result<bytes::Bytes, CacheError>, context: CacheContext<'_>) -> Response {
+    match result {
+        Ok(body) => (
+            [
+                (header::CONTENT_TYPE, crate::attestation::PROVENANCE_MEDIA_TYPE),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            body,
+        )
+            .into_response(),
+        Err(err) => cache_error_response(&err, context),
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct CacheContext<'a> {
     operation: &'static str,
@@ -189,6 +205,16 @@ impl<'a> CacheContext<'a> {
     pub(super) const fn metadata(index: &'a str, digest: &'a str, filename: &'a str) -> Self {
         Self {
             operation: "metadata fetch",
+            index: Some(index),
+            project: None,
+            digest: Some(digest),
+            filename: Some(filename),
+        }
+    }
+
+    pub(super) const fn provenance(index: &'a str, digest: &'a str, filename: &'a str) -> Self {
+        Self {
+            operation: "provenance fetch",
             index: Some(index),
             project: None,
             digest: Some(digest),
@@ -286,6 +312,25 @@ mod tests {
     use peryx_storage::meta::MetaError;
 
     use super::*;
+
+    #[test]
+    fn test_provenance_response_tags_the_integrity_media_type_and_maps_errors() {
+        let served = provenance_response(
+            Ok(bytes::Bytes::from_static(br#"{"version":1}"#)),
+            CacheContext::provenance("root/pypi", "abc", "pkg-1.0-py3-none-any.whl.provenance"),
+        );
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(
+            served.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/vnd.pypi.integrity.v1+json"
+        );
+
+        let missing = provenance_response(
+            Err(CacheError::FileNotFound),
+            CacheContext::provenance("root/pypi", "abc", "pkg-1.0-py3-none-any.whl.provenance"),
+        );
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
 
     #[test]
     fn test_cache_error_status_maps_store_and_policy_errors() {

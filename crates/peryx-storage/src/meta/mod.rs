@@ -16,6 +16,7 @@ mod job;
 mod journal;
 mod policy_decision;
 mod quota;
+mod role_grant;
 mod user;
 mod webhook;
 mod writer;
@@ -33,6 +34,7 @@ pub use quota::{
     AccountingClass, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage, QuotaRepairReport,
     QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
 };
+pub use role_grant::RoleGrantStoreError;
 pub use user::UserStoreError;
 pub use webhook::{NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus};
 
@@ -65,6 +67,7 @@ const USER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user");
 const USER_NAME: TableDefinition<&str, &str> = TableDefinition::new("server_user_name");
 const USER_EVENT: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_event");
 const USER_VERIFIER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_verifier");
+const ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant");
 const SERIAL_KEY: &str = "serial";
 const WEBHOOK_SERIAL_KEY: &str = "webhook_delivery";
 const JOB_SERIAL_KEY: &str = "job_run";
@@ -141,6 +144,7 @@ impl MetaStore {
             txn.open_table(USER_NAME)?;
             txn.open_table(USER_EVENT)?;
             txn.open_table(USER_VERIFIER)?;
+            txn.open_table(ROLE_GRANT)?;
         }
         txn.commit()?;
         Ok(Self { db: Arc::new(db) })

@@ -10,6 +10,7 @@
 //! therefore never depends on the serving layer that hosts it, only on the seam it fills.
 
 pub mod access;
+pub mod authz;
 pub mod body;
 pub mod conditional;
 pub mod discovery;

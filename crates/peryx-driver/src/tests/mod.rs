@@ -1,4 +1,5 @@
 mod access_tests;
+mod authz_tests;
 mod body_tests;
 mod conditional_tests;
 mod range_tests;

@@ -18,10 +18,16 @@
 //! [`authorize_publish`] is the other way grants are approved: a CI job presents an OIDC identity token
 //! instead of a secret, and a configured [`TrustedPublisher`] turns its verified claims into the same
 //! grants `mint` signs — trusted publishing without a long-lived credential to rotate.
+//!
+//! [`grants_permit`] is the second access model, for persistent users rather than per-index tokens: a
+//! [`UserId`] holds one of the fixed [`Role`]s over a [`GrantScope`], and a decision asks whether that
+//! user's [`RoleGrant`]s permit a [`Scope`] on a [`Resource`]. It is deny-by-default and independent of
+//! the token ACL, so a legacy `upload_token` keeps resolving through [`authorize`] untouched.
 
 mod acl;
 mod oidc;
 mod password;
+mod roles;
 mod token;
 mod trusted_publisher;
 mod user;
@@ -35,6 +41,7 @@ pub use acl::{
 };
 pub use oidc::{ExchangeError, ExchangedToken, IdentityExchange, OidcRuntime, PublisherBinding};
 pub use password::{PasswordCheck, PasswordError, PasswordPolicy, PasswordVerifier};
+pub use roles::{GrantScope, Resource, Role, RoleGrant, Scope, grants_permit};
 pub use token::{Signer, TokenError, VerifiedToken};
 pub use trusted_publisher::{PublishClaims, PublishDenial, TrustedPublisher, authorize_publish};
 pub use user::{ServerUser, UserId, UserLifecycleChange, UserLifecycleEvent, UserName, UserNameError, UserState};

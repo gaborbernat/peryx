@@ -1,0 +1,176 @@
+//! Role-based access control, the decision model that sits beside the per-index token ACL.
+//!
+//! The token ACL in [`crate::acl`] answers "does this credential's grant cover this project?"; a
+//! legacy `upload_token` still resolves entirely through it. This module answers a different question
+//! that the server user model asks: "does this *user* hold a role that permits this scope on this
+//! resource?" A [`Principal`](crate::Principal) is a resolved credential; a [`UserId`] is a persistent
+//! account, and roles bind to the account.
+//!
+//! The model is deny-by-default after [Kubernetes authorization]: a decision starts denied and a grant
+//! must affirmatively cover both the [`Scope`] and the [`Resource`] to allow it. Roles are fixed after
+//! [NIST RBAC] — an operator grants a user one of four built-in roles rather than assembling scopes by
+//! hand — so the scope set of a role is a constant this module owns, not persisted state that could
+//! drift. Only the binding of a user to a role over a [`GrantScope`] is persisted.
+//!
+//! [Kubernetes authorization]: https://kubernetes.io/docs/reference/access-authn-authz/authorization/
+//! [NIST RBAC]: https://csrc.nist.gov/projects/role-based-access-control
+
+use serde::{Deserialize, Serialize};
+
+use crate::UserId;
+
+/// Whether any of a user's grants permits `scope` on `resource`. Deny-by-default: an empty slice, an
+/// unknown user's (also empty) slice, and grants that miss on either axis all return `false`.
+#[must_use]
+pub fn grants_permit(grants: &[RoleGrant], scope: Scope, resource: &Resource) -> bool {
+    grants.iter().any(|grant| grant.permits(scope, resource))
+}
+
+/// A persisted binding of a user to a role over a reach.
+///
+/// The stored authority a decision reads; [`Scope`] and [`Resource`] never persist, they are decision
+/// inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleGrant {
+    pub user: UserId,
+    pub role: Role,
+    pub scope: GrantScope,
+}
+
+impl RoleGrant {
+    #[must_use]
+    pub const fn new(user: UserId, role: Role, scope: GrantScope) -> Self {
+        Self { user, role, scope }
+    }
+
+    /// Whether this grant permits `scope` on `resource`: the role must carry the scope and the reach
+    /// must cover the resource. Either miss denies.
+    #[must_use]
+    pub fn permits(&self, scope: Scope, resource: &Resource) -> bool {
+        self.role.carries(scope) && self.scope.covers(resource)
+    }
+}
+
+/// A built-in role, the unit an operator grants.
+///
+/// The scope set of each is fixed here, so a grant persists only which role a user holds and never a
+/// hand-assembled permission set that could drift from the four the server understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Every scope, including operator data: the role a server administrator holds.
+    Administrator,
+    /// Read, write, and delete on the granted repository, and nothing off it.
+    RepositoryPublisher,
+    /// Read on the granted repository, and nothing more.
+    RepositoryReader,
+    /// Read operator data, without any repository grant.
+    Operator,
+}
+
+impl Role {
+    /// Every role, in a stable order, for help text and the UI.
+    pub const ALL: &'static [Self] = &[
+        Self::Administrator,
+        Self::RepositoryPublisher,
+        Self::RepositoryReader,
+        Self::Operator,
+    ];
+
+    /// The stable identifier used in config, the API, the UI, and security events.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Administrator => "administrator",
+            Self::RepositoryPublisher => "repository_publisher",
+            Self::RepositoryReader => "repository_reader",
+            Self::Operator => "operator",
+        }
+    }
+
+    /// The scopes this role carries. Administrator is the union; a repository role carries no operator
+    /// scope, which is what stops a publisher from reading operator data however it is granted.
+    #[must_use]
+    pub const fn scopes(self) -> &'static [Scope] {
+        match self {
+            Self::Administrator => &[
+                Scope::RepositoryRead,
+                Scope::RepositoryWrite,
+                Scope::RepositoryDelete,
+                Scope::OperatorRead,
+            ],
+            Self::RepositoryPublisher => &[Scope::RepositoryRead, Scope::RepositoryWrite, Scope::RepositoryDelete],
+            Self::RepositoryReader => &[Scope::RepositoryRead],
+            Self::Operator => &[Scope::OperatorRead],
+        }
+    }
+
+    fn carries(self, scope: Scope) -> bool {
+        self.scopes().contains(&scope)
+    }
+}
+
+/// A permission scope: the stable name of one thing a request may do. A role is a set of these, and a
+/// decision names the one it requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    RepositoryRead,
+    RepositoryWrite,
+    RepositoryDelete,
+    OperatorRead,
+}
+
+impl Scope {
+    /// The stable identifier used in security events. The colon namespace keeps repository and operator
+    /// scopes from colliding as the set grows.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RepositoryRead => "repository:read",
+            Self::RepositoryWrite => "repository:write",
+            Self::RepositoryDelete => "repository:delete",
+            Self::OperatorRead => "operator:read",
+        }
+    }
+}
+
+/// The reach of a grant: the whole server, or one named repository.
+///
+/// A server grant covers every resource; a repository grant covers only its own repository and never
+/// operator data, so a grant cannot widen a role's reach past the resource it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GrantScope {
+    Server,
+    Repository { name: String },
+}
+
+impl GrantScope {
+    fn covers(&self, resource: &Resource) -> bool {
+        match (self, resource) {
+            (Self::Server, _) => true,
+            (Self::Repository { name }, Resource::Repository(target)) => name == target,
+            (Self::Repository { .. }, Resource::Operator) => false,
+        }
+    }
+}
+
+/// The thing a decision is taken against. A repository scope is checked against a named repository;
+/// operator scopes are checked against the single server-wide [`Resource::Operator`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resource {
+    Repository(String),
+    Operator,
+}
+
+impl Resource {
+    /// The resource class and the name a security event records, so a denial is legible without
+    /// leaking a credential — a resource name is not one.
+    #[must_use]
+    pub fn fields(&self) -> (&'static str, &str) {
+        match self {
+            Self::Repository(name) => ("repository", name),
+            Self::Operator => ("operator", ""),
+        }
+    }
+}

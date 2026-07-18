@@ -9,6 +9,7 @@ mod journal_tests;
 mod policy_decision_tests;
 mod quota_tests;
 mod replica_tests;
+mod role_grant_tests;
 mod user_tests;
 mod webhook_tests;
 mod writer_tests;

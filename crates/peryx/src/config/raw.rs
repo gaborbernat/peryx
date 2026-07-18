@@ -77,6 +77,28 @@ pub struct PartialConfig {
     pub auth: PartialAuthConfig,
     pub replication: Option<RawReplication>,
     pub jobs: PartialJobsConfig,
+    /// A `[blob]` table selecting the blob storage backend.
+    pub blob: Option<RawBlobStorage>,
+}
+
+/// The raw `[blob]` table selecting the blob storage backend before validation. Secret-free by
+/// design: S3 credentials resolve from the environment, never from configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "backend", rename_all = "lowercase", deny_unknown_fields)]
+pub enum RawBlobStorage {
+    Filesystem,
+    S3 {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        prefix: Option<String>,
+        path_style: Option<bool>,
+        timeout_secs: Option<u64>,
+        max_retries: Option<u32>,
+        multipart_threshold_bytes: Option<u64>,
+        part_size_bytes: Option<u64>,
+        upload_concurrency: Option<usize>,
+    },
 }
 
 /// The `[jobs]` half of [`PartialConfig`].

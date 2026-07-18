@@ -27,6 +27,9 @@ fn filesystem_context<T>(
 pub enum BlobDurability {
     /// The selected filesystem acknowledged the write. Crash guarantees depend on that filesystem.
     Filesystem,
+    /// An S3-compatible object store acknowledged the write. Crash and replication guarantees are the
+    /// object store's.
+    ObjectStore,
 }
 
 impl BlobDurability {
@@ -34,6 +37,7 @@ impl BlobDurability {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Filesystem => "filesystem",
+            Self::ObjectStore => "object-store",
         }
     }
 }
@@ -222,6 +226,7 @@ pub struct BlobWrite {
 
 enum BlobWriteBackend {
     Filesystem(FilesystemWrite),
+    S3(super::s3::S3Write),
 }
 
 struct FilesystemWrite {
@@ -244,6 +249,7 @@ pub struct BlobStaged {
 #[derive(Debug)]
 enum BlobStagedBackend {
     Filesystem { store: BlobStore, staged: StagedBlob },
+    S3(Box<super::s3::S3Staged>),
 }
 
 impl BlobWrite {
@@ -266,6 +272,12 @@ impl BlobWrite {
         })
     }
 
+    pub(crate) const fn s3(write: super::s3::S3Write) -> Self {
+        Self {
+            backend: BlobWriteBackend::S3(write),
+        }
+    }
+
     /// Append a chunk without buffering the complete blob.
     ///
     /// # Errors
@@ -273,6 +285,7 @@ impl BlobWrite {
     pub async fn write_chunk(&mut self, chunk: Bytes) -> Result<(), BlobError> {
         match &mut self.backend {
             BlobWriteBackend::Filesystem(write) => write.write_chunk(chunk).await,
+            BlobWriteBackend::S3(write) => write.write_chunk(chunk).await,
         }
     }
 
@@ -283,6 +296,7 @@ impl BlobWrite {
     pub async fn flush(&mut self) -> Result<u64, BlobError> {
         match &mut self.backend {
             BlobWriteBackend::Filesystem(write) => write.flush().await,
+            BlobWriteBackend::S3(write) => write.flush().await,
         }
     }
 
@@ -291,6 +305,7 @@ impl BlobWrite {
     pub fn tail(&self) -> Option<BlobTail> {
         match &self.backend {
             BlobWriteBackend::Filesystem(write) => Some(write.tail.clone()),
+            BlobWriteBackend::S3(write) => write.tail(),
         }
     }
 
@@ -299,7 +314,10 @@ impl BlobWrite {
     /// # Errors
     /// Returns a contextual commit error on mismatch or storage failure.
     pub async fn commit(self, expected: &Digest) -> Result<(), BlobError> {
-        self.finish().await?.commit_as(expected).await
+        match self.backend {
+            BlobWriteBackend::Filesystem(_) => self.finish().await?.commit_as(expected).await,
+            BlobWriteBackend::S3(write) => write.commit(expected).await,
+        }
     }
 
     /// Finish hashing and syncing the stage without publishing it.
@@ -309,6 +327,7 @@ impl BlobWrite {
     pub async fn finish(self) -> Result<BlobStaged, BlobError> {
         match self.backend {
             BlobWriteBackend::Filesystem(write) => write.finish().await,
+            BlobWriteBackend::S3(write) => write.finish().await,
         }
     }
 
@@ -319,6 +338,7 @@ impl BlobWrite {
     pub async fn abort(self) -> Result<(), BlobError> {
         match self.backend {
             BlobWriteBackend::Filesystem(write) => write.abort().await,
+            BlobWriteBackend::S3(write) => write.abort().await,
         }
     }
 }
@@ -433,10 +453,17 @@ impl BlobStaged {
         }
     }
 
+    pub(crate) fn s3(staged: super::s3::S3Staged) -> Self {
+        Self {
+            backend: Some(BlobStagedBackend::S3(Box::new(staged))),
+        }
+    }
+
     #[must_use]
     pub const fn digest(&self) -> &Digest {
         match self.backend() {
             BlobStagedBackend::Filesystem { staged, .. } => staged.digest(),
+            BlobStagedBackend::S3(staged) => staged.digest(),
         }
     }
 
@@ -444,6 +471,7 @@ impl BlobStaged {
     pub const fn len(&self) -> u64 {
         match self.backend() {
             BlobStagedBackend::Filesystem { staged, .. } => staged.len(),
+            BlobStagedBackend::S3(staged) => staged.len(),
         }
     }
 
@@ -451,6 +479,7 @@ impl BlobStaged {
     pub const fn is_empty(&self) -> bool {
         match self.backend() {
             BlobStagedBackend::Filesystem { staged, .. } => staged.is_empty(),
+            BlobStagedBackend::S3(staged) => staged.is_empty(),
         }
     }
 
@@ -458,6 +487,7 @@ impl BlobStaged {
     pub fn with_materialized<T>(&self, inspect: impl FnOnce(&Path) -> T) -> T {
         match self.backend() {
             BlobStagedBackend::Filesystem { staged, .. } => inspect(staged.path()),
+            BlobStagedBackend::S3(staged) => staged.inner().with_materialized(inspect),
         }
     }
 
@@ -469,16 +499,18 @@ impl BlobStaged {
     /// # Panics
     /// Panics if the internal blocking task panics.
     pub async fn commit(mut self) -> Result<(), BlobError> {
-        let permit = match self.backend() {
-            BlobStagedBackend::Filesystem { store, .. } => store.worker_permit().await,
-        };
-        let backend = self.take_backend();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            Self::commit_backend(backend)
-        })
-        .await
-        .expect("blob commit task never panics")
+        match self.take_backend() {
+            BlobStagedBackend::Filesystem { store, staged } => {
+                let permit = store.worker_permit().await;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    Self::commit_backend(BlobStagedBackend::Filesystem { store, staged })
+                })
+                .await
+                .expect("blob commit task never panics")
+            }
+            BlobStagedBackend::S3(staged) => staged.commit().await,
+        }
     }
 
     pub(crate) fn commit_blocking(mut self) -> Result<(), BlobError> {
@@ -493,7 +525,7 @@ impl BlobStaged {
     pub async fn commit_as(self, expected: &Digest) -> Result<(), BlobError> {
         if self.digest() != expected {
             let error = BlobError::digest_mismatch(expected, self.digest()).with_context(
-                "filesystem",
+                self.backend_name(),
                 BlobOperation::Commit,
                 Some(expected),
             );
@@ -506,7 +538,7 @@ impl BlobStaged {
     pub(crate) fn commit_as_blocking(self, expected: &Digest) -> Result<(), BlobError> {
         if self.digest() != expected {
             let error = BlobError::digest_mismatch(expected, self.digest()).with_context(
-                "filesystem",
+                self.backend_name(),
                 BlobOperation::Commit,
                 Some(expected),
             );
@@ -524,16 +556,18 @@ impl BlobStaged {
     /// # Panics
     /// Panics if the internal blocking task panics.
     pub async fn abort(mut self) -> Result<(), BlobError> {
-        let permit = match self.backend() {
-            BlobStagedBackend::Filesystem { store, .. } => store.worker_permit().await,
-        };
-        let backend = self.take_backend();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            Self::abort_backend(backend)
-        })
-        .await
-        .expect("blob abort task never panics")
+        match self.take_backend() {
+            BlobStagedBackend::Filesystem { store, staged } => {
+                let permit = store.worker_permit().await;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    Self::abort_backend(BlobStagedBackend::Filesystem { store, staged })
+                })
+                .await
+                .expect("blob abort task never panics")
+            }
+            BlobStagedBackend::S3(staged) => staged.abort().await,
+        }
     }
 
     fn abort_blocking(mut self) -> Result<(), BlobError> {
@@ -543,6 +577,13 @@ impl BlobStaged {
 
     const fn backend(&self) -> &BlobStagedBackend {
         self.backend.as_ref().expect("staged blob retains its backend")
+    }
+
+    const fn backend_name(&self) -> &'static str {
+        match self.backend() {
+            BlobStagedBackend::Filesystem { .. } => "filesystem",
+            BlobStagedBackend::S3(_) => "s3",
+        }
     }
 
     const fn take_backend(&mut self) -> BlobStagedBackend {
@@ -555,6 +596,13 @@ impl BlobStaged {
                 let digest = staged.digest().clone();
                 filesystem_context(store.commit_staged(staged), BlobOperation::Commit, Some(&digest))
             }
+            BlobStagedBackend::S3(_) => Err(
+                BlobError::unsupported("blocking commit on the s3 backend").with_context(
+                    "s3",
+                    BlobOperation::Commit,
+                    None,
+                ),
+            ),
         }
     }
 
@@ -563,6 +611,9 @@ impl BlobStaged {
             BlobStagedBackend::Filesystem { staged, .. } => staged
                 .abort()
                 .map_err(|error| error.with_context("filesystem", BlobOperation::Write, None)),
+            // The staged blob owns a local temp file; dropping it removes the stage. Nothing reached
+            // S3 without a commit, so there is no remote object to clean up.
+            BlobStagedBackend::S3(_) => Ok(()),
         }
     }
 }
@@ -605,12 +656,31 @@ impl BlobTail {
 #[derive(Debug)]
 pub struct BlobLease {
     path: PathBuf,
-    lock: std::fs::File,
-    coordination: std::fs::File,
-    _temporary: tempfile::TempPath,
+    guard: LeaseGuard,
+}
+
+/// What keeps a lease's materialized file alive and cleans it up on drop.
+#[derive(Debug)]
+enum LeaseGuard {
+    /// A hard-link or copy of a filesystem-store blob, coordinated with the store's lease cleanup.
+    Filesystem {
+        lock: std::fs::File,
+        coordination: std::fs::File,
+        _temporary: tempfile::TempPath,
+    },
+    /// A freshly downloaded object owned outright; its temp path removes itself on drop.
+    Downloaded { _temporary: tempfile::TempPath },
 }
 
 impl BlobLease {
+    /// Wrap a downloaded temp file as a lease. The file is removed when the lease drops.
+    pub(crate) fn downloaded(temporary: tempfile::TempPath) -> Self {
+        Self {
+            path: temporary.to_path_buf(),
+            guard: LeaseGuard::Downloaded { _temporary: temporary },
+        }
+    }
+
     pub(crate) fn pinned(path: &Path, lease_dir: &Path) -> Result<Self, std::io::Error> {
         std::fs::create_dir_all(lease_dir)?;
         let coordination = std::fs::OpenOptions::new()
@@ -641,9 +711,11 @@ impl BlobLease {
         fs4::fs_std::FileExt::unlock(&coordination)?;
         Ok(Self {
             path: temporary.to_path_buf(),
-            lock,
-            coordination,
-            _temporary: temporary,
+            guard: LeaseGuard::Filesystem {
+                lock,
+                coordination,
+                _temporary: temporary,
+            },
         })
     }
 
@@ -656,10 +728,13 @@ impl BlobLease {
 
 impl Drop for BlobLease {
     fn drop(&mut self) {
-        let _ = fs4::fs_std::FileExt::lock_shared(&self.coordination);
-        let _ = fs4::fs_std::FileExt::unlock(&self.lock);
-        let _ = std::fs::remove_file(&self.path);
-        let _ = fs4::fs_std::FileExt::unlock(&self.coordination);
+        // A downloaded lease owns its temp path, which removes the file on its own drop.
+        if let LeaseGuard::Filesystem { lock, coordination, .. } = &self.guard {
+            let _ = fs4::fs_std::FileExt::lock_shared(coordination);
+            let _ = fs4::fs_std::FileExt::unlock(lock);
+            let _ = std::fs::remove_file(&self.path);
+            let _ = fs4::fs_std::FileExt::unlock(coordination);
+        }
     }
 }
 
@@ -807,4 +882,58 @@ where
     .await
     .expect("blob backend task never panics")
     .map_err(|error| error.with_context("filesystem", operation, None))
+}
+
+#[cfg(test)]
+mod s3_staged_tests {
+    use bytes::Bytes;
+
+    use super::super::s3::{S3Backend, S3Config, S3Credentials, S3Settings};
+    use super::super::{BlobBackend, BlobErrorKind, BlobStaged};
+
+    fn backend(staging: &std::path::Path) -> S3Backend {
+        let settings = S3Settings {
+            endpoint: "https://s3.example.com".to_owned(),
+            bucket: "bucket".to_owned(),
+            prefix: String::new(),
+            region: "us-east-1".to_owned(),
+            path_style: true,
+            request_timeout: std::time::Duration::from_secs(5),
+            max_retries: 0,
+            multipart_threshold: 8,
+            part_size: 8,
+            upload_concurrency: 1,
+        };
+        S3Backend::new(
+            S3Config::new(settings).unwrap(),
+            S3Credentials {
+                access_key_id: "a".to_owned(),
+                secret_access_key: "b".to_owned(),
+                session_token: None,
+            },
+            staging.to_path_buf(),
+        )
+    }
+
+    async fn staged(backend: &S3Backend) -> BlobStaged {
+        let mut write = backend.begin().await.unwrap();
+        write.write_chunk(Bytes::from_static(b"local")).await.unwrap();
+        write.finish().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_s3_staged_rejects_a_blocking_commit() {
+        // Staging is local, so no S3 request is made; the blocking facade is unsupported for S3.
+        let dir = tempfile::tempdir().unwrap();
+        let backend = backend(dir.path());
+        let error = staged(&backend).await.commit_blocking().unwrap_err();
+        assert_eq!(error.kind(), BlobErrorKind::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn test_s3_staged_blocking_abort_drops_the_local_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = backend(dir.path());
+        staged(&backend).await.abort_blocking().unwrap();
+    }
 }

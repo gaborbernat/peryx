@@ -16,11 +16,67 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use peryx_ecosystem_oci::LibraryPrefix;
 
+use peryx_storage::blob::S3Credentials;
+
 use crate::config::{
-    AuthConfig, Config, IndexConfig, IndexKind, ReplicationConfig, SecretSource, TrustedPublisherConfig,
-    UpstreamConfig, UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
+    AuthConfig, BlobStorageConfig, Config, IndexConfig, IndexKind, ReplicationConfig, S3StorageConfig, SecretSource,
+    TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
 };
-use crate::server::{build_index_settings, build_indexes, build_router, build_state, upstream_auth};
+use crate::server::{
+    build_blob_storage, build_index_settings, build_indexes, build_router, build_state, upstream_auth,
+};
+
+fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
+    Config {
+        data_dir: dir.path().to_path_buf(),
+        blob: BlobStorageConfig::S3(S3StorageConfig {
+            endpoint: "https://s3.example.com".to_owned(),
+            bucket: "cache".to_owned(),
+            prefix: String::new(),
+            region: "us-east-1".to_owned(),
+            path_style: true,
+            request_timeout: Duration::from_secs(30),
+            max_retries: 3,
+            multipart_threshold: 16 << 20,
+            part_size: 16 << 20,
+            upload_concurrency: 4,
+        }),
+        ..Config::default()
+    }
+}
+
+fn test_credentials() -> S3Credentials {
+    S3Credentials {
+        access_key_id: "id".to_owned(),
+        secret_access_key: "secret".to_owned(),
+        session_token: None,
+    }
+}
+
+#[test]
+fn test_build_blob_storage_selects_the_filesystem_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Config::default()
+    };
+    let storage = build_blob_storage(&config, None).unwrap();
+    assert_eq!(storage.name(), "filesystem");
+}
+
+#[test]
+fn test_build_blob_storage_opens_the_s3_backend_with_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = build_blob_storage(&s3_blob_config(&dir), Some(test_credentials())).unwrap();
+    assert_eq!(storage.name(), "s3");
+}
+
+#[test]
+fn test_build_blob_storage_requires_s3_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = build_blob_storage(&s3_blob_config(&dir), None).unwrap_err();
+    assert!(error.to_string().contains("S3 credentials"), "{error}");
+}
 
 fn config_with(dir: &tempfile::TempDir, indexes: Vec<IndexConfig>) -> Config {
     Config {

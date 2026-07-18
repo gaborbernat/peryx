@@ -14,13 +14,14 @@ use std::collections::HashSet;
 
 use super::ConfigError;
 use super::model::{
-    AcmeConfig, AuthConfig, Config, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, IndexConfig,
-    IndexKind, JobsConfig, LogConfig, ReplicationConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig,
-    UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
+    AcmeConfig, AuthConfig, BlobStorageConfig, Config, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS,
+    IndexConfig, IndexKind, JobsConfig, LogConfig, ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig,
+    TokenConfig, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig,
+    WebhookSecret,
 };
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawIndex, RawJobSchedule, RawReplication, RawTls, RawToken, RawUpstream, RawWebhook,
+    RawAcme, RawBlobStorage, RawIndex, RawJobSchedule, RawReplication, RawTls, RawToken, RawUpstream, RawWebhook,
 };
 
 impl Config {
@@ -75,6 +76,9 @@ impl Config {
         if let Some(replication) = partial.replication {
             self.replication = Some(classify_replication(replication)?);
         }
+        if let Some(blob) = partial.blob {
+            self.blob = classify_blob(blob)?;
+        }
         self.jobs = self.jobs.apply(partial.jobs)?;
         Ok(self)
     }
@@ -107,6 +111,41 @@ const fn classify_schedule(index: usize, raw: RawJobSchedule) -> Result<Schedule
         job: raw.job,
         interval: Duration::from_secs(interval.get()),
     })
+}
+
+fn classify_blob(raw: RawBlobStorage) -> Result<BlobStorageConfig, ConfigError> {
+    let RawBlobStorage::S3 {
+        endpoint,
+        bucket,
+        region,
+        prefix,
+        path_style,
+        timeout_secs,
+        max_retries,
+        multipart_threshold_bytes,
+        part_size_bytes,
+        upload_concurrency,
+    } = raw
+    else {
+        return Ok(BlobStorageConfig::Filesystem);
+    };
+    let config = S3StorageConfig {
+        endpoint,
+        bucket,
+        region,
+        prefix: prefix.unwrap_or_default().trim_matches('/').to_owned(),
+        path_style: path_style.unwrap_or(false),
+        request_timeout: Duration::from_secs(timeout_secs.unwrap_or(30)),
+        max_retries: max_retries.unwrap_or(3),
+        multipart_threshold: multipart_threshold_bytes.unwrap_or(16 << 20),
+        part_size: part_size_bytes.unwrap_or(16 << 20),
+        upload_concurrency: upload_concurrency.unwrap_or(4),
+    };
+    // Validate through the backend's own builder so config and runtime agree on what is usable.
+    peryx_storage::blob::S3Config::new((&config).into()).map_err(|error| ConfigError::Blob {
+        reason: error.to_string(),
+    })?;
+    Ok(BlobStorageConfig::S3(config))
 }
 
 fn classify_replication(raw: RawReplication) -> Result<ReplicationConfig, ConfigError> {

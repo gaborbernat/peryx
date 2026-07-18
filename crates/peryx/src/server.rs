@@ -14,14 +14,37 @@ use peryx_events::webhook::{WebhookRuntime, WebhookTargetConfig};
 use peryx_http::router;
 use peryx_identity::{Action, Signer};
 use peryx_policy::{Policy, PolicyDecisionRecorder, PolicyEvaluation};
-use peryx_storage::blob::BlobStorage;
+use peryx_storage::blob::{BlobStorage, S3Config, S3Credentials};
 use peryx_storage::meta::{MetaStore, NewPolicyDecision};
 use peryx_upstream::{Auth, NamedUpstream, Netrc, UpstreamClient, UpstreamRouter, UpstreamTls, redact_url};
 
 use crate::config::{
-    AuthConfig, Config, IndexConfig, IndexKind as ConfigKind, ReplicationConfig, SecretSource, UpstreamTlsConfig,
-    WebhookSecret,
+    AuthConfig, BlobStorageConfig, Config, IndexConfig, IndexKind as ConfigKind, ReplicationConfig, SecretSource,
+    UpstreamTlsConfig, WebhookSecret,
 };
+
+/// Open the configured blob backend. S3 `credentials` are resolved once at the composition root and
+/// passed in, so this stays a pure function of the configuration.
+///
+/// # Errors
+/// Returns an error when the S3 backend is configured but credentials are absent, or the client
+/// cannot be built.
+pub(crate) fn build_blob_storage(config: &Config, credentials: Option<S3Credentials>) -> anyhow::Result<BlobStorage> {
+    match &config.blob {
+        BlobStorageConfig::Filesystem => Ok(BlobStorage::filesystem(config.data_dir.join("blobs"))),
+        BlobStorageConfig::S3(s3) => {
+            let credentials = credentials.context(
+                "resolve S3 credentials from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for the s3 blob backend",
+            )?;
+            let s3_config = S3Config::new(s3.into()).context("build S3 blob backend configuration")?;
+            Ok(BlobStorage::s3(
+                s3_config,
+                credentials,
+                config.data_dir.join("blob-staging"),
+            ))
+        }
+    }
+}
 
 /// Build the peryx router from configuration.
 ///
@@ -63,7 +86,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         meta.claim_writer_identity(identity)
             .with_context(|| format!("claim writer identity {identity:?}"))?;
     }
-    let blobs = BlobStorage::filesystem(config.data_dir.join("blobs"));
+    let blobs = build_blob_storage(config, S3Credentials::from_env())?;
     let configs = if configured_replica {
         let mut configs = config.indexes.clone();
         make_replica_configs(&mut configs);

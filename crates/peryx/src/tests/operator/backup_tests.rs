@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use rstest::rstest;
 
-use crate::config::{self, Config, IndexKind, JobsConfig, JobsMode, LogConfig, LogFormat, LogSink, SecretSource};
+use crate::config::{
+    self, BlobStorageConfig, Config, IndexKind, JobsConfig, JobsMode, LogConfig, LogFormat, LogSink, S3StorageConfig,
+    SecretSource,
+};
 use crate::operator;
 
 use super::backup_fixture;
@@ -367,6 +370,40 @@ fn test_backup_snapshots_where_the_upload_token_lives(#[case] source: SecretSour
 
     let snapshot = std::fs::read_to_string(backup.join("config.toml")).unwrap();
     assert!(snapshot.contains(expected), "{snapshot}");
+}
+
+#[test]
+fn test_backup_snapshots_the_s3_blob_backend_and_restores_it() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    drop(MetaStore::open(data_dir.join("peryx.redb")).unwrap());
+    let s3 = S3StorageConfig {
+        endpoint: "https://s3.example.com".to_owned(),
+        bucket: "cache".to_owned(),
+        prefix: "peryx".to_owned(),
+        region: "us-east-1".to_owned(),
+        path_style: true,
+        request_timeout: std::time::Duration::from_secs(20),
+        max_retries: 4,
+        multipart_threshold: 1024,
+        part_size: 2048,
+        upload_concurrency: 6,
+    };
+    let config = Config {
+        data_dir,
+        blob: BlobStorageConfig::S3(s3.clone()),
+        ..Config::default()
+    };
+    let backup = root.path().join("backup");
+    operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
+    let snapshot = std::fs::read_to_string(backup.join("config.toml")).unwrap();
+    assert!(snapshot.contains("backend = \"s3\""), "{snapshot}");
+    assert!(!snapshot.to_lowercase().contains("secret"), "{snapshot}");
+    let restored = Config::default()
+        .apply(config::from_toml(PathBuf::from("config.toml"), &snapshot).unwrap())
+        .unwrap();
+    assert_eq!(restored.blob, BlobStorageConfig::S3(s3));
 }
 
 #[test]

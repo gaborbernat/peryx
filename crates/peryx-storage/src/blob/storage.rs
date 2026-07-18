@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
+use super::s3::S3Backend;
 use super::{
     BlobBackend, BlobCapabilities, BlobEntry, BlobError, BlobLease, BlobMetadata, BlobOperation, BlobRead,
-    BlobScanError, BlobStaged, BlobStore, BlobWrite, Digest,
+    BlobScanError, BlobStaged, BlobStore, BlobWrite, Digest, S3Config, S3Credentials,
 };
 
 /// The blob backend selected for this process.
@@ -15,6 +16,11 @@ pub struct BlobStorage {
 #[derive(Debug, Clone)]
 enum Backend {
     Filesystem(BlobStore),
+    S3(Box<S3Backend>),
+}
+
+fn unsupported_blocking(operation: BlobOperation) -> BlobError {
+    BlobError::unsupported("blocking blob access on the s3 backend").with_context("s3", operation, None)
 }
 
 fn filesystem_context<T>(
@@ -35,11 +41,20 @@ impl BlobStorage {
         Self::from(BlobStore::new(root))
     }
 
+    /// Select the S3-compatible backend for `config`, staging local writes under `staging_dir`.
+    #[must_use]
+    pub fn s3(config: S3Config, credentials: S3Credentials, staging_dir: std::path::PathBuf) -> Self {
+        Self {
+            backend: Backend::S3(Box::new(S3Backend::new(config, credentials, staging_dir))),
+        }
+    }
+
     /// Stable backend name for status and error surfaces.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self.backend {
             Backend::Filesystem(_) => "filesystem",
+            Backend::S3(_) => "s3",
         }
     }
 
@@ -48,6 +63,7 @@ impl BlobStorage {
     pub fn capabilities(&self) -> BlobCapabilities {
         match &self.backend {
             Backend::Filesystem(store) => store.capabilities(),
+            Backend::S3(backend) => backend.capabilities(),
         }
     }
 
@@ -64,6 +80,7 @@ impl BlobStorage {
     pub async fn health(&self) -> Result<(), BlobError> {
         match &self.backend {
             Backend::Filesystem(store) => store.health().await,
+            Backend::S3(backend) => backend.health().await,
         }
     }
 
@@ -74,6 +91,7 @@ impl BlobStorage {
     pub async fn open(&self, digest: &Digest, range: Option<Range<u64>>) -> Result<BlobRead, BlobError> {
         match &self.backend {
             Backend::Filesystem(store) => store.open(digest.clone(), range).await,
+            Backend::S3(backend) => backend.open(digest.clone(), range).await,
         }
     }
 
@@ -96,6 +114,7 @@ impl BlobStorage {
     pub async fn head(&self, digest: &Digest) -> Result<Option<BlobMetadata>, BlobError> {
         match &self.backend {
             Backend::Filesystem(store) => BlobBackend::head(store, digest.clone()).await,
+            Backend::S3(backend) => backend.head(digest.clone()).await,
         }
     }
 
@@ -122,6 +141,15 @@ impl BlobStorage {
                 .await
                 .expect("blob presence task never panics")
             }
+            Backend::S3(backend) => {
+                let mut present = HashSet::with_capacity(digests.len());
+                for digest in digests {
+                    if backend.head(digest.clone()).await?.is_some() {
+                        present.insert(digest);
+                    }
+                }
+                Ok(present)
+            }
         }
     }
 
@@ -132,6 +160,7 @@ impl BlobStorage {
     pub async fn begin(&self) -> Result<BlobWrite, BlobError> {
         match &self.backend {
             Backend::Filesystem(store) => BlobBackend::begin(store).await,
+            Backend::S3(backend) => backend.begin().await,
         }
     }
 
@@ -171,6 +200,7 @@ impl BlobStorage {
     pub async fn verify(&self, digest: &Digest) -> Result<bool, BlobError> {
         match &self.backend {
             Backend::Filesystem(store) => BlobBackend::verify(store, digest.clone()).await,
+            Backend::S3(backend) => backend.verify(digest.clone()).await,
         }
     }
 
@@ -181,6 +211,7 @@ impl BlobStorage {
     pub async fn delete(&self, digest: &Digest) -> Result<bool, BlobError> {
         match &self.backend {
             Backend::Filesystem(store) => store.delete(digest.clone()).await,
+            Backend::S3(backend) => backend.delete(digest.clone()).await,
         }
     }
 
@@ -191,6 +222,7 @@ impl BlobStorage {
     pub async fn materialize(&self, digest: &Digest) -> Result<BlobLease, BlobError> {
         match &self.backend {
             Backend::Filesystem(store) => store.materialize(digest.clone()).await,
+            Backend::S3(backend) => backend.materialize(digest.clone()).await,
         }
     }
 }
@@ -220,6 +252,7 @@ impl BlobBlocking<'_> {
                 let staged = filesystem_context(pending.finish(), BlobOperation::Write, None)?;
                 Ok(BlobStaged::filesystem(store.clone(), staged))
             }
+            Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Write)),
         }
     }
 
@@ -254,6 +287,7 @@ impl BlobBlocking<'_> {
     pub fn head(&self, digest: &Digest) -> Result<Option<BlobMetadata>, BlobError> {
         match self.backend {
             Backend::Filesystem(store) => filesystem_context(store.head(digest), BlobOperation::Head, Some(digest)),
+            Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Head)),
         }
     }
 
@@ -296,6 +330,7 @@ impl BlobBlocking<'_> {
                 filesystem_context(read, BlobOperation::Open, Some(digest))?;
                 Ok(result)
             }
+            Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Open)),
         }
     }
 
@@ -335,6 +370,7 @@ impl BlobBlocking<'_> {
                     error.with_context("filesystem", BlobOperation::Materialize, Some(digest))
                 })
             }
+            Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Materialize)),
         }
     }
 
@@ -347,6 +383,7 @@ impl BlobBlocking<'_> {
             Backend::Filesystem(store) => store
                 .verify(digest)
                 .map_err(|error| error.with_context("filesystem", BlobOperation::Verify, Some(digest))),
+            Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Verify)),
         }
     }
 
@@ -357,6 +394,7 @@ impl BlobBlocking<'_> {
     pub fn delete(&self, digest: &Digest) -> Result<bool, BlobError> {
         match self.backend {
             Backend::Filesystem(store) => filesystem_context(store.remove(digest), BlobOperation::Delete, Some(digest)),
+            Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Delete)),
         }
     }
 
@@ -372,6 +410,7 @@ impl BlobBlocking<'_> {
                 }
                 BlobScanError::Visit(error) => BlobScanError::Visit(error),
             }),
+            Backend::S3(_) => Err(BlobScanError::Store(unsupported_blocking(BlobOperation::List))),
         }
     }
 }

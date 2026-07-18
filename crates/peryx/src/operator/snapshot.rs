@@ -14,9 +14,9 @@ use time::format_description::well_known::Rfc3339;
 use toml::{Table, Value};
 
 use crate::config::{
-    AcmeConfig, AuthConfig, Config, IndexConfig, IndexKind, JobsConfig, JobsMode, LogConfig, LogFormat, LogSink,
-    PrefetchConfig, PrefetchMode, ReplicationConfig, SecretSource, TlsConfig, TokenConfig, WebhookConfig,
-    WebhookSecret,
+    AcmeConfig, AuthConfig, BlobStorageConfig, Config, IndexConfig, IndexKind, JobsConfig, JobsMode, LogConfig,
+    LogFormat, LogSink, PrefetchConfig, PrefetchMode, ReplicationConfig, SecretSource, TlsConfig, TokenConfig,
+    WebhookConfig, WebhookSecret,
 };
 
 #[derive(Serialize)]
@@ -47,6 +47,28 @@ struct SnapshotConfig<'a> {
     replication: Option<SnapshotReplication<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     jobs: Option<SnapshotJobs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blob: Option<SnapshotBlob<'a>>,
+}
+
+/// The `[blob]` snapshot, written only for the S3 backend so a filesystem default stays terse.
+/// Secret-free by construction: S3 credentials never enter configuration.
+#[derive(Serialize)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+enum SnapshotBlob<'a> {
+    S3 {
+        endpoint: &'a str,
+        bucket: &'a str,
+        region: &'a str,
+        #[serde(skip_serializing_if = "str::is_empty")]
+        prefix: &'a str,
+        path_style: bool,
+        timeout_secs: u64,
+        max_retries: u32,
+        multipart_threshold_bytes: u64,
+        part_size_bytes: u64,
+        upload_concurrency: usize,
+    },
 }
 
 #[derive(Serialize)]
@@ -308,6 +330,7 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         auth,
         replication,
         jobs,
+        blob,
     } = config;
     let LogConfig {
         level,
@@ -366,6 +389,7 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         },
         replication: snapshot_replication(replication.as_ref()),
         jobs: snapshot_jobs(jobs),
+        blob: snapshot_blob(blob),
     };
     Ok(toml::to_string_pretty(&snapshot)?)
 }
@@ -394,6 +418,24 @@ fn snapshot_jobs(jobs: &JobsConfig) -> Option<SnapshotJobs> {
         return None;
     }
     Some(SnapshotJobs { mode, schedules })
+}
+
+fn snapshot_blob(blob: &BlobStorageConfig) -> Option<SnapshotBlob<'_>> {
+    let BlobStorageConfig::S3(s3) = blob else {
+        return None;
+    };
+    Some(SnapshotBlob::S3 {
+        endpoint: &s3.endpoint,
+        bucket: &s3.bucket,
+        region: &s3.region,
+        prefix: &s3.prefix,
+        path_style: s3.path_style,
+        timeout_secs: s3.request_timeout.as_secs(),
+        max_retries: s3.max_retries,
+        multipart_threshold_bytes: s3.multipart_threshold,
+        part_size_bytes: s3.part_size,
+        upload_concurrency: s3.upload_concurrency,
+    })
 }
 
 fn snapshot_replication(replication: Option<&ReplicationConfig>) -> Option<SnapshotReplication<'_>> {

@@ -17,14 +17,14 @@ pub use load::{from_env, from_file, from_toml};
 #[cfg(test)]
 pub(crate) use merge::classify_tls;
 pub use model::{
-    AcmeConfig, AuthConfig, Config, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, IndexConfig,
-    IndexKind, JobsConfig, JobsMode, LogConfig, LogFormat, LogSink, PrefetchConfig, PrefetchMode, ReplicationConfig,
-    SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig,
-    UpstreamTlsConfig, WebhookConfig, WebhookSecret,
+    AcmeConfig, AuthConfig, BlobStorageConfig, Config, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS,
+    IndexConfig, IndexKind, JobsConfig, JobsMode, LogConfig, LogFormat, LogSink, PrefetchConfig, PrefetchMode,
+    ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig,
+    UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
 };
 pub use raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawIndex, RawJobSchedule, RawPolicy, RawPrefetchConfig, RawReplication, RawTls, RawToken,
+    RawAcme, RawBlobStorage, RawIndex, RawJobSchedule, RawPolicy, RawPrefetchConfig, RawReplication, RawTls, RawToken,
     RawTrustedPublisher, RawUpstream, RawWebhook,
 };
 
@@ -51,6 +51,8 @@ pub enum ConfigError {
     Replication { reason: &'static str },
     #[error("jobs schedule [{index}]: {reason}")]
     Jobs { index: usize, reason: &'static str },
+    #[error("blob storage: {reason}")]
+    Blob { reason: String },
     #[error("writer identity: {reason}")]
     WriterIdentity { reason: &'static str },
     #[error("secret file {path} holds no secret")]

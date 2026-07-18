@@ -51,6 +51,50 @@ pub struct Config {
     pub auth: AuthConfig,
     pub replication: Option<ReplicationConfig>,
     pub jobs: JobsConfig,
+    /// Where blobs are stored: the local filesystem (default) or an S3-compatible object store.
+    pub blob: BlobStorageConfig,
+}
+
+/// The selected blob storage backend. Credentials for S3 never live here; they resolve from the
+/// environment at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobStorageConfig {
+    /// Blobs live under `data_dir/blobs`.
+    Filesystem,
+    /// Blobs live in an S3-compatible bucket.
+    S3(S3StorageConfig),
+}
+
+/// The non-secret settings that address an S3-compatible bucket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3StorageConfig {
+    pub endpoint: String,
+    pub bucket: String,
+    pub prefix: String,
+    pub region: String,
+    pub path_style: bool,
+    pub request_timeout: Duration,
+    pub max_retries: u32,
+    pub multipart_threshold: u64,
+    pub part_size: u64,
+    pub upload_concurrency: usize,
+}
+
+impl From<&S3StorageConfig> for peryx_storage::blob::S3Settings {
+    fn from(config: &S3StorageConfig) -> Self {
+        Self {
+            endpoint: config.endpoint.clone(),
+            bucket: config.bucket.clone(),
+            prefix: config.prefix.clone(),
+            region: config.region.clone(),
+            path_style: config.path_style,
+            request_timeout: config.request_timeout,
+            max_retries: config.max_retries,
+            multipart_threshold: config.multipart_threshold,
+            part_size: config.part_size,
+            upload_concurrency: config.upload_concurrency,
+        }
+    }
 }
 
 /// The `[jobs]` table: how this node runs its background maintenance.
@@ -483,6 +527,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             replication: None,
             jobs: JobsConfig::default(),
+            blob: BlobStorageConfig::Filesystem,
         }
     }
 }

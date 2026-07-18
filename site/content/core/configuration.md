@@ -630,6 +630,59 @@ contend for upstream bandwidth.
 The timer keeps no durable state. On restart it sets each schedule's next run one full interval after startup and drops
 the occurrences missed while the process was down rather than replaying them as a backlog.
 
+## `[blob]`
+
+The `[blob]` table selects where blobs live: the local filesystem (the default) or an S3-compatible object store.
+Metadata always stays in the local redb store; only the content-addressed blobs move. Omit the table to keep blobs under
+`data_dir/blobs`.
+
+```toml
+[blob]
+backend = "s3"
+endpoint = "https://s3.us-east-1.amazonaws.com"
+bucket = "peryx-blobs"
+region = "us-east-1"
+prefix = "prod"
+path_style = false
+timeout_secs = 30
+max_retries = 3
+multipart_threshold_bytes = 16777216
+part_size_bytes = 16777216
+upload_concurrency = 4
+```
+
+| Key                         | Meaning                                                           | Default      |
+| --------------------------- | ----------------------------------------------------------------- | ------------ |
+| `backend`                   | `filesystem` or `s3`                                              | `filesystem` |
+| `endpoint`                  | Base URL of the S3-compatible service (http or https)             | (required)   |
+| `bucket`                    | Bucket that holds the blobs                                       | (required)   |
+| `region`                    | Signing region                                                    | (required)   |
+| `prefix`                    | Key prefix inside the bucket; blobs land at `<prefix>/sha256/...` | (none)       |
+| `path_style`                | `true` for path-style addressing (MinIO); `false` virtual-hosted  | `false`      |
+| `timeout_secs`              | Per-request timeout, in seconds                                   | `30`         |
+| `max_retries`               | Retries for a transient transport or 5xx/429 response             | `3`          |
+| `multipart_threshold_bytes` | Objects at or below this size upload in one `PUT`                 | `16777216`   |
+| `part_size_bytes`           | Multipart part size above the threshold                           | `16777216`   |
+| `upload_concurrency`        | Parts uploaded at once during a multipart upload                  | `4`          |
+
+Blobs are immutable and keyed by their sha256, so a write stages to `data_dir/blob-staging`, hashes as it streams, then
+uploads under `<prefix>/sha256/<digest>` — one `PUT` below `multipart_threshold_bytes`, bounded concurrent parts above
+it. Reads stream ranged `GET`s, and every fetch is verified against its digest.
+
+### Credentials
+
+The `[blob]` table never holds a secret. S3 credentials resolve at startup from the standard environment variables
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and the optional `AWS_SESSION_TOKEN`. Startup fails fast if the S3 backend
+is selected and no access key or secret is present. The bucket policy must allow `s3:GetObject`, `s3:PutObject`, and
+`s3:DeleteObject` on `<prefix>/*`, plus `s3:ListBucket` for the startup health check.
+
+### Backup and failure recovery
+
+Because the object write commits the blob before its metadata row is written, a crash between the two leaves an orphan
+object — harmless and overwritten byte-for-byte by any later write of the same content. `peryx backup` snapshots the
+`[blob]` selection (never the credentials) so a restore points at the same bucket; the objects themselves are not copied
+into the archive. Bucket-level versioning or replication, if you need it, is configured on the object store, not here.
+
 ## `[auth]`
 
 The `[auth]` table holds the access settings every index shares: the signing key of peryx's token realm, the lifetime of

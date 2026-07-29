@@ -150,7 +150,7 @@ mod tests {
         RetentionClass, RetentionConfig, RetentionDecision, RetentionFrontier, RetentionOutcome, RetentionPolicy,
         RetentionSelector, RetentionVisibility,
     };
-    use peryx_storage::meta::MetaStore;
+    use peryx_storage::meta::{MetaError, MetaStore};
 
     use super::evaluate_retention;
     use crate::store::PypiStore as _;
@@ -346,11 +346,14 @@ mod tests {
     #[test]
     fn test_evaluate_retention_reports_the_metadata_frontier() {
         let (_dir, meta) = store();
+        meta.commit_driver_txn(|_| Ok::<_, MetaError>(((), vec![b"journal entry".to_vec()])))
+            .unwrap();
         meta.advance_policy_generation("pypi").unwrap();
         seed(&meta, "pypi", "demo", "1.0", Yanked::No, None);
 
         let (_, frontier) = plan(&meta, "pypi", &expire_all_but_latest(1));
 
+        assert_eq!(frontier.repository, 1);
         assert_eq!(frontier.policy, 1);
     }
 

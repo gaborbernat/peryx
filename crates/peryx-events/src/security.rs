@@ -1,9 +1,42 @@
-//! Structured security-relevant index events.
+//! Structured security events for index actions and server-role decisions.
 
 use http::{HeaderMap, header};
-use peryx_identity::{Identity, Principal};
+use peryx_identity::{Identity, Principal, Scope, UserId};
 
 const UNKNOWN: &str = "unknown";
+
+/// A bounded reason for denying a role-based authorization decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorizationDenial {
+    NoGrant,
+    StorageUnavailable,
+}
+
+impl AuthorizationDenial {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoGrant => "no_grant",
+            Self::StorageUnavailable => "storage_unavailable",
+        }
+    }
+}
+
+/// Record a denied role authorization without accepting a resource path or query string.
+pub fn authorization_denied(user: &UserId, scope: Scope, denial: AuthorizationDenial) {
+    let user = user.as_str();
+    let scope = scope.as_str();
+    let reason = denial.as_str();
+    tracing::info!(
+        target: "peryx::security",
+        security_event = true,
+        event = "authorization",
+        user,
+        scope,
+        result = "denied",
+        reason,
+        "role authorization denied"
+    );
+}
 
 pub struct Event<'a> {
     action: &'static str,
@@ -212,7 +245,13 @@ fn text(value: Option<&str>) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Seek as _};
+    use std::sync::Mutex;
+
     use peryx_identity::{Identity, Principal};
+    use rstest::rstest;
+
+    use super::AuthorizationDenial;
 
     fn presenting(user: &str) -> Identity {
         Identity {
@@ -249,5 +288,42 @@ mod tests {
             user: None,
         };
         assert_eq!(super::actor(&anonymous), None);
+    }
+
+    #[rstest]
+    #[case::no_grant(AuthorizationDenial::NoGrant, "no_grant")]
+    #[case::storage_unavailable(AuthorizationDenial::StorageUnavailable, "storage_unavailable")]
+    fn test_authorization_denial_event_contains_only_bounded_context(
+        #[case] denial: AuthorizationDenial,
+        #[case] expected_reason: &str,
+    ) {
+        let mut capture = tempfile::tempfile().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(Mutex::new(capture.try_clone().unwrap()))
+            .finish();
+        let user = peryx_identity::UserId::random();
+
+        tracing::subscriber::with_default(subscriber, || {
+            super::authorization_denied(&user, peryx_identity::Scope::OperatorRead, denial);
+        });
+
+        capture.rewind().unwrap();
+        let mut text = String::new();
+        capture.read_to_string(&mut text).unwrap();
+        let event: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(
+            event["fields"],
+            serde_json::json!({
+                "message": "role authorization denied",
+                "security_event": true,
+                "event": "authorization",
+                "user": user.as_str(),
+                "scope": "operator:read",
+                "result": "denied",
+                "reason": expected_reason,
+            })
+        );
     }
 }

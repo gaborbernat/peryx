@@ -76,6 +76,13 @@ fn repository_grant(role: Role, name: &str) -> RoleGrant {
     false
 )]
 #[case::operator_reads_operator_data(server_grant(Role::Operator), Scope::OperatorRead, Resource::Operator, true)]
+#[case::operator_reads_analytics(server_grant(Role::Operator), Scope::AnalyticsRead, Resource::Operator, true)]
+#[case::operator_cannot_read_administration(
+    server_grant(Role::Operator),
+    Scope::AdministrationRead,
+    Resource::Operator,
+    false
+)]
 #[case::operator_cannot_read_a_repository(
     server_grant(Role::Operator),
     Scope::RepositoryRead,
@@ -105,6 +112,30 @@ fn repository_grant(role: Role, name: &str) -> RoleGrant {
     Scope::OperatorRead,
     Resource::Operator,
     true
+)]
+#[case::administrator_reads_analytics(
+    server_grant(Role::Administrator),
+    Scope::AnalyticsRead,
+    Resource::Operator,
+    true
+)]
+#[case::administrator_reads_administration(
+    server_grant(Role::Administrator),
+    Scope::AdministrationRead,
+    Resource::Operator,
+    true
+)]
+#[case::administrator_cannot_apply_repository_scope_to_operator_data(
+    server_grant(Role::Administrator),
+    Scope::RepositoryRead,
+    Resource::Operator,
+    false
+)]
+#[case::administrator_cannot_apply_operator_scope_to_a_repository(
+    server_grant(Role::Administrator),
+    Scope::OperatorRead,
+    repository("team/api"),
+    false
 )]
 #[case::repository_admin_writes_its_repository(
     repository_grant(Role::Administrator, "team/api"),
@@ -147,6 +178,8 @@ fn test_no_grant_denies_every_scope() {
         Scope::RepositoryWrite,
         Scope::RepositoryDelete,
         Scope::OperatorRead,
+        Scope::AnalyticsRead,
+        Scope::AdministrationRead,
     ] {
         assert!(!grants_permit(&[], scope, &repository("team/api")));
         assert!(!grants_permit(&[], scope, &Resource::Operator));
@@ -174,6 +207,8 @@ fn test_role_scope_sets_are_fixed() {
             Scope::RepositoryWrite,
             Scope::RepositoryDelete,
             Scope::OperatorRead,
+            Scope::AnalyticsRead,
+            Scope::AdministrationRead,
         ]
     );
     assert_eq!(
@@ -181,7 +216,7 @@ fn test_role_scope_sets_are_fixed() {
         &[Scope::RepositoryRead, Scope::RepositoryWrite, Scope::RepositoryDelete]
     );
     assert_eq!(Role::RepositoryReader.scopes(), &[Scope::RepositoryRead]);
-    assert_eq!(Role::Operator.scopes(), &[Scope::OperatorRead]);
+    assert_eq!(Role::Operator.scopes(), &[Scope::OperatorRead, Scope::AnalyticsRead]);
     assert_eq!(
         Role::ALL,
         &[
@@ -203,6 +238,8 @@ fn test_role_and_scope_names_are_stable() {
     assert_eq!(Scope::RepositoryWrite.as_str(), "repository:write");
     assert_eq!(Scope::RepositoryDelete.as_str(), "repository:delete");
     assert_eq!(Scope::OperatorRead.as_str(), "operator:read");
+    assert_eq!(Scope::AnalyticsRead.as_str(), "analytics:read");
+    assert_eq!(Scope::AdministrationRead.as_str(), "administration:read");
 }
 
 #[test]

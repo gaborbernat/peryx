@@ -14,10 +14,10 @@ use std::collections::HashSet;
 
 use super::ConfigError;
 use super::model::{
-    AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, DEFAULT_REPLICA_PAGE_SIZE,
-    DEFAULT_REPLICA_POLL_INTERVAL_SECS, IndexConfig, IndexKind, JobsConfig, LogConfig, ReplicationConfig,
-    S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig,
-    UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
+    AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode,
+    CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, IndexConfig, IndexKind,
+    JobsConfig, LogConfig, ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig, TokenConfig,
+    TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
 };
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
@@ -333,11 +333,25 @@ fn validate_index_kind(raw: &RawIndex) -> Result<(), ConfigError> {
             || raw.password_env.is_some()
             || raw.token.is_some()
             || raw.token_file.is_some()
-            || raw.token_env.is_some())
+            || raw.token_env.is_some()
+            || raw.credential_refresh_secs.is_some()
+            || raw.credential_refresh_on_unauthorized.is_some()
+            || raw.credential_failure.is_some())
     {
         return Err(ConfigError::Index {
             name: raw.name.clone(),
             reason: "credentials for `[[index.upstream]]` belong on each source",
+        });
+    }
+    if raw.cached.is_none()
+        && raw.upstreams.is_empty()
+        && (raw.credential_refresh_secs.is_some()
+            || raw.credential_refresh_on_unauthorized.is_some()
+            || raw.credential_failure.is_some())
+    {
+        return Err(ConfigError::Index {
+            name: raw.name.clone(),
+            reason: "credential refresh requires a cached index",
         });
     }
     if !raw.upstreams.is_empty()
@@ -358,20 +372,31 @@ fn classify_legacy_cached(raw: &mut RawIndex, upstream: String) -> Result<IndexK
         raw.client_cert_file.take(),
         raw.client_key_file.take(),
     )?;
+    let password = upstream_secret_source(raw.password.take(), raw.password_file.take(), raw.password_env.take())
+        .map_err(|reason| ConfigError::Index {
+            name: raw.name.clone(),
+            reason,
+        })?;
+    let token =
+        upstream_secret_source(raw.token.take(), raw.token_file.take(), raw.token_env.take()).map_err(|reason| {
+            ConfigError::Index {
+                name: raw.name.clone(),
+                reason,
+            }
+        })?;
+    let credential_refresh = credential_refresh(
+        &raw.name,
+        token.as_ref().or_else(|| raw.username.as_ref().and(password.as_ref())),
+        raw.credential_refresh_secs.take(),
+        raw.credential_refresh_on_unauthorized.take(),
+        raw.credential_failure.take(),
+    )?;
     Ok(IndexKind::Cached {
         upstream,
         username: raw.username.take(),
-        password: upstream_secret_source(raw.password.take(), raw.password_file.take(), raw.password_env.take())
-            .map_err(|reason| ConfigError::Index {
-                name: raw.name.clone(),
-                reason,
-            })?,
-        token: upstream_secret_source(raw.token.take(), raw.token_file.take(), raw.token_env.take()).map_err(
-            |reason| ConfigError::Index {
-                name: raw.name.clone(),
-                reason,
-            },
-        )?,
+        password,
+        token,
+        credential_refresh,
         tls,
         routing: None,
         upstream_concurrency: raw.upstream_concurrency.unwrap_or(DEFAULT_UPSTREAM_CONCURRENCY),
@@ -391,6 +416,7 @@ fn classify_routed_cached(raw: &mut RawIndex) -> Result<IndexKind, ConfigError> 
         username: primary.username.clone(),
         password: primary.password.clone(),
         token: primary.token.clone(),
+        credential_refresh: primary.credential_refresh,
         tls: primary.tls.clone(),
         routing: Some(Box::new(UpstreamRoutingConfig {
             upstreams,
@@ -405,25 +431,69 @@ fn classify_routed_cached(raw: &mut RawIndex) -> Result<IndexKind, ConfigError> 
 }
 
 fn classify_upstream(index: &str, raw: RawUpstream) -> Result<UpstreamConfig, ConfigError> {
+    let password = upstream_secret_source(raw.password, raw.password_file, raw.password_env).map_err(|reason| {
+        ConfigError::Index {
+            name: index.to_owned(),
+            reason,
+        }
+    })?;
+    let token =
+        upstream_secret_source(raw.token, raw.token_file, raw.token_env).map_err(|reason| ConfigError::Index {
+            name: index.to_owned(),
+            reason,
+        })?;
+    let credential_refresh = credential_refresh(
+        index,
+        token.as_ref().or_else(|| raw.username.as_ref().and(password.as_ref())),
+        raw.credential_refresh_secs,
+        raw.credential_refresh_on_unauthorized,
+        raw.credential_failure,
+    )?;
     Ok(UpstreamConfig {
         name: raw.name,
         url: raw.url,
         artifact_url: raw.artifact_url,
         username: raw.username,
-        password: upstream_secret_source(raw.password, raw.password_file, raw.password_env).map_err(|reason| {
-            ConfigError::Index {
-                name: index.to_owned(),
-                reason,
-            }
-        })?,
-        token: upstream_secret_source(raw.token, raw.token_file, raw.token_env).map_err(|reason| {
-            ConfigError::Index {
-                name: index.to_owned(),
-                reason,
-            }
-        })?,
+        credential_refresh,
+        password,
+        token,
         tls: upstream_tls(index, raw.ca_file, raw.client_cert_file, raw.client_key_file)?,
     })
+}
+
+fn credential_refresh(
+    index: &str,
+    source: Option<&SecretSource>,
+    interval_secs: Option<u64>,
+    on_unauthorized: Option<bool>,
+    failure: Option<CredentialFailureMode>,
+) -> Result<Option<CredentialRefreshConfig>, ConfigError> {
+    let Some(interval_secs) = interval_secs else {
+        if on_unauthorized.is_some() || failure.is_some() {
+            return Err(ConfigError::Index {
+                name: index.to_owned(),
+                reason: "`credential_refresh_secs` is required for credential refresh controls",
+            });
+        }
+        return Ok(None);
+    };
+    if interval_secs == 0 {
+        return Err(ConfigError::Index {
+            name: index.to_owned(),
+            reason: "`credential_refresh_secs` must be positive",
+        });
+    }
+    if !source.is_some_and(SecretSource::supports_refresh) {
+        return Err(ConfigError::Index {
+            name: index.to_owned(),
+            reason: "credential refresh requires `token_file`/`token_env` or `username` with `password_file`/`password_env`",
+        });
+    }
+    Ok(Some(CredentialRefreshConfig {
+        interval: Duration::from_secs(interval_secs),
+        on_unauthorized: on_unauthorized.unwrap_or(true),
+        failure: failure.unwrap_or_default(),
+    }))
 }
 
 fn upstream_tls(

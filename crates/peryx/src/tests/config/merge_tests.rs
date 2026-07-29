@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
 use rstest::rstest;
 
 use super::toml_config;
 use crate::config::{
-    self, AcmeConfig, Config, ConfigError, IndexKind, LogConfig, LogFormat, LogSink, PartialConfig, PartialLogConfig,
-    SecretSource, TlsConfig, WebhookSecret,
+    self, AcmeConfig, Config, ConfigError, CredentialFailureMode, IndexKind, LogConfig, LogFormat, LogSink,
+    PartialConfig, PartialLogConfig, SecretSource, TlsConfig, WebhookSecret,
 };
 
 fn toml_error(text: &str) -> ConfigError {
@@ -393,6 +394,21 @@ fn test_cached_url_and_ordered_upstreams_are_mutually_exclusive() {
      [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
     "credentials for `[[index.upstream]]` belong on each source"
 )]
+#[case::credential_refresh_on_index(
+    "[[index]]\nname = \"pypi\"\ncredential_refresh_secs = 30\n\
+     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
+    "credentials for `[[index.upstream]]` belong on each source"
+)]
+#[case::credential_unauthorized_refresh_on_index(
+    "[[index]]\nname = \"pypi\"\ncredential_refresh_on_unauthorized = false\n\
+     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
+    "credentials for `[[index.upstream]]` belong on each source"
+)]
+#[case::credential_failure_on_index(
+    "[[index]]\nname = \"pypi\"\ncredential_failure = \"anonymous\"\n\
+     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
+    "credentials for `[[index.upstream]]` belong on each source"
+)]
 #[case::tls_on_index(
     "[[index]]\nname = \"pypi\"\nca_file = \"wrong-level.pem\"\n\
      [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
@@ -450,6 +466,96 @@ fn test_ordered_upstream_password_reads_from_env() {
         &routing.upstreams[0].password,
         Some(SecretSource::Env(var)) if var == "CORP_PASSWORD"
     ));
+}
+
+#[test]
+fn test_upstream_credential_refresh_resolves_for_file_sources() {
+    let config = toml_config(
+        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
+         token_file = \"/run/secrets/token\"\ncredential_refresh_secs = 30\n\
+         credential_refresh_on_unauthorized = false\ncredential_failure = \"anonymous\"\n",
+    );
+    let IndexKind::Cached {
+        credential_refresh: Some(refresh),
+        ..
+    } = &config.indexes[0].kind
+    else {
+        panic!("expected credential refresh");
+    };
+
+    assert_eq!(
+        (refresh.interval, refresh.on_unauthorized, refresh.failure),
+        (Duration::from_secs(30), false, CredentialFailureMode::Anonymous)
+    );
+}
+
+#[test]
+fn test_routed_credential_refresh_defaults_apply_to_the_primary_client() {
+    let config = toml_config(
+        "[[index]]\nname = \"corp\"\n\
+         [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
+         token_env = \"CORP_TOKEN\"\ncredential_refresh_secs = 60\n",
+    );
+    let IndexKind::Cached {
+        credential_refresh: Some(primary),
+        routing: Some(routing),
+        ..
+    } = &config.indexes[0].kind
+    else {
+        panic!("expected routed credential refresh");
+    };
+
+    assert_eq!(*primary, routing.upstreams[0].credential_refresh.unwrap());
+    assert_eq!(
+        (primary.on_unauthorized, primary.failure),
+        (true, CredentialFailureMode::Fail)
+    );
+}
+
+#[rstest]
+#[case::zero_interval(
+    "token_file = \"token\"\ncredential_refresh_secs = 0\n",
+    "`credential_refresh_secs` must be positive"
+)]
+#[case::literal_source(
+    "token = \"secret\"\ncredential_refresh_secs = 30\n",
+    "credential refresh requires `token_file`/`token_env` or `username` with `password_file`/`password_env`"
+)]
+#[case::password_without_username(
+    "password_file = \"password\"\ncredential_refresh_secs = 30\n",
+    "credential refresh requires `token_file`/`token_env` or `username` with `password_file`/`password_env`"
+)]
+#[case::missing_interval(
+    "token_file = \"token\"\ncredential_failure = \"anonymous\"\n",
+    "`credential_refresh_secs` is required for credential refresh controls"
+)]
+fn test_credential_refresh_rejects_invalid_controls(#[case] controls: &str, #[case] reason: &str) {
+    let text = format!("[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n{controls}");
+    assert_eq!(toml_error(&text).to_string(), format!("index corp: {reason}"));
+}
+
+#[test]
+fn test_routed_credential_refresh_rejects_invalid_controls() {
+    assert_eq!(
+        toml_error(
+            "[[index]]\nname = \"corp\"\n\
+             [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
+             token_file = \"token\"\ncredential_failure = \"anonymous\"\n",
+        )
+        .to_string(),
+        "index corp: `credential_refresh_secs` is required for credential refresh controls"
+    );
+}
+
+#[rstest]
+#[case("credential_refresh_secs = 30")]
+#[case("credential_refresh_on_unauthorized = false")]
+#[case("credential_failure = \"anonymous\"")]
+fn test_credential_refresh_requires_a_cached_index(#[case] control: &str) {
+    assert_eq!(
+        toml_error(&format!("[[index]]\nname = \"hosted\"\nhosted = true\n{control}\n")).to_string(),
+        "index hosted: credential refresh requires a cached index"
+    );
 }
 
 #[rstest]

@@ -1,5 +1,6 @@
 //! The upstream HTTP client.
 
+mod credential;
 mod error;
 mod netrc;
 pub mod retry;
@@ -24,6 +25,10 @@ use self::retry::{
     MAX_RETRIES, should_retry_error, should_retry_status, sleep_before_retry_status, sleep_before_retry_str,
 };
 
+pub use self::credential::{
+    CredentialError, CredentialFailure, CredentialIdentity, CredentialProvider, CredentialProviderId,
+    CredentialRefresh, CredentialSnapshot,
+};
 pub use self::error::{RangeError, UpstreamError};
 pub use self::netrc::{Netrc, NetrcError};
 pub use self::response::FileHead;
@@ -104,7 +109,7 @@ pub struct UpstreamClient {
     cross_origin_http: reqwest::Client,
     cross_origin_bulk: reqwest::Client,
     base: Url,
-    auth: Auth,
+    credentials: CredentialProvider,
     range_support: Arc<AtomicU8>,
     reachability: Arc<AtomicU8>,
 }
@@ -157,6 +162,21 @@ impl UpstreamClient {
         tls: &UpstreamTls,
         identity_origin: &str,
     ) -> Result<Self, UpstreamError> {
+        Self::with_credentials_and_tls_for_origin(base, CredentialProvider::fixed(auth), tls, identity_origin)
+    }
+
+    /// Build a client with refreshable credentials. Clones of `credentials` share one refresh gate
+    /// and generation, which lets an artifact mirror use its metadata source's credential provider.
+    ///
+    /// # Errors
+    /// Returns [`UpstreamError::Url`] if either origin is invalid, or [`UpstreamError::Http`] if
+    /// the TLS material is invalid or the HTTP clients cannot be built.
+    pub fn with_credentials_and_tls_for_origin(
+        base: &str,
+        credentials: CredentialProvider,
+        tls: &UpstreamTls,
+        identity_origin: &str,
+    ) -> Result<Self, UpstreamError> {
         // Pin the ring crypto provider: unlike aws-lc it is pure Rust plus portable assembly, so
         // every release target cross-compiles without a C toolchain. Err means already installed.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -202,14 +222,14 @@ impl UpstreamClient {
             cross_origin_http,
             cross_origin_bulk,
             base,
-            auth,
+            credentials,
             range_support: Arc::new(AtomicU8::new(RANGE_UNKNOWN)),
             reachability: Arc::new(AtomicU8::new(REACHABILITY_UNKNOWN)),
         })
     }
 
-    fn authenticate(&self, request: reqwest::RequestBuilder, url: &Url) -> reqwest::RequestBuilder {
-        match &self.auth {
+    fn authenticate(&self, request: reqwest::RequestBuilder, url: &Url, auth: &Auth) -> reqwest::RequestBuilder {
+        match auth {
             Auth::None => request,
             _ if !same_origin(&self.base, url) => request,
             Auth::Basic { username, password } => request.basic_auth(username, Some(password)),
@@ -236,9 +256,13 @@ impl UpstreamClient {
     /// Open a connection to the upstream host ahead of traffic, so the first real request skips
     /// the TCP and TLS handshakes. Failures are the first real request's problem to report.
     pub async fn warm(&self) {
+        let Ok(credentials) = self.credentials.credential().await else {
+            self.reachability.store(REACHABILITY_UNREACHABLE, Ordering::Relaxed);
+            return;
+        };
         self.reachability.store(
             if self
-                .authenticate(self.http.head(self.base.clone()), &self.base)
+                .authenticate(self.http.head(self.base.clone()), &self.base, credentials.auth())
                 .send()
                 .await
                 .is_ok()
@@ -264,7 +288,8 @@ impl UpstreamClient {
     /// Start fetching a file's bytes from an absolute URL, for streaming.
     ///
     /// # Errors
-    /// Returns [`UpstreamError::Http`] if the request fails or answers a non-success status.
+    /// Returns [`UpstreamError::Credential`] when refresh fails, or [`UpstreamError::Http`] when the
+    /// request fails or answers a non-success status.
     pub async fn stream_bytes(
         &self,
         url: &str,
@@ -272,10 +297,11 @@ impl UpstreamClient {
         use futures_util::TryStreamExt as _;
         let url = Url::parse(url)?;
         let response = self
-            .send_with_retry(|| {
+            .send_with_retry(|auth| {
                 self.authenticate(
                     self.bulk(&url).get(url.clone()).header(ACCEPT_ENCODING, "identity"),
                     &url,
+                    auth,
                 )
             })
             .await?
@@ -286,16 +312,18 @@ impl UpstreamClient {
     /// Fetch a file's bytes from an absolute URL.
     ///
     /// # Errors
-    /// Returns [`UpstreamError::Http`] if the request fails or answers a non-success status.
+    /// Returns [`UpstreamError::Credential`] when refresh fails, or [`UpstreamError::Http`] when the
+    /// request fails or answers a non-success status.
     pub async fn fetch_bytes(&self, url: &str) -> Result<Bytes, UpstreamError> {
         let url = Url::parse(url)?;
         let mut attempt = 0;
         loop {
             let response = self
-                .send_with_retry(|| {
+                .send_with_retry(|auth| {
                     self.authenticate(
                         self.bulk(&url).get(url.clone()).header(ACCEPT_ENCODING, "identity"),
                         &url,
+                        auth,
                     )
                 })
                 .await?
@@ -315,7 +343,8 @@ impl UpstreamClient {
     ///
     /// # Errors
     /// Returns [`UpstreamError::ResponseTooLarge`] if the response exceeds `limit`, or
-    /// [`UpstreamError::Http`] if the request fails or answers a non-success status.
+    /// [`UpstreamError::Credential`] when refresh fails, or [`UpstreamError::Http`] when the request
+    /// fails or answers a non-success status.
     pub async fn fetch_bytes_limited(&self, url: &str, limit: usize) -> Result<Bytes, UpstreamError> {
         use futures_util::TryStreamExt as _;
 
@@ -323,10 +352,11 @@ impl UpstreamClient {
         let mut attempt = 0;
         loop {
             let response = self
-                .send_with_retry(|| {
+                .send_with_retry(|auth| {
                     self.authenticate(
                         self.bulk(&url).get(url.clone()).header(ACCEPT_ENCODING, "identity"),
                         &url,
+                        auth,
                     )
                 })
                 .await?
@@ -378,11 +408,12 @@ impl UpstreamClient {
     pub async fn head_file_for_range(&self, url: &str) -> Result<FileHead, RangeError> {
         let url = Url::parse(url).map_err(UpstreamError::from)?;
         let response = self
-            .authenticate(self.http(&url).head(url.clone()), &url)
-            .header(ACCEPT_ENCODING, "identity")
-            .send()
+            .send_with_retry(|auth| {
+                self.authenticate(self.http(&url).head(url.clone()), &url, auth)
+                    .header(ACCEPT_ENCODING, "identity")
+            })
             .await
-            .map_err(UpstreamError::from)?;
+            .map_err(RangeError::from)?;
         if head_status_disables_ranges(response.status()) {
             self.disable_ranges();
             return Err(RangeError::Unsupported);
@@ -425,12 +456,13 @@ impl UpstreamClient {
         };
         let url = Url::parse(url).map_err(UpstreamError::from)?;
         let response = self
-            .authenticate(self.http(&url).get(url.clone()), &url)
-            .header(ACCEPT_ENCODING, "identity")
-            .header(RANGE, format!("bytes={start}-{end}"))
-            .send()
+            .send_with_retry(|auth| {
+                self.authenticate(self.http(&url).get(url.clone()), &url, auth)
+                    .header(ACCEPT_ENCODING, "identity")
+                    .header(RANGE, format!("bytes={start}-{end}"))
+            })
             .await
-            .map_err(UpstreamError::from)?;
+            .map_err(RangeError::from)?;
         match response.status() {
             reqwest::StatusCode::PARTIAL_CONTENT => {}
             reqwest::StatusCode::OK | reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
@@ -481,22 +513,28 @@ impl UpstreamClient {
         &self.base
     }
 
+    /// The credential provider shared by ecosystem-specific authentication flows.
+    #[must_use]
+    pub const fn auth(&self) -> &CredentialProvider {
+        &self.credentials
+    }
+
     /// The authentication scheme without credential material.
     #[must_use]
-    pub const fn auth_status(&self) -> AuthStatus {
-        match &self.auth {
+    pub fn auth_status(&self) -> AuthStatus {
+        match self.credentials.snapshot().configured_auth() {
             Auth::None => AuthStatus::None,
             Auth::Basic { .. } => AuthStatus::Basic,
             Auth::Bearer(_) => AuthStatus::Bearer,
         }
     }
 
-    /// The configured credentials, carrying secret material. A protocol that authenticates outside the
-    /// simple request path (the OCI bearer-token exchange trades Basic credentials at a realm for a
-    /// scoped token) reads them here; anything user-facing must go through [`Self::auth_status`] instead.
-    #[must_use]
-    pub const fn auth(&self) -> &Auth {
-        &self.auth
+    /// Return the last resolved credential without checking its refresh deadline.
+    ///
+    /// # Errors
+    /// Returns the provider's last redacted refresh error under `fail` policy.
+    pub fn current_credential(&self) -> Result<Arc<CredentialSnapshot>, UpstreamError> {
+        self.credentials.current().map_err(UpstreamError::from)
     }
 
     /// Send a conditional `GET` to `url` with the caller's `Accept` and optional `If-None-Match`,
@@ -505,7 +543,8 @@ impl UpstreamClient {
     /// client) builds its document requests on; `304`/`404` are surfaced, not raised.
     ///
     /// # Errors
-    /// Returns [`UpstreamError::Http`] if the request fails after exhausting retries.
+    /// Returns [`UpstreamError::Credential`] when refresh fails, or [`UpstreamError::Http`] when the
+    /// request fails after exhausting retries.
     pub async fn send_conditional(
         &self,
         url: Url,
@@ -519,7 +558,8 @@ impl UpstreamClient {
     /// the fallback for upstreams that do not provide entity tags.
     ///
     /// # Errors
-    /// Returns [`UpstreamError::Http`] if the request fails after exhausting retries.
+    /// Returns [`UpstreamError::Credential`] when refresh fails, or [`UpstreamError::Http`] when the
+    /// request fails after exhausting retries.
     pub async fn send_validated(
         &self,
         url: Url,
@@ -527,9 +567,9 @@ impl UpstreamClient {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<reqwest::Response, UpstreamError> {
-        self.send_with_retry(|| {
+        self.send_with_retry(|auth| {
             let mut request = self
-                .authenticate(self.http(&url).get(url.clone()), &url)
+                .authenticate(self.http(&url).get(url.clone()), &url, auth)
                 .header(ACCEPT, accept);
             if let Some(etag) = etag {
                 request = request.header(IF_NONE_MATCH, etag);
@@ -543,11 +583,27 @@ impl UpstreamClient {
 
     async fn send_with_retry(
         &self,
-        mut request: impl FnMut() -> reqwest::RequestBuilder,
+        mut request: impl FnMut(&Auth) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, UpstreamError> {
         let mut attempt = 0;
+        let mut credential = self.credentials.credential().await.map_err(UpstreamError::from)?;
+        let mut refreshed = false;
         loop {
-            match request().send().await {
+            match request(credential.auth()).send().await {
+                Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED && !refreshed => {
+                    let generation = credential.generation();
+                    let replacement = self
+                        .credentials
+                        .refresh_after_unauthorized(generation)
+                        .await
+                        .map_err(UpstreamError::from)?;
+                    if replacement.generation() == generation {
+                        self.reachability.store(REACHABILITY_REACHABLE, Ordering::Relaxed);
+                        return Ok(response);
+                    }
+                    credential = replacement;
+                    refreshed = true;
+                }
                 Ok(response) if should_retry_status(response.status()) && attempt < MAX_RETRIES => {
                     let url = response.url().clone();
                     let status = response.status();

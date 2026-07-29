@@ -2,7 +2,19 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{mount_get, simple_client};
-use crate::client::UpstreamClient;
+use crate::client::{CredentialError, UpstreamClient, UpstreamError};
+
+#[test]
+fn test_credential_error_is_redacted_for_users() {
+    let error = UpstreamError::Credential(CredentialError::new("secret file /run/keys/token is empty"));
+
+    assert_eq!(error.status(), None);
+    assert_eq!(error.user_message(), "upstream credential refresh failed");
+    assert_eq!(
+        error.to_string(),
+        "upstream credential refresh failed: secret file /run/keys/token is empty"
+    );
+}
 
 #[tokio::test]
 async fn test_fetch_bytes_reports_decode_errors() {

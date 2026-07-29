@@ -29,6 +29,7 @@ fn cached_config(data_dir: &Path, ecosystem: Ecosystem, upstream: String, files:
                 username: None,
                 password: None,
                 token: None,
+                credential_refresh: None,
                 tls: UpstreamTlsConfig {
                     ca_file: Some(files.ca.clone()),
                     client_cert_file: Some(files.certificate.clone()),

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use axum::http::{HeaderValue, Method, StatusCode};
 use peryx_identity::strip_auth_scheme;
-use peryx_upstream::Auth;
+use peryx_upstream::{Auth, CredentialError, CredentialIdentity, CredentialProvider, CredentialProviderId};
 use reqwest::Response;
 use tokio::sync::Mutex;
 
@@ -28,7 +28,20 @@ application/vnd.oci.image.index.v1+json, \
 #[derive(Debug)]
 pub struct Upstream {
     http: reqwest::Client,
-    tokens: Mutex<HashMap<String, String>>,
+    tokens: Mutex<HashMap<TokenCacheKey, CachedToken>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct TokenCacheKey {
+    base: String,
+    scope: String,
+    provider: CredentialProviderId,
+}
+
+#[derive(Debug)]
+struct CachedToken {
+    credentials: CredentialIdentity,
+    value: String,
 }
 
 /// Why an upstream pull did not yield bytes to serve.
@@ -62,6 +75,12 @@ impl From<reqwest::Error> for UpstreamError {
 impl From<serde_json::Error> for UpstreamError {
     fn from(err: serde_json::Error) -> Self {
         Self::Transport(err.to_string())
+    }
+}
+
+impl From<CredentialError> for UpstreamError {
+    fn from(error: CredentialError) -> Self {
+        Self::Transport(error.to_string())
     }
 }
 
@@ -101,12 +120,12 @@ impl Upstream {
     pub async fn manifest(
         &self,
         base: &str,
-        auth: &Auth,
+        credentials: &CredentialProvider,
         repo: &str,
         reference: &str,
     ) -> Result<Response, UpstreamError> {
         let url = format!("{base}v2/{repo}/manifests/{reference}");
-        self.send(Method::GET, base, auth, &url, repo, Some(ACCEPT_MANIFESTS))
+        self.send(Method::GET, base, credentials, &url, repo, Some(ACCEPT_MANIFESTS))
             .await
     }
 
@@ -121,13 +140,13 @@ impl Upstream {
     pub async fn manifest_digest(
         &self,
         base: &str,
-        auth: &Auth,
+        credentials: &CredentialProvider,
         repo: &str,
         reference: &str,
     ) -> Result<Option<String>, UpstreamError> {
         let url = format!("{base}v2/{repo}/manifests/{reference}");
         let response = self
-            .send(Method::HEAD, base, auth, &url, repo, Some(ACCEPT_MANIFESTS))
+            .send(Method::HEAD, base, credentials, &url, repo, Some(ACCEPT_MANIFESTS))
             .await?;
         Ok(response
             .headers()
@@ -140,9 +159,15 @@ impl Upstream {
     ///
     /// # Errors
     /// Returns [`UpstreamError`] on a non-success status or a transport failure.
-    pub async fn blob(&self, base: &str, auth: &Auth, repo: &str, digest: &str) -> Result<Response, UpstreamError> {
+    pub async fn blob(
+        &self,
+        base: &str,
+        credentials: &CredentialProvider,
+        repo: &str,
+        digest: &str,
+    ) -> Result<Response, UpstreamError> {
         let url = format!("{base}v2/{repo}/blobs/{digest}");
-        self.send(Method::GET, base, auth, &url, repo, None).await
+        self.send(Method::GET, base, credentials, &url, repo, None).await
     }
 
     /// Check a blob's existence and size with a `HEAD`, so a client's pre-flight `HEAD` need not pull
@@ -153,12 +178,12 @@ impl Upstream {
     pub async fn blob_head(
         &self,
         base: &str,
-        auth: &Auth,
+        credentials: &CredentialProvider,
         repo: &str,
         digest: &str,
     ) -> Result<Option<u64>, UpstreamError> {
         let url = format!("{base}v2/{repo}/blobs/{digest}");
-        let response = self.send(Method::HEAD, base, auth, &url, repo, None).await?;
+        let response = self.send(Method::HEAD, base, credentials, &url, repo, None).await?;
         Ok(response
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
@@ -174,7 +199,7 @@ impl Upstream {
     pub async fn referrers(
         &self,
         base: &str,
-        auth: &Auth,
+        credentials: &CredentialProvider,
         repo: &str,
         digest: &str,
     ) -> Result<Response, UpstreamError> {
@@ -182,7 +207,7 @@ impl Upstream {
         self.send(
             Method::GET,
             base,
-            auth,
+            credentials,
             &url,
             repo,
             Some("application/vnd.oci.image.index.v1+json"),
@@ -194,34 +219,47 @@ impl Upstream {
     ///
     /// # Errors
     /// Returns [`UpstreamError`] on a non-success status or a transport failure.
-    pub async fn tags(&self, base: &str, auth: &Auth, repo: &str, query: &str) -> Result<Response, UpstreamError> {
+    pub async fn tags(
+        &self,
+        base: &str,
+        credentials: &CredentialProvider,
+        repo: &str,
+        query: &str,
+    ) -> Result<Response, UpstreamError> {
         let mut url = format!("{base}v2/{repo}/tags/list");
         if !query.is_empty() {
             url.push('?');
             url.push_str(query);
         }
-        self.send(Method::GET, base, auth, &url, repo, None).await
+        self.send(Method::GET, base, credentials, &url, repo, None).await
     }
 
     /// Send `method` with the token-auth flow: attach a cached token if any, and on a `401` carrying a
     /// bearer challenge, trade the configured credentials for a fresh token, cache it, and replay once.
-    /// The token cache is keyed by `(base, scope, identity)`, so once one object in a repo authenticates
-    /// the rest reuse the token; the credentials only ever reach the realm, never the object (or a blob
-    /// CDN it redirects to). The identity keys the cache by *whose* credentials minted the token: one
-    /// shared `Upstream` serves every proxy, so without it two indexes on the same host with different
-    /// credentials would trade tokens — an anonymous index riding a private token, or vice versa.
+    /// The token cache is keyed by `(base, scope, provider)` and records the credential generation.
+    /// One provider reuses a token until its credentials rotate; distinct providers cannot exchange
+    /// tokens even when their current secret text matches. Credentials only reach the token realm,
+    /// never the registry object endpoint or a blob CDN redirect.
     async fn send(
         &self,
         method: Method,
         base: &str,
-        auth: &Auth,
+        credentials: &CredentialProvider,
         url: &str,
         repo: &str,
         accept: Option<&str>,
     ) -> Result<Response, UpstreamError> {
         let scope = format!("repository:{repo}:pull");
-        let cache_key = format!("{base}\u{0}{scope}\u{0}{}", auth_identity(auth));
-        let cached = self.tokens.lock().await.get(&cache_key).cloned();
+        let mut credential = credentials.credential().await?;
+        let mut auth = credential.auth();
+        let cache_key = token_cache_key(base, &scope, credential.identity().provider());
+        let cached = self
+            .tokens
+            .lock()
+            .await
+            .get(&cache_key)
+            .filter(|token| token.credentials == credential.identity())
+            .map(|token| token.value.clone());
         let response = self.attempt(&method, url, accept, cached.as_deref()).await?;
         if response.status() != StatusCode::UNAUTHORIZED {
             return finish(response);
@@ -234,8 +272,25 @@ impl Upstream {
         else {
             return finish(response);
         };
-        let token = self.fetch_token(&challenge, &scope, auth).await?;
-        self.tokens.lock().await.insert(cache_key, token.clone());
+        let token = match self.fetch_token(&challenge, &scope, auth).await {
+            Err(UpstreamError::Status(StatusCode::UNAUTHORIZED)) => {
+                let generation = credential.generation();
+                credential = credentials.refresh_after_unauthorized(generation).await?;
+                if credential.generation() == generation {
+                    return Err(UpstreamError::Status(StatusCode::UNAUTHORIZED));
+                }
+                auth = credential.auth();
+                self.fetch_token(&challenge, &scope, auth).await?
+            }
+            result => result?,
+        };
+        self.tokens.lock().await.insert(
+            token_cache_key(base, &scope, credential.identity().provider()),
+            CachedToken {
+                credentials: credential.identity(),
+                value: token.clone(),
+            },
+        );
         finish(self.attempt(&method, url, accept, Some(&token)).await?)
     }
 
@@ -285,25 +340,12 @@ impl Upstream {
     }
 }
 
-/// A stable, opaque identity for the credentials that mint a token, for use in the token cache key.
-/// Distinct credentials must never collide, so `Basic`/`Bearer` fold their secret into a hash rather
-/// than the raw value — the key can end up in a log or a panic, and a password must not.
-fn auth_identity(auth: &Auth) -> String {
-    match auth {
-        Auth::None => "none".to_owned(),
-        Auth::Basic { username, password } => format!("basic:{:016x}", hash_secret(&[username, password])),
-        Auth::Bearer(token) => format!("bearer:{:016x}", hash_secret(&[token])),
+fn token_cache_key(base: &str, scope: &str, provider: CredentialProviderId) -> TokenCacheKey {
+    TokenCacheKey {
+        base: base.to_owned(),
+        scope: scope.to_owned(),
+        provider,
     }
-}
-
-/// Hash secret parts length-delimited (so `["ab","c"]` and `["a","bc"]` differ), never logging them.
-fn hash_secret(parts: &[&str]) -> u64 {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut hasher = std::hash::DefaultHasher::new();
-    for part in parts {
-        part.hash(&mut hasher);
-    }
-    hasher.finish()
 }
 
 /// Fail a non-success response, otherwise hand it back for the caller to read. A `429` becomes a
@@ -493,6 +535,10 @@ struct TokenResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use peryx_upstream::{CredentialFailure, CredentialProvider, CredentialRefresh};
+
     use super::*;
     use rstest::rstest;
 
@@ -563,17 +609,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_auth_identity_distinguishes_credentials() {
-        let anon = auth_identity(&Auth::None);
-        let alice = auth_identity(&basic("alice", "pw"));
-        assert_eq!(anon, "none");
-        assert_ne!(anon, alice);
-        assert_ne!(alice, auth_identity(&basic("bob", "pw")));
-        assert_ne!(alice, auth_identity(&basic("alice", "other")));
-        assert_ne!(auth_identity(&Auth::Bearer("t".to_owned())), anon);
-        assert_ne!(auth_identity(&Auth::Bearer("t".to_owned())), alice);
-        assert_eq!(alice, auth_identity(&basic("alice", "pw")));
+    fn credentials(auth: Auth) -> CredentialProvider {
+        CredentialProvider::fixed(auth)
     }
 
     use base64::Engine as _;
@@ -611,7 +648,7 @@ mod tests {
             .await;
 
         let response = Upstream::new()
-            .manifest(base, &Auth::None, "library/nginx", "latest")
+            .manifest(base, &credentials(Auth::None), "library/nginx", "latest")
             .await
             .unwrap();
 
@@ -653,7 +690,7 @@ mod tests {
             .await;
 
         let response = Upstream::new()
-            .manifest(&base, &Auth::None, "library/nginx", "latest")
+            .manifest(&base, &credentials(Auth::None), "library/nginx", "latest")
             .await
             .unwrap();
 
@@ -763,7 +800,7 @@ mod tests {
             .await;
 
         let result = Upstream::new()
-            .manifest(&base, &Auth::None, "library/nginx", "latest")
+            .manifest(&base, &credentials(Auth::None), "library/nginx", "latest")
             .await;
 
         assert!(matches!(result, Err(UpstreamError::Status(StatusCode::UNAUTHORIZED))));
@@ -781,7 +818,7 @@ mod tests {
             .await;
 
         let result = Upstream::new()
-            .manifest(&base, &Auth::None, "library/nginx", "latest")
+            .manifest(&base, &credentials(Auth::None), "library/nginx", "latest")
             .await;
 
         assert!(
@@ -790,43 +827,182 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_does_not_share_a_token_across_credentials() {
+    async fn test_send_does_not_share_a_token_across_providers() {
         let server = MockServer::start().await;
         let base = format!("{}/", server.uri());
-        let alice = base64::engine::general_purpose::STANDARD.encode("alice:pw1");
-        let bob = base64::engine::general_purpose::STANDARD.encode("bob:pw2");
         Mock::given(method("GET"))
             .and(path("/v2/library/nginx/manifests/latest"))
             .and(Unauthenticated)
             .respond_with(challenge(&base))
             .mount(&server)
             .await;
-        for (auth_header, token) in [(&alice, "tok-alice"), (&bob, "tok-bob")] {
-            Mock::given(method("GET"))
-                .and(path("/token"))
-                .and(match_header("authorization", format!("Basic {auth_header}").as_str()))
-                .respond_with(ResponseTemplate::new(200).set_body_string(format!(r#"{{"token":"{token}"}}"#)))
-                .expect(1)
-                .mount(&server)
-                .await;
-            Mock::given(method("GET"))
-                .and(path("/v2/library/nginx/manifests/latest"))
-                .and(match_header("authorization", format!("Bearer {token}").as_str()))
-                .respond_with(ResponseTemplate::new(200))
-                .expect(1)
-                .mount(&server)
-                .await;
-        }
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"token":"tok"}"#))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(match_header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
 
         let upstream = Upstream::new();
         upstream
-            .manifest(&base, &basic("alice", "pw1"), "library/nginx", "latest")
+            .manifest(&base, &credentials(basic("alice", "pw")), "library/nginx", "latest")
             .await
             .unwrap();
         upstream
-            .manifest(&base, &basic("bob", "pw2"), "library/nginx", "latest")
+            .manifest(&base, &credentials(basic("alice", "pw")), "library/nginx", "latest")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_token_realm_401_refreshes_the_source_credential_once() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(Unauthenticated)
+            .respond_with(challenge(&base))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .and(match_header(
+                "authorization",
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("alice:old")
+                )
+                .as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .and(match_header(
+                "authorization",
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("alice:new")
+                )
+                .as_str(),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"token":"tok"}"#))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(match_header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let credentials = CredentialProvider::refreshing(
+            basic("alice", "old"),
+            CredentialRefresh {
+                interval: Duration::from_mins(1),
+                on_unauthorized: true,
+                failure: CredentialFailure::Fail,
+            },
+            || async { Ok(basic("alice", "new")) },
+        );
+
+        let response = Upstream::new()
+            .manifest(&base, &credentials, "library/nginx", "latest")
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_manifest_reports_a_scheduled_credential_refresh_failure() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        let credentials = CredentialProvider::refreshing(
+            Auth::None,
+            CredentialRefresh {
+                interval: Duration::ZERO,
+                on_unauthorized: true,
+                failure: CredentialFailure::Fail,
+            },
+            || async { Err(CredentialError::new("source unavailable")) },
+        );
+
+        let result = Upstream::new()
+            .manifest(&base, &credentials, "library/nginx", "latest")
+            .await;
+
+        assert!(matches!(result, Err(UpstreamError::Transport(message)) if message == "source unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_token_realm_reports_a_source_refresh_failure() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(Unauthenticated)
+            .respond_with(challenge(&base))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let credentials = CredentialProvider::refreshing(
+            Auth::None,
+            CredentialRefresh {
+                interval: Duration::from_mins(1),
+                on_unauthorized: true,
+                failure: CredentialFailure::Fail,
+            },
+            || async { Err(CredentialError::new("source unavailable")) },
+        );
+
+        let result = Upstream::new()
+            .manifest(&base, &credentials, "library/nginx", "latest")
+            .await;
+
+        assert!(matches!(result, Err(UpstreamError::Transport(message)) if message == "source unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_token_realm_401_stops_when_refresh_is_disabled() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(Unauthenticated)
+            .respond_with(challenge(&base))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = Upstream::new()
+            .manifest(&base, &credentials(Auth::None), "library/nginx", "latest")
+            .await;
+
+        assert!(matches!(result, Err(UpstreamError::Status(StatusCode::UNAUTHORIZED))));
     }
 
     #[tokio::test]
@@ -854,13 +1030,58 @@ mod tests {
             .await;
 
         let upstream = Upstream::new();
-        let auth = basic("alice", "pw1");
+        let credentials = credentials(basic("alice", "pw1"));
         upstream
-            .manifest(&base, &auth, "library/nginx", "latest")
+            .manifest(&base, &credentials, "library/nginx", "latest")
             .await
             .unwrap();
         upstream
-            .manifest(&base, &auth, "library/nginx", "latest")
+            .manifest(&base, &credentials, "library/nginx", "latest")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_discards_a_cached_token_after_credential_refresh() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(Unauthenticated)
+            .respond_with(challenge(&base))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"token":"tok"}"#))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(match_header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let credentials = CredentialProvider::refreshing(
+            basic("alice", "pw"),
+            CredentialRefresh {
+                interval: Duration::ZERO,
+                on_unauthorized: false,
+                failure: CredentialFailure::Fail,
+            },
+            || async { Ok(basic("alice", "pw")) },
+        );
+        let upstream = Upstream::new();
+
+        upstream
+            .manifest(&base, &credentials, "library/nginx", "latest")
+            .await
+            .unwrap();
+        upstream
+            .manifest(&base, &credentials, "library/nginx", "latest")
             .await
             .unwrap();
     }

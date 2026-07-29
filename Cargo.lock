@@ -4024,6 +4024,7 @@ dependencies = [
 name = "peryx-upstream"
 version = "0.0.1"
 dependencies = [
+ "arc-swap",
  "bytes",
  "futures-core",
  "futures-util",

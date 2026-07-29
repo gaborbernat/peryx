@@ -368,8 +368,6 @@ fn test_import_dir_rejects_invalid_metadata_version(#[case] metadata: &[u8], #[c
 #[test]
 fn test_import_dir_rejects_unusable_repositories_and_paths() {
     let root = tempfile::tempdir().unwrap();
-    let import = root.path().join("import");
-    std::fs::create_dir(&import).unwrap();
     let cached_config = Config {
         data_dir: root.path().join("cached-data"),
         indexes: vec![IndexConfig {
@@ -387,6 +385,7 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
                 username: None,
                 password: None,
                 token: None,
+                credential_refresh: None,
                 tls: crate::config::UpstreamTlsConfig::default(),
                 routing: None,
                 upstream_concurrency: peryx_driver::rate_limit::DEFAULT_UPSTREAM_CONCURRENCY,
@@ -415,7 +414,6 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
         }],
         ..Config::default()
     };
-
     assert!(
         operator::import_dir(
             &Config::default(),
@@ -426,19 +424,19 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
         .is_err()
     );
     assert!(
-        operator::import_dir(&cached_config, "pypi", &import, &mut Vec::new())
+        operator::import_dir(&cached_config, "pypi", root.path(), &mut Vec::new())
             .unwrap_err()
             .to_string()
             .contains("read-only")
     );
     assert!(
-        operator::import_dir(&virtual_config, "aggregate", &import, &mut Vec::new())
+        operator::import_dir(&virtual_config, "aggregate", root.path(), &mut Vec::new())
             .unwrap_err()
             .to_string()
             .contains("no hosted upload target")
     );
     assert!(
-        operator::import_dir(&virtual_config, "missing", &import, &mut Vec::new())
+        operator::import_dir(&virtual_config, "missing", root.path(), &mut Vec::new())
             .unwrap_err()
             .to_string()
             .contains("unknown index")
@@ -465,7 +463,7 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
         ..Config::default()
     };
     assert!(
-        operator::import_dir(&oci_config, "images", &import, &mut Vec::new())
+        operator::import_dir(&oci_config, "images", root.path(), &mut Vec::new())
             .unwrap_err()
             .to_string()
             .contains("oci ecosystem")

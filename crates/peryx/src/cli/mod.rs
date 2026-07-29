@@ -21,8 +21,8 @@ pub use job::{JobCommand, JobListArgs, JobShowArgs};
 #[cfg(feature = "self-update")]
 pub use maintenance::SelfCommand;
 pub use maintenance::{
-    BackupCommand, BackupCreateArgs, BackupVerifyArgs, ImportDirArgs, PolicyCommand, PolicyDryRunArgs, RestoreArgs,
-    WriterCommand, WriterPromoteArgs,
+    BackupCommand, BackupCreateArgs, BackupVerifyArgs, BootstrapAdministratorArgs, ImportDirArgs, PolicyCommand,
+    PolicyDryRunArgs, RestoreArgs, WriterCommand, WriterPromoteArgs,
 };
 pub use mirror::{PrefetchCommand, PrefetchOptions, PrefetchPlanArgs, PrefetchSyncArgs, PrefetchVerifyArgs};
 pub use snippet::{ConfigSnippetArgs, SnippetFormat};
@@ -62,6 +62,8 @@ pub enum Command {
     Serve(RuntimeArgs),
     /// Initialize a data directory.
     Init(RuntimeArgs),
+    /// Create the first local administrator.
+    BootstrapAdministrator(BootstrapAdministratorArgs),
     /// Print client configuration for one index.
     #[command(
         after_help = "Examples:\n  peryx config-snippet --base-url https://packages.example --index root/pypi pip.conf\n  peryx config-snippet --base-url https://packages.example --index root/pypi uv.toml\n  peryx config-snippet --base-url https://packages.example --index root/pypi .pypirc"

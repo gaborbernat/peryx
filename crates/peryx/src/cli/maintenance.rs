@@ -1,10 +1,34 @@
-//! Backup, restore, import, policy, and self-management commands.
+//! Bootstrap, backup, restore, import, policy, and self-management commands.
 
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 
 use super::RuntimeArgs;
+
+/// Options for creating the first local administrator.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(group(
+    ArgGroup::new("password_source")
+        .required(true)
+        .multiple(false)
+        .args(["password_stdin", "password_file"])
+))]
+pub struct BootstrapAdministratorArgs {
+    #[command(flatten)]
+    pub runtime: RuntimeArgs,
+
+    /// Display name for the administrator.
+    pub display_name: String,
+
+    /// Read the password from standard input.
+    #[arg(long)]
+    pub password_stdin: bool,
+
+    /// Read the password from a secret file.
+    #[arg(long, value_name = "PATH")]
+    pub password_file: Option<PathBuf>,
+}
 
 /// Single-writer failover commands.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]

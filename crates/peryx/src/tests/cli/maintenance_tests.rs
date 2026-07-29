@@ -1,7 +1,70 @@
 use std::path::PathBuf;
 
+use clap::Parser as _;
+
 use super::parse;
-use crate::cli::{BackupCommand, Command, PolicyCommand, WriterCommand};
+use crate::cli::{BackupCommand, Cli, Command, PolicyCommand, WriterCommand};
+
+#[test]
+fn test_parse_bootstrap_administrator_secret_sources() {
+    let stdin = parse(&[
+        "peryx",
+        "bootstrap-administrator",
+        "Alice",
+        "--password-stdin",
+        "--data-dir",
+        "/data",
+    ]);
+    let Command::BootstrapAdministrator(stdin) = stdin.command else {
+        panic!("expected bootstrap-administrator");
+    };
+    assert_eq!(stdin.display_name, "Alice");
+    assert!(stdin.password_stdin);
+    assert_eq!(stdin.password_file, None);
+    assert_eq!(stdin.runtime.data_dir, Some(PathBuf::from("/data")));
+
+    let file = parse(&[
+        "peryx",
+        "bootstrap-administrator",
+        "Alice",
+        "--password-file",
+        "/run/credentials/peryx.service/administrator-password",
+    ]);
+    let Command::BootstrapAdministrator(file) = file.command else {
+        panic!("expected bootstrap-administrator");
+    };
+    assert_eq!(
+        file.password_file,
+        Some(PathBuf::from("/run/credentials/peryx.service/administrator-password"))
+    );
+    assert!(!file.password_stdin);
+}
+
+#[test]
+fn test_parse_bootstrap_administrator_requires_one_non_argv_secret_source() {
+    assert!(Cli::try_parse_from(["peryx", "bootstrap-administrator", "Alice"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "peryx",
+            "bootstrap-administrator",
+            "Alice",
+            "--password-stdin",
+            "--password-file",
+            "/secret"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "peryx",
+            "bootstrap-administrator",
+            "Alice",
+            "--password",
+            "password-must-not-enter-argv"
+        ])
+        .is_err()
+    );
+}
 
 #[test]
 fn test_parse_writer_promote() {

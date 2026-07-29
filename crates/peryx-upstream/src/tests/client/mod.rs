@@ -1,4 +1,5 @@
 mod client_tests;
+mod credential_tests;
 mod error_tests;
 mod netrc_tests;
 mod retry_tests;

@@ -98,6 +98,9 @@ name = "registry"
 ecosystem = "oci"
 cached = "https://registry.corp.example"
 token_file = "/run/credentials/peryx.service/registry-token" # from a systemd credential
+credential_refresh_secs = 60
+credential_refresh_on_unauthorized = true
+credential_failure = "fail"
 ```
 
 `password_file`/`token_file` fit secret files mounted read-only by the process manager: a
@@ -108,11 +111,27 @@ or an `echo` left with a trailing newline still resolves. `password_env`/`token_
 an environment variable, including systemd's `%d`-free `Environment=`/`EnvironmentFile=` and a Kubernetes
 `secretKeyRef`.
 
-peryx resolves every source once, when it builds the cached index at startup, and holds the value for the process
-lifetime, so it never rereads the file or variable per artifact request. A missing, unreadable, empty, or oversized file
-and an unset, non-UTF-8, or empty environment variable each stop startup with an error that names only the file path or
-variable, never the secret. The one-mebibyte file ceiling rejects a path pointed at a log or device before it is read
-into memory. Config snapshots (`peryx backup`) keep the `_file`/`_env` reference, not the resolved secret.
+By default, peryx resolves every source once when it builds the cached index and holds the value for the process
+lifetime. Set `credential_refresh_secs` on a cached index, or separately on each `[[index.upstream]]` source, to reload
+a `_file` or `_env` credential before a request after that interval has elapsed. Concurrent requests share one reload
+and read the current credential without locking. Literal credentials and netrc entries cannot be refreshed.
+
+`credential_refresh_on_unauthorized` defaults to `true`. When the upstream rejects a credential, peryx reloads its
+source and replays the request once. The replay happens only when that credential generation has not already been
+replaced, so a burst of rejected requests does not repeatedly read the source. `credential_failure = "fail"` rejects
+requests until a later reload succeeds; `"anonymous"` retries without authentication. Credentials and OCI bearer tokens
+stay isolated by configured source and origin.
+
+Projected Kubernetes Secret volumes and files replaced atomically by Vault Agent can rotate without restarting peryx.
+Kubernetes `subPath` mounts do not receive projected Secret updates. Process managers ordinarily cannot change the
+environment of an existing process, so `_env` refresh only observes changes made inside that process; restart peryx when
+the manager changes an environment value. Refresh is lazy rather than a background task, and the interval is a minimum
+between reads, not a promise that an idle source is read on schedule.
+
+A missing, unreadable, empty, or oversized file and an unset, non-UTF-8, or empty environment variable each stop startup
+or fail a refresh with an error that names only the file path or variable, never the secret. The one-mebibyte file
+ceiling rejects a path pointed at a log or device before it is read into memory. Config snapshots (`peryx backup`) keep
+the `_file`/`_env` reference and refresh policy, not the resolved secret.
 
 To migrate an inlined credential, move the value into a file or environment variable and replace `password`/`token` with
 its `_file`/`_env` sibling; the inline keys keep working, so migrate one upstream at a time.
@@ -252,36 +271,39 @@ and let the proxy hold the certificate.
 Each `[[index]]` table declares one index. `name` is required; exactly one of `cached`, `hosted`, or `layers` selects
 the role. peryx rejects unknown keys.
 
-| Key                    | Role    | Meaning                                                               | Default            |
-| ---------------------- | ------- | --------------------------------------------------------------------- | ------------------ |
-| `name`                 | all     | Identifier other indexes reference in `layers`                        | (required)         |
-| `route`                | all     | URL prefix the index is served under                                  | same as `name`     |
-| `ecosystem`            | all     | Packaging format: `pypi` or `oci`                                     | `pypi`             |
-| `cached`               | cached  | Upstream URL to cache (a Simple index, or a `/v2/` registry for OCI)  |                    |
-| `username`             | cached  | Basic-auth username for the upstream                                  | (none)             |
-| `password`             | cached  | Basic-auth password for the upstream                                  | (none)             |
-| `password_file`        | cached  | Path to read `password` from instead of inlining it                   | (none)             |
-| `password_env`         | cached  | Environment variable to read `password` from instead of inlining it   | (none)             |
-| `token`                | cached  | Bearer token; takes precedence over username/password                 | (none)             |
-| `token_file`           | cached  | Path to read `token` from instead of inlining it                      | (none)             |
-| `token_env`            | cached  | Environment variable to read `token` from instead of inlining it      | (none)             |
-| `ca_file`              | cached  | PEM CA bundle added to platform trust for this upstream               | (none)             |
-| `client_cert_file`     | cached  | PEM client certificate chain; requires `client_key_file`              | (none)             |
-| `client_key_file`      | cached  | Matching unencrypted PEM client key; requires `client_cert_file`      | (none)             |
-| `upstream_concurrency` | cached  | Cap on concurrent upstream fetches; `0` is unlimited and the default  | `0`                |
-| `offline`              | cached  | Serve this cached index from disk only                                | `false`            |
-| `prefetch`             | cached  | Package and artifact selection for `peryx mirror`                     | (see below)        |
-| `hosted`               | hosted  | `true` marks this index as a hosted store (implied by `upload_token`) | `false`            |
-| `upload_token`         | hosted  | Sugar for one token granted write and delete over every project       | (none)             |
-| `upload_token_file`    | hosted  | Path to read `upload_token` from instead of inlining it               | (none)             |
-| `volatile`             | hosted  | Allow delete and overwrite                                            | `true`             |
-| `anonymous_read`       | all     | Whether a credential-less request may read this index                 | `[auth]` default   |
-| `access_token`         | all     | Named credentials the index accepts, with scoped grants               | none               |
-| `layers`               | virtual | Ordered index names to compose; first match per filename wins         |                    |
-| `upload`               | virtual | Hosted layer that receives uploads                                    | first hosted layer |
-| `policy`               | all     | Nested index policy table                                             | empty              |
-| `settings`             | all     | Nested table of the index ecosystem's own settings                    | empty              |
-| `webhook`              | all     | Signed delivery targets for upload and index-change events            | none               |
+| Key                                  | Role    | Meaning                                                               | Default            |
+| ------------------------------------ | ------- | --------------------------------------------------------------------- | ------------------ |
+| `name`                               | all     | Identifier other indexes reference in `layers`                        | (required)         |
+| `route`                              | all     | URL prefix the index is served under                                  | same as `name`     |
+| `ecosystem`                          | all     | Packaging format: `pypi` or `oci`                                     | `pypi`             |
+| `cached`                             | cached  | Upstream URL to cache (a Simple index, or a `/v2/` registry for OCI)  |                    |
+| `username`                           | cached  | Basic-auth username for the upstream                                  | (none)             |
+| `password`                           | cached  | Basic-auth password for the upstream                                  | (none)             |
+| `password_file`                      | cached  | Path to read `password` from instead of inlining it                   | (none)             |
+| `password_env`                       | cached  | Environment variable to read `password` from instead of inlining it   | (none)             |
+| `token`                              | cached  | Bearer token; takes precedence over username/password                 | (none)             |
+| `token_file`                         | cached  | Path to read `token` from instead of inlining it                      | (none)             |
+| `token_env`                          | cached  | Environment variable to read `token` from instead of inlining it      | (none)             |
+| `credential_refresh_secs`            | cached  | Minimum seconds between credential source reads                       | (none)             |
+| `credential_refresh_on_unauthorized` | cached  | Reload and replay once after credential rejection                     | `true`             |
+| `credential_failure`                 | cached  | Reload failure behavior: `fail` or `anonymous`                        | `fail`             |
+| `ca_file`                            | cached  | PEM CA bundle added to platform trust for this upstream               | (none)             |
+| `client_cert_file`                   | cached  | PEM client certificate chain; requires `client_key_file`              | (none)             |
+| `client_key_file`                    | cached  | Matching unencrypted PEM client key; requires `client_cert_file`      | (none)             |
+| `upstream_concurrency`               | cached  | Cap on concurrent upstream fetches; `0` is unlimited and the default  | `0`                |
+| `offline`                            | cached  | Serve this cached index from disk only                                | `false`            |
+| `prefetch`                           | cached  | Package and artifact selection for `peryx mirror`                     | (see below)        |
+| `hosted`                             | hosted  | `true` marks this index as a hosted store (implied by `upload_token`) | `false`            |
+| `upload_token`                       | hosted  | Sugar for one token granted write and delete over every project       | (none)             |
+| `upload_token_file`                  | hosted  | Path to read `upload_token` from instead of inlining it               | (none)             |
+| `volatile`                           | hosted  | Allow delete and overwrite                                            | `true`             |
+| `anonymous_read`                     | all     | Whether a credential-less request may read this index                 | `[auth]` default   |
+| `access_token`                       | all     | Named credentials the index accepts, with scoped grants               | none               |
+| `layers`                             | virtual | Ordered index names to compose; first match per filename wins         |                    |
+| `upload`                             | virtual | Hosted layer that receives uploads                                    | first hosted layer |
+| `policy`                             | all     | Nested index policy table                                             | empty              |
+| `settings`                           | all     | Nested table of the index ecosystem's own settings                    | empty              |
+| `webhook`                            | all     | Signed delivery targets for upload and index-change events            | none               |
 
 A `route` is a raw URL path prefix. It must be one or more non-empty path segments separated by `/`; each segment may
 contain only ASCII letters, digits, `-`, `.`, `_`, and `~`. Startup rejects routes with a leading or trailing `/`, empty

@@ -11,7 +11,9 @@ use toml::Table;
 
 use peryx_driver::jobs::ScheduledJob;
 
-use super::model::{AvailabilityMode, JobsMode, LogFormat, LogSink, PrefetchConfig, PrefetchMode};
+use super::model::{
+    AvailabilityMode, CredentialFailureMode, JobsMode, LogFormat, LogSink, PrefetchConfig, PrefetchMode,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -260,6 +262,9 @@ pub struct RawIndex {
     pub token: Option<String>,
     pub token_file: Option<PathBuf>,
     pub token_env: Option<String>,
+    pub credential_refresh_secs: Option<u64>,
+    pub credential_refresh_on_unauthorized: Option<bool>,
+    pub credential_failure: Option<CredentialFailureMode>,
     pub ca_file: Option<PathBuf>,
     pub client_cert_file: Option<PathBuf>,
     pub client_key_file: Option<PathBuf>,
@@ -295,6 +300,9 @@ pub struct RawUpstream {
     pub token: Option<String>,
     pub token_file: Option<PathBuf>,
     pub token_env: Option<String>,
+    pub credential_refresh_secs: Option<u64>,
+    pub credential_refresh_on_unauthorized: Option<bool>,
+    pub credential_failure: Option<CredentialFailureMode>,
     pub ca_file: Option<PathBuf>,
     pub client_cert_file: Option<PathBuf>,
     pub client_key_file: Option<PathBuf>,

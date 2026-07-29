@@ -2,6 +2,8 @@
 
 use url::Url;
 
+use super::CredentialError;
+
 /// An error from the range-read path.
 #[derive(Debug, thiserror::Error)]
 pub enum RangeError {
@@ -24,6 +26,8 @@ impl RangeError {
 /// An error talking to an upstream index.
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
+    #[error("upstream credential refresh failed: {0}")]
+    Credential(#[from] CredentialError),
     #[error(transparent)]
     Url(#[from] url::ParseError),
     #[error(transparent)]
@@ -42,7 +46,8 @@ impl UpstreamError {
     pub fn status(&self) -> Option<u16> {
         match self {
             Self::Http(err) => err.status().map(|status| status.as_u16()),
-            Self::Url(_)
+            Self::Credential(_)
+            | Self::Url(_)
             | Self::MissingContentType { .. }
             | Self::UnsupportedContentType { .. }
             | Self::ResponseTooLarge { .. } => None,
@@ -56,6 +61,7 @@ impl UpstreamError {
     #[must_use]
     pub fn user_message(&self) -> String {
         match self {
+            Self::Credential(_) => "upstream credential refresh failed".to_owned(),
             Self::Url(err) => format!("invalid upstream URL: {err}"),
             Self::Http(err) if let Some(status) = err.status() => format!("upstream returned {status}"),
             Self::Http(err) if err.is_timeout() => "upstream request timed out".to_owned(),

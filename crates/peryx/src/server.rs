@@ -16,11 +16,14 @@ use peryx_identity::{Action, Signer};
 use peryx_policy::{Policy, PolicyDecisionRecorder, PolicyEvaluation};
 use peryx_storage::blob::{BlobStorage, S3Config, S3Credentials};
 use peryx_storage::meta::{MetaStore, NewPolicyDecision};
-use peryx_upstream::{Auth, NamedUpstream, Netrc, UpstreamClient, UpstreamRouter, UpstreamTls, redact_url};
+use peryx_upstream::{
+    Auth, CredentialError, CredentialFailure, CredentialProvider, CredentialRefresh, NamedUpstream, Netrc,
+    UpstreamClient, UpstreamRouter, UpstreamTls, redact_url,
+};
 
 use crate::config::{
-    AuthConfig, BlobStorageConfig, Config, IndexConfig, IndexKind as ConfigKind, ReplicationConfig, SecretSource,
-    UpstreamTlsConfig, WebhookSecret,
+    AuthConfig, BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, IndexConfig,
+    IndexKind as ConfigKind, ReplicationConfig, SecretSource, UpstreamTlsConfig, WebhookSecret,
 };
 
 /// Open the configured blob backend. S3 `credentials` are resolved once at the composition root and
@@ -103,8 +106,14 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         .map(Netrc::from_path)
         .transpose()
         .context("load upstream netrc")?;
-    let upstream_routes = build_upstream_routes(&configs, netrc.as_ref())?;
-    let mut indexes = build_indexes_with_netrc(&configs, &config.auth, config.offline || read_only, netrc.as_ref())?;
+    let credential_providers = build_credential_providers(&configs, netrc.as_ref())?;
+    let upstream_routes = build_upstream_routes(&configs, &credential_providers, netrc.as_ref())?;
+    let mut indexes = build_indexes_with_providers(
+        &configs,
+        &config.auth,
+        config.offline || read_only,
+        &credential_providers,
+    )?;
     if configured_replica {
         for index in &mut indexes {
             if let IndexKind::Virtual { upload, .. } = &mut index.kind {
@@ -274,18 +283,21 @@ pub(crate) fn drivers() -> &'static DriverSet {
     })
 }
 
+type CredentialProviders = HashMap<(String, String), CredentialProvider>;
+
 /// Resolve configured indexes into their runtime form, mapping virtual-index member names to positions,
 /// building each cached index's authenticated upstream client, and reading each index's access rules
 /// (which is where a secret kept in a file is read).
 pub(crate) fn build_indexes(configs: &[IndexConfig], auth: &AuthConfig, offline: bool) -> anyhow::Result<Vec<Index>> {
-    build_indexes_with_netrc(configs, auth, offline, None)
+    let credential_providers = build_credential_providers(configs, None)?;
+    build_indexes_with_providers(configs, auth, offline, &credential_providers)
 }
 
-fn build_indexes_with_netrc(
+fn build_indexes_with_providers(
     configs: &[IndexConfig],
     auth: &AuthConfig,
     offline: bool,
-    netrc: Option<&Netrc>,
+    credential_providers: &CredentialProviders,
 ) -> anyhow::Result<Vec<Index>> {
     let mut positions = HashMap::with_capacity(configs.len());
     let mut routes = HashMap::with_capacity(configs.len());
@@ -311,7 +323,7 @@ fn build_indexes_with_netrc(
                 name: index.name.clone(),
                 route: index.route.clone(),
                 ecosystem: index.ecosystem,
-                kind: build_kind(index, configs, &positions, offline, netrc)?,
+                kind: build_kind(index, configs, &positions, offline, credential_providers)?,
                 policy: Policy::compile(&index.policy, |name| driver.normalize_name(name)).with_rules(rules),
                 acl: index
                     .acl(auth)
@@ -365,11 +377,12 @@ fn build_webhooks(configs: &[IndexConfig]) -> anyhow::Result<WebhookRuntime> {
     WebhookRuntime::new(targets).context("build webhook targets")
 }
 
-#[derive(Clone, Copy)]
-struct UpstreamCredentials<'a> {
-    username: Option<&'a str>,
-    password: Option<&'a SecretSource>,
-    token: Option<&'a SecretSource>,
+#[derive(Clone)]
+struct UpstreamCredentials {
+    username: Option<String>,
+    password: Option<SecretSource>,
+    token: Option<SecretSource>,
+    refresh: Option<CredentialRefreshConfig>,
 }
 
 fn webhook_secret(secret: &WebhookSecret, name: &str) -> anyhow::Result<String> {
@@ -386,29 +399,28 @@ fn build_kind(
     configs: &[IndexConfig],
     positions: &HashMap<&str, usize>,
     global_offline: bool,
-    netrc: Option<&Netrc>,
+    credential_providers: &CredentialProviders,
 ) -> anyhow::Result<IndexKind> {
     match &index.kind {
         ConfigKind::Cached {
             upstream,
-            username,
-            password,
-            token,
             tls,
+            routing,
             offline,
             ..
         } => Ok(IndexKind::Cached {
             client: build_upstream_client(
                 &index.name,
                 upstream,
-                UpstreamCredentials {
-                    username: username.as_deref(),
-                    password: password.as_ref(),
-                    token: token.as_ref(),
-                },
+                credential_provider(
+                    credential_providers,
+                    &index.name,
+                    routing
+                        .as_ref()
+                        .map_or("", |routing| routing.upstreams[0].name.as_str()),
+                ),
                 &load_upstream_tls(&index.name, tls)?,
                 upstream,
-                netrc,
             )?,
             offline: global_offline || *offline,
         }),
@@ -427,8 +439,122 @@ fn build_kind(
     }
 }
 
+fn build_credential_providers(configs: &[IndexConfig], netrc: Option<&Netrc>) -> anyhow::Result<CredentialProviders> {
+    let mut providers = HashMap::new();
+    for index in configs {
+        match &index.kind {
+            ConfigKind::Cached {
+                upstream,
+                username,
+                password,
+                token,
+                credential_refresh,
+                routing: None,
+                ..
+            } => {
+                providers.insert(
+                    (index.name.clone(), String::new()),
+                    build_credential_provider(
+                        &index.name,
+                        upstream,
+                        UpstreamCredentials {
+                            username: username.clone(),
+                            password: password.clone(),
+                            token: token.clone(),
+                            refresh: *credential_refresh,
+                        },
+                        netrc,
+                    )?,
+                );
+            }
+            ConfigKind::Cached {
+                routing: Some(routing), ..
+            } => {
+                for upstream in &routing.upstreams {
+                    providers.insert(
+                        (index.name.clone(), upstream.name.clone()),
+                        build_credential_provider(
+                            &index.name,
+                            &upstream.url,
+                            UpstreamCredentials {
+                                username: upstream.username.clone(),
+                                password: upstream.password.clone(),
+                                token: upstream.token.clone(),
+                                refresh: upstream.credential_refresh,
+                            },
+                            netrc,
+                        )?,
+                    );
+                }
+            }
+            ConfigKind::Hosted { .. } | ConfigKind::Virtual { .. } => {}
+        }
+    }
+    Ok(providers)
+}
+
+fn build_credential_provider(
+    index: &str,
+    upstream: &str,
+    credentials: UpstreamCredentials,
+    netrc: Option<&Netrc>,
+) -> anyhow::Result<CredentialProvider> {
+    let mut auth = resolve_upstream_auth(&credentials)
+        .with_context(|| format!("read the upstream credentials of index {index}"))?;
+    if auth == Auth::None
+        && let Some(netrc) = netrc
+    {
+        auth = netrc
+            .auth_for_str(upstream)
+            .with_context(|| format!("match netrc credentials for {}", redact_url(upstream)))?;
+    }
+    let Some(refresh) = credentials.refresh else {
+        return Ok(CredentialProvider::fixed(auth));
+    };
+    let credentials = Arc::new(credentials);
+    let index = Arc::<str>::from(index);
+    Ok(CredentialProvider::refreshing(
+        auth,
+        CredentialRefresh {
+            interval: refresh.interval,
+            on_unauthorized: refresh.on_unauthorized,
+            failure: match refresh.failure {
+                CredentialFailureMode::Fail => CredentialFailure::Fail,
+                CredentialFailureMode::Anonymous => CredentialFailure::Anonymous,
+            },
+        },
+        move || {
+            let credentials = credentials.clone();
+            let index = index.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    resolve_upstream_auth(&credentials)
+                        .map_err(|error| CredentialError::new(format!("index {index}: {error:#}")))
+                })
+                .await
+                .expect("secret resolution has no panic path")
+            }
+        },
+    ))
+}
+
+fn resolve_upstream_auth(credentials: &UpstreamCredentials) -> anyhow::Result<Auth> {
+    let read = |source: Option<&SecretSource>| source.map(SecretSource::read).transpose();
+    let (token, password) = (read(credentials.token.as_ref())?, read(credentials.password.as_ref())?);
+    Ok(upstream_auth(
+        token.as_deref(),
+        credentials.username.as_deref(),
+        password.as_deref(),
+    ))
+}
+
+fn credential_provider(providers: &CredentialProviders, index: &str, upstream: &str) -> CredentialProvider {
+    providers[&(index.to_owned(), upstream.to_owned())].clone()
+}
+
 fn build_upstream_routes(
     configs: &[IndexConfig],
+    credential_providers: &CredentialProviders,
     netrc: Option<&Netrc>,
 ) -> anyhow::Result<Vec<(String, UpstreamRouter)>> {
     configs
@@ -448,31 +574,31 @@ fn build_upstream_routes(
                     let client = build_upstream_client(
                         &index.name,
                         &upstream.url,
-                        UpstreamCredentials {
-                            username: upstream.username.as_deref(),
-                            password: upstream.password.as_ref(),
-                            token: upstream.token.as_ref(),
-                        },
+                        credential_provider(credential_providers, &index.name, &upstream.name),
                         &tls,
                         &upstream.url,
-                        netrc,
                     )?;
                     let named = NamedUpstream::new(&upstream.name, client);
                     let Some(artifact_url) = &upstream.artifact_url else {
                         return Ok(named);
                     };
-                    let mirror = build_upstream_client(
-                        &index.name,
-                        artifact_url,
-                        UpstreamCredentials {
-                            username: upstream.username.as_deref(),
-                            password: upstream.password.as_ref(),
-                            token: upstream.token.as_ref(),
-                        },
-                        &tls,
-                        &upstream.url,
-                        netrc,
-                    )?;
+                    let credentials =
+                        if upstream.token.is_some() || upstream.username.is_some() && upstream.password.is_some() {
+                            credential_provider(credential_providers, &index.name, &upstream.name)
+                        } else {
+                            build_credential_provider(
+                                &index.name,
+                                artifact_url,
+                                UpstreamCredentials {
+                                    username: upstream.username.clone(),
+                                    password: upstream.password.clone(),
+                                    token: upstream.token.clone(),
+                                    refresh: None,
+                                },
+                                netrc,
+                            )?
+                        };
+                    let mirror = build_upstream_client(&index.name, artifact_url, credentials, &tls, &upstream.url)?;
                     Ok(named.with_artifact_mirror(mirror, routing.fallback))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
@@ -494,27 +620,11 @@ fn build_upstream_routes(
 fn build_upstream_client(
     index: &str,
     upstream: &str,
-    credentials: UpstreamCredentials<'_>,
+    credentials: CredentialProvider,
     tls: &UpstreamTls,
     identity_origin: &str,
-    netrc: Option<&Netrc>,
 ) -> anyhow::Result<UpstreamClient> {
-    let read = |source: Option<&SecretSource>| {
-        source
-            .map(SecretSource::read)
-            .transpose()
-            .with_context(|| format!("read the upstream credentials of index {index}"))
-    };
-    let (token, password) = (read(credentials.token)?, read(credentials.password)?);
-    let mut auth = upstream_auth(token.as_deref(), credentials.username, password.as_deref());
-    if auth == Auth::None
-        && let Some(netrc) = netrc
-    {
-        auth = netrc
-            .auth_for_str(upstream)
-            .with_context(|| format!("match netrc credentials for {}", redact_url(upstream)))?;
-    }
-    UpstreamClient::with_auth_and_tls_for_origin(upstream, auth, tls, identity_origin)
+    UpstreamClient::with_credentials_and_tls_for_origin(upstream, credentials, tls, identity_origin)
         .with_context(|| format!("build cached index {index} with upstream {}", redact_url(upstream)))
 }
 

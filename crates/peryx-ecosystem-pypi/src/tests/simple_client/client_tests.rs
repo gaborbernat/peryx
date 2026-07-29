@@ -1,4 +1,9 @@
-use peryx_upstream::{Auth, NamedUpstream, UpstreamClient, UpstreamError, UpstreamHealth, UpstreamRouter};
+use std::time::Duration;
+
+use peryx_upstream::{
+    Auth, CredentialError, CredentialFailure, CredentialProvider, CredentialRefresh, NamedUpstream, UpstreamClient,
+    UpstreamError, UpstreamHealth, UpstreamRouter, UpstreamTls,
+};
 use rstest::rstest;
 use wiremock::matchers::{header, header_regex, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -165,6 +170,46 @@ async fn test_routed_project_does_not_fall_back_on_an_invalid_response() {
         route.sources().map(NamedUpstream::health).collect::<Vec<_>>(),
         [UpstreamHealth::Unhealthy, UpstreamHealth::Configured]
     );
+}
+
+#[tokio::test]
+async fn test_routed_project_does_not_fall_back_after_a_credential_failure() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    mount_get(
+        &second,
+        "/simple/flask/",
+        ResponseTemplate::new(200).set_body_raw(b"{}".to_vec(), "application/vnd.pypi.simple.v1+json"),
+    )
+    .await;
+    let credentials = CredentialProvider::refreshing(
+        Auth::Bearer("old".to_owned()),
+        CredentialRefresh {
+            interval: Duration::ZERO,
+            on_unauthorized: true,
+            failure: CredentialFailure::Fail,
+        },
+        || async { Err(CredentialError::new("source unavailable")) },
+    );
+    let route = UpstreamRouter::new(vec![
+        NamedUpstream::new(
+            "first",
+            UpstreamClient::with_credentials_and_tls_for_origin(
+                &format!("{}/simple/", first.uri()),
+                credentials,
+                &UpstreamTls::default(),
+                &first.uri(),
+            )
+            .unwrap(),
+        ),
+        NamedUpstream::new("second", simple_client(&second)),
+    ])
+    .unwrap();
+
+    let error = route.fetch_project("flask", None).await.unwrap_err();
+
+    assert!(matches!(error, UpstreamError::Credential(_)));
+    assert!(second.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]

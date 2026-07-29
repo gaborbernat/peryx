@@ -230,7 +230,8 @@ fn fallback_result<T: SimpleStatus>(result: &Result<T, UpstreamError>) -> bool {
         Ok(response) => matches!(response.status(), 404 | 429 | 500..=599),
         Err(UpstreamError::Http(_)) => true,
         Err(
-            UpstreamError::Url(_)
+            UpstreamError::Credential(_)
+            | UpstreamError::Url(_)
             | UpstreamError::MissingContentType { .. }
             | UpstreamError::UnsupportedContentType { .. }
             | UpstreamError::ResponseTooLarge { .. },

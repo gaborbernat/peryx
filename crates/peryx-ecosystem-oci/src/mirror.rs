@@ -7,7 +7,7 @@ use std::sync::Arc;
 use peryx_driver::ServingState;
 use peryx_index::Index;
 use peryx_storage::blob::Digest;
-use peryx_upstream::Auth;
+use peryx_upstream::CredentialProvider;
 use serde::Serialize;
 
 use crate::registry::{MAX_MANIFEST_BYTES, bounded_body, download_blob, serving_members};
@@ -110,7 +110,7 @@ struct Mirror<'a> {
     state: &'a Arc<ServingState>,
     upstream: &'a Upstream,
     base: String,
-    auth: Auth,
+    credentials: CredentialProvider,
     index: &'a str,
     settings: IndexSettings,
     mode: MirrorMode,
@@ -132,7 +132,7 @@ pub async fn mirror(
     mode: MirrorMode,
 ) -> anyhow::Result<Vec<MirrorRow>> {
     let mut rows = Vec::new();
-    let Some((base, auth)) = serving_members(state, index).into_iter().find_map(|member| {
+    let Some((base, credentials)) = serving_members(state, index).into_iter().find_map(|member| {
         member
             .proxy_client()
             .map(|client| (client.base_url().to_owned(), client.auth().clone()))
@@ -151,7 +151,7 @@ pub async fn mirror(
         state,
         upstream: &upstream,
         base,
-        auth,
+        credentials,
         index: &index.name,
         settings,
         mode,
@@ -216,7 +216,7 @@ impl Mirror<'_> {
         }
         let response = match self
             .upstream
-            .manifest(&self.base, &self.auth, &self.upstream_repo(repo), reference)
+            .manifest(&self.base, &self.credentials, &self.upstream_repo(repo), reference)
             .await
         {
             Ok(response) => response,
@@ -360,7 +360,7 @@ impl Mirror<'_> {
         }
         match self
             .upstream
-            .blob(&self.base, &self.auth, &self.upstream_repo(repo), digest)
+            .blob(&self.base, &self.credentials, &self.upstream_repo(repo), digest)
             .await
         {
             Ok(response) => match download_blob(&self.state.blobs, &storage, response).await {

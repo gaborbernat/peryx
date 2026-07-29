@@ -299,7 +299,34 @@ pub enum SecretSource {
     Env(String),
 }
 
+/// Request behavior when a dynamic credential source cannot be read.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialFailureMode {
+    /// Reject requests until a later refresh succeeds.
+    #[default]
+    Fail,
+    /// Retry without authentication.
+    Anonymous,
+}
+
+/// Dynamic credential reload policy for an environment variable or file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialRefreshConfig {
+    /// Minimum time between source reads.
+    pub interval: Duration,
+    /// Reload once when an upstream rejects the current generation.
+    pub on_unauthorized: bool,
+    /// Request behavior when the source read fails.
+    pub failure: CredentialFailureMode,
+}
+
 impl SecretSource {
+    #[must_use]
+    pub(super) const fn supports_refresh(&self) -> bool {
+        matches!(self, Self::File(_) | Self::Env(_))
+    }
+
     /// The secret's value, reading the file or environment variable when that is where it lives.
     /// Surrounding whitespace goes: a secret file written by `echo` or a Kubernetes mount ends in a
     /// newline that is not part of it. Every error path names only the location, never the value.
@@ -434,6 +461,7 @@ pub enum IndexKind {
         /// Bearer token; takes precedence over username/password. A `token_file` sibling keeps it out
         /// of the config file.
         token: Option<SecretSource>,
+        credential_refresh: Option<CredentialRefreshConfig>,
         /// Per-upstream trust and client identity files.
         tls: UpstreamTlsConfig,
         /// Ordered named sources and fallback controls. `None` preserves the legacy single-upstream
@@ -469,6 +497,7 @@ pub struct UpstreamConfig {
     pub username: Option<String>,
     pub password: Option<SecretSource>,
     pub token: Option<SecretSource>,
+    pub credential_refresh: Option<CredentialRefreshConfig>,
     pub tls: UpstreamTlsConfig,
 }
 
@@ -615,6 +644,7 @@ fn default_indexes() -> Vec<IndexConfig> {
         username: None,
         password: None,
         token: None,
+        credential_refresh: None,
         tls: UpstreamTlsConfig::default(),
         routing: None,
         upstream_concurrency: DEFAULT_UPSTREAM_CONCURRENCY,

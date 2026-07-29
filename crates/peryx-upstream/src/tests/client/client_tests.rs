@@ -399,9 +399,13 @@ fn test_auth_returns_the_configured_credentials() {
         password: "s3cret".to_owned(),
     };
     let client = UpstreamClient::with_auth("https://example.invalid/simple/", auth.clone()).unwrap();
-    assert_eq!(client.auth(), &auth);
+    assert_eq!(client.current_credential().unwrap().auth(), &auth);
     assert_eq!(
-        UpstreamClient::new("https://example.invalid/simple/").unwrap().auth(),
+        UpstreamClient::new("https://example.invalid/simple/")
+            .unwrap()
+            .current_credential()
+            .unwrap()
+            .auth(),
         &Auth::None
     );
 }

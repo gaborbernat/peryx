@@ -11,17 +11,17 @@ use peryx_storage::meta::{MetaStore, PolicyDecisionQuery};
 use peryx_upstream::Auth;
 use rstest::rstest;
 use tower::ServiceExt as _;
-use wiremock::matchers::{header_regex, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{header as match_header, header_regex, method, path};
+use wiremock::{Match, Mock, MockServer, Request as WiremockRequest, ResponseTemplate};
 
 use peryx_ecosystem_oci::LibraryPrefix;
 
 use peryx_storage::blob::S3Credentials;
 
 use crate::config::{
-    AuthConfig, AvailabilityConfig, BlobStorageConfig, Config, IndexConfig, IndexKind, ReplicationConfig,
-    S3StorageConfig, SecretSource, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig,
-    WebhookSecret,
+    AuthConfig, AvailabilityConfig, BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig,
+    IndexConfig, IndexKind, ReplicationConfig, S3StorageConfig, SecretSource, TrustedPublisherConfig, UpstreamConfig,
+    UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
 };
 use crate::server::{
     build_blob_storage, build_index_settings, build_indexes, build_router, build_state, upstream_auth,
@@ -103,6 +103,7 @@ fn cached(name: &str, upstream: &str) -> IndexConfig {
             username: None,
             password: None,
             token: None,
+            credential_refresh: None,
             tls: crate::config::UpstreamTlsConfig::default(),
             routing: None,
             upstream_concurrency: peryx_driver::rate_limit::DEFAULT_UPSTREAM_CONCURRENCY,
@@ -164,6 +165,18 @@ fn write_netrc(path: &Path, contents: &str) {
     }
 }
 
+fn current_auth(client: &peryx_upstream::UpstreamClient) -> Auth {
+    client.current_credential().unwrap().auth().clone()
+}
+
+struct NoAuthorization;
+
+impl Match for NoAuthorization {
+    fn matches(&self, request: &WiremockRequest) -> bool {
+        !request.headers.contains_key("authorization")
+    }
+}
+
 fn availability_replica(configured: bool) -> AvailabilityConfig {
     if configured {
         AvailabilityConfig::Dc(ReplicationConfig::Replica {
@@ -190,6 +203,7 @@ fn routed(metadata: &str, artifact: Option<&str>) -> IndexConfig {
             username: None,
             password: None,
             token: None,
+            credential_refresh: None,
             tls: crate::config::UpstreamTlsConfig::default(),
         }],
         fallback: true,
@@ -330,8 +344,8 @@ fn test_build_state_reads_basic_upstream_credentials_from_netrc() {
     };
 
     assert_eq!(
-        client.auth(),
-        &Auth::Basic {
+        current_auth(client),
+        Auth::Basic {
             username: "reader".to_owned(),
             password: "netrc-secret".to_owned()
         }
@@ -345,7 +359,10 @@ async fn test_build_state_reads_netrc_for_routed_upstreams() {
     let artifacts = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/packages/pkg.whl"))
-        .and(header_regex("authorization", "^Basic "))
+        .and(match_header(
+            "authorization",
+            "Basic YXJ0aWZhY3QtcmVhZGVyOmFydGlmYWN0LXNlY3JldA==",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wheelbytes".to_vec()))
         .mount(&artifacts)
         .await;
@@ -372,8 +389,8 @@ async fn test_build_state_reads_netrc_for_routed_upstreams() {
     let source = state.upstream_routes["pypi"].source("primary").unwrap();
 
     assert_eq!(
-        source.client().auth(),
-        &Auth::Basic {
+        current_auth(source.client()),
+        Auth::Basic {
             username: "metadata-reader".to_owned(),
             password: "metadata-secret".to_owned()
         }
@@ -393,6 +410,136 @@ async fn test_build_state_reads_netrc_for_routed_upstreams() {
             .collect::<Vec<_>>(),
         b"wheelbytes"
     );
+}
+
+#[tokio::test]
+async fn test_routed_metadata_and_artifacts_share_credential_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let metadata = MockServer::start().await;
+    let artifacts = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/pkg/"))
+        .and(header_regex("authorization", "^Bearer old$"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&metadata)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/simple/pkg/"))
+        .and(header_regex("authorization", "^Bearer new$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&metadata)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/packages/pkg.whl"))
+        .and(header_regex("authorization", "^Bearer new$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wheelbytes".to_vec()))
+        .expect(1)
+        .mount(&artifacts)
+        .await;
+    let token = dir.path().join("token");
+    std::fs::write(&token, "old\n").unwrap();
+    let mut index = routed(
+        &format!("{}/simple/", metadata.uri()),
+        Some(&format!("{}/packages/", artifacts.uri())),
+    );
+    let IndexKind::Cached {
+        routing: Some(routing), ..
+    } = &mut index.kind
+    else {
+        panic!("expected a routed cached index");
+    };
+    routing.upstreams[0].token = Some(SecretSource::File(token.clone()));
+    routing.upstreams[0].credential_refresh = Some(CredentialRefreshConfig {
+        interval: Duration::from_hours(1),
+        on_unauthorized: true,
+        failure: CredentialFailureMode::Fail,
+    });
+    let state = build_state(&Config {
+        data_dir: dir.path().join("data"),
+        indexes: vec![index],
+        ..Config::default()
+    })
+    .unwrap();
+    std::fs::write(token, "new\n").unwrap();
+    let source = state.upstream_routes["pypi"].source("primary").unwrap();
+
+    let metadata_response = source
+        .client()
+        .send_conditional(source.client().base().join("pkg/").unwrap(), "application/json", None)
+        .await
+        .unwrap();
+    let artifact = source
+        .artifacts()
+        .stream_bytes(&format!("{}/pkg.whl", artifacts.uri()))
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .iter()
+        .flat_map(|chunk| chunk.iter().copied())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        (metadata_response.status(), artifact.as_slice()),
+        (StatusCode::OK, b"wheelbytes".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_failure_can_fall_back_to_anonymous() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/pkg/"))
+        .and(header_regex("authorization", "^Bearer old$"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/simple/pkg/"))
+        .and(NoAuthorization)
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let token = dir.path().join("token");
+    std::fs::write(&token, "old\n").unwrap();
+    let mut index = cached("corp", &format!("{}/simple/", upstream.uri()));
+    let IndexKind::Cached {
+        token: configured_token,
+        credential_refresh,
+        ..
+    } = &mut index.kind
+    else {
+        panic!("expected a cached index");
+    };
+    *configured_token = Some(SecretSource::File(token.clone()));
+    *credential_refresh = Some(CredentialRefreshConfig {
+        interval: Duration::from_hours(1),
+        on_unauthorized: true,
+        failure: CredentialFailureMode::Anonymous,
+    });
+    let state = build_state(&Config {
+        data_dir: dir.path().join("data"),
+        indexes: vec![index],
+        ..Config::default()
+    })
+    .unwrap();
+    std::fs::remove_file(token).unwrap();
+    let RuntimeKind::Cached { client, .. } = &state.indexes[0].kind else {
+        panic!("expected a cached index");
+    };
+
+    let response = client
+        .send_conditional(client.base().join("pkg/").unwrap(), "application/json", None)
+        .await
+        .unwrap();
+
+    assert_eq!((response.status(), current_auth(client)), (StatusCode::OK, Auth::None));
 }
 
 #[rstest]
@@ -444,7 +591,7 @@ fn test_build_state_prefers_explicit_upstream_credentials(
         panic!("expected cached index");
     };
 
-    assert_eq!(client.auth(), &expected);
+    assert_eq!(current_auth(client), expected);
 }
 
 #[test]
@@ -466,8 +613,8 @@ fn test_build_state_reads_an_upstream_token_from_the_environment() {
     };
 
     assert_eq!(
-        client.auth(),
-        &Auth::Bearer(std::env::var("PATH").unwrap().trim().to_owned())
+        current_auth(client),
+        Auth::Bearer(std::env::var("PATH").unwrap().trim().to_owned())
     );
 }
 
@@ -511,7 +658,7 @@ fn test_build_state_leaves_missing_netrc_entries_anonymous() {
         panic!("expected cached index");
     };
 
-    assert_eq!(client.auth(), &Auth::None);
+    assert_eq!(current_auth(client), Auth::None);
 }
 
 #[test]
@@ -1050,6 +1197,17 @@ fn test_build_state_rejects_invalid_routed_source_urls(#[case] metadata: &str, #
     let message = format!("{err:#}");
     assert!(message.contains("match netrc credentials for <invalid upstream URL>"));
     assert!(!message.contains("swordfish"));
+}
+
+#[test]
+fn test_build_state_rejects_invalid_routed_metadata_without_netrc() {
+    let dir = tempfile::tempdir().unwrap();
+    let Err(error) = build_state(&config_with(&dir, vec![routed("not a url", None)])) else {
+        panic!("invalid routed source URL succeeded");
+    };
+
+    let message = format!("{error:#}");
+    assert!(message.contains("build cached index pypi with upstream <invalid upstream URL>"));
 }
 
 #[rstest]

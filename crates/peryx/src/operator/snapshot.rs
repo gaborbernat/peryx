@@ -14,9 +14,10 @@ use time::format_description::well_known::Rfc3339;
 use toml::{Table, Value};
 
 use crate::config::{
-    AcmeConfig, AuthConfig, AvailabilityConfig, BlobStorageConfig, Config, IndexConfig, IndexKind, JobsConfig,
-    JobsMode, LogConfig, LogFormat, LogSink, PrefetchConfig, PrefetchMode, ReplicationConfig, SecretSource, TlsConfig,
-    TokenConfig, WebhookConfig, WebhookSecret,
+    AcmeConfig, AuthConfig, AvailabilityConfig, BlobStorageConfig, Config, CredentialFailureMode,
+    CredentialRefreshConfig, IndexConfig, IndexKind, JobsConfig, JobsMode, LogConfig, LogFormat, LogSink,
+    PrefetchConfig, PrefetchMode, ReplicationConfig, SecretSource, TlsConfig, TokenConfig, WebhookConfig,
+    WebhookSecret,
 };
 
 #[derive(Serialize)]
@@ -122,6 +123,8 @@ enum SnapshotIndexKind<'a> {
         token_file: Option<&'a Path>,
         #[serde(skip_serializing_if = "Option::is_none")]
         token_env: Option<&'a str>,
+        #[serde(flatten)]
+        credential_refresh: Option<SnapshotCredentialRefresh>,
         #[serde(skip_serializing_if = "Option::is_none")]
         ca_file: Option<&'a Path>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,12 +180,24 @@ struct SnapshotUpstream<'a> {
     token_file: Option<&'a Path>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_env: Option<&'a str>,
+    #[serde(flatten)]
+    credential_refresh: Option<SnapshotCredentialRefresh>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ca_file: Option<&'a Path>,
     #[serde(skip_serializing_if = "Option::is_none")]
     client_cert_file: Option<&'a Path>,
     #[serde(skip_serializing_if = "Option::is_none")]
     client_key_file: Option<&'a Path>,
+}
+
+#[derive(Serialize)]
+struct SnapshotCredentialRefresh {
+    #[serde(rename = "credential_refresh_secs")]
+    interval_secs: u64,
+    #[serde(rename = "credential_refresh_on_unauthorized")]
+    on_unauthorized: bool,
+    #[serde(rename = "credential_failure")]
+    failure: &'static str,
 }
 
 #[derive(Serialize)]
@@ -507,6 +522,7 @@ fn snapshot_index(index: &IndexConfig) -> anyhow::Result<SnapshotIndex<'_>> {
             username,
             password,
             token,
+            credential_refresh,
             tls,
             routing,
             upstream_concurrency,
@@ -525,6 +541,7 @@ fn snapshot_index(index: &IndexConfig) -> anyhow::Result<SnapshotIndex<'_>> {
                     token,
                     token_file,
                     token_env,
+                    credential_refresh: credential_refresh.map(snapshot_credential_refresh),
                     ca_file: tls.ca_file.as_deref(),
                     client_cert_file: tls.client_cert_file.as_deref(),
                     client_key_file: tls.client_key_file.as_deref(),
@@ -584,9 +601,21 @@ fn snapshot_upstream(upstream: &crate::config::UpstreamConfig) -> SnapshotUpstre
         token,
         token_file,
         token_env,
+        credential_refresh: upstream.credential_refresh.map(snapshot_credential_refresh),
         ca_file: upstream.tls.ca_file.as_deref(),
         client_cert_file: upstream.tls.client_cert_file.as_deref(),
         client_key_file: upstream.tls.client_key_file.as_deref(),
+    }
+}
+
+const fn snapshot_credential_refresh(refresh: CredentialRefreshConfig) -> SnapshotCredentialRefresh {
+    SnapshotCredentialRefresh {
+        interval_secs: refresh.interval.as_secs(),
+        on_unauthorized: refresh.on_unauthorized,
+        failure: match refresh.failure {
+            CredentialFailureMode::Fail => "fail",
+            CredentialFailureMode::Anonymous => "anonymous",
+        },
     }
 }
 

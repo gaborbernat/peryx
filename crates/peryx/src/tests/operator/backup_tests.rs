@@ -172,7 +172,8 @@ allow_versions = ">=1"
 name = "hub"
 ecosystem = "oci"
 cached = "https://registry-1.docker.io"
-token = "upstream-token"
+token_env = "DOCKERHUB_TOKEN"
+credential_refresh_secs = 60
 upstream_concurrency = 9
 offline = false
 
@@ -323,7 +324,11 @@ flask = "public"
 name = "internal"
 url = "https://packages.example/simple/"
 artifact_url = "https://artifacts.example/"
+username = "mirror"
 password_file = "/run/secrets/internal-password"
+credential_refresh_secs = 45
+credential_refresh_on_unauthorized = false
+credential_failure = "anonymous"
 ca_file = "/run/secrets/internal-ca.pem"
 client_cert_file = "/run/secrets/internal-client.pem"
 client_key_file = "/run/secrets/internal-client-key.pem"

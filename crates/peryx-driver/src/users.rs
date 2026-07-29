@@ -3,7 +3,7 @@ use std::sync::Arc;
 use peryx_identity::{
     PasswordCheck, PasswordError, PasswordPolicy, PasswordVerifier, ServerUser, UserId, UserLifecycleEvent, UserState,
 };
-use peryx_storage::meta::{MetaError, MetaStore, UserStoreError};
+use peryx_storage::meta::{AdministratorBootstrapError, MetaError, MetaStore, UserStoreError};
 use tokio::sync::Semaphore;
 
 /// How many password derivations may run at once by default, chosen well under the request worker
@@ -29,6 +29,15 @@ pub enum EnrollError {
     Hash(#[from] PasswordError),
     #[error(transparent)]
     Store(#[from] UserStoreError),
+}
+
+/// A rejected first-administrator bootstrap.
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapError {
+    #[error(transparent)]
+    Hash(#[from] PasswordError),
+    #[error(transparent)]
+    Store(#[from] AdministratorBootstrapError),
 }
 
 impl UserService {
@@ -118,6 +127,20 @@ impl UserService {
         let verifier = self.hash(password.to_owned()).await?;
         self.store.set_user_password(id, &verifier)?;
         Ok(())
+    }
+
+    /// Derive a password verifier on the bounded worker pool and commit the first administrator.
+    ///
+    /// # Errors
+    /// Returns [`BootstrapError::Hash`] when derivation fails or [`BootstrapError::Store`] when an
+    /// administrator already exists, the identity conflicts, or the metadata transaction aborts.
+    pub async fn bootstrap_administrator(
+        &self,
+        display_name: &str,
+        password: &str,
+    ) -> Result<ServerUser, BootstrapError> {
+        let verifier = self.hash(password.to_owned()).await?;
+        Ok(self.store.bootstrap_administrator(display_name, &verifier)?)
     }
 
     /// Remove a user's password, leaving the account unable to authenticate by password until a new one

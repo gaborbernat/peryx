@@ -92,6 +92,9 @@ pub enum UserLifecycleChange {
     Created {
         display_name: String,
     },
+    AdministratorBootstrapped {
+        display_name: String,
+    },
     Renamed {
         previous_display_name: String,
         display_name: String,

@@ -1,9 +1,11 @@
+use std::error::Error as _;
+
 use peryx_identity::{
     IndexAcl, PasswordCheck, PasswordError, PasswordPolicy, Principal, UserId, UserLifecycleChange, UserState,
 };
 use peryx_storage::meta::MetaStore;
 
-use crate::users::{EnrollError, UserService};
+use crate::users::{BootstrapError, EnrollError, UserService};
 
 fn service() -> (tempfile::TempDir, UserService) {
     let dir = tempfile::tempdir().unwrap();
@@ -75,6 +77,53 @@ async fn test_authenticate_accepts_the_password_and_rejects_a_wrong_one() {
         Some(user.id)
     );
     assert_eq!(service.authenticate("alice", "battery staple").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_user_service_bootstrap_uses_the_password_worker() {
+    let (_dir, store, service) = cheap_service();
+
+    let user = service
+        .bootstrap_administrator("Alice", "correct horse battery staple")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service
+            .authenticate("Alice", "correct horse battery staple")
+            .await
+            .unwrap(),
+        Some(user.id.clone())
+    );
+    assert_eq!(
+        store.user_role_grants(&user.id).unwrap()[0].role,
+        peryx_identity::Role::Administrator
+    );
+}
+
+#[tokio::test]
+async fn test_user_service_bootstrap_forwards_store_refusal() {
+    let (_dir, _store, service) = cheap_service();
+    service
+        .bootstrap_administrator("Alice", "correct horse battery staple")
+        .await
+        .unwrap();
+
+    let error = service
+        .bootstrap_administrator("Bob", "another administrator password")
+        .await
+        .unwrap_err();
+
+    assert!(error.source().is_none());
+    assert!(matches!(error, BootstrapError::Store(_)));
+}
+
+#[test]
+fn test_bootstrap_error_preserves_a_hash_failure() {
+    let error = BootstrapError::from(PasswordError::Params);
+    assert_eq!(error.to_string(), "argon2 cost parameters are out of range");
+    assert!(error.source().is_none());
+    assert!(matches!(error, BootstrapError::Hash(PasswordError::Params)));
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use redb::{Database, TableDefinition};
 
 mod analytics;
+mod bootstrap;
 mod error;
 mod index;
 mod job;
@@ -22,6 +23,7 @@ mod webhook;
 mod writer;
 
 pub use analytics::AnalyticsHandle;
+pub use bootstrap::AdministratorBootstrapError;
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use index::DriverTxn;
 pub use job::{JobKind, JobOutcome, JobRunRecord, JobState, NewJobRun};

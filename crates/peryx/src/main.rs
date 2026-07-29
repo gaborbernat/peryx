@@ -273,6 +273,10 @@ fn main() -> anyhow::Result<()> {
             let _guard = install_logging(&config.log)?;
             app::init(&config)
         }
+        peryx::cli::Command::BootstrapAdministrator(args) => {
+            let config = resolve_config(&args.runtime)?;
+            app::bootstrap_administrator(&config, &args, &mut std::io::stdin(), &mut std::io::stdout())
+        }
         peryx::cli::Command::ConfigSnippet(args) => print_config_snippet(&args),
         peryx::cli::Command::Index(command) => {
             let config = resolve_config(command.runtime_args())?;

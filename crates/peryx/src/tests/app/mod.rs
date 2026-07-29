@@ -10,6 +10,7 @@ use peryx_storage::meta::MetaStore;
 use crate::cli::RuntimeArgs;
 use crate::config::Config;
 
+mod bootstrap_tests;
 mod cache_tests;
 mod fsck_tests;
 mod indexes_tests;

@@ -50,10 +50,6 @@ impl DownloadHandle {
     pub const fn progress(&mut self) -> &mut watch::Receiver<DownloadProgress> {
         &mut self.progress
     }
-
-    fn same_transfer(&self, other: &Self) -> bool {
-        self.progress.same_channel(&other.progress)
-    }
 }
 
 /// Active downloads sharded by digest.
@@ -86,11 +82,10 @@ impl DownloadRegistry {
                 let handle = DownloadHandle::new(tail, receiver);
                 entry.insert(handle.clone());
                 Ok((
-                    handle.clone(),
+                    handle,
                     DownloadProducer {
                         registry: self.clone(),
                         digest,
-                        handle,
                         sender,
                         active: true,
                     },
@@ -105,7 +100,6 @@ impl DownloadRegistry {
 pub struct DownloadProducer {
     registry: DownloadRegistry,
     digest: Arc<str>,
-    handle: DownloadHandle,
     sender: watch::Sender<DownloadProgress>,
     active: bool,
 }
@@ -125,14 +119,12 @@ impl DownloadProducer {
     /// Remove this producer and publish its terminal result.
     pub fn finish(mut self, outcome: Result<(), String>) {
         self.remove();
-        self.sender.send_modify(|progress| progress.done = Some(outcome));
         self.active = false;
+        self.sender.send_modify(|progress| progress.done = Some(outcome));
     }
 
     fn remove(&self) {
-        self.registry
-            .entries
-            .remove_if(self.digest.as_ref(), |_, handle| handle.same_transfer(&self.handle));
+        self.registry.entries.remove(self.digest.as_ref());
     }
 }
 
@@ -202,21 +194,16 @@ mod tests {
     }
 
     #[test]
-    fn test_old_producer_does_not_remove_replacement() {
+    fn test_finished_producer_releases_digest_for_replacement() {
         let registry = DownloadRegistry::default();
         let (mut old_handle, old) = registry.register("digest", Option::<BlobTail>::None).unwrap();
-        let progress = old_handle.progress().borrow();
-        let finishing = std::thread::spawn(move || old.finish(Ok(())));
-        while registry.get("digest").is_some() {
-            std::thread::yield_now();
-        }
-        let (mut replacement, current) = registry.register("digest", Option::<BlobTail>::None).unwrap();
 
-        drop(progress);
-        finishing.join().unwrap();
+        old.finish(Ok(()));
+        let (mut replacement, current) = registry.register("digest", Option::<BlobTail>::None).unwrap();
 
         let mut registered = registry.get("digest").unwrap();
         assert!(registered.progress().same_channel(replacement.progress()));
+        assert_eq!(old_handle.progress().borrow_and_update().done.clone(), Some(Ok(())));
         drop(current);
     }
 }

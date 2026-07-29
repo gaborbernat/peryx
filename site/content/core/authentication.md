@@ -46,6 +46,57 @@ their handlers gain access checks. LDAP, token revocation, and per-mirror upstre
 this release. PyPI publishing can use a configured CI provider's OIDC identity without making OIDC a general login
 source.
 
+## Server roles and protected responses
+
+Server users hold fixed roles over the whole server or one repository. A decision matches one named scope and one
+resource against those grants. Repository reach cannot cover operator data, even when the role itself carries a server
+scope. Separate role and resource checks follow the action-and-scope model used by
+[Grafana RBAC](https://grafana.com/docs/grafana/latest/administration/roles-and-permissions/access-control/).
+
+| Fixed role           | `repository:read` | `repository:write` | `repository:delete` | `operator:read` | `analytics:read` | `administration:read` |
+| -------------------- | ----------------- | ------------------ | ------------------- | --------------- | ---------------- | --------------------- |
+| Administrator        | yes               | yes                | yes                 | yes             | yes              | yes                   |
+| Repository publisher | yes               | yes                | yes                 |                 |                  |                       |
+| Repository reader    | yes               |                    |                     |                 |                  |                       |
+| Operator             |                   |                    |                     | yes             | yes              |                       |
+
+| Field classification | Public caller | Operator caller | Administrator caller |
+| -------------------- | ------------- | --------------- | -------------------- |
+| Public               | yes           | yes             | yes                  |
+| Operator             |               | yes             | yes                  |
+| Administrator        |               |                 | yes                  |
+
+`operator:read` covers runtime health, queues, and configuration state. `analytics:read` covers retained usage
+aggregates. The two scopes remain distinct, so each handler states which data family it reads. `administration:read`
+covers server users, grants, credential state, and other data whose disclosure changes the attack surface. The
+[Prometheus security model](https://prometheus.io/docs/operating/security/) treats operational and debug endpoints as
+trusted-user data.
+
+API and UI handlers classify each field as public, operator, or administrator data, then filter a bounded model before
+serialization. Public callers receive public fields; a caller authorized for operator data also receives operator
+fields; an administrator receives all three classes. A nested object inherits the highest classification of its contents
+unless the handler filters that object first.
+
+Role and field primitives do not authorize a route by themselves. Migrate a route in this order:
+
+1. Resolve the server user and call `authorize_scoped` with the route's exact scope against `Resource::Operator` before
+   reading protected data.
+1. Build a bounded response without holding metadata or request-path locks, and assign every field a classification.
+1. Pass the scoped authorization result and classified fields to the shared response filter. The checked scope sets the
+   caller's maximum field class; handlers cannot promote an operator decision to administrator access. Return the
+   filter's generic denial without adding a resource path or query value.
+1. Apply `private, no-cache` to caller-specific responses or `no-store` when a response contains credential or sensitive
+   administration state.
+
+Authorization failure returns no partial response. Peryx records the user, required scope, and bounded reason for a
+denial; it omits the protected resource and raw query string.
+
+Reverse proxies must preserve Peryx's `Cache-Control` header. The
+[RFC 9111 `private` directive](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.7) prevents a shared cache from
+storing a caller-specific response while allowing a private cache to retain it; `no-cache` requires validation before
+reuse. The [`no-store` directive](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.5) applies to private and
+shared caches. These directives constrain conforming caches and do not replace route authorization or TLS.
+
 ## Project globs
 
 A grant's `projects` are patterns matched against a project or repository name. `*` stands for any run of characters,

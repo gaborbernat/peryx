@@ -9,9 +9,10 @@
 //!
 //! Decisions fail closed. When the grant store cannot be read the answer is [`Decision::Deny`] with
 //! [`DenyReason::StorageUnavailable`], never an allow, so a storage fault cannot open access. Each
-//! decision emits one bounded security event carrying the user, scope, resource, and outcome — never a
-//! credential — for both allowed and denied results.
+//! decision emits one bounded security event. Allowed events carry the resource; denied events omit it
+//! so a failed check cannot disclose a protected path or query.
 
+use peryx_events::security::{AuthorizationDenial, authorization_denied};
 use peryx_identity::{GrantScope, Resource, Role, RoleGrant, Scope, UserId, grants_permit};
 use peryx_storage::meta::{MetaError, MetaStore, RoleGrantStoreError};
 
@@ -37,22 +38,29 @@ pub enum DenyReason {
     StorageUnavailable,
 }
 
+/// A decision bound to the scope the authorization service checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopedDecision {
+    scope: Scope,
+    decision: Decision,
+}
+
+impl ScopedDecision {
+    #[must_use]
+    pub const fn scope(self) -> Scope {
+        self.scope
+    }
+
+    #[must_use]
+    pub const fn decision(self) -> Decision {
+        self.decision
+    }
+}
+
 impl Decision {
     #[must_use]
     pub const fn is_allowed(self) -> bool {
         matches!(self, Self::Allow)
-    }
-
-    const fn result(self) -> &'static str {
-        if self.is_allowed() { "allowed" } else { "denied" }
-    }
-
-    const fn reason(self) -> &'static str {
-        match self {
-            Self::Allow => "granted",
-            Self::Deny(DenyReason::NoGrant) => "no_grant",
-            Self::Deny(DenyReason::StorageUnavailable) => "storage_unavailable",
-        }
     }
 }
 
@@ -89,7 +97,7 @@ impl AuthorizationService {
     }
 
     /// Decide whether `user` may take `scope` on `resource`, failing closed on a storage fault and
-    /// emitting one bounded security event for the outcome.
+    /// emitting one bounded security event for the outcome. Denied events omit the resource.
     #[must_use]
     pub fn authorize(&self, user: &UserId, scope: Scope, resource: &Resource) -> Decision {
         let decision = match self.store.user_role_grants(user) {
@@ -99,11 +107,20 @@ impl AuthorizationService {
         };
         // Compute the log fields before the macro: as macro arguments they would evaluate only when the
         // callsite is enabled, so a run without a security-log subscriber would never cover them.
+        if let Decision::Deny(reason) = decision {
+            authorization_denied(
+                user,
+                scope,
+                match reason {
+                    DenyReason::NoGrant => AuthorizationDenial::NoGrant,
+                    DenyReason::StorageUnavailable => AuthorizationDenial::StorageUnavailable,
+                },
+            );
+            return decision;
+        }
         let user = user.as_str();
         let scope = scope.as_str();
         let (resource_kind, resource_name) = resource.fields();
-        let result = decision.result();
-        let reason = decision.reason();
         tracing::info!(
             target: "peryx::security",
             security_event = true,
@@ -112,10 +129,19 @@ impl AuthorizationService {
             scope,
             resource_kind,
             resource = resource_name,
-            result,
-            reason,
+            result = "allowed",
+            reason = "granted",
             "role authorization decision"
         );
         decision
+    }
+
+    /// Decide and retain the checked scope for consumers that derive data visibility from it.
+    #[must_use]
+    pub fn authorize_scoped(&self, user: &UserId, scope: Scope, resource: &Resource) -> ScopedDecision {
+        ScopedDecision {
+            scope,
+            decision: self.authorize(user, scope, resource),
+        }
     }
 }

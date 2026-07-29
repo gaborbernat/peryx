@@ -6,6 +6,7 @@
 //! no ecosystem depends on the router that dispatches to it.
 
 pub mod handlers;
+pub mod response_security;
 pub mod router;
 
 pub use peryx_driver::state::{

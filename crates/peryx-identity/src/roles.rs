@@ -43,11 +43,11 @@ impl RoleGrant {
         Self { user, role, scope }
     }
 
-    /// Whether this grant permits `scope` on `resource`: the role must carry the scope and the reach
-    /// must cover the resource. Either miss denies.
+    /// Whether this grant permits `scope` on `resource`: the role must carry the scope, its resource
+    /// class must match, and the reach must cover the resource. Any miss denies.
     #[must_use]
     pub fn permits(&self, scope: Scope, resource: &Resource) -> bool {
-        self.role.carries(scope) && self.scope.covers(resource)
+        self.role.carries(scope) && scope.applies_to(resource) && self.scope.covers(resource)
     }
 }
 
@@ -64,7 +64,7 @@ pub enum Role {
     RepositoryPublisher,
     /// Read on the granted repository, and nothing more.
     RepositoryReader,
-    /// Read operator data, without any repository grant.
+    /// Read operator and analytics data, without any repository grant.
     Operator,
 }
 
@@ -88,8 +88,8 @@ impl Role {
         }
     }
 
-    /// The scopes this role carries. Administrator is the union; a repository role carries no operator
-    /// scope, which is what stops a publisher from reading operator data however it is granted.
+    /// The scopes this role carries. Administrator is the union; repository roles carry no server-data
+    /// scope, which stops a publisher from reading operator data however it is granted.
     #[must_use]
     pub const fn scopes(self) -> &'static [Scope] {
         match self {
@@ -98,10 +98,12 @@ impl Role {
                 Scope::RepositoryWrite,
                 Scope::RepositoryDelete,
                 Scope::OperatorRead,
+                Scope::AnalyticsRead,
+                Scope::AdministrationRead,
             ],
             Self::RepositoryPublisher => &[Scope::RepositoryRead, Scope::RepositoryWrite, Scope::RepositoryDelete],
             Self::RepositoryReader => &[Scope::RepositoryRead],
-            Self::Operator => &[Scope::OperatorRead],
+            Self::Operator => &[Scope::OperatorRead, Scope::AnalyticsRead],
         }
     }
 
@@ -118,6 +120,8 @@ pub enum Scope {
     RepositoryWrite,
     RepositoryDelete,
     OperatorRead,
+    AnalyticsRead,
+    AdministrationRead,
 }
 
 impl Scope {
@@ -130,7 +134,22 @@ impl Scope {
             Self::RepositoryWrite => "repository:write",
             Self::RepositoryDelete => "repository:delete",
             Self::OperatorRead => "operator:read",
+            Self::AnalyticsRead => "analytics:read",
+            Self::AdministrationRead => "administration:read",
         }
+    }
+
+    const fn applies_to(self, resource: &Resource) -> bool {
+        matches!(
+            (self, resource),
+            (
+                Self::RepositoryRead | Self::RepositoryWrite | Self::RepositoryDelete,
+                Resource::Repository(_)
+            ) | (
+                Self::OperatorRead | Self::AnalyticsRead | Self::AdministrationRead,
+                Resource::Operator
+            )
+        )
     }
 }
 
@@ -164,8 +183,7 @@ pub enum Resource {
 }
 
 impl Resource {
-    /// The resource class and the name a security event records, so a denial is legible without
-    /// leaking a credential — a resource name is not one.
+    /// The resource class and name an allowed security event records.
     #[must_use]
     pub fn fields(&self) -> (&'static str, &str) {
         match self {

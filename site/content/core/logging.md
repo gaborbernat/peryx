@@ -54,6 +54,11 @@ secrets out of these records.
 The current action names are `token_use`, `upload`, `yank`, `unyank`, `delete`, `restore`, and `mirror_sync`. Results
 are `success`, `denied`, `failure`, or `noop`.
 
+Peryx emits `event=authorization` for server-role checks. Allowed records include `user`, `scope`, `resource_kind`,
+`resource`, `result`, and `reason`. Peryx omits `resource_kind` and `resource` from denied records; they contain only
+the user, required scope, `result=denied`, and either `reason=no_grant` or `reason=storage_unavailable`. A rejected URL
+and its query parameters stay outside the denial record.
+
 Plain-file queries:
 
 ```shell

@@ -40,6 +40,7 @@ pub use record::{
     ProjectStatusRecord,
 };
 pub use summary::summarize_indexes;
+pub(crate) use uploads::scan_upload_policy_snapshot;
 pub use uploads::{
     Guard, MetadataSibling, PromotedRelease, ProvenanceSibling, PublishedFile, UploadMutation, delete_override,
     delete_upload, list_overrides, list_upload_entries, mutate_uploads, promote_files_checked, publish_file_if,

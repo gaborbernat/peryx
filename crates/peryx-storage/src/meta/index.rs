@@ -1,6 +1,6 @@
 use redb::{ReadableDatabase as _, ReadableTable as _};
 
-use super::error::MetaError;
+use super::error::{MetaError, MetaScanError};
 use super::{
     DRIVER_KV, DriverBatch, DriverBlobReference, DriverMutation, JOURNAL, JOURNAL_BLOBS, JOURNAL_MUTATIONS, MetaStore,
     POLICY_INPUT_GENERATION, PolicyInputGeneration, SERIAL, SERIAL_KEY,
@@ -92,6 +92,43 @@ impl MetaStore {
             visit(key.value(), value.value());
         }
         Ok(())
+    }
+
+    /// Visit driver records and read one repository's policy-input generation from one snapshot.
+    ///
+    /// # Errors
+    /// Returns a scan error if the store read fails or the visitor rejects one row.
+    pub fn visit_driver_policy_snapshot<E>(
+        &self,
+        prefix: &str,
+        repository: &str,
+        mut visit: impl FnMut(&str, &[u8]) -> Result<(), E>,
+    ) -> Result<PolicyInputGeneration, MetaScanError<E>> {
+        let txn = self.db.begin_read().map_err(MetaError::from)?;
+        let mut generation = txn
+            .open_table(POLICY_INPUT_GENERATION)
+            .map_err(MetaError::from)?
+            .get(repository)
+            .map_err(MetaError::from)?
+            .map(|value| serde_json::from_slice::<PolicyInputGeneration>(value.value()))
+            .transpose()
+            .map_err(MetaError::from)?
+            .unwrap_or_default();
+        generation.repository = txn
+            .open_table(SERIAL)
+            .map_err(MetaError::from)?
+            .get(SERIAL_KEY)
+            .map_err(MetaError::from)?
+            .map_or(0, |value| value.value());
+        let table = txn.open_table(DRIVER_KV).map_err(MetaError::from)?;
+        for entry in table.range(prefix..).map_err(MetaError::from)? {
+            let (key, value) = entry.map_err(MetaError::from)?;
+            if !key.value().starts_with(prefix) {
+                break;
+            }
+            visit(key.value(), value.value()).map_err(MetaScanError::Visit)?;
+        }
+        Ok(generation)
     }
 
     /// Apply a batch of driver-owned writes in one transaction. `durable` requests an fsync-backed
@@ -386,7 +423,7 @@ impl DriverTxn<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::MetaStore;
+    use super::{MetaScanError, MetaStore};
 
     #[test]
     fn test_driver_prefix_keys_limited_bounds_results() {
@@ -408,5 +445,41 @@ mod tests {
         })
         .unwrap();
         assert_eq!(visited.len(), 3);
+    }
+
+    #[test]
+    fn test_visit_driver_policy_snapshot_is_consistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+        meta.put_driver_value("catalog/1", b"one").unwrap();
+        meta.put_driver_value("catalog/2", b"two").unwrap();
+        meta.put_driver_value("other/1", b"other").unwrap();
+        meta.advance_policy_generation("private").unwrap();
+        let mut visited = Vec::new();
+
+        let snapshot = meta
+            .visit_driver_policy_snapshot("catalog/", "private", |key, value| {
+                visited.push((key.to_owned(), value.to_vec()));
+                if visited.len() == 1 {
+                    meta.put_driver_value("catalog/3", b"three").unwrap();
+                    meta.advance_policy_generation("private").unwrap();
+                }
+                Ok::<(), std::io::Error>(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            visited,
+            vec![
+                ("catalog/1".to_owned(), b"one".to_vec()),
+                ("catalog/2".to_owned(), b"two".to_vec())
+            ]
+        );
+        assert_eq!(snapshot.policy, 1);
+        assert_eq!(meta.policy_input_generation("private").unwrap().policy, 2);
+        let error = meta
+            .visit_driver_policy_snapshot("catalog/", "private", |_key, _value| Err(std::io::Error::other("stop")))
+            .unwrap_err();
+        assert!(matches!(error, MetaScanError::Visit(_)));
     }
 }

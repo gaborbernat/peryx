@@ -333,6 +333,19 @@ pub fn scan_upload_records<E>(
     Ok(())
 }
 
+/// Visit one index's upload records and policy-input generation from one metadata snapshot.
+///
+/// # Errors
+/// Returns a scan error if the store read fails or the visitor returns an error.
+pub fn scan_upload_policy_snapshot<E>(
+    meta: &MetaStore,
+    index: &str,
+    mut visit: impl FnMut(&str, &[u8]) -> Result<(), E>,
+) -> Result<peryx_storage::meta::PolicyInputGeneration, MetaScanError<E>> {
+    let prefix = format!("{UPLOAD_PREFIX}{index}/");
+    meta.visit_driver_policy_snapshot(&prefix, index, |key, value| visit(&key[prefix.len()..], value))
+}
+
 /// Record an override for a file served from a read-only layer: `kind` is `yanked` or `hidden`,
 /// keyed like uploads by `{index}/{normalized}/{filename}`.
 ///

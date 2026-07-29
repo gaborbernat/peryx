@@ -9,23 +9,21 @@ metadata snapshot, applies the configured rules, and returns an ordered decision
 and touches no blob. This release ships the planner, which computes and reports decisions. Applying a plan, exposing it
 over HTTP or the CLI, and reclaiming bytes come later and consume this planner without rebuilding it.
 
-The subject is an index's hosted upload records. Cached upstream pages are evicted through cache maintenance, and
-unreferenced blobs are reclaimed through blob collection; neither is a retention decision.
+The subject is an index's hosted upload records. Cache maintenance evicts cached upstream pages, while blob collection
+reclaims unreferenced blobs; neither is a retention decision.
 
 ## Rules
 
 A policy holds two ordered rule groups. `keep` rules protect an artifact; `expire` rules mark it for removal. A rule
 matches one dimension:
 
-| Rule             | Matches                                                        |
-| ---------------- | -------------------------------------------------------------- |
-| `age`            | An artifact published at least `older_than_seconds` before now |
-| `source`         | An artifact routed from the named source                       |
-| `project-prefix` | An artifact whose project name begins with `prefix`            |
-| `keep-latest`    | An artifact among the newest `count` versions of its project   |
-| `cached`         | A cached artifact                                              |
-| `trash`          | A soft-deleted artifact                                        |
-| `orphan`         | An artifact no live reference reaches                          |
+- `age`: an artifact published at least `older_than_seconds` before now.
+- `source`: an artifact routed from the named source.
+- `project-prefix`: an artifact whose project name begins with `prefix`.
+- `keep-latest`: an artifact among the newest `count` versions of its project.
+- `cached`: a cached artifact.
+- `trash`: a soft-deleted artifact.
+- `orphan`: an artifact no live reference reaches.
 
 The same rule protects in `keep` and removes in `expire`; the group gives it meaning. An `age` rule matches nothing when
 the artifact carries no publish time or the evaluation supplies no clock, so the planner ages only what it can date.
@@ -77,8 +75,8 @@ yanked, or hidden). A removal decision adds:
 
 A plan carries the identity of both inputs it read, so a later apply step can reject a plan built against stale state:
 
-- `policy_version`: a stable content hash of the compiled rules. Equal rules produce an equal version; any rule change
-  produces a different one.
+- `policy_version`: a stable content hash of the compiled rules. Equal rules produce an equal version, and every rule
+  contributes a typed, length-framed value to the hash input.
 - `frontier`: the metadata generation the scan read, combining the repository serial, the catalog generation, and the
   policy generation. It mirrors the store's policy-input generation.
 

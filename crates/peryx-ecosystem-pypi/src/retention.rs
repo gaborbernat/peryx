@@ -17,7 +17,7 @@ use peryx_policy::{
 use peryx_storage::meta::MetaStore;
 
 use crate::policy::parse_upload_time;
-use crate::store::PypiStore as _;
+use crate::store::scan_upload_policy_snapshot;
 use crate::upload::Uploaded;
 use crate::version::{VersionKey, version_key};
 use crate::{Yanked, error_message};
@@ -39,12 +39,10 @@ pub fn evaluate_retention<F>(
 where
     F: FnMut(RetentionDecision),
 {
-    let frontier = read_frontier(meta, index)?;
-    let prefix = format!("{index}/");
     let mut current: Option<String> = None;
     let mut group: Vec<Uploaded> = Vec::new();
-    meta.scan_upload_records(|key, bytes| {
-        let Some((project, _filename)) = key.strip_prefix(&prefix).and_then(|rest| rest.split_once('/')) else {
+    let generation = scan_upload_policy_snapshot(meta, index, |key, bytes| {
+        let Some((project, _filename)) = key.split_once('/') else {
             return Ok(());
         };
         if current.as_deref() != Some(project) {
@@ -65,7 +63,11 @@ where
     }
     Ok(RetentionSummary {
         policy_version: policy.version(),
-        frontier,
+        frontier: RetentionFrontier {
+            repository: generation.repository,
+            catalog: generation.catalog,
+            policy: generation.policy,
+        },
     })
 }
 
@@ -94,9 +96,10 @@ fn candidates(project: &str, group: &[Uploaded]) -> Vec<RetentionCandidate> {
                 } else {
                     RetentionClass::Hosted
                 },
-                visibility: match file.yanked {
-                    Yanked::No => RetentionVisibility::Active,
-                    Yanked::Yes | Yanked::Reason(_) => RetentionVisibility::Yanked,
+                visibility: match (&uploaded.trashed, &file.yanked) {
+                    (Some(_), _) => RetentionVisibility::Hidden,
+                    (None, Yanked::No) => RetentionVisibility::Active,
+                    (None, Yanked::Yes | Yanked::Reason(_)) => RetentionVisibility::Yanked,
                 },
                 source: None,
                 bytes: file.size.unwrap_or(0),
@@ -136,15 +139,6 @@ const fn parse_class(key: &VersionKey) -> u8 {
         VersionKey::Parsed(_) => 0,
         VersionKey::Raw(_) => 1,
     }
-}
-
-fn read_frontier(meta: &MetaStore, index: &str) -> Result<RetentionFrontier, String> {
-    let generation = meta.policy_input_generation(index).map_err(error_message)?;
-    Ok(RetentionFrontier {
-        repository: meta.current_serial().map_err(error_message)?,
-        catalog: generation.catalog,
-        policy: generation.policy,
-    })
 }
 
 #[cfg(test)]
@@ -274,6 +268,7 @@ mod tests {
         assert_eq!(decisions[0].outcome, RetentionOutcome::Remove);
         assert_eq!(decisions[0].rule, Some("trash"));
         assert_eq!(decisions[0].class, RetentionClass::Trash);
+        assert_eq!(decisions[0].visibility, RetentionVisibility::Hidden);
         assert_eq!(decisions[0].bytes, 1024);
     }
 
@@ -315,6 +310,17 @@ mod tests {
 
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].version.as_deref(), Some("1.0"));
+    }
+
+    #[test]
+    fn test_evaluate_retention_skips_a_malformed_upload_key() {
+        let (_dir, meta) = store();
+        meta.put_driver_value("pypi\u{0}u\u{0}pypi/malformed", b"not an upload")
+            .unwrap();
+
+        let (decisions, _) = plan(&meta, "pypi", &expire_all_but_latest(1));
+
+        assert!(decisions.is_empty());
     }
 
     #[test]

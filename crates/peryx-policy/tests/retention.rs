@@ -183,6 +183,18 @@ fn an_age_rule_ages_nothing_without_a_clock_or_a_publish_time() {
 }
 
 #[test]
+fn an_age_rule_does_not_expire_a_future_upload() {
+    let policy = expiring(RetentionSelector::Age { older_than_seconds: 1 });
+    let mut future = candidate("flask", "1.0", 0);
+    future.upload_time_unix = Some(i64::MAX);
+
+    assert_eq!(
+        policy.plan_project(Some(i64::MIN), vec![future])[0].outcome,
+        RetentionOutcome::Retain
+    );
+}
+
+#[test]
 fn a_source_rule_matches_the_named_routed_source() {
     let policy = expiring(RetentionSelector::Source {
         name: "upstream".to_owned(),
@@ -372,6 +384,20 @@ fn equal_rules_compile_to_one_version_and_distinct_rules_diverge() {
         keeping(RetentionSelector::Orphan).version(),
         expiring(RetentionSelector::Orphan).version()
     );
+    assert_ne!(
+        keeping(RetentionSelector::Source {
+            name: "a|source:b".to_owned(),
+        })
+        .version(),
+        RetentionPolicy::compile(&RetentionConfig {
+            keep: vec![
+                RetentionSelector::Source { name: "a".to_owned() },
+                RetentionSelector::Source { name: "b".to_owned() },
+            ],
+            expire: Vec::new(),
+        })
+        .version()
+    );
 }
 
 #[test]
@@ -411,6 +437,13 @@ fn a_config_deserializes_every_selector_from_json() {
             ],
             expire: vec![RetentionSelector::Trash, RetentionSelector::Orphan],
         }
+    );
+}
+
+#[test]
+fn a_config_rejects_a_negative_age() {
+    assert!(
+        serde_json::from_str::<RetentionConfig>(r#"{"expire":[{"selector":"age","older_than_seconds":-1}]}"#).is_err()
     );
 }
 

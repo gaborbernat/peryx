@@ -47,7 +47,7 @@ pub enum RetentionSelector {
     /// Match a candidate whose publish time is at least `older_than_seconds` before the evaluation
     /// clock. A candidate with no publish time, or an evaluation with no clock, never matches, so the
     /// engine ages nothing it cannot date.
-    Age { older_than_seconds: i64 },
+    Age { older_than_seconds: u64 },
     /// Match a candidate routed from the named source.
     Source { name: String },
     /// Match a candidate whose project name begins with `prefix`.
@@ -80,7 +80,11 @@ impl RetentionSelector {
     fn matches(&self, candidate: &RetentionCandidate, now: Option<i64>) -> bool {
         match self {
             Self::Age { older_than_seconds } => {
-                matches!((now, candidate.upload_time_unix), (Some(now), Some(uploaded)) if now - uploaded >= *older_than_seconds)
+                matches!(
+                    (now, candidate.upload_time_unix),
+                    (Some(now), Some(uploaded))
+                        if i128::from(now) - i128::from(uploaded) >= i128::from(*older_than_seconds)
+                )
             }
             Self::Source { name } => candidate.source.as_deref() == Some(name.as_str()),
             Self::ProjectPrefix { prefix } => candidate.project.starts_with(prefix.as_str()),
@@ -141,8 +145,8 @@ impl RetentionPolicy {
         }
     }
 
-    /// The policy's content identity: equal rules compile to an equal version, distinct rules to a
-    /// distinct one, through a stable FNV-1a hash of the rules' canonical form.
+    /// The policy's content identity: equal rules compile to an equal version through a stable FNV-1a
+    /// hash of the rules' canonical form.
     #[must_use]
     pub const fn version(&self) -> u64 {
         self.version
@@ -259,50 +263,52 @@ pub struct RetentionSummary {
 }
 
 fn policy_version(config: &RetentionConfig) -> u64 {
-    let mut canonical = String::new();
-    encode_group(&mut canonical, "keep", &config.keep);
-    encode_group(&mut canonical, "expire", &config.expire);
-    fnv1a(canonical.as_bytes())
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    encode_group(&mut hash, 0, &config.keep);
+    encode_group(&mut hash, 1, &config.expire);
+    hash
 }
 
-fn encode_group(out: &mut String, label: &str, selectors: &[RetentionSelector]) {
-    out.push_str(label);
+fn encode_group(hash: &mut u64, tag: u8, selectors: &[RetentionSelector]) {
+    fnv1a(hash, &[tag]);
+    fnv1a(hash, &(selectors.len() as u64).to_le_bytes());
     for selector in selectors {
-        out.push('|');
-        encode_selector(out, selector);
+        encode_selector(hash, selector);
     }
-    out.push('\n');
 }
 
-fn encode_selector(out: &mut String, selector: &RetentionSelector) {
+fn encode_selector(hash: &mut u64, selector: &RetentionSelector) {
     match selector {
         RetentionSelector::Age { older_than_seconds } => {
-            out.push_str("age:");
-            out.push_str(&older_than_seconds.to_string());
+            fnv1a(hash, &[0]);
+            fnv1a(hash, &older_than_seconds.to_le_bytes());
         }
         RetentionSelector::Source { name } => {
-            out.push_str("source:");
-            out.push_str(name);
+            fnv1a(hash, &[1]);
+            encode_string(hash, name);
         }
         RetentionSelector::ProjectPrefix { prefix } => {
-            out.push_str("project-prefix:");
-            out.push_str(prefix);
+            fnv1a(hash, &[2]);
+            encode_string(hash, prefix);
         }
         RetentionSelector::KeepLatest { count } => {
-            out.push_str("keep-latest:");
-            out.push_str(&count.to_string());
+            fnv1a(hash, &[3]);
+            fnv1a(hash, &count.to_le_bytes());
         }
-        RetentionSelector::Cached => out.push_str("cached"),
-        RetentionSelector::Trash => out.push_str("trash"),
-        RetentionSelector::Orphan => out.push_str("orphan"),
+        RetentionSelector::Cached => fnv1a(hash, &[4]),
+        RetentionSelector::Trash => fnv1a(hash, &[5]),
+        RetentionSelector::Orphan => fnv1a(hash, &[6]),
     }
 }
 
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+fn encode_string(hash: &mut u64, value: &str) {
+    fnv1a(hash, &(value.len() as u64).to_le_bytes());
+    fnv1a(hash, value.as_bytes());
+}
+
+fn fnv1a(hash: &mut u64, bytes: &[u8]) {
     for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    hash
 }

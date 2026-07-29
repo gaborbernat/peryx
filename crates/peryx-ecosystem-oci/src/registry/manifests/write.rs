@@ -56,6 +56,9 @@ pub(in crate::registry) async fn put_manifest(
         }
         Err(err) => return Err(ServeError::Transport(err.to_string())),
     };
+    if let Some(response) = policy_size_denial(index, &repo, bytes.len() as u64) {
+        return Ok(response);
+    }
     let canonical = format!("sha256:{}", Digest::of(&bytes).as_str());
     if let Reference::Digest(digest) = reference
         && *digest != canonical
@@ -65,17 +68,35 @@ pub(in crate::registry) async fn put_manifest(
             "manifest bytes do not match the digest",
         ));
     }
-    if let Some(response) = missing_manifest_reference(state, &index.name, &repo, &bytes).await? {
+    if let Some(response) = missing_manifest_reference(state, index, &repo, &bytes).await? {
         return Ok(response);
     }
     let manifest = Manifest {
         media_type: media_type.clone(),
         bytes: bytes.to_vec(),
     };
-    store::record_manifest(&state.meta, &index.name, &repo, &canonical, &manifest)?;
-    if let Reference::Tag(tag) = reference
-        && store::put_tag(&state.meta, &index.name, &repo, tag, &canonical)?
-    {
+    let version = reference_tag(reference);
+    // A re-push of the same manifest under the same reference is already accounted, so it must not
+    // reserve a fresh version or byte allocation.
+    let reservation =
+        if crate::quota::manifest_already_published(&state.meta, &index.name, &repo, &canonical, reference)? {
+            None
+        } else {
+            match crate::quota::admit_push(state, index, &repo, version, &canonical, bytes.len() as u64)? {
+                crate::quota::Admission::Rejected(response) => return Ok(response),
+                crate::quota::Admission::Unmetered => None,
+                crate::quota::Admission::Reserved(record) => Some(record),
+            }
+        };
+    if crate::quota::publish_manifest(
+        &state.meta,
+        &index.name,
+        &repo,
+        &canonical,
+        &manifest,
+        reference,
+        reservation,
+    )? {
         state.bump_search_epoch();
     }
     let subject = record_referrer(state, &index.name, &repo, &canonical, &media_type, &bytes)?;
@@ -86,10 +107,7 @@ pub(in crate::registry) async fn put_manifest(
         route: index.route.clone(),
         project: repo.clone(),
     });
-    let version = match reference {
-        Reference::Tag(tag) => Some(tag.clone()),
-        Reference::Digest(_) => None,
-    };
+    let version = reference_tag(reference).map(str::to_owned);
     emit_webhook(
         state,
         &Requester {
@@ -103,6 +121,12 @@ pub(in crate::registry) async fn put_manifest(
         Some(canonical.clone()),
     );
     Ok(manifest_created(&location, &canonical, subject.as_deref()))
+}
+fn reference_tag(reference: &Reference) -> Option<&str> {
+    match reference {
+        Reference::Tag(tag) => Some(tag),
+        Reference::Digest(_) => None,
+    }
 }
 /// If a pushed manifest declares a subject, store its descriptor under that subject for the referrers
 /// API and return the subject digest so the response can echo it in `OCI-Subject`.
@@ -243,7 +267,7 @@ fn is_length_limit(err: &axum::Error) -> bool {
 /// Returns a store error if a membership lookup fails.
 async fn missing_manifest_reference(
     state: &ServingState,
-    index: &str,
+    index: &Index,
     repo: &str,
     bytes: &[u8],
 ) -> Result<Option<Response>, ServeError> {
@@ -259,7 +283,7 @@ async fn missing_manifest_reference(
         } else {
             false
         };
-        if !present || !store::blob_is_member(&state.meta, index, repo, &blob)? {
+        if !present || !store::blob_is_member(&state.meta, &index.name, repo, &blob)? {
             return Ok(Some(error_response(
                 ErrorCode::ManifestBlobUnknown,
                 &format!("referenced blob {blob} is not present"),
@@ -267,7 +291,9 @@ async fn missing_manifest_reference(
         }
     }
     for child in children {
-        if store::get_manifest(&state.meta, &child)?.is_none() {
+        if store::get_manifest(&state.meta, &child)?.is_none()
+            || index.policy.enforces_quota() && !store::manifest_is_member(&state.meta, &index.name, repo, &child)?
+        {
             return Ok(Some(error_response(
                 ErrorCode::ManifestBlobUnknown,
                 &format!("referenced manifest {child} is not present"),

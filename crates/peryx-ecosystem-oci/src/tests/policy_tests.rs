@@ -15,7 +15,7 @@ use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::MetaStore;
 use tower::ServiceExt as _;
 
-use super::{auth, oci_digest, send, send_body, send_with};
+use super::{app_with_indexes, auth, body_has_code, oci_digest, send, send_body, send_with, writable_index};
 use crate::store::{self, Manifest};
 
 const TOKEN: &str = "s3cret";
@@ -260,6 +260,73 @@ async fn test_policy_refuses_a_monolithic_blob_over_the_size_limit() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
+}
+
+#[rstest::rstest]
+#[case::at_limit(19, StatusCode::CREATED, None)]
+#[case::over_limit(18, StatusCode::FORBIDDEN, Some("DENIED"))]
+#[tokio::test]
+async fn test_policy_applies_the_size_limit_to_manifests(
+    #[case] limit: u64,
+    #[case] expected_status: StatusCode,
+    #[case] expected_error: Option<&str>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = store_size_limited(&dir, limit);
+    let (status, _, body) = send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/app/manifests/v1",
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        br#"{"schemaVersion":2}"#.to_vec(),
+    )
+    .await;
+
+    assert_eq!(
+        (status, expected_error.map(|code| body_has_code(&body, code))),
+        (expected_status, expected_error.map(|_| true)),
+        "{body:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_policy_applies_the_size_limit_to_cross_repo_mounts_in_quota_audit_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut limited = writable_index("limited", "limited", true, TOKEN);
+    limited.policy = Policy::compile(
+        &PolicyConfig {
+            max_file_size_bytes: Some(4),
+            max_accounted_bytes: Some(u64::MAX),
+            quota_audit: true,
+            ..PolicyConfig::default()
+        },
+        str::to_owned,
+    );
+    let (_state, app) = app_with_indexes(&dir, vec![writable_index("source", "source", true, TOKEN), limited]);
+    let blob = b"five!";
+    let digest = oci_digest(blob);
+    assert_eq!(
+        send_body(
+            &app,
+            Method::POST,
+            &format!("/v2/source/app/blobs/uploads/?digest={digest}"),
+            &[("authorization", &auth(TOKEN))],
+            blob.to_vec(),
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+
+    let (status, _, body) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/limited/app/blobs/uploads/?mount={digest}&from=source/app"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!((status, body_has_code(&body, "DENIED")), (StatusCode::FORBIDDEN, true));
 }
 
 #[tokio::test]

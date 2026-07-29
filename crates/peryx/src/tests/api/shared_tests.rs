@@ -30,6 +30,9 @@ fn test_openapi_document_covers_every_endpoint() {
         "/+stats",
         "/+analytics/top-packages",
         "/+policy/decisions",
+        "/+revocations",
+        "/+revocations/{digest}",
+        "/+revocations/{digest}/lift",
         "/metrics",
         "/api-docs/openapi.json",
         "/_/oidc/audience",
@@ -45,7 +48,7 @@ fn test_openapi_document_covers_every_endpoint() {
     ] {
         assert!(paths.contains_key(path), "missing path {path}");
     }
-    assert_eq!(paths.len(), 37);
+    assert_eq!(paths.len(), 40);
     assert_eq!(spec["info"]["version"], env!("CARGO_PKG_VERSION"));
 }
 

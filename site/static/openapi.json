@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "peryx",
-    "description": "Read-through cache and private index for multiple ecosystems. A PyPI index serves the Simple API under `/{route}/`, where `{route}` is the index's route (for example `root/pypi`); an OCI index serves the distribution-spec registry under `/v2/`. Write operations authenticate with HTTP Basic where the password is the target hosted index's upload token and the username is ignored.",
+    "description": "Read-through cache and private index for multiple ecosystems. A PyPI index serves the Simple API under `/{route}/`, where `{route}` is the index's route (for example `root/pypi`); an OCI index serves the distribution-spec registry under `/v2/`. Write operations authenticate with HTTP Basic where the password is the target hosted index's upload token and the username is ignored. Server administration uses a local user's display name and password with role authorization.",
     "contact": {
       "name": "tox-dev",
       "url": "https://github.com/tox-dev/peryx"
@@ -374,6 +374,353 @@
             }
           }
         }
+      }
+    },
+    "/+revocations": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "List digest revocations",
+        "description": "Returns a bounded page of current records in canonical digest order. Lifted records remain visible to administrators.",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by `active` or `lifted`",
+            "required": false,
+            "example": "active"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Exclusive canonical digest from the prior page",
+            "required": false,
+            "example": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "required": false,
+            "example": 25
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matching current records",
+            "content": {
+              "application/json": {
+                "example": {
+                  "next_cursor": null,
+                  "revocations": [
+                    {
+                      "created_at_unix": 1800000000,
+                      "created_by": "usr_550e8400e29b41d4a716446655440000",
+                      "digest": {
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                      },
+                      "reason": "compromised build host",
+                      "revision": 1,
+                      "state": {
+                        "status": "active"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor or limit is invalid",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid revocation cursor"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot discover this record, or it does not exist"
+          },
+          "503": {
+            "description": "Authentication, authorization, or revocation storage is unavailable",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "revocation service unavailable"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ]
+      }
+    },
+    "/+revocations/{digest}": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Inspect a digest revocation",
+        "description": "Returns the current lifecycle record without changing package yank, trash, retention, or policy state.",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "description": "Canonical `sha256:<64 lowercase hex>` artifact digest",
+            "required": true,
+            "example": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current revocation record",
+            "content": {
+              "application/json": {
+                "example": {
+                  "created_at_unix": 1800000000,
+                  "created_by": "usr_550e8400e29b41d4a716446655440000",
+                  "digest": {
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                  },
+                  "reason": "compromised build host",
+                  "revision": 1,
+                  "state": {
+                    "status": "active"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The digest is not canonical SHA-256",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid digest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot discover this record, or it does not exist"
+          },
+          "503": {
+            "description": "Authentication, authorization, or revocation storage is unavailable",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "revocation service unavailable"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Put an active digest revocation",
+        "description": "Creates or reopens the digest-addressed record. Retrying the same active reason is idempotent; replacing another active reason conflicts.",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "description": "Canonical `sha256:<64 lowercase hex>` artifact digest",
+            "required": true,
+            "example": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "reason": "compromised build host"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The unchanged active record",
+            "content": {
+              "application/json": {
+                "example": {
+                  "created_at_unix": 1800000000,
+                  "created_by": "usr_550e8400e29b41d4a716446655440000",
+                  "digest": {
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                  },
+                  "reason": "compromised build host",
+                  "revision": 1,
+                  "state": {
+                    "status": "active"
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The created or reopened record",
+            "content": {
+              "application/json": {
+                "example": {
+                  "created_at_unix": 1800000000,
+                  "created_by": "usr_550e8400e29b41d4a716446655440000",
+                  "digest": {
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                  },
+                  "reason": "compromised build host",
+                  "revision": 1,
+                  "state": {
+                    "status": "active"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The digest or reason is invalid",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid digest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot discover this record, or it does not exist"
+          },
+          "409": {
+            "description": "The active record has another reason",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "digest is already revoked"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request exceeds the fixed body limit"
+          },
+          "415": {
+            "description": "The request is not JSON"
+          },
+          "422": {
+            "description": "The JSON request body is invalid"
+          },
+          "503": {
+            "description": "Authentication, authorization, or revocation storage is unavailable",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "revocation service unavailable"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ]
+      }
+    },
+    "/+revocations/{digest}/lift": {
+      "post": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Lift a digest revocation",
+        "description": "Transitions an active record to lifted and retains its original reason, actor, and creation time. Retrying a lift is idempotent.",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "description": "Canonical `sha256:<64 lowercase hex>` artifact digest",
+            "required": true,
+            "example": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lifted record",
+            "content": {
+              "application/json": {
+                "example": {
+                  "created_at_unix": 1800000000,
+                  "created_by": "usr_550e8400e29b41d4a716446655440000",
+                  "digest": {
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                  },
+                  "reason": "compromised build host",
+                  "revision": 2,
+                  "state": {
+                    "lifted_at_unix": 1800000100,
+                    "lifted_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+                    "status": "lifted"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The digest is not canonical SHA-256",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid digest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot discover this record, or it does not exist"
+          },
+          "503": {
+            "description": "Authentication, authorization, or revocation storage is unavailable",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "revocation service unavailable"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ]
       }
     },
     "/+search": {
@@ -2499,6 +2846,11 @@
   },
   "components": {
     "securitySchemes": {
+      "administratorPassword": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "A local server user's display name and password. Digest revocation operations require the administrator role."
+      },
       "uploadToken": {
         "type": "http",
         "scheme": "basic",

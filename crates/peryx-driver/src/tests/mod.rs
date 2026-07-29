@@ -3,5 +3,6 @@ mod authz_tests;
 mod body_tests;
 mod conditional_tests;
 mod range_tests;
+mod revocation_tests;
 mod state_tests;
 mod user_tests;

@@ -277,6 +277,9 @@ fn main() -> anyhow::Result<()> {
             let config = resolve_config(&args.runtime)?;
             app::bootstrap_administrator(&config, &args, &mut std::io::stdin(), &mut std::io::stdout())
         }
+        peryx::cli::Command::Revocation(command) => {
+            app::revocation(&command, &mut std::io::stdin(), &mut std::io::stdout())
+        }
         peryx::cli::Command::ConfigSnippet(args) => print_config_snippet(&args),
         peryx::cli::Command::Index(command) => {
             let config = resolve_config(command.runtime_args())?;

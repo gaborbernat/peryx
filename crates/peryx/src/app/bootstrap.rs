@@ -10,7 +10,6 @@ use peryx_storage::meta::MetaStore;
 use crate::cli::BootstrapAdministratorArgs;
 use crate::config::Config;
 
-const MAX_PASSWORD_BYTES: usize = 1_048_576;
 const MAX_PASSWORD_CHARACTERS: usize = 1_024;
 const MIN_PASSWORD_CHARACTERS: usize = 15;
 
@@ -30,12 +29,7 @@ pub fn bootstrap_administrator(
     }
     super::init_data_dir(&config.data_dir)
         .with_context(|| format!("initialize data directory {}", config.data_dir.display()))?;
-    let password = if let Some(path) = &args.password_file {
-        read_password(&mut std::fs::File::open(path).with_context(|| format!("open password file {}", path.display()))?)
-            .context(format!("read password file {}", path.display()))?
-    } else {
-        read_password(stdin).context("read password from standard input")?
-    };
+    let password = super::secret::read_secret(args.password_file.as_deref(), stdin, "password")?;
     let characters = password.chars().count();
     if characters < MIN_PASSWORD_CHARACTERS {
         bail!("administrator password must contain at least {MIN_PASSWORD_CHARACTERS} characters");
@@ -50,18 +44,4 @@ pub fn bootstrap_administrator(
     Event::new("administrator_bootstrap", "success").emit();
     writeln!(out, "administrator\t{}\t{}", user.id, user.name.display())?;
     Ok(())
-}
-
-fn read_password(input: &mut dyn Read) -> anyhow::Result<String> {
-    let mut bytes = Vec::new();
-    input.take((MAX_PASSWORD_BYTES + 1) as u64).read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PASSWORD_BYTES {
-        bail!("password input exceeds the {MAX_PASSWORD_BYTES}-byte limit");
-    }
-    if bytes.ends_with(b"\r\n") {
-        bytes.truncate(bytes.len() - 2);
-    } else if bytes.ends_with(b"\n") {
-        bytes.pop();
-    }
-    String::from_utf8(bytes).context("password input must be UTF-8")
 }

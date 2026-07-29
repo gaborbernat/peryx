@@ -21,8 +21,9 @@ pub use job::{JobCommand, JobListArgs, JobShowArgs};
 #[cfg(feature = "self-update")]
 pub use maintenance::SelfCommand;
 pub use maintenance::{
-    BackupCommand, BackupCreateArgs, BackupVerifyArgs, BootstrapAdministratorArgs, ImportDirArgs, PolicyCommand,
-    PolicyDryRunArgs, RestoreArgs, WriterCommand, WriterPromoteArgs,
+    AdministratorClientArgs, BackupCommand, BackupCreateArgs, BackupVerifyArgs, BootstrapAdministratorArgs,
+    ImportDirArgs, InspectRevocationArgs, LiftRevocationArgs, ListRevocationsArgs, PolicyCommand, PolicyDryRunArgs,
+    PutRevocationArgs, RestoreArgs, RevocationCommand, RevocationStatusArg, WriterCommand, WriterPromoteArgs,
 };
 pub use mirror::{PrefetchCommand, PrefetchOptions, PrefetchPlanArgs, PrefetchSyncArgs, PrefetchVerifyArgs};
 pub use snippet::{ConfigSnippetArgs, SnippetFormat};
@@ -64,6 +65,9 @@ pub enum Command {
     Init(RuntimeArgs),
     /// Create the first local administrator.
     BootstrapAdministrator(BootstrapAdministratorArgs),
+    /// Create, inspect, list, and lift digest revocations.
+    #[command(subcommand)]
+    Revocation(RevocationCommand),
     /// Print client configuration for one index.
     #[command(
         after_help = "Examples:\n  peryx config-snippet --base-url https://packages.example --index root/pypi pip.conf\n  peryx config-snippet --base-url https://packages.example --index root/pypi uv.toml\n  peryx config-snippet --base-url https://packages.example --index root/pypi .pypirc"

@@ -293,9 +293,15 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         let metrics = Metrics::start_durable(meta.analytics(), usage_retention_days, clock.clone());
+        let users = crate::users::UserService::new(meta.clone());
+        let authorization = crate::authz::AuthorizationService::new(meta.clone());
+        let revocations = crate::revocations::RevocationService::new(meta.clone());
         Self {
             serving: std::sync::Arc::new(super::app::ServingState {
                 meta,
+                users,
+                authorization,
+                revocations,
                 blobs,
                 ttl_secs,
                 max_stale_secs,

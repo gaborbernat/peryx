@@ -29,6 +29,14 @@ use crate::response_security::{
         "version": "0.0.1",
     })
 )]
+#[case::administrator_write(
+    Some((Role::Administrator, Scope::AdministrationWrite)),
+    serde_json::json!({
+        "queue_depth": 4,
+        "signing_key_state": {"configured": true},
+        "version": "0.0.1",
+    })
+)]
 fn test_filter_fields_serializes_only_the_callers_classification(
     #[case] role_scope: Option<(Role, Scope)>,
     #[case] expected: serde_json::Value,
@@ -114,7 +122,9 @@ fn authorized(role: Role, scope: Scope) -> ScopedDecision {
         Scope::RepositoryRead | Scope::RepositoryWrite | Scope::RepositoryDelete => {
             Resource::Repository("private".to_owned())
         }
-        Scope::OperatorRead | Scope::AnalyticsRead | Scope::AdministrationRead => Resource::Operator,
+        Scope::OperatorRead | Scope::AnalyticsRead | Scope::AdministrationRead | Scope::AdministrationWrite => {
+            Resource::Operator
+        }
     };
     authorized_on(role, scope, &resource)
 }

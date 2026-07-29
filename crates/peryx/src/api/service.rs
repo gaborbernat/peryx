@@ -53,6 +53,25 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
                 .build(),
         )
         .path(
+            "/+revocations",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, list_revocations())
+                .build(),
+        )
+        .path(
+            "/+revocations/{digest}",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, inspect_revocation())
+                .operation(HttpMethod::Put, put_revocation())
+                .build(),
+        )
+        .path(
+            "/+revocations/{digest}/lift",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Post, lift_revocation())
+                .build(),
+        )
+        .path(
             "/metrics",
             PathItemBuilder::new().operation(HttpMethod::Get, metrics()).build(),
         )
@@ -423,6 +442,197 @@ fn policy_decisions() -> OperationBuilder {
         operation = operation.parameter(parameter);
     }
     operation
+}
+
+fn revocation_example() -> serde_json::Value {
+    json!({
+        "digest": {"sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+        "reason": "compromised build host",
+        "created_by": "usr_550e8400e29b41d4a716446655440000",
+        "created_at_unix": 1_800_000_000,
+        "state": {"status": "active"},
+        "revision": 1
+    })
+}
+
+fn digest_parameter() -> utoipa::openapi::path::Parameter {
+    ParameterBuilder::new()
+        .name("digest")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Canonical `sha256:<64 lowercase hex>` artifact digest"))
+        .example(Some(json!(
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )))
+        .build()
+}
+
+fn administrator_errors(operation: OperationBuilder) -> OperationBuilder {
+    operation
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local user credential was presented"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The caller cannot discover this record, or it does not exist"),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication, authorization, or revocation storage is unavailable",
+                json!({"error": "revocation service unavailable"}),
+            ),
+        )
+}
+
+fn inspect_revocation() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Inspect a digest revocation"))
+            .description(Some(
+                "Returns the current lifecycle record without changing package yank, trash, retention, or policy state.",
+            ))
+            .security(SecurityRequirement::new(
+                "administratorPassword",
+                Vec::<String>::new(),
+            ))
+            .parameter(digest_parameter())
+            .response("200", api_json_response("The current revocation record", revocation_example()))
+            .response(
+                "400",
+                api_json_response("The digest is not canonical SHA-256", json!({"error": "invalid digest"})),
+            ),
+    )
+}
+
+fn list_revocations() -> OperationBuilder {
+    let mut operation = administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("List digest revocations"))
+            .description(Some(
+                "Returns a bounded page of current records in canonical digest order. Lifted records remain visible to administrators.",
+            ))
+            .security(SecurityRequirement::new(
+                "administratorPassword",
+                Vec::<String>::new(),
+            ))
+            .response(
+                "200",
+                api_json_response(
+                    "The matching current records",
+                    json!({"revocations": [revocation_example()], "next_cursor": null}),
+                ),
+            )
+            .response(
+                "400",
+                api_json_response(
+                    "The cursor or limit is invalid",
+                    json!({"error": "invalid revocation cursor"}),
+                ),
+            ),
+    );
+    for (name, description, example) in [
+        ("status", "Filter by `active` or `lifted`", json!("active")),
+        (
+            "cursor",
+            "Exclusive canonical digest from the prior page",
+            json!("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        ),
+        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
+    ] {
+        operation = operation.parameter(
+            ParameterBuilder::new()
+                .name(name)
+                .parameter_in(ParameterIn::Query)
+                .description(Some(description))
+                .example(Some(example)),
+        );
+    }
+    operation
+}
+
+fn put_revocation() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Put an active digest revocation"))
+            .description(Some(
+                "Creates or reopens the digest-addressed record. Retrying the same active reason is idempotent; replacing another active reason conflicts.",
+            ))
+            .security(SecurityRequirement::new(
+                "administratorPassword",
+                Vec::<String>::new(),
+            ))
+            .parameter(digest_parameter())
+            .request_body(Some(
+                RequestBodyBuilder::new()
+                    .required(Some(Required::True))
+                    .content(
+                        "application/json",
+                        ContentBuilder::new()
+                            .example(Some(json!({"reason": "compromised build host"})))
+                            .build(),
+                    )
+                    .build(),
+            ))
+            .response("200", api_json_response("The unchanged active record", revocation_example()))
+            .response("201", api_json_response("The created or reopened record", revocation_example()))
+            .response(
+                "400",
+                api_json_response("The digest or reason is invalid", json!({"error": "invalid digest"})),
+            )
+            .response(
+                "409",
+                api_json_response(
+                    "The active record has another reason",
+                    json!({"error": "digest is already revoked"}),
+                ),
+            )
+            .response("413", ResponseBuilder::new().description("The request exceeds the fixed body limit"))
+            .response("415", ResponseBuilder::new().description("The request is not JSON"))
+            .response("422", ResponseBuilder::new().description("The JSON request body is invalid")),
+    )
+}
+
+fn lift_revocation() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Lift a digest revocation"))
+            .description(Some(
+                "Transitions an active record to lifted and retains its original reason, actor, and creation time. Retrying a lift is idempotent.",
+            ))
+            .security(SecurityRequirement::new(
+                "administratorPassword",
+                Vec::<String>::new(),
+            ))
+            .parameter(digest_parameter())
+            .response(
+                "200",
+                api_json_response(
+                    "The lifted record",
+                    json!({
+                        "digest": {"sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+                        "reason": "compromised build host",
+                        "created_by": "usr_550e8400e29b41d4a716446655440000",
+                        "created_at_unix": 1_800_000_000,
+                        "state": {
+                            "status": "lifted",
+                            "lifted_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+                            "lifted_at_unix": 1_800_000_100
+                        },
+                        "revision": 2
+                    }),
+                ),
+            )
+            .response(
+                "400",
+                api_json_response("The digest is not canonical SHA-256", json!({"error": "invalid digest"})),
+            ),
+    )
 }
 
 fn metrics() -> OperationBuilder {

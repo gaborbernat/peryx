@@ -36,7 +36,8 @@ pub fn openapi() -> OpenApi {
                      the Simple API under `/{route}/`, where `{route}` is the index's route (for example \
                      `root/pypi`); an OCI index serves the distribution-spec registry under `/v2/`. Write \
                      operations authenticate with HTTP Basic where the password is the target hosted \
-                     index's upload token and the username is ignored.",
+                     index's upload token and the username is ignored. Server administration uses a \
+                     local user's display name and password with role authorization.",
                 ))
                 .contact(Some(
                     ContactBuilder::new()
@@ -62,6 +63,17 @@ pub fn openapi() -> OpenApi {
                             .description(Some(
                                 "Any username; the password is the hosted index's `upload_token` \
                                  (the pypi.org `__token__` convention)",
+                            ))
+                            .build(),
+                    ),
+                )
+                .security_scheme(
+                    "administratorPassword",
+                    SecurityScheme::Http(
+                        HttpBuilder::new()
+                            .scheme(HttpAuthScheme::Basic)
+                            .description(Some(
+                                "A local server user's display name and password. Digest revocation operations require the administrator role.",
                             ))
                             .build(),
                     ),

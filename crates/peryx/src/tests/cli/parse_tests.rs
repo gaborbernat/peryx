@@ -10,6 +10,7 @@ fn runtime(cli: Cli) -> RuntimeArgs {
     match cli.command {
         Command::Serve(args) | Command::Init(args) => args,
         Command::BootstrapAdministrator(_) => panic!("bootstrap-administrator carries nested runtime args"),
+        Command::Revocation(_) => panic!("revocation commands use remote administrator arguments"),
         Command::ConfigSnippet(_) => panic!("no runtime args on config-snippet"),
         Command::Index(_) => panic!("index commands carry nested runtime args"),
         Command::Job(_) => panic!("job commands carry nested runtime args"),

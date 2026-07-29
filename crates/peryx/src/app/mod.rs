@@ -13,6 +13,8 @@ mod indexes;
 mod jobs;
 mod policy;
 mod purge;
+mod revocation;
+mod secret;
 
 pub use bootstrap::bootstrap_administrator;
 pub use cache::cache;
@@ -20,6 +22,7 @@ pub use indexes::{config_snippet, index, init, init_data_dir};
 pub use jobs::job;
 pub use policy::policy;
 pub(crate) use purge::referenced_blob_digests;
+pub use revocation::revocation;
 
 struct CacheStores {
     meta: MetaStore,

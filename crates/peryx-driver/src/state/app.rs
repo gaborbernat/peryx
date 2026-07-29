@@ -12,7 +12,10 @@ use peryx_upstream::UpstreamRouter;
 use peryx_index::{Index, RouteResolver};
 
 use super::describe::{IndexDescription, describe_indexes, describe_upstream_route};
+use crate::authz::AuthorizationService;
 use crate::rate_limit::{RateLimiter, UpstreamLimits};
+use crate::revocations::RevocationService;
+use crate::users::UserService;
 use peryx_events::metrics::Metrics;
 use peryx_events::webhook::WebhookRuntime;
 use peryx_search::PackageSearch;
@@ -36,6 +39,12 @@ pub trait PrometheusSource: Send + Sync {
 /// not a convention.
 pub struct ServingState {
     pub meta: MetaStore,
+    /// Shared password worker bound and persistent user operations.
+    pub users: UserService,
+    /// Persistent server-role authorization.
+    pub authorization: AuthorizationService,
+    /// Digest revocation lifecycle and serving decisions.
+    pub revocations: RevocationService,
     pub blobs: BlobStorage,
     /// Fallback freshness for cached simple pages, in seconds: applies only when upstream's
     /// `Cache-Control` granted no usable lifetime.

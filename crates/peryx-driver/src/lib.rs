@@ -20,6 +20,7 @@ pub mod jobs;
 pub mod openapi;
 pub mod range;
 pub mod rate_limit;
+pub mod revocations;
 pub mod serving;
 pub mod state;
 pub mod users;

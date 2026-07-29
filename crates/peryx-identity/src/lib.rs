@@ -27,6 +27,7 @@
 mod acl;
 mod oidc;
 mod password;
+mod revocation;
 mod roles;
 mod token;
 mod trusted_publisher;
@@ -41,6 +42,7 @@ pub use acl::{
 };
 pub use oidc::{ExchangeError, ExchangedToken, IdentityExchange, OidcRuntime, PublisherBinding};
 pub use password::{PasswordCheck, PasswordError, PasswordPolicy, PasswordVerifier};
+pub use revocation::{ArtifactDigest, ArtifactDigestError, DigestDecision, RevocationReason, RevocationReasonError};
 pub use roles::{GrantScope, Resource, Role, RoleGrant, Scope, grants_permit};
 pub use token::{Signer, TokenError, VerifiedToken};
 pub use trusted_publisher::{PublishClaims, PublishDenial, TrustedPublisher, authorize_publish};

@@ -327,15 +327,11 @@ impl Policy {
         self.quota_audit
     }
 
-    /// Whether a write path must account against the repository quota: a repository, project, or
-    /// version limit is set, or audit mode observes projected enforcement. The per-file size limit is
-    /// enforced on the byte stream itself, so it alone does not turn accounting on.
+    /// Whether a write path must account against a configured repository quota. Per-file limits use
+    /// the policy engine, and audit mode has no decision to observe without a repository limit.
     #[must_use]
     pub const fn enforces_quota(&self) -> bool {
-        self.max_accounted_bytes.is_some()
-            || self.max_projects.is_some()
-            || self.max_versions_per_project.is_some()
-            || self.quota_audit
+        self.max_accounted_bytes.is_some() || self.max_projects.is_some() || self.max_versions_per_project.is_some()
     }
 
     /// The source policy contributed by this ecosystem, or the compatibility-preserving fallback

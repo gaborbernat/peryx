@@ -176,13 +176,10 @@ pub fn commit_blob_membership(
     digest: &str,
     reservation: Option<QuotaReservationRecord>,
 ) -> Result<(), ServeError> {
-    match reservation {
-        None => Ok(store::record_blob_membership(meta, index, repo, digest)?),
-        Some(record) => meta.commit_driver_txn_with_quota(record.id, |txn| {
-            txn.put(&store::blob_membership_key(index, repo, digest), &[])?;
-            Ok::<_, ServeError>(((), Vec::new()))
-        }),
-    }
+    finalize(meta, reservation, |txn| {
+        txn.put(&store::blob_membership_key(index, repo, digest), &[])?;
+        Ok(((), Vec::new()))
+    })
 }
 
 /// Publish a manifest by digest and optional tag, committing a quota reservation with it when the
@@ -204,9 +201,23 @@ pub fn publish_manifest(
         };
         Ok((grew, Vec::new()))
     };
-    match reservation {
-        None => meta.commit_driver_txn(body),
-        Some(record) => meta.commit_driver_txn_with_quota(record.id, body),
+    finalize(meta, reservation, body)
+}
+
+fn finalize<T>(
+    meta: &MetaStore,
+    reservation: Option<QuotaReservationRecord>,
+    body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), ServeError>,
+) -> Result<T, ServeError> {
+    let Some(record) = reservation else {
+        return meta.commit_driver_txn(body);
+    };
+    match meta.commit_driver_txn_with_quota(record.id, body) {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            meta.release_quota_reservation(record.id)?;
+            Err(err)
+        }
     }
 }
 
@@ -230,10 +241,10 @@ pub fn manifest_already_published(
 
 #[cfg(test)]
 mod tests {
-    use peryx_storage::meta::MetaStore;
+    use peryx_storage::meta::{AccountingClass, MetaStore, QuotaLimit, QuotaLimits};
 
-    use super::{ReserveOutcome, describe, quota_reservation, reserve};
-    use peryx_storage::meta::{AccountingClass, QuotaLimit, QuotaLimits};
+    use super::{ReserveOutcome, describe, finalize, quota_reservation, reserve};
+    use crate::registry::ServeError;
 
     fn store() -> (tempfile::TempDir, MetaStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -289,6 +300,31 @@ mod tests {
                 QuotaLimit::VersionsPerProject,
             ]),
             "file size, repository bytes, repository projects, project versions"
+        );
+    }
+
+    #[test]
+    fn test_finalize_releases_the_reservation_after_a_driver_failure() {
+        let (_dir, meta) = store();
+        let request = quota_reservation("store", "app", None, "sha256:a", 4, AccountingClass::Hosted, 1);
+        let record = meta.reserve_quota(request, QuotaLimits::default()).unwrap();
+        let id = record.id;
+
+        let result = finalize(&meta, Some(record), |_txn| {
+            Err::<((), Vec<Vec<u8>>), _>(ServeError::Transport("driver write failed".to_owned()))
+        });
+
+        assert!(matches!(result, Err(ServeError::Transport(message)) if message == "driver write failed"));
+        let usage = meta.quota_usage("store").unwrap();
+        assert_eq!(
+            (
+                usage.accounted_bytes.committed,
+                usage.accounted_bytes.reserved,
+                usage.projects.committed,
+                usage.projects.reserved,
+                meta.quota_reservation(id).unwrap(),
+            ),
+            (0, 0, 0, 0, None)
         );
     }
 }

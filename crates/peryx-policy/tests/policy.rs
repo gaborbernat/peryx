@@ -123,6 +123,22 @@ fn a_per_file_size_limit_alone_does_not_enforce_a_quota() {
 }
 
 #[test]
+fn audit_mode_alone_does_not_enforce_a_quota() {
+    let policy = Policy::compile(
+        &PolicyConfig {
+            quota_audit: true,
+            ..PolicyConfig::default()
+        },
+        str::to_owned,
+    );
+
+    assert_eq!(
+        (policy.quota_audit(), policy.enforces_quota(), policy.active()),
+        (true, false, false)
+    );
+}
+
+#[test]
 fn a_fallback_mode_renders_its_configured_wire_name() {
     for (mode, name) in [
         (FallbackMode::Fallback, "fallback"),

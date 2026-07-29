@@ -139,6 +139,59 @@ async fn test_blob_push_within_the_repository_byte_quota_is_accounted() {
     );
 }
 
+#[tokio::test]
+async fn test_chunked_blob_push_is_accounted_at_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = quota_store(
+        &dir,
+        &PolicyConfig {
+            max_accounted_bytes: Some(64),
+            ..PolicyConfig::default()
+        },
+    );
+    let blob = b"a-chunked-layer";
+    let (status, headers, _) = send_body(
+        &app,
+        Method::POST,
+        "/v2/store/app/blobs/uploads/",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let location = headers["location"].to_str().unwrap();
+    assert_eq!(
+        send_body(
+            &app,
+            Method::PATCH,
+            location,
+            &[("authorization", &auth(TOKEN))],
+            blob[..4].to_vec(),
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        send_body(
+            &app,
+            Method::PUT,
+            &format!("{location}?digest={}", oci_digest(blob)),
+            &[("authorization", &auth(TOKEN))],
+            blob[4..].to_vec(),
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+
+    let usage = state.meta.quota_usage("store").unwrap();
+    assert_eq!(
+        (usage.accounted_bytes.committed, usage.accounted_bytes.reserved),
+        (blob.len() as u64, 0)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_push_of_one_digest_charges_bytes_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -526,6 +579,22 @@ async fn test_a_push_to_an_unmetered_index_records_no_quota_usage() {
         push_blob(&app, "store/app", b"a-real-layer-of-bytes").await,
         StatusCode::CREATED
     );
+    let usage = state.meta.quota_usage("store").unwrap();
+    assert_eq!((usage.accounted_bytes.committed, usage.projects.committed), (0, 0));
+}
+
+#[tokio::test]
+async fn test_audit_without_limits_records_no_quota_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = quota_store(
+        &dir,
+        &PolicyConfig {
+            quota_audit: true,
+            ..PolicyConfig::default()
+        },
+    );
+
+    assert_eq!(push_blob(&app, "store/app", b"a-real-layer").await, StatusCode::CREATED);
     let usage = state.meta.quota_usage("store").unwrap();
     assert_eq!((usage.accounted_bytes.committed, usage.projects.committed), (0, 0));
 }

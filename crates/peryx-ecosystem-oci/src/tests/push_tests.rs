@@ -7,6 +7,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt as _;
 use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_index::{Index, IndexKind};
+use peryx_policy::{Policy, PolicyConfig};
 use peryx_storage::blob::Digest;
 use peryx_storage::meta::DriverBatch;
 use rstest::rstest;
@@ -900,23 +901,49 @@ async fn test_manifest_push_rejects_index_with_missing_child() {
     assert!(body_has_code(&body, "MANIFEST_BLOB_UNKNOWN"), "{body:?}");
 }
 
+#[rstest]
+#[case::metered_same_repository("store/app", true, StatusCode::CREATED, None, StatusCode::OK)]
+#[case::unmetered_other_repository("store/other", false, StatusCode::CREATED, None, StatusCode::OK)]
+#[case::metered_other_repository(
+    "store/other",
+    true,
+    StatusCode::BAD_REQUEST,
+    Some("MANIFEST_BLOB_UNKNOWN"),
+    StatusCode::NOT_FOUND
+)]
 #[tokio::test]
-async fn test_manifest_push_accepts_index_with_present_child() {
+async fn test_manifest_push_checks_referenced_child_membership(
+    #[case] child_repository: &str,
+    #[case] metered: bool,
+    #[case] expected_status: StatusCode,
+    #[case] expected_error: Option<&str>,
+    #[case] expected_visibility: StatusCode,
+) {
     let dir = tempfile::tempdir().unwrap();
-    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let mut index = writable_index("store", "store", true, TOKEN);
+    if metered {
+        index.policy = Policy::compile(
+            &PolicyConfig {
+                max_accounted_bytes: Some(u64::MAX),
+                ..PolicyConfig::default()
+            },
+            str::to_owned,
+        );
+    }
+    let (_state, app) = app_with_indexes(&dir, vec![index]);
     let child = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
     let child_digest = oci_digest(child);
     let (status, _, _) = send_body(
         &app,
         Method::PUT,
-        &format!("/v2/store/app/manifests/{child_digest}"),
+        &format!("/v2/{child_repository}/manifests/{child_digest}"),
         &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
         child.to_vec(),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let index = format!(r#"{{"schemaVersion":2,"manifests":[{{"digest":"{child_digest}"}}]}}"#);
-    let (status, _, _) = send_body(
+    let (status, _, body) = send_body(
         &app,
         Method::PUT,
         "/v2/store/app/manifests/latest",
@@ -927,7 +954,17 @@ async fn test_manifest_push_accepts_index_with_present_child() {
         index.into_bytes(),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        (
+            status,
+            expected_error.map(|code| body_has_code(&body, code)),
+            send(&app, Method::GET, &format!("/v2/store/app/manifests/{child_digest}"))
+                .await
+                .0,
+        ),
+        (expected_status, expected_error.map(|_| true), expected_visibility),
+        "{body:?}"
+    );
 }
 
 #[tokio::test]

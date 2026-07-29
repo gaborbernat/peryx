@@ -39,6 +39,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 if policy_blocks(index, PolicyAction::Upload, &repo) {
                     return Ok(error_response(ErrorCode::Denied, "image name is blocked by policy"));
                 }
+                if let Some(response) = policy_size_denial(index, &repo, metadata.bytes) {
+                    return Ok(response);
+                }
                 // A mount publishes an existing blob into this repository without a transfer, so it
                 // reserves the mounted digest's bytes exactly as an upload of them would; a digest
                 // already served here is not reserved again.

@@ -25,8 +25,8 @@ pub use model::{
 };
 pub use raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawAvailability, RawBlobStorage, RawIndex, RawJobSchedule, RawPolicy, RawPrefetchConfig, RawReplication,
-    RawTls, RawToken, RawTrustedPublisher, RawUpstream, RawWebhook,
+    RawAcme, RawAvailability, RawBlobStorage, RawCredentialExec, RawIndex, RawJobSchedule, RawPolicy,
+    RawPrefetchConfig, RawReplication, RawTls, RawToken, RawTrustedPublisher, RawUpstream, RawWebhook,
 };
 
 /// An error while assembling configuration.

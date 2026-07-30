@@ -83,6 +83,7 @@ insta = "1"
 thiserror = "2.0"
 async-trait = "0.1"
 arc-swap = "1.7"
+command-group = { version = "5.0.1", features = ["with-tokio"] }
 mockall = "0.15"
 anyhow = "1.0"
 tracing = "0.1"

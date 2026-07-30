@@ -9,9 +9,14 @@ use tokio::sync::Mutex;
 
 use super::Auth;
 
-type LoadFuture = Pin<Box<dyn Future<Output = Result<Auth, CredentialError>> + Send>>;
+type LoadFuture = Pin<Box<dyn Future<Output = Result<LoadedCredential, CredentialError>> + Send>>;
 type Loader = dyn Fn() -> LoadFuture + Send + Sync;
 static NEXT_PROVIDER_ID: AtomicU64 = AtomicU64::new(0);
+
+pub(super) struct LoadedCredential {
+    pub auth: Auth,
+    pub refresh_after: Duration,
+}
 
 /// Request behavior after a credential source cannot be refreshed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +161,30 @@ impl CredentialProvider {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Auth, CredentialError>> + Send + 'static,
     {
+        Self::with_loader(auth, refresh.interval, refresh, move || {
+            let future = loader();
+            async move {
+                future.await.map(|auth| LoadedCredential {
+                    auth,
+                    refresh_after: refresh.interval,
+                })
+            }
+        })
+    }
+
+    pub(super) fn lazy<F, Fut>(refresh: CredentialRefresh, loader: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<LoadedCredential, CredentialError>> + Send + 'static,
+    {
+        Self::with_loader(Auth::None, Duration::ZERO, refresh, loader)
+    }
+
+    fn with_loader<F, Fut>(auth: Auth, refresh_deadline: Duration, refresh: CredentialRefresh, loader: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<LoadedCredential, CredentialError>> + Send + 'static,
+    {
         let identity = CredentialIdentity {
             provider: CredentialProviderId(NEXT_PROVIDER_ID.fetch_add(1, Ordering::Relaxed)),
             generation: 0,
@@ -165,7 +194,7 @@ impl CredentialProvider {
                 auth,
                 error: None,
                 identity,
-                refresh_deadline: Some(refresh.interval),
+                refresh_deadline: Some(refresh_deadline),
             }),
             started: std::time::Instant::now(),
             refresh: Some(refresh),
@@ -227,10 +256,10 @@ impl CredentialProvider {
         }
         let refresh = self.0.refresh.expect("a refresh needs refresh policy");
         let result = self.0.loader.as_ref().expect("a refresh needs a loader")().await;
-        let (auth, error) = match result {
-            Ok(auth) => (auth, None),
-            Err(_) if refresh.failure == CredentialFailure::Anonymous => (Auth::None, None),
-            Err(error) => (current.auth.clone(), Some(error)),
+        let (auth, error, refresh_after) = match result {
+            Ok(loaded) => (loaded.auth, None, loaded.refresh_after),
+            Err(_) if refresh.failure == CredentialFailure::Anonymous => (Auth::None, None, refresh.interval),
+            Err(error) => (current.auth.clone(), Some(error), refresh.interval),
         };
         let snapshot = Arc::new(CredentialSnapshot {
             auth,
@@ -239,7 +268,7 @@ impl CredentialProvider {
                 provider: current.identity.provider,
                 generation: current.generation().wrapping_add(1),
             },
-            refresh_deadline: Some(self.0.started.elapsed().saturating_add(refresh.interval)),
+            refresh_deadline: Some(self.0.started.elapsed().saturating_add(refresh_after)),
         });
         self.0.snapshot.store(snapshot.clone());
         CredentialSnapshot::resolved(snapshot)

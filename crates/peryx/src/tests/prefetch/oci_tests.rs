@@ -29,6 +29,7 @@ fn oci_config(data_dir: &Path, upstream: &str) -> Config {
                 username: None,
                 password: None,
                 token: None,
+                credential_exec: None,
                 credential_refresh: None,
                 tls: crate::config::UpstreamTlsConfig::default(),
                 routing: None,

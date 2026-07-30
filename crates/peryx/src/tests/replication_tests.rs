@@ -380,6 +380,7 @@ fn test_replica_runtime_disables_local_writers() {
             username: Some("replica".to_owned()),
             password: Some(SecretSource::File("missing-routed-upstream-password".into())),
             token: None,
+            credential_exec: None,
             credential_refresh: None,
             tls: crate::config::UpstreamTlsConfig::default(),
         }],

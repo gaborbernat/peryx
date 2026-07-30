@@ -8,6 +8,7 @@ use peryx_core::Ecosystem;
 use peryx_driver::rate_limit::{RateLimitConfig, RouteLimit};
 use peryx_identity::Action;
 use peryx_policy::PolicyConfig;
+use peryx_upstream::{CredentialFailure, ExecCredentialConfig};
 use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -136,6 +137,8 @@ enum SnapshotIndexKind<'a> {
         #[serde(flatten)]
         credential_refresh: Option<SnapshotCredentialRefresh>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        credential_exec: Option<Box<SnapshotCredentialExec<'a>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         ca_file: Option<&'a Path>,
         #[serde(skip_serializing_if = "Option::is_none")]
         client_cert_file: Option<&'a Path>,
@@ -193,6 +196,8 @@ struct SnapshotUpstream<'a> {
     #[serde(flatten)]
     credential_refresh: Option<SnapshotCredentialRefresh>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    credential_exec: Option<SnapshotCredentialExec<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ca_file: Option<&'a Path>,
     #[serde(skip_serializing_if = "Option::is_none")]
     client_cert_file: Option<&'a Path>,
@@ -207,6 +212,14 @@ struct SnapshotCredentialRefresh {
     #[serde(rename = "credential_refresh_on_unauthorized")]
     on_unauthorized: bool,
     #[serde(rename = "credential_failure")]
+    failure: &'static str,
+}
+
+#[derive(Serialize)]
+struct SnapshotCredentialExec<'a> {
+    argv: &'a [String],
+    timeout_secs: u64,
+    environment: &'a [String],
     failure: &'static str,
 }
 
@@ -549,6 +562,7 @@ fn snapshot_index(index: &IndexConfig) -> anyhow::Result<SnapshotIndex<'_>> {
             username,
             password,
             token,
+            credential_exec,
             credential_refresh,
             tls,
             routing,
@@ -569,6 +583,9 @@ fn snapshot_index(index: &IndexConfig) -> anyhow::Result<SnapshotIndex<'_>> {
                     token_file,
                     token_env,
                     credential_refresh: credential_refresh.map(snapshot_credential_refresh),
+                    credential_exec: credential_exec
+                        .as_ref()
+                        .map(|config| Box::new(snapshot_credential_exec(config))),
                     ca_file: tls.ca_file.as_deref(),
                     client_cert_file: tls.client_cert_file.as_deref(),
                     client_key_file: tls.client_key_file.as_deref(),
@@ -629,9 +646,22 @@ fn snapshot_upstream(upstream: &crate::config::UpstreamConfig) -> SnapshotUpstre
         token_file,
         token_env,
         credential_refresh: upstream.credential_refresh.map(snapshot_credential_refresh),
+        credential_exec: upstream.credential_exec.as_ref().map(snapshot_credential_exec),
         ca_file: upstream.tls.ca_file.as_deref(),
         client_cert_file: upstream.tls.client_cert_file.as_deref(),
         client_key_file: upstream.tls.client_key_file.as_deref(),
+    }
+}
+
+fn snapshot_credential_exec(config: &ExecCredentialConfig) -> SnapshotCredentialExec<'_> {
+    SnapshotCredentialExec {
+        argv: config.argv(),
+        timeout_secs: config.timeout().as_secs(),
+        environment: config.environment(),
+        failure: match config.failure() {
+            CredentialFailure::Fail => "fail",
+            CredentialFailure::Anonymous => "anonymous",
+        },
     }
 }
 

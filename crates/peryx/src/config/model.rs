@@ -11,6 +11,7 @@ use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig};
 use peryx_http::{DEFAULT_HOT_CACHE_BYTES, DEFAULT_MAX_STALE_SECS};
 use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_policy::PolicyConfig;
+use peryx_upstream::ExecCredentialConfig;
 use serde::Deserialize;
 use toml::Table;
 
@@ -461,6 +462,7 @@ pub enum IndexKind {
         /// Bearer token; takes precedence over username/password. A `token_file` sibling keeps it out
         /// of the config file.
         token: Option<SecretSource>,
+        credential_exec: Option<ExecCredentialConfig>,
         credential_refresh: Option<CredentialRefreshConfig>,
         /// Per-upstream trust and client identity files.
         tls: UpstreamTlsConfig,
@@ -497,6 +499,7 @@ pub struct UpstreamConfig {
     pub username: Option<String>,
     pub password: Option<SecretSource>,
     pub token: Option<SecretSource>,
+    pub credential_exec: Option<ExecCredentialConfig>,
     pub credential_refresh: Option<CredentialRefreshConfig>,
     pub tls: UpstreamTlsConfig,
 }
@@ -644,6 +647,7 @@ fn default_indexes() -> Vec<IndexConfig> {
         username: None,
         password: None,
         token: None,
+        credential_exec: None,
         credential_refresh: None,
         tls: UpstreamTlsConfig::default(),
         routing: None,

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
+use peryx_upstream::CredentialFailure;
 use rstest::rstest;
 
 use super::toml_config;
@@ -13,6 +14,20 @@ use crate::config::{
 fn toml_error(text: &str) -> ConfigError {
     let partial = config::from_toml(PathBuf::from("x.toml"), text).unwrap();
     Config::default().apply(partial).unwrap_err()
+}
+
+#[cfg(windows)]
+const fn exec_path() -> &'static str {
+    r"C:\credential-helper.exe"
+}
+
+#[cfg(not(windows))]
+const fn exec_path() -> &'static str {
+    "/credential-helper"
+}
+
+fn exec_argv() -> String {
+    format!("argv = [{:?}]", exec_path())
 }
 
 #[test]
@@ -509,6 +524,167 @@ fn test_routed_credential_refresh_defaults_apply_to_the_primary_client() {
     assert_eq!(
         (primary.on_unauthorized, primary.failure),
         (true, CredentialFailureMode::Fail)
+    );
+}
+
+#[test]
+fn test_exec_credential_resolves_for_a_cached_index() {
+    let config = toml_config(&format!(
+        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
+         [index.credential_exec]\nargv = [{:?}, \"--profile\", \"production\"]\n\
+         timeout_secs = 12\nenvironment = [\"HOME\", \"AWS_PROFILE\"]\nfailure = \"anonymous\"\n",
+        exec_path()
+    ));
+    let IndexKind::Cached {
+        credential_exec: Some(exec),
+        ..
+    } = &config.indexes[0].kind
+    else {
+        panic!("expected an exec credential");
+    };
+
+    assert_eq!(
+        (exec.argv(), exec.timeout(), exec.environment(), exec.failure()),
+        (
+            &[exec_path().to_owned(), "--profile".to_owned(), "production".to_owned(),][..],
+            Duration::from_secs(12),
+            &["HOME".to_owned(), "AWS_PROFILE".to_owned()][..],
+            CredentialFailure::Anonymous,
+        )
+    );
+}
+
+#[test]
+fn test_routed_exec_credential_applies_to_the_primary_client() {
+    let config = toml_config(&format!(
+        "[[index]]\nname = \"corp\"\n\
+         [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
+         [index.upstream.credential_exec]\n{}\n",
+        exec_argv()
+    ));
+    let IndexKind::Cached {
+        credential_exec: Some(primary),
+        routing: Some(routing),
+        ..
+    } = &config.indexes[0].kind
+    else {
+        panic!("expected routed exec credentials");
+    };
+
+    assert_eq!(primary, routing.upstreams[0].credential_exec.as_ref().unwrap());
+    assert_eq!(
+        (primary.timeout(), primary.environment(), primary.failure()),
+        (Duration::from_secs(30), &[][..], CredentialFailure::Fail)
+    );
+}
+
+#[rstest]
+#[case::empty_argv("argv = []", "`credential_exec.argv` must not be empty")]
+#[case::relative_argv(
+    "argv = [\"helper\"]",
+    "`credential_exec.argv` must start with an absolute executable path"
+)]
+#[case::nul_argv("argv = [\"/helper\\u0000argument\"]", "`credential_exec.argv` contains a null byte")]
+#[case::zero_timeout("timeout_secs = 0", "`credential_exec.timeout_secs` must be between 1 and 300")]
+#[case::long_timeout("timeout_secs = 301", "`credential_exec.timeout_secs` must be between 1 and 300")]
+#[case::invalid_environment("environment = [\"A=B\"]", "`credential_exec.environment` contains an invalid name")]
+fn test_exec_credential_rejects_invalid_settings(#[case] settings: &str, #[case] reason: &str) {
+    let settings = if settings.starts_with("argv") {
+        settings.to_owned()
+    } else {
+        format!("{}\n{settings}", exec_argv())
+    };
+    let text =
+        format!("[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n[index.credential_exec]\n{settings}\n");
+
+    assert_eq!(toml_error(&text).to_string(), format!("index corp: {reason}"));
+}
+
+#[test]
+fn test_exec_credential_bounds_argv_items() {
+    let argv = std::iter::repeat_n(format!("{:?}", exec_path()), 65)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = format!(
+        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n[index.credential_exec]\nargv = [{argv}]\n"
+    );
+
+    assert_eq!(
+        toml_error(&text).to_string(),
+        "index corp: `credential_exec.argv` exceeds its item or byte limit"
+    );
+}
+
+#[test]
+fn test_exec_credential_bounds_environment_items() {
+    let environment = std::iter::repeat_n("\"NAME\"", 65).collect::<Vec<_>>().join(", ");
+    let text = format!(
+        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
+         [index.credential_exec]\n{}\nenvironment = [{environment}]\n",
+        exec_argv()
+    );
+
+    assert_eq!(
+        toml_error(&text).to_string(),
+        "index corp: `credential_exec.environment` exceeds its item limit"
+    );
+}
+
+#[rstest]
+#[case::username("username = \"service\"")]
+#[case::password("password_file = \"/run/secret\"")]
+#[case::token("token_env = \"TOKEN\"")]
+fn test_exec_credential_rejects_static_credentials(#[case] credential: &str) {
+    let text = format!(
+        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n{credential}\n\
+         [index.credential_exec]\n{}\n",
+        exec_argv()
+    );
+
+    assert_eq!(
+        toml_error(&text).to_string(),
+        "index corp: `credential_exec` is mutually exclusive with username, password, and token settings"
+    );
+}
+
+#[test]
+fn test_exec_credential_rejects_refresh_controls() {
+    let error = toml_error(&format!(
+        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\ncredential_refresh_secs = 30\n\
+         [index.credential_exec]\n{}\n",
+        exec_argv()
+    ));
+
+    assert_eq!(
+        error.to_string(),
+        "index corp: `credential_exec` controls its own expiry and failure behavior"
+    );
+}
+
+#[test]
+fn test_exec_credential_requires_a_cached_index() {
+    let error = toml_error(&format!(
+        "[[index]]\nname = \"hosted\"\nhosted = true\n[index.credential_exec]\n{}\n",
+        exec_argv()
+    ));
+
+    assert_eq!(
+        error.to_string(),
+        "index hosted: upstream credentials require a cached index"
+    );
+}
+
+#[test]
+fn test_routed_exec_credential_rejects_top_level_configuration() {
+    let error = toml_error(&format!(
+        "[[index]]\nname = \"corp\"\n[index.credential_exec]\n{}\n\
+         [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n",
+        exec_argv()
+    ));
+
+    assert_eq!(
+        error.to_string(),
+        "index corp: credentials for `[[index.upstream]]` belong on each source"
     );
 }
 

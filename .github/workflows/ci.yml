@@ -128,6 +128,38 @@ jobs:
         with:
           cache: false
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          # v0.17 exceeds Windows' command limit after expanding Rust response files.
+          # https://github.com/mozilla/sccache/issues/2397
+          version: "v0.16.0"
+      - name: Verify sccache response files
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ((sccache --version) -ne "sccache 0.16.0") {
+            throw "unexpected sccache version"
+          }
+          $directory = Join-Path $env:RUNNER_TEMP "sccache-response-file"
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          $source = Join-Path $directory "response_file.rs"
+          Set-Content -Encoding utf8NoBOM -Path $source -Value "pub fn response_file_works() {}"
+          $padding = 1..2048 | ForEach-Object { "--cfg"; "sccache_response_file_$($_)" }
+          $response = Join-Path $directory "arguments"
+          @(
+            "--crate-name=sccache_response_file"
+            "--crate-type=rlib"
+            "--emit=link,dep-info"
+            "--out-dir=$directory"
+            $padding
+            $source
+          ) | Set-Content -Encoding utf8NoBOM -Path $response
+          sccache rustc "@$response"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          if (-not (Test-Path (Join-Path $directory "libsccache_response_file.rlib"))) {
+            throw "rustc did not produce the response-file artifact"
+          }
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           shared-key: test

@@ -47,9 +47,8 @@ jobs:
               - '.cargo/**'
               - 'rust-toolchain*'
             runner:
-              - '.github/codspeed/**'
               - '.github/workflows/codspeed.yml'
-              - 'ci/run-codspeed*.sh'
+              - 'ci/run-codspeed.sh'
             workflow:
               - '.github/workflows/codspeed.yml'
             pypi:
@@ -66,8 +65,9 @@ jobs:
         run: |
           # The standard no-LTO benchmark profile keeps links short and within the standard ARM
           # runner's memory, so both ecosystems build in parallel.
-          oci='{"ecosystem":"OCI","package":"peryx-ecosystem-oci","cargo_jobs":4}'
-          pypi='{"ecosystem":"PyPI","package":"peryx-ecosystem-pypi","cargo_jobs":4}'
+          oci='{"ecosystem":"OCI","package":"peryx-ecosystem-oci","cargo_jobs":4,'
+          oci+='"bench_args":"--bench manifest_by_digest --bench tags_list --bench version_check"}'
+          pypi='{"ecosystem":"PyPI","package":"peryx-ecosystem-pypi","cargo_jobs":4,"bench_args":""}'
           legs=()
           if [ "$EVENT" == "push" ] || [ "$EVENT" == "workflow_dispatch" ]; then
             legs=("$oci" "$pypi")
@@ -146,9 +146,9 @@ jobs:
             local path
             {
               for path in \
-                .github/codspeed/Dockerfile \
                 .github/workflows/codspeed.yml \
-                ci/run-codspeed.sh; do
+                ci/run-codspeed.sh \
+                rust-toolchain.toml; do
                 printf '%s\0' "$path"
                 git show "$revision:$path"
                 printf '\0'
@@ -167,86 +167,12 @@ jobs:
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure
 
-  codspeed-image:
-    name: CodSpeed runtime image
-    needs: changes
-    if: needs.changes.outputs.bench_matrix != '[]'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
-    permissions:
-      actions: write
-      contents: read
-      packages: write
-    outputs:
-      available: ${{ steps.image.outputs.available }}
-      image: ${{ steps.image.outputs.image }}
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Resolve immutable runtime image
-        id: image
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EVENT: ${{ github.event_name }}
-          GH_TOKEN: ${{ github.token }}
-          IMAGE: ghcr.io/${{ github.repository_owner }}/peryx-codspeed
-        run: |
-          set -euo pipefail
-          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          definition=$(sha256sum .github/codspeed/Dockerfile | cut -d ' ' -f 1)
-          tag="$IMAGE:definition-$definition"
-          digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-          if [[ "$digest" == sha256:* ]]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-            echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [[ "$EVENT" == pull_request ]] && git cat-file -e "$BASE_SHA:.github/codspeed/Dockerfile"; then
-            base_definition=$(git show "$BASE_SHA:.github/codspeed/Dockerfile" | sha256sum | cut -d ' ' -f 1)
-            if [[ "$definition" == "$base_definition" ]]; then
-              echo "The runtime image for this reviewed definition is unavailable."
-              exit 1
-            fi
-          fi
-
-          build=(
-            docker buildx build
-            --file .github/codspeed/Dockerfile
-            --platform linux/arm64
-            --tag "$tag"
-            --label "org.opencontainers.image.revision=$GITHUB_SHA"
-          )
-          if [[ "$EVENT" == pull_request ]]; then
-            "${build[@]}" --load .
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          "${build[@]}" --provenance=mode=max --sbom=true --push .
-          for attempt in {1..5}; do
-            digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-            [[ "$digest" == sha256:* ]] && break
-            sleep $((attempt * 2))
-          done
-          [[ "$digest" == sha256:* ]]
-          echo "available=true" >> "$GITHUB_OUTPUT"
-          echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
-      - name: Cancel remaining jobs on failure
-        if: failure() && !cancelled()
-        uses: ./.github/actions/cancel-on-failure
-
   operations:
     name: ${{ matrix.ecosystem }} operation benchmarks
-    needs: [changes, baseline, codspeed-image]
+    needs: [changes, baseline]
     if: >-
       always() &&
       (needs.baseline.result == 'success' || needs.baseline.result == 'skipped') &&
-      needs.codspeed-image.result == 'success' &&
-      needs.codspeed-image.outputs.available == 'true' &&
       needs.changes.outputs.bench_matrix != '[]'
     concurrency:
       # GitHub left ARM jobs running after workflow-level cancellation in #280.
@@ -258,12 +184,10 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.bench_matrix) }}
     runs-on: ubuntu-24.04-arm
     container:
-      image: ${{ needs.codspeed-image.outputs.image }} # zizmor: ignore[unpinned-images] output is digest-pinned
+      image: >-
+        buildpack-deps:bookworm@sha256:5bfacbc6611775f980cf283fbc86b999517878d39723510687135a0d6366bbee
       # CodSpeed's Valgrind runner uses setarch; Docker's default seccomp profile blocks personality.
       options: --security-opt seccomp=unconfined
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ github.token }}
     defaults:
       run:
         shell: bash
@@ -272,14 +196,11 @@ jobs:
       actions: read
       contents: read
       id-token: write
-      packages: read
     env:
-      # GitHub hands out heterogeneous ARM CPUs for ubuntu-24.04-arm. glibc then picks CPU-specific
-      # memcpy/memset/malloc paths per runner, so cachegrind (simulation mode) measures the same
-      # benchmark differently and reports phantom regressions on unrelated benchmarks. Forcing the
-      # generic aarch64 code path and a single malloc arena makes the measurement CPU-independent.
-      # See CodSpeed's write-up on runner CPU variance (codspeed.io/blog/why-glibc-faster-github-actions).
-      GLIBC_TUNABLES: glibc.cpu.name=generic:glibc.malloc.arena_max=1
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
       # cargo codspeed builds with the release profile, whose project-wide fat LTO does a serial,
       # memory-heavy whole-program link. Cargo's standard optimized benchmark profile disables LTO;
       # use that here so changed sources remain quick to link. Production and dist builds keep LTO.
@@ -291,13 +212,21 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: cargo-codspeed@5.0.1
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: "v0.16.0"
       - name: Compute benchmark source key
         id: source
         run: |
           git config --global --add safe.directory "$(pwd)"
           git ls-files -s -- \
             .cargo \
-            .github/codspeed \
             .github/workflows/codspeed.yml \
             ci/run-codspeed.sh \
             crates \
@@ -319,14 +248,15 @@ jobs:
             /usr/local/cargo/registry/cache
             /usr/local/cargo/registry/index
             target
-          key: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
-          restore-keys: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-
+          key: codspeed-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
+          restore-keys: codspeed-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-
       # Cargo uses mtimes for freshness. Age files only when their blobs match the cached manifest, so
       # a pull request rebuilds changed sources while reusing every unaffected main-branch artifact.
       - name: Preserve cached benchmark build
         if: steps.benchmark-cache.outputs.cache-matched-key != ''
         env:
-          CURRENT_KEY: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
+          CURRENT_KEY: >-
+            codspeed-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
           RESTORED_KEY: ${{ steps.benchmark-cache.outputs.cache-matched-key }}
         run: |
           if [[ -f target/codspeed-sources ]]; then
@@ -339,10 +269,24 @@ jobs:
             git ls-files -z -- .cargo crates Cargo.lock Cargo.toml rust-toolchain.toml \
               | xargs -0 touch --date=@0 --
           fi
-      - run: ci/run-codspeed.sh ${{ matrix.package }} ${{ matrix.cargo_jobs }}
+      - name: Build benchmark artifacts through sccache
+        run: |
+          [[ $(sccache --version) == "sccache 0.16.0" ]]
+          [[ "$RUSTC_WRAPPER" == sccache ]]
+          ci/run-codspeed.sh ${{ matrix.package }} ${{ matrix.cargo_jobs }}
+          sccache --show-stats
         env:
-          GH_MATRIX: ${{ toJSON(matrix) }}
-          GH_STRATEGY: ${{ toJSON(strategy) }}
+          CODSPEED_BUILD_ONLY: "true"
+      - name: Run benchmark artifacts
+        uses: CodSpeedHQ/action@f22792bfac16f3e14eb9fbea76f4a48e9cc22b93 # v4.19.1
+        with:
+          mode: simulation
+          # Debian 12's libc-bin cannot run with the CPU tunable during setup. The benchmark process
+          # still needs generic dispatch and one malloc arena to remove ARM runner variance.
+          run: >-
+            env GLIBC_TUNABLES='glibc.cpu.name=generic:glibc.malloc.arena_max=1'
+            cargo codspeed run -p ${{ matrix.package }} ${{ matrix.bench_args }}
+          runner-version: 4.18.4
       - name: Record benchmark sources
         if: github.ref == 'refs/heads/main' && steps.benchmark-cache.outputs.cache-hit != 'true'
         run: git ls-files -s -z -- .cargo crates Cargo.lock Cargo.toml rust-toolchain.toml > target/codspeed-sources
@@ -355,7 +299,7 @@ jobs:
             /usr/local/cargo/registry/cache
             /usr/local/cargo/registry/index
             target
-          key: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
+          key: codspeed-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
 
   analysis:
     name: CodSpeed analysis
@@ -409,7 +353,7 @@ jobs:
   # fails if any failed or was cancelled.
   codspeed-gate:
     if: always()
-    needs: [changes, baseline, codspeed-image, operations, analysis]
+    needs: [changes, baseline, operations, analysis]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify no required job failed

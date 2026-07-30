@@ -58,19 +58,20 @@ simulation counts the work performed by the benchmark on a simulated CPU. It run
 system calls, and is therefore suited to the in-process parser, renderer, and router benchmarks rather than the
 end-to-end network workloads above.
 
-The local runner uses the immutable CI image when its Dockerfile definition has been published. The image pins Ubuntu,
-Rust, cargo-codspeed, the CodSpeed CLI, and CodSpeed's Valgrind fork; the runner also uses the CI workspace path, thin
-LTO, generic glibc CPU routines, and one malloc arena. On an ARM64 host with Docker:
+CI runs in a digest-pinned Debian 12 image. Pinned actions install Rust 1.96 and cargo-codspeed 5.0.1; CodSpeed 4.18.4
+provides the simulation runner. sccache 0.16 wraps each benchmark build. CI also pins the workspace and glibc CPU paths,
+then caps glibc at one malloc arena. On a supported Linux host, install the same releases for a local smoke run:
 
 ```shell
-ci/run-codspeed-local.sh login
-ci/run-codspeed-local.sh peryx-ecosystem-pypi
-ci/run-codspeed-local.sh peryx-ecosystem-oci
+cargo install cargo-codspeed --version 5.0.1 --locked
+curl -fsSL https://codspeed.io/v4.18.4/install.sh | sh
+codspeed auth login
+ci/run-codspeed.sh peryx-ecosystem-pypi
+ci/run-codspeed.sh peryx-ecosystem-oci
 ```
 
-`login` is needed once and stores the CodSpeed credential in a Docker volume. Build artifacts use a separate volume
-keyed by the image definition. If the current Dockerfile has not been published, the runner builds it locally; compare
-those results only with another run using the same definition.
+Treat local results as smoke checks for large regressions. The pull-request report compares against the exact base
+commit under CI's runtime.
 
 Pull requests publish affected benchmarks after the exact base commit produces a compatible baseline. Pushes to `main`
 publish every target and refresh the shared baseline.

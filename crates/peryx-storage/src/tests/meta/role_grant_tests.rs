@@ -5,6 +5,7 @@ use super::store;
 use crate::meta::{MetaError, MetaStore, RoleGrantStoreError};
 
 const RAW_USER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user");
+const RAW_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant");
 
 fn repository(name: &str) -> GrantScope {
     GrantScope::Repository { name: name.to_owned() }
@@ -141,4 +142,17 @@ fn test_grant_operations_surface_an_incompatible_table() {
         store.revoke_role(&alice, Role::Operator, &GrantScope::Server),
         Err(MetaError::Table(_))
     ));
+}
+
+#[test]
+fn test_grant_read_surfaces_an_incompatible_managed_table() {
+    let alice = UserId::random();
+    let (_dir, store) = raw_store(|txn| {
+        persist_user(txn, &alice);
+        txn.open_table(RAW_GRANT).unwrap();
+        txn.open_table(TableDefinition::<&str, u64>::new("external_role_grant"))
+            .unwrap();
+    });
+
+    assert!(matches!(store.user_role_grants(&alice), Err(MetaError::Table(_))));
 }

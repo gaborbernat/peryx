@@ -211,6 +211,30 @@ Server users do not yet authorize package requests: mapping an authenticated use
 Existing `upload_token` and `[[index.access_token]]` credentials keep their current subjects and behavior when a server
 user is renamed or disabled.
 
+## External identity links
+
+An external identity is the exact pair of a configured provider ID and that provider's opaque subject. Peryx preserves
+the subject's spelling and case instead of substituting a mutable email address or display name. OpenID Connect defines
+the [`iss` and `sub` pair](https://openid.net/specs/openid-connect-core-1_0.html#ClaimStability) as the stable
+identifier; SCIM scopes each external identifier to its provisioning domain. Peryx creates distinct local users for
+equal subjects from two providers.
+
+The first successful provider login creates the local user and provider-subject link in the same metadata transaction.
+Later logins resolve the same stable user ID. A colliding display name does not link accounts; peryx gives the new user
+a distinct local display name. Linking by a matching email or display name would let one provider impersonate an account
+created through another trust boundary.
+
+Configured external groups map to the fixed server roles above. Peryx replaces the grants owned by that identity link
+after each successful provider login, so removing a group takes effect on the next authorization decision. Peryx
+preserves manual grants and grants owned by another link. The linker receives verified identities, so a failed provider
+check cannot modify a link or its grants.
+
+Diagnostics and security events omit provider subjects and group names. Link events contain the provider ID, local user
+ID, result, and managed-grant count. Peryx persists the subject because the provider uses it as the stable lookup key.
+
+The linking model is transport-neutral. OIDC and LDAP provide login transports; browser sessions and SCIM provisioning
+remain separate integrations. The PyPI trusted-publisher path handles CI publishing and does not create server users.
+
 ## Local password authentication
 
 A server user may hold a local password. Enrollment derives a memory-hard verifier and discards the password, so the

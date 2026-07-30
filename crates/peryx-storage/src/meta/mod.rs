@@ -12,6 +12,7 @@ use redb::{Database, TableDefinition};
 mod analytics;
 mod bootstrap;
 mod error;
+mod external_identity;
 mod index;
 mod job;
 mod journal;
@@ -26,6 +27,7 @@ mod writer;
 pub use analytics::AnalyticsHandle;
 pub use bootstrap::AdministratorBootstrapError;
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
+pub use external_identity::ExternalIdentityStoreError;
 pub use index::DriverTxn;
 pub use job::{JobKind, JobOutcome, JobRunRecord, JobState, NewJobRun};
 pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSnapshot};
@@ -75,6 +77,8 @@ const USER_NAME: TableDefinition<&str, &str> = TableDefinition::new("server_user
 const USER_EVENT: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_event");
 const USER_VERIFIER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_verifier");
 const ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant");
+const EXTERNAL_IDENTITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("external_identity");
+const EXTERNAL_ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("external_role_grant");
 const DIGEST_REVOCATION: TableDefinition<&str, &[u8]> = TableDefinition::new("digest_revocation");
 const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new("digest_revocation_state");
 const SERIAL_KEY: &str = "serial";
@@ -154,6 +158,8 @@ impl MetaStore {
             txn.open_table(USER_EVENT)?;
             txn.open_table(USER_VERIFIER)?;
             txn.open_table(ROLE_GRANT)?;
+            txn.open_table(EXTERNAL_IDENTITY)?;
+            txn.open_table(EXTERNAL_ROLE_GRANT)?;
             txn.open_table(DIGEST_REVOCATION)?;
             txn.open_table(DIGEST_REVOCATION_STATE)?;
         }

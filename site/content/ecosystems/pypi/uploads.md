@@ -13,6 +13,22 @@ version, and take whatever spelling names the right thing. peryx does the same a
 it once was stricter than the index it fronts. This page explains what it accepts and why, and where accepting a broader
 input still stops short of accepting the wrong one.
 
+## Project size under concurrent uploads
+
+`max_project_size_bytes` applies to the sum of counted distribution files for one normalized project. peryx reserves an
+upload's bytes before durable blob storage, then commits those bytes in the transaction that publishes the filename.
+Concurrent uploads therefore compete for the same remaining capacity; only complete files that fit become visible.
+
+This differs from reading every file size and adding the incoming body before publication. That check grows with the
+project's release history, and two requests can both observe the same free space. The reservation counter stays constant
+cost as releases accumulate and includes capacity held by uploads that have not published yet.
+
+A failed or cancelled request releases its reservation. A same-content re-upload of an existing filename stays an
+idempotent success and does not consume more project bytes. `quota_audit = true` accepts a would-reject upload while
+recording the violation, which lets an operator observe the limit before enforcing it. See the
+[quota accounting model](@/core/quotas.md#pypi-upload-enforcement) and the
+[exact response contract](@/ecosystems/pypi/reference/uploads.md#project-size-quota).
+
 ## Un-normalized wheels
 
 peryx accepts a wheel whose internal `.dist-info` directory is not spelled the modern, normalized way, as long as it

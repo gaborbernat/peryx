@@ -2,7 +2,7 @@ use std::sync::{Arc, Barrier};
 
 use crate::meta::{
     AccountingClass, MetaStore, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage,
-    QuotaReservationState, QuotaUsage, QuotaValue,
+    QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
 };
 
 use super::store;
@@ -156,6 +156,7 @@ fn test_quota_reserve_commit_release_updates_counters() {
                 },
             },
             QuotaProjectUsage {
+                file_bytes: QuotaValue::default(),
                 versions: QuotaValue {
                     committed: 0,
                     reserved: 1,
@@ -186,6 +187,7 @@ fn test_quota_reserve_commit_release_updates_counters() {
                 },
             },
             QuotaProjectUsage {
+                file_bytes: QuotaValue::default(),
                 versions: QuotaValue {
                     committed: 1,
                     reserved: 0,
@@ -206,7 +208,7 @@ fn test_quota_reserve_commit_release_updates_counters() {
 fn test_quota_duplicate_commit_and_release_have_no_effect() {
     let (_dir, meta) = store();
     let id = meta
-        .reserve_quota(request("package", "1.0", "sha256:first", 7), QuotaLimits::default())
+        .reserve_project_quota(request("package", "1.0", "sha256:first", 7), 7, false)
         .unwrap()
         .id;
 
@@ -221,6 +223,20 @@ fn test_quota_duplicate_commit_and_release_have_no_effect() {
         ),
         (true, false, true, false, None, QuotaUsage::default())
     );
+}
+
+#[test]
+fn test_quota_reservation_reads_records_from_before_project_byte_accounting() {
+    let (_dir, meta) = store();
+    let reservation = meta
+        .reserve_quota(request("package", "1.0", "sha256:first", 7), QuotaLimits::default())
+        .unwrap();
+    let mut encoded = serde_json::to_value(reservation).unwrap();
+    encoded.as_object_mut().unwrap().remove("project_file_bytes");
+
+    let decoded: QuotaReservationRecord = serde_json::from_value(encoded).unwrap();
+
+    assert!(!decoded.project_file_bytes);
 }
 
 #[test]
@@ -267,6 +283,87 @@ fn test_quota_commit_is_atomic_with_driver_metadata() {
                 reserved: 0,
             },
         )
+    );
+}
+
+#[test]
+fn test_quota_conditional_commit_releases_a_skipped_write() {
+    let (_dir, meta) = store();
+    let id = meta
+        .reserve_project_quota(request("package", "1.0", "sha256:first", 7), 7, false)
+        .unwrap()
+        .id;
+
+    let stored = meta
+        .commit_driver_txn_with_quota_if(id, |stored| *stored, |_txn| Ok::<_, QuotaError>((false, Vec::new())))
+        .unwrap();
+
+    assert!(!stored);
+    assert_eq!(meta.quota_usage("private").unwrap(), QuotaUsage::default());
+    assert_eq!(meta.quota_reservation(id).unwrap(), None);
+}
+
+#[test]
+fn test_quota_conditional_commit_publishes_an_accepted_write() {
+    let (_dir, meta) = store();
+    let id = meta
+        .reserve_project_quota(request("package", "1.0", "sha256:first", 7), 7, false)
+        .unwrap()
+        .id;
+
+    let stored = meta
+        .commit_driver_txn_with_quota_if(
+            id,
+            |stored| *stored,
+            |txn| {
+                txn.put_local("published/package/1.0", b"sha256:first")?;
+                Ok::<_, QuotaError>((true, Vec::new()))
+            },
+        )
+        .unwrap();
+
+    assert!(stored);
+    assert_eq!(
+        (
+            meta.get_driver_value("published/package/1.0").unwrap(),
+            meta.quota_project_usage("private", "package").unwrap().file_bytes,
+        ),
+        (
+            Some(b"sha256:first".to_vec()),
+            QuotaValue {
+                committed: 7,
+                reserved: 0,
+            },
+        )
+    );
+}
+
+#[test]
+fn test_quota_conditional_skip_rejects_a_committed_reservation() {
+    let (_dir, meta) = store();
+    let id = meta
+        .reserve_project_quota(request("package", "1.0", "sha256:first", 7), 7, false)
+        .unwrap()
+        .id;
+    meta.commit_quota_reservation(id).unwrap();
+
+    let result = meta.commit_driver_txn_with_quota_if(
+        id,
+        |stored| *stored,
+        |txn| {
+            txn.put_local("published/package/1.0", b"sha256:first")?;
+            Ok::<_, QuotaError>((false, Vec::new()))
+        },
+    );
+
+    assert!(matches!(result, Err(QuotaError::ReservationUnavailable { .. })));
+    assert!(meta.get_driver_value("published/package/1.0").unwrap().is_none());
+    assert_eq!(
+        meta.quota_project_usage("private", "package").unwrap().file_bytes,
+        QuotaValue {
+            committed: 7,
+            reserved: 0,
+        }
     );
 }
 
@@ -550,6 +647,108 @@ fn test_quota_enforcement_rejects_without_writes() {
             meta.quota_usage("private").unwrap(),
         ),
         (true, QuotaUsage::default())
+    );
+}
+
+#[test]
+fn test_quota_project_bytes_reject_only_the_exhausted_project() {
+    let (_dir, meta) = store();
+    let first = meta
+        .reserve_project_quota(request("package", "1.0", "sha256:first", 7), 10, false)
+        .unwrap();
+    meta.commit_quota_reservation(first.id).unwrap();
+    assert!(matches!(
+        meta.reserve_project_quota(request("package", "2.0", "sha256:second", 4), 10, false),
+        Err(QuotaError::ProjectExceeded { total: 11 })
+    ));
+    let other = meta
+        .reserve_project_quota(request("other", "1.0", "sha256:other", 4), 10, false)
+        .unwrap();
+
+    assert_eq!(
+        (
+            meta.quota_project_usage("private", "package").unwrap().file_bytes,
+            meta.quota_project_usage("private", "other").unwrap().file_bytes,
+            other.state,
+        ),
+        (
+            QuotaValue {
+                committed: 7,
+                reserved: 0,
+            },
+            QuotaValue {
+                committed: 0,
+                reserved: 4,
+            },
+            QuotaReservationState::Reserved,
+        )
+    );
+}
+
+#[test]
+fn test_quota_project_bytes_reject_after_the_limit_is_lowered() {
+    let (_dir, meta) = store();
+    let reservation = meta
+        .reserve_project_quota(request("package", "1.0", "sha256:first", 7), 8, false)
+        .unwrap();
+    meta.commit_quota_reservation(reservation.id).unwrap();
+
+    let result = meta.reserve_project_quota(request("package", "2.0", "sha256:second", 1), 6, false);
+
+    assert!(matches!(result, Err(QuotaError::ProjectExceeded { total: 8 })));
+    assert_eq!(
+        meta.quota_project_usage("private", "package").unwrap().file_bytes,
+        QuotaValue {
+            committed: 7,
+            reserved: 0,
+        }
+    );
+}
+
+#[test]
+fn test_quota_project_bytes_require_a_project_identity() {
+    let (_dir, meta) = store();
+    let request = NewQuotaReservation {
+        project: None,
+        version: None,
+        ..request("package", "1.0", "sha256:first", 7)
+    };
+
+    assert_eq!(
+        meta.reserve_project_quota(request, 10, false).unwrap_err().to_string(),
+        "project must not be empty"
+    );
+}
+
+#[test]
+fn test_quota_parallel_project_reservations_share_available_bytes() {
+    let (_dir, meta) = store();
+    let meta = Arc::new(meta);
+    let barrier = Arc::new(Barrier::new(3));
+    let threads = ["first", "second"].map(|digest| {
+        let meta = Arc::clone(&meta);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            meta.reserve_project_quota(request("package", digest, digest, 7), 10, false)
+        })
+    });
+    barrier.wait();
+    let results = threads.map(|thread| thread.join().unwrap());
+
+    assert_eq!(
+        (
+            results.iter().filter(|result| result.is_ok()).count(),
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(QuotaError::ProjectExceeded { .. })))
+                .count(),
+            meta.quota_project_usage("private", "package")
+                .unwrap()
+                .file_bytes
+                .reserved,
+        ),
+        (1, 1, 7)
     );
 }
 

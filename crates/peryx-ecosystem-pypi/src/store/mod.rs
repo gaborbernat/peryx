@@ -115,7 +115,7 @@ fn project_file_key(index: &str, normalized: &str, generation: u64, filename: &s
     format!("{}{filename}", project_generation_prefix(index, normalized, generation))
 }
 
-fn upload_key(index: &str, normalized: &str, filename: &str) -> String {
+pub(crate) fn upload_key(index: &str, normalized: &str, filename: &str) -> String {
     format!("{UPLOAD_PREFIX}{index}/{normalized}/{filename}")
 }
 

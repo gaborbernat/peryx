@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use peryx_storage::meta::{MetaError, MetaScanError, MetaStore};
+use peryx_storage::meta::{DriverTxn, MetaError, MetaScanError, MetaStore, QuotaError, QuotaReservationRecord};
 
 use super::journal::JournalEntry;
 use super::{
@@ -53,6 +53,8 @@ pub struct PublishedFile<'a> {
     pub metadata: Option<MetadataSibling<'a>>,
     /// The file's PEP 740 provenance sibling, when the upload carried valid attestations.
     pub provenance: Option<ProvenanceSibling<'a>>,
+    /// The capacity allocation to finalize with this file, when its upload is metered.
+    pub quota: Option<&'a QuotaReservationRecord>,
 }
 
 /// Everything one release promotion writes to the store.
@@ -109,8 +111,49 @@ pub fn publish_file_if<E: From<MetaError>>(
     file: &PublishedFile,
     guard: impl FnOnce(Option<&[u8]>) -> Result<Guard, E>,
 ) -> Result<bool, E> {
+    let Some(reservation) = file.quota else {
+        return meta.commit_driver_txn(|txn| publish_file_in_txn(txn, file, guard));
+    };
+    meta.commit_driver_txn_with_quota_if(
+        reservation.id,
+        |stored| *stored,
+        |txn| publish_file_in_txn(txn, file, guard).map_err(PublishError::Body),
+    )
+    .map_err(map_publish_error)
+}
+
+fn map_publish_error<E: From<MetaError>>(err: PublishError<E>) -> E {
+    match err {
+        PublishError::Body(err) => err,
+        PublishError::Quota(QuotaError::Store(err)) => err.into(),
+        PublishError::Quota(err) => MetaError::DriverPrecondition(err.to_string()).into(),
+    }
+}
+
+enum PublishError<E> {
+    Body(E),
+    Quota(QuotaError),
+}
+
+impl<E> From<MetaError> for PublishError<E> {
+    fn from(err: MetaError) -> Self {
+        Self::Quota(err.into())
+    }
+}
+
+impl<E> From<QuotaError> for PublishError<E> {
+    fn from(err: QuotaError) -> Self {
+        Self::Quota(err)
+    }
+}
+
+fn publish_file_in_txn<E: From<MetaError>>(
+    txn: &mut DriverTxn,
+    file: &PublishedFile,
+    guard: impl FnOnce(Option<&[u8]>) -> Result<Guard, E>,
+) -> Result<(bool, Vec<Vec<u8>>), E> {
     let upload = upload_key(file.index, file.normalized, file.filename);
-    meta.commit_driver_txn(|txn| match guard(txn.get(&upload)?.as_deref())? {
+    match guard(txn.get(&upload)?.as_deref())? {
         Guard::Skip => Ok((false, Vec::new())),
         Guard::Commit => {
             txn.reference_blob(file.artifact_sha256, file.artifact_size);
@@ -135,7 +178,7 @@ pub fn publish_file_if<E: From<MetaError>>(
             );
             Ok((true, vec![journal]))
         }
-    })
+    }
 }
 
 /// Store an uploaded file's serialized record on a private index, keyed by
@@ -484,11 +527,14 @@ fn journal_version(filename: &str, record: &[u8]) -> Option<String> {
 mod tests {
     use std::collections::BTreeMap;
 
+    use peryx_storage::meta::{AccountingClass, NewQuotaReservation};
+
     use super::{
-        Guard, MetaError, MetaStore, MetadataSibling, PromotedRelease, ProvenanceSibling, PublishedFile,
-        UploadMutation, override_key, upload_key,
+        Guard, MetaError, MetaStore, MetadataSibling, PromotedRelease, ProvenanceSibling, PublishError, PublishedFile,
+        UploadMutation, map_publish_error, override_key, upload_key,
     };
     use crate::store::{PypiStore as _, read_journal_entries};
+    use crate::upload::UploadStoreError;
 
     fn store() -> (tempfile::TempDir, MetaStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -514,6 +560,7 @@ mod tests {
                 source: "hosted",
             }),
             provenance: None,
+            quota: None,
         }
     }
 
@@ -545,6 +592,132 @@ mod tests {
         assert_eq!(journal.version.as_deref(), Some("1.0"));
         assert_eq!(journal.filename.as_deref(), Some("flask-1.0.whl"));
         assert_eq!(journal.submitted_at_unix, 123);
+    }
+
+    #[test]
+    fn test_publish_file_if_commits_quota_with_a_new_record() {
+        let (_dir, meta) = store();
+        let reservation = reservation(&meta);
+
+        let wrote = meta
+            .publish_file_if(
+                &PublishedFile {
+                    quota: Some(&reservation),
+                    ..published()
+                },
+                |_existing| Ok::<_, MetaError>(Guard::Commit),
+            )
+            .unwrap();
+
+        assert!(wrote);
+        assert_eq!(
+            meta.quota_project_usage("hosted", "flask")
+                .unwrap()
+                .file_bytes
+                .committed,
+            8
+        );
+    }
+
+    #[test]
+    fn test_publish_file_if_releases_quota_for_a_duplicate() {
+        let (_dir, meta) = store();
+        meta.publish_file_if(&published(), |_existing| Ok::<_, MetaError>(Guard::Commit))
+            .unwrap();
+        let reservation = reservation(&meta);
+
+        let wrote = meta
+            .publish_file_if(
+                &PublishedFile {
+                    quota: Some(&reservation),
+                    ..published()
+                },
+                |_existing| Ok::<_, MetaError>(Guard::Skip),
+            )
+            .unwrap();
+
+        assert!(!wrote);
+        assert_eq!(meta.quota_reservation(reservation.id).unwrap(), None);
+        assert_eq!(
+            meta.quota_project_usage("hosted", "flask").unwrap().file_bytes,
+            peryx_storage::meta::QuotaValue::default()
+        );
+    }
+
+    #[test]
+    fn test_publish_file_if_leaves_quota_pending_after_a_guard_error() {
+        let (_dir, meta) = store();
+        let reservation = reservation(&meta);
+
+        let result = meta.publish_file_if(
+            &PublishedFile {
+                quota: Some(&reservation),
+                ..published()
+            },
+            |_existing| Err::<Guard, _>(MetaError::DriverPrecondition("conflict".to_owned())),
+        );
+
+        assert!(matches!(result, Err(MetaError::DriverPrecondition(reason)) if reason == "conflict"));
+        assert_eq!(
+            meta.quota_project_usage("hosted", "flask").unwrap().file_bytes.reserved,
+            8
+        );
+    }
+
+    #[test]
+    fn test_publish_file_if_rejects_a_used_quota_reservation() {
+        let (_dir, meta) = store();
+        let reservation = reservation(&meta);
+        meta.commit_quota_reservation(reservation.id).unwrap();
+
+        let result = meta.publish_file_if(
+            &PublishedFile {
+                quota: Some(&reservation),
+                ..published()
+            },
+            |_existing| Ok::<_, MetaError>(Guard::Commit),
+        );
+
+        assert!(matches!(result, Err(MetaError::DriverPrecondition(reason)) if reason.contains("already committed")));
+        assert!(
+            meta.get_driver_value(&upload_key("hosted", "flask", "flask-1.0.whl"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_publish_file_if_preserves_quota_store_errors() {
+        let error = map_publish_error::<UploadStoreError>(PublishError::from(MetaError::DriverPrecondition(
+            "store".to_owned(),
+        )));
+
+        assert!(matches!(error, UploadStoreError::Meta(MetaError::DriverPrecondition(reason)) if reason == "store"));
+    }
+
+    #[test]
+    fn test_publish_file_if_preserves_driver_store_errors() {
+        let error =
+            map_publish_error::<MetaError>(PublishError::from(MetaError::DriverPrecondition("store".to_owned())));
+
+        assert!(matches!(error, MetaError::DriverPrecondition(reason) if reason == "store"));
+    }
+
+    fn reservation(meta: &MetaStore) -> peryx_storage::meta::QuotaReservationRecord {
+        meta.reserve_project_quota(
+            NewQuotaReservation {
+                repository: "hosted",
+                project: Some("flask"),
+                version: Some("1.0"),
+                digest: "artifact-sha",
+                bytes: 8,
+                class: AccountingClass::Hosted,
+                created_at_unix: 123,
+            },
+            8,
+            false,
+        )
+        .unwrap()
     }
 
     #[test]

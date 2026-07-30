@@ -11,6 +11,30 @@ is rejected, and the error string a rejection returns. For why peryx works this 
 [what peryx accepts on upload](@/ecosystems/pypi/uploads.md); for the routes these apply to, see
 [HTTP endpoints](@/ecosystems/pypi/reference/endpoints.md).
 
+## Project size quota
+
+An index policy can set `max_project_size_bytes` for hosted PyPI uploads. The limit counts each distribution file's
+logical size under its normalized project. Files that existed before quota accounting was enabled are not backfilled;
+the counter starts at zero and grows through metered uploads.
+
+| Situation                                      | Status | Result                                                      |
+| ---------------------------------------------- | ------ | ----------------------------------------------------------- |
+| Projected counted bytes are within the limit   | `200`  | File and reservation commit together                        |
+| Projected counted bytes exceed the limit       | `403`  | Rule `max-project-size`; no file metadata publishes         |
+| The policy enables `quota_audit`               | `200`  | File publishes and the durable reservation records the hit  |
+| Validation, storage, metadata, or status fails | varies | No file publishes and reserved project bytes return to zero |
+| The request is cancelled or disconnected       | varies | Pending project bytes are released                          |
+| The filename already holds the same content    | `200`  | No new allocation                                           |
+
+The denial reason remains `project size <total> would exceed limit <limit>`. It is returned as the existing JSON policy
+denial with action `upload`, field `project_size`, and rule `max-project-size`. Lowering a limit below current counted
+use rejects later counted uploads; project pages and file downloads remain available.
+
+A virtual upload route and its hosted target can both configure the limit. The lower value applies. When both set a
+limit, audit behavior requires `quota_audit = true` on both; either enforcing layer makes the combined decision enforce.
+Quota decisions increment `peryx_pypi_quota_admitted_total` or `peryx_pypi_quota_rejected_total` under the hosted role.
+The metric series contain no project names.
+
 ## Wheel .dist-info matching
 
 Every wheel carries one `*.dist-info` directory holding its `METADATA`, `WHEEL`, and `RECORD`.

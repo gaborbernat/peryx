@@ -10,8 +10,10 @@ use peryx_storage::meta::MetaStore;
 use serde_json::{Value, json};
 
 use super::support::{hex, staged_form, wheel_metadata};
+use crate::PackageName;
+use crate::quota::{Admission, PendingQuota, admit_upload, quota_reservation};
 use crate::store::PypiStore as _;
-use crate::upload::{StagedUpload, prepare, store_prepared_blocking};
+use crate::upload::{StagedUpload, UploadStoreError, prepare, store_prepared, store_prepared_blocking};
 
 const FILENAME: &str = "Flask-1.0-py3-none-any.whl";
 
@@ -39,6 +41,24 @@ fn blake2_256(bytes: &[u8]) -> String {
     let mut digest = [0; 32];
     blake2.finalize_variable(&mut digest).unwrap();
     hex(&digest)
+}
+
+fn pending_quota(meta: &MetaStore, wheel: &[u8]) -> PendingQuota {
+    let project = PackageName::new("Flask");
+    let digest = Digest::of(wheel);
+    let request = quota_reservation(
+        "hosted",
+        &project,
+        Some("1.0"),
+        digest.as_str(),
+        wheel.len() as u64,
+        peryx_storage::meta::AccountingClass::Hosted,
+        1000,
+    );
+    let Admission::Reserved(pending) = admit_upload(meta, request, wheel.len() as u64, false).unwrap() else {
+        panic!("the upload must reserve its exact capacity");
+    };
+    pending
 }
 
 #[test]
@@ -83,5 +103,51 @@ fn test_store_prepared_blocking_stages_and_records_the_provenance_bundle() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn test_store_prepared_quota_releases_after_blob_storage_fails() {
+    let wheel = wheel_metadata("Flask", "1.0");
+    let (_staged_dir, staged) = super::support::staged_upload(&wheel);
+    let prepared = prepare(staged_form(&wheel), staged, "root/hosted", 1000).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let invalid_root = dir.path().join("not-a-directory");
+    std::fs::write(&invalid_root, b"file").unwrap();
+    let blobs = BlobStorage::filesystem(invalid_root);
+    let pending = pending_quota(&meta, &wheel);
+
+    let result = store_prepared(&meta, &blobs, "hosted", prepared, Some(pending)).await;
+
+    assert!(matches!(result, Err(UploadStoreError::Blob(_))));
+    assert_eq!(
+        meta.quota_project_usage("hosted", "flask").unwrap().file_bytes,
+        peryx_storage::meta::QuotaValue::default()
+    );
+    assert!(meta.list_upload_entries("hosted", "flask").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_store_prepared_quota_releases_when_the_existing_record_is_invalid() {
+    let wheel = wheel_metadata("Flask", "1.0");
+    let (_staged_dir, staged) = super::support::staged_upload(&wheel);
+    let prepared = prepare(staged_form(&wheel), staged, "root/hosted", 1000).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+    meta.put_upload("hosted", "flask", FILENAME, b"invalid-json").unwrap();
+    let pending = pending_quota(&meta, &wheel);
+
+    let result = store_prepared(&meta, &blobs, "hosted", prepared, Some(pending)).await;
+
+    assert!(matches!(result, Err(UploadStoreError::Parse(_))));
+    assert_eq!(
+        meta.quota_project_usage("hosted", "flask").unwrap().file_bytes,
+        peryx_storage::meta::QuotaValue::default()
+    );
+    assert_eq!(
+        meta.list_upload_entries("hosted", "flask").unwrap(),
+        vec![(FILENAME.to_owned(), b"invalid-json".to_vec())]
     );
 }

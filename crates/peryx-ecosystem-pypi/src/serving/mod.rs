@@ -212,7 +212,12 @@ const PROVENANCE_FAMILY: MetricFamily = MetricFamily {
     roles: &[Role::Cached, Role::Hosted, Role::Virtual],
 };
 
-const PYPI_FAMILIES: &[MetricFamily] = &[METADATA_FAMILY, PROVENANCE_FAMILY];
+const PYPI_FAMILIES: &[MetricFamily] = &[
+    METADATA_FAMILY,
+    PROVENANCE_FAMILY,
+    crate::quota::QUOTA_FAMILIES[0],
+    crate::quota::QUOTA_FAMILIES[1],
+];
 
 #[async_trait]
 impl EcosystemDriver for PypiServing {

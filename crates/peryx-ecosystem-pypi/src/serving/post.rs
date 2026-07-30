@@ -20,8 +20,9 @@ use peryx_policy::{PolicyAction, PolicyDenial};
 
 use crate::cache::{self, CacheError};
 use crate::policy::{PypiPolicy, REQUIRED_ATTESTATION_AUDIT_RULE};
+use crate::quota::{self, Admission, PendingQuota};
 use crate::upload::{self, UploadError};
-use crate::{ProjectStatus, normalize_name};
+use crate::{PackageName, ProjectStatus, normalize_name};
 
 use super::response::{CacheContext, cache_error_response, policy_denial_response};
 use super::upload_form::{collect_form, upload_error_message, upload_error_response};
@@ -208,10 +209,13 @@ async fn accept_upload(context: UploadContext<'_>, multipart: Multipart) -> Resp
     {
         return block;
     }
-    if let Some(block) = project_quota_block(state, index, hosted, &prepared, &project, &filename) {
-        emit_upload_status_event(&audit, &block);
-        return block.response;
-    }
+    let quota = match project_quota_reservation(state, index, hosted, &prepared, &project, &filename) {
+        Ok(quota) => quota,
+        Err(block) => {
+            emit_upload_status_event(&audit, &block);
+            return block.response;
+        }
+    };
     if let Some(block) = upload_status_response(
         cache::project_status(state, index, &project).await,
         &index.route,
@@ -220,34 +224,72 @@ async fn accept_upload(context: UploadContext<'_>, multipart: Multipart) -> Resp
         emit_upload_status_event(&audit, &block);
         return block.response;
     }
-    upload_store_response(state, &audit, cache::store_upload(state, &hosted.name, prepared).await)
+    upload_store_response(
+        state,
+        &audit,
+        cache::store_upload(state, &hosted.name, prepared, quota).await,
+    )
 }
 
-fn project_quota_block(
+fn project_quota_reservation(
     state: &Arc<ServingState>,
     index: &Index,
     hosted: &Index,
     prepared: &upload::PreparedUpload,
     project: &str,
     filename: &str,
-) -> Option<UploadStatusBlock> {
-    let limit = [index.policy.max_project_size(), hosted.policy.max_project_size()]
-        .into_iter()
-        .flatten()
-        .min()?;
+) -> Result<Option<PendingQuota>, UploadStatusBlock> {
+    let Some((limit, audit)) = effective_project_quota(index, hosted) else {
+        return Ok(None);
+    };
+    let exists = cache::upload_exists(state, &hosted.name, project, filename);
+    if upload_quota_result(exists, &index.route, project)? {
+        return Ok(None);
+    }
     let incoming = prepared
         .record
         .file
         .size
         .expect("a prepared upload carries its byte size");
-    upload_quota_response(
-        cache::project_upload_bytes(state, &hosted.name, project, filename),
-        limit,
-        project,
-        filename,
+    let package = PackageName::new(project);
+    let request = quota::quota_reservation(
+        &hosted.name,
+        &package,
+        Some(prepared.record.version.as_str()),
+        prepared.digest.as_str(),
         incoming,
-        &index.route,
-    )
+        peryx_storage::meta::AccountingClass::Hosted,
+        (state.clock)(),
+    );
+    let admission = quota::admit_upload(&state.meta, request, limit, audit);
+    let admission = upload_quota_result(admission, &index.route, project)?;
+    match admission {
+        Admission::Reserved(reservation) => {
+            quota::record_decision(state, hosted, project, false);
+            Ok(Some(reservation))
+        }
+        Admission::Rejected { total } => {
+            quota::record_decision(state, hosted, project, true);
+            Err(upload_quota_denial(limit, project, filename, total))
+        }
+    }
+}
+
+fn effective_project_quota(index: &Index, hosted: &Index) -> Option<(u64, bool)> {
+    match (
+        index.policy.max_project_size(),
+        (hosted.name != index.name)
+            .then(|| hosted.policy.max_project_size())
+            .flatten(),
+    ) {
+        (Some(index_limit), Some(hosted_limit)) => Some((
+            index_limit.min(hosted_limit),
+            index.policy.quota_audit() && hosted.policy.quota_audit(),
+        )),
+        (Some(limit), None) => Some((limit, index.policy.quota_audit())),
+        (None, Some(limit)) => Some((limit, hosted.policy.quota_audit())),
+        (None, None) => None,
+    }
 }
 
 fn upload_policy_response(
@@ -405,48 +447,39 @@ pub(super) struct UploadStatusBlock {
     pub(super) reason: String,
 }
 
-/// Reject a hosted upload that would push a project's stored bytes past its `max_project_size` quota.
-/// `existing` is the project's current file total on the target store, read outside so a store error
-/// maps to the same failure response the other pre-commit checks return; the incoming file's own
-/// bytes are added to it. `None` means the upload fits and may proceed.
-fn upload_quota_response(
-    existing: Result<u64, CacheError>,
-    limit: u64,
-    project: &str,
-    filename: &str,
-    incoming: u64,
-    route: &str,
-) -> Option<UploadStatusBlock> {
-    match existing {
-        Ok(existing) => {
-            let total = existing.saturating_add(incoming);
-            (total > limit).then(|| {
-                let reason = format!("project size {total} would exceed limit {limit}");
-                let denial = PolicyDenial::new(
-                    PolicyAction::Upload,
-                    project,
-                    Some(filename),
-                    None,
-                    "max-project-size",
-                    "project_size",
-                    reason.clone(),
-                );
-                UploadStatusBlock {
-                    response: policy_denial_response(&denial),
-                    result: "denied",
-                    reason,
-                }
-            })
-        }
-        Err(err) => {
-            let reason = err.user_message();
-            Some(UploadStatusBlock {
-                response: cache_error_response(&err, CacheContext::upload(route, project)),
-                result: "failure",
-                reason,
-            })
-        }
+/// Preserve the existing policy-denial contract for a project-size reservation rejection.
+fn upload_quota_denial(limit: u64, project: &str, filename: &str, total: u64) -> UploadStatusBlock {
+    let reason = format!("project size {total} would exceed limit {limit}");
+    let denial = PolicyDenial::new(
+        PolicyAction::Upload,
+        project,
+        Some(filename),
+        None,
+        "max-project-size",
+        "project_size",
+        reason.clone(),
+    );
+    UploadStatusBlock {
+        response: policy_denial_response(&denial),
+        result: "denied",
+        reason,
     }
+}
+
+fn upload_quota_failure(err: &CacheError, route: &str, project: &str) -> UploadStatusBlock {
+    UploadStatusBlock {
+        response: cache_error_response(err, CacheContext::upload(route, project)),
+        result: "failure",
+        reason: err.user_message(),
+    }
+}
+
+fn upload_quota_result<T, E: Into<CacheError>>(
+    result: Result<T, E>,
+    route: &str,
+    project: &str,
+) -> Result<T, UploadStatusBlock> {
+    result.map_err(|err| upload_quota_failure(&err.into(), route, project))
 }
 
 pub(super) fn upload_status_response(
@@ -514,26 +547,27 @@ mod tests {
     }
 
     #[test]
-    fn test_upload_quota_response_maps_limit_and_store_errors() {
-        assert!(upload_quota_response(Ok(4), 10, "flask", "flask-1.0.whl", 5, "root/pypi").is_none());
+    fn test_upload_quota_failure_preserves_the_storage_fault() {
+        let failure =
+            upload_quota_result::<(), _>(Err(CacheError::Meta(meta_error())), "root/pypi", "flask").unwrap_err();
 
-        let over = upload_quota_response(Ok(6), 10, "flask", "flask-1.0.whl", 5, "root/pypi").unwrap();
-        assert_eq!(over.response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(over.result, "denied");
-        assert_eq!(over.reason, "project size 11 would exceed limit 10");
-
-        let failure = upload_quota_response(
-            Err(CacheError::Meta(meta_error())),
-            10,
-            "flask",
-            "flask-1.0.whl",
-            5,
-            "root/pypi",
-        )
-        .unwrap();
         assert_eq!(failure.response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(failure.result, "failure");
         assert!(failure.reason.contains("metadata store error"));
+    }
+
+    #[test]
+    fn test_upload_quota_failure_describes_the_accounting_fault() {
+        let failure = upload_quota_result::<(), _>(
+            Err(peryx_storage::meta::QuotaError::Empty { field: "project" }),
+            "root/pypi",
+            "flask",
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(failure.result, "failure");
+        assert_eq!(failure.reason, "quota accounting error: project must not be empty");
     }
 
     fn meta_error() -> MetaError {

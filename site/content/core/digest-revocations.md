@@ -66,5 +66,6 @@ exclusive gate through commit and exact-digest invalidation, preventing an older
 
 The cache does not store metadata errors. A failed store read returns unavailable so download handlers can deny the
 artifact. The CLI changes records through the live HTTP process and triggers exact-key invalidation. Replication and
-cross-process cache purge remain outside this lifecycle. OCI content and discovery responses limit compliant client and
-proxy caches to the same 60-second bound; see [revoked OCI content](@/ecosystems/oci/revoked-content.md).
+cross-process cache purge remain outside this lifecycle. PyPI and OCI responses limit compliant client and proxy caches
+to the same 60-second bound; see [revoked PyPI content](@/ecosystems/pypi/revoked-content.md) and
+[revoked OCI content](@/ecosystems/oci/revoked-content.md).

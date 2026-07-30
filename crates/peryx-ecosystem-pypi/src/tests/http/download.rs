@@ -433,7 +433,7 @@ async fn test_cached_file_matching_if_none_match_is_not_modified(#[case] field: 
 
     assert_eq!(status, StatusCode::NOT_MODIFIED);
     assert_eq!(headers[header::ETAG], wheel_etag());
-    assert_eq!(headers[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
     assert!(body.is_empty());
 }
 #[rstest]
@@ -760,7 +760,13 @@ async fn test_head_of_an_uncached_file_carries_the_headers_of_its_download() {
     assert_eq!(headers[header::CONTENT_TYPE], "application/octet-stream");
     assert_eq!(headers[header::ETAG], wheel_etag());
     assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
-    assert_eq!(headers[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+    assert_eq!(
+        headers[header::CACHE_CONTROL],
+        format!(
+            "public, max-age={}, must-revalidate, no-transform",
+            peryx_driver::revocations::DECISION_CACHE_TTL_SECS,
+        )
+    );
 }
 #[tokio::test]
 async fn test_head_of_an_uncached_file_states_the_length_its_index_page_published() {

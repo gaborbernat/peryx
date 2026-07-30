@@ -25,6 +25,41 @@ async fn test_html_page_is_rendered_once_and_then_served_from_cache() {
     let (_, _, second) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
     assert_eq!(first, second);
 }
+#[rstest]
+#[case::simple_html("/pypi/simple/flask/", "text/html")]
+#[case::legacy_json("/pypi/flask/json", "application/json")]
+#[tokio::test]
+async fn test_revocation_bypasses_a_preexisting_render(#[case] uri: &str, #[case] accept: &str) {
+    let h = harness().await;
+    let digest = Digest::of(b"wheel");
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_detail(&h.server, digest.as_str(), &file_url, None).await;
+    let (_, _, before) = get(&h.state, uri, Some(accept)).await;
+    assert!(before.contains(digest.as_str()));
+    revoke_digest(&h.state, &digest);
+
+    let (_, _, after) = get(&h.state, uri, Some(accept)).await;
+
+    assert!(!after.contains(digest.as_str()), "{after}");
+}
+#[rstest]
+#[case::simple_html("/pypi/simple/flask/", "text/html")]
+#[case::legacy_json("/pypi/flask/json", "application/json")]
+#[tokio::test]
+async fn test_revocation_filtered_render_is_not_cached_after_lift(#[case] uri: &str, #[case] accept: &str) {
+    let h = harness().await;
+    let digest = Digest::of(b"wheel");
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_detail(&h.server, digest.as_str(), &file_url, None).await;
+    revoke_digest(&h.state, &digest);
+    let (_, _, blocked) = get(&h.state, uri, Some(accept)).await;
+    assert!(!blocked.contains(digest.as_str()), "{blocked}");
+
+    lift_digest(&h.state, &digest);
+    let (_, _, restored) = get(&h.state, uri, Some(accept)).await;
+
+    assert!(restored.contains(digest.as_str()), "{restored}");
+}
 #[tokio::test]
 async fn test_a_mutation_retires_the_cached_html_render() {
     let h = harness().await;

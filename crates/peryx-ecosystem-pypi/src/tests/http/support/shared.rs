@@ -31,6 +31,7 @@ pub use peryx_core::path::local_file_url;
 pub use peryx_driver::DEFAULT_MAX_STALE_SECS;
 pub use peryx_driver::state::AppState;
 pub use peryx_http::router;
+pub use peryx_identity::{ArtifactDigest, RevocationReason, UserId};
 pub use peryx_index::{Index, IndexKind};
 pub use peryx_policy::{Policy, PolicyConfig};
 

@@ -9,8 +9,10 @@ use crate::store::PypiStore as _;
 use crate::upload;
 use peryx_driver::rate_limit::UpstreamPermit;
 use peryx_driver::state::ServingState;
+use peryx_identity::{ArtifactDigest, DigestDecision};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::PolicyDenial;
+use peryx_storage::blob::Digest;
 use peryx_upstream::{ArtifactClient, UpstreamClient};
 
 mod download;
@@ -66,6 +68,8 @@ pub enum CacheError {
     NotVolatile,
     #[error("no known source for this file")]
     FileNotFound,
+    #[error("artifact is revoked")]
+    ArtifactRevoked,
     #[error("file already exists: {0}")]
     FileExists(String),
     #[error("file record lacks sha256: {0}")]
@@ -131,7 +135,9 @@ impl CacheError {
             Self::Unavailable => "upstream is unavailable and no cached page exists".to_owned(),
             Self::OfflineMissing(target) => format!("offline mode has no cached {target}"),
             Self::NotVolatile => "index is not volatile; delete is disabled".to_owned(),
-            Self::FileNotFound => "no matching cached file or upstream source was found".to_owned(),
+            Self::FileNotFound | Self::ArtifactRevoked => {
+                "no matching cached file or upstream source was found".to_owned()
+            }
             Self::FileExists(filename) => format!("file {filename:?} already exists with different content"),
             Self::MissingSha256(filename) => format!("uploaded file {filename:?} has no sha256 hash"),
             Self::NoPromotableFiles {
@@ -147,6 +153,18 @@ impl CacheError {
             Self::Quota(err) => format!("quota accounting error: {err}"),
         }
     }
+}
+
+pub(crate) fn ensure_digest_clear(state: &ServingState, digest: &Digest) -> Result<(), CacheError> {
+    let digest = ArtifactDigest::from_sha256(digest.as_str()).expect("a storage digest is canonical sha256");
+    match state.revocations.decision(&digest)? {
+        DigestDecision::Clear => Ok(()),
+        DigestDecision::Revoked => Err(CacheError::ArtifactRevoked),
+    }
+}
+
+pub(crate) fn has_active_revocations(state: &ServingState) -> Result<bool, CacheError> {
+    Ok(state.revocations.has_active()?)
 }
 
 /// The per-page lock concurrent cache misses share.

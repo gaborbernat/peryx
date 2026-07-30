@@ -147,3 +147,4 @@ password = <token>
 - Front an index that is not pypi.org: [front another index](@/ecosystems/pypi/tutorials/front-another-index.md)
 - Add credentials for a private upstream: [proxy a private upstream](@/ecosystems/pypi/guides/private-mirror.md)
 - Publish your own packages: [publish](@/ecosystems/pypi/guides/publish.md)
+- Block compromised distributions without deleting evidence: [digest revocations](@/ecosystems/pypi/revoked-content.md)

@@ -20,7 +20,8 @@ use central_dir::{
 
 use super::download::file_path;
 use super::{
-    CacheError, NEGATIVE_TTL_SECS, is_tar_gz, is_wheel, source_artifact_client, source_client, upstream_permit,
+    CacheError, NEGATIVE_TTL_SECS, ensure_digest_clear, is_tar_gz, is_wheel, source_artifact_client, source_client,
+    upstream_permit,
 };
 
 /// Fetch a URL through its recorded upstream client, reusing that source's authentication.
@@ -55,6 +56,7 @@ pub async fn metadata_bytes(
     route: &str,
     metadata_filename: &str,
 ) -> Result<Bytes, CacheError> {
+    ensure_digest_clear(state, artifact_digest)?;
     let artifact_filename = metadata_filename
         .strip_suffix(".metadata")
         .ok_or(CacheError::FileNotFound)?;

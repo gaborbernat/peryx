@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use peryx_core::path::{self};
 use peryx_driver::conditional::{applicable_range, http_date, if_modified_since, if_none_match, last_modified};
@@ -42,7 +42,10 @@ pub async fn pypi_dispatch_get(
     headers: HeaderMap,
     head: bool,
 ) -> Response {
-    pypi_get(&state, position, rest, &headers, &uri, head).await
+    let authenticated = headers.contains_key(header::AUTHORIZATION);
+    let mut response = pypi_get(&state, position, rest, &headers, &uri, head).await;
+    apply_revocation_cache_policy(&mut response, authenticated);
+    response
 }
 
 /// `PyPI` GET routing within an index: the Simple index and project detail (HTML, PEP 691 JSON, legacy
@@ -60,40 +63,8 @@ async fn pypi_get(
     head: bool,
 ) -> Response {
     let index = state.index_at(position);
-    match legacy_json_target(rest) {
-        Ok(Some(target)) => {
-            state.metrics.record(Event::Page {
-                route: index.route.clone(),
-                project: target.project.clone(),
-            });
-            // The release form of this API answers differently per version, so the version is part of
-            // what the cached bytes are.
-            let variant = target.version.as_deref().map_or_else(
-                || cache::LEGACY_JSON.to_owned(),
-                |version| format!("{}/{version}", cache::LEGACY_JSON),
-            );
-            if let Some((bytes, last_serial)) =
-                state.hot_fresh_versioned(&state.hot_key(&index.route, &target.project, &variant))
-            {
-                return legacy_bytes_response(bytes, last_serial);
-            }
-            let detail = cache::resolve_detail_page(state, index, &target.project, &index.route).await;
-            if let Ok(Some(found)) = &detail
-                && let Some(body) = crate::legacy_json::render_legacy_json_with_serial(
-                    &found.detail,
-                    target.version.as_deref(),
-                    None,
-                    found.last_serial,
-                )
-            {
-                let body = bytes::Bytes::from(body);
-                remember_rendered(state, index, &target.project, &variant, &body, found.last_serial);
-                return legacy_bytes_response(body, found.last_serial);
-            }
-            return legacy_json_response(detail, &index.route, &target.project, target.version.as_deref());
-        }
-        Ok(None) => {}
-        Err(response) => return response,
+    if let Some(response) = legacy_json_route(state, index, rest).await {
+        return response;
     }
     if rest == "simple" {
         return simple_slash_redirect(uri, rest, "simple/");
@@ -136,15 +107,26 @@ async fn pypi_get(
         let index = state.index_at(position);
         let format = negotiate(headers);
         if matches!(format, Format::Html) {
-            if let Some((bytes, last_serial)) =
-                state.hot_fresh_versioned(&state.hot_key(&index.route, &normalized, cache::SIMPLE_HTML))
-            {
+            let hot_key = state.hot_key(&index.route, &normalized, cache::SIMPLE_HTML);
+            let hot = match revocation_safe_hot_page(state, &hot_key) {
+                Ok(hot) => hot,
+                Err(err) => return cache_error_response(&err, CacheContext::project(&index.route, &normalized)),
+            };
+            if let Some((bytes, last_serial)) = hot {
                 return html_bytes_response(bytes, last_serial);
             }
             let detail = cache::resolve_detail_page(state, index, &normalized, &index.route).await;
             if let Ok(Some(found)) = &detail {
                 let body = bytes::Bytes::from(crate::render_detail_html(&found.detail));
-                remember_rendered(state, index, &normalized, cache::SIMPLE_HTML, &body, found.last_serial);
+                remember_rendered(
+                    state,
+                    index,
+                    &normalized,
+                    cache::SIMPLE_HTML,
+                    &body,
+                    found.last_serial,
+                    found.revoked_files_removed,
+                );
                 return html_bytes_response(body, found.last_serial);
             }
             return detail_response(detail, &index.route, &normalized);
@@ -159,6 +141,62 @@ async fn pypi_get(
         return inspect_route(state.clone(), index.route.clone(), target, uri.query()).await;
     }
     not_found()
+}
+
+async fn legacy_json_route(state: &Arc<ServingState>, index: &Index, rest: &str) -> Option<Response> {
+    let target = match legacy_json_target(rest) {
+        Ok(Some(target)) => target,
+        Ok(None) => return None,
+        Err(response) => return Some(response),
+    };
+    state.metrics.record(Event::Page {
+        route: index.route.clone(),
+        project: target.project.clone(),
+    });
+    let variant = target.version.as_deref().map_or_else(
+        || cache::LEGACY_JSON.to_owned(),
+        |version| format!("{}/{version}", cache::LEGACY_JSON),
+    );
+    let hot_key = state.hot_key(&index.route, &target.project, &variant);
+    let hot = match revocation_safe_hot_page(state, &hot_key) {
+        Ok(hot) => hot,
+        Err(err) => {
+            return Some(cache_error_response(
+                &err,
+                CacheContext::project(&index.route, &target.project),
+            ));
+        }
+    };
+    if let Some((bytes, last_serial)) = hot {
+        return Some(legacy_bytes_response(bytes, last_serial));
+    }
+    let detail = cache::resolve_detail_page(state, index, &target.project, &index.route).await;
+    if let Ok(Some(found)) = &detail
+        && let Some(body) = crate::legacy_json::render_legacy_json_with_serial(
+            &found.detail,
+            target.version.as_deref(),
+            None,
+            found.last_serial,
+        )
+    {
+        let body = bytes::Bytes::from(body);
+        remember_rendered(
+            state,
+            index,
+            &target.project,
+            &variant,
+            &body,
+            found.last_serial,
+            found.revoked_files_removed,
+        );
+        return Some(legacy_bytes_response(body, found.last_serial));
+    }
+    Some(legacy_json_response(
+        detail,
+        &index.route,
+        &target.project,
+        target.version.as_deref(),
+    ))
 }
 
 fn simple_index_response(state: &ServingState, index: &Index, headers: &HeaderMap) -> Response {
@@ -193,6 +231,9 @@ async fn file_route(state: &Arc<ServingState>, index: &Index, file: &str, header
         Ok(filename) => filename,
         Err(err) => return path_error_response(&err),
     };
+    if let Err(err) = cache::ensure_digest_clear(state, &digest) {
+        return cache_error_response(&err, CacheContext::file(&route, digest.as_str(), &filename));
+    }
     match download_policy_response(state, index, &filename, &digest).await {
         Ok(Some(response)) => return response,
         Ok(None) => {}
@@ -554,11 +595,41 @@ fn remember_rendered(
     variant: &str,
     body: &bytes::Bytes,
     last_serial: Option<u64>,
+    revoked_files_removed: bool,
 ) {
+    if revoked_files_removed {
+        return;
+    }
     if let Ok(Some(expires_at)) = cache::rendered_expiry(state, index, project) {
         let key = state.hot_key(&index.route, project, variant);
         state
             .cache
             .store_hot_versioned(key, body.clone(), expires_at, last_serial);
     }
+}
+
+fn revocation_safe_hot_page(
+    state: &ServingState,
+    key: &str,
+) -> Result<Option<(bytes::Bytes, Option<u64>)>, CacheError> {
+    if cache::has_active_revocations(state)? {
+        return Ok(None);
+    }
+    Ok(state.hot_fresh_versioned(key))
+}
+
+fn apply_revocation_cache_policy(response: &mut Response, authenticated: bool) {
+    let value = if response.status().is_success() {
+        format!(
+            "{}, max-age={}, must-revalidate, no-transform",
+            if authenticated { "private" } else { "public" },
+            peryx_driver::revocations::DECISION_CACHE_TTL_SECS,
+        )
+    } else {
+        "no-store".to_owned()
+    };
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_str(&value).expect("cache policy is a valid header"),
+    );
 }

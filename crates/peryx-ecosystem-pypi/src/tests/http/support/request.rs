@@ -65,6 +65,27 @@ pub async fn request_response(
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
+pub fn revoke_digest(state: &AppState, digest: &Digest) {
+    state
+        .revocations
+        .put(
+            &ArtifactDigest::from_sha256(digest.as_str()).unwrap(),
+            &RevocationReason::new("compromised builder").unwrap(),
+            &UserId::random(),
+            1_000,
+        )
+        .unwrap();
+}
+pub fn lift_digest(state: &AppState, digest: &Digest) {
+    state
+        .revocations
+        .lift(
+            &ArtifactDigest::from_sha256(digest.as_str()).unwrap(),
+            &UserId::random(),
+            1_001,
+        )
+        .unwrap();
+}
 /// A detail page whose wheel advertises a PEP 658 `core-metadata` sibling by default, so serving it
 /// registers the sibling and spawns no metadata backfill. That detached backfill fetches the wheel
 /// from upstream to read its `METADATA` member; under load it races the mock windows these tests set

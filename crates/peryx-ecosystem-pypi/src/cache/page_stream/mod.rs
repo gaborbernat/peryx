@@ -129,7 +129,7 @@ pub async fn stream_detail(
 ) -> Result<PageOutcome, CacheError> {
     let index = state.index_at(position);
     index.policy.check_project(PolicyAction::Serve, &project)?;
-    if index.policy.active() {
+    if index.policy.active() || super::has_active_revocations(&state)? {
         return Ok(PageOutcome::Fallback);
     }
     let route = index.route.clone();

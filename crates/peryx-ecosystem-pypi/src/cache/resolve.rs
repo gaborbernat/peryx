@@ -9,6 +9,7 @@ use crate::upload::Uploaded;
 use crate::{CoreMetadata, File, Meta, ProjectDetail, ProjectList, ProjectListEntry, parse_detail};
 use peryx_core::path::{is_local_file_url, local_file_url};
 use peryx_driver::state::ServingState;
+use peryx_identity::{ArtifactDigest, DigestDecision};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{FallbackMode, PolicyAction, PolicyDenial};
 use peryx_upstream::UpstreamClient;
@@ -22,6 +23,7 @@ pub struct DetailPage {
     pub detail: ProjectDetail,
     /// The upstream or local journal serial represented by `detail`.
     pub last_serial: Option<u64>,
+    pub(crate) revoked_files_removed: bool,
 }
 
 /// Resolve one project's detail across a virtual index's layers, first-match, returning `None` when
@@ -35,9 +37,11 @@ pub async fn resolve_detail(
     project: &str,
     serve_route: &str,
 ) -> Result<Option<ProjectDetail>, CacheError> {
-    Ok(resolve_detail_page_with(state, index, project, serve_route, true)
-        .await?
-        .map(|page| page.detail))
+    let Some(mut page) = resolve_detail_page_with(state, index, project, serve_route, true).await? else {
+        return Ok(None);
+    };
+    filter_revoked_files(state, &mut page.detail)?;
+    Ok(Some(page.detail))
 }
 
 pub(super) async fn resolve_detail_optional(
@@ -61,7 +65,11 @@ pub async fn resolve_detail_page(
     project: &str,
     serve_route: &str,
 ) -> Result<Option<DetailPage>, CacheError> {
-    resolve_detail_page_with(state, index, project, serve_route, true).await
+    let Some(mut page) = resolve_detail_page_with(state, index, project, serve_route, true).await? else {
+        return Ok(None);
+    };
+    page.revoked_files_removed = filter_revoked_files(state, &mut page.detail)?;
+    Ok(Some(page))
 }
 
 async fn resolve_detail_page_with(
@@ -89,6 +97,7 @@ async fn resolve_detail_page_with(
             Some(DetailPage {
                 detail,
                 last_serial: Some(state.meta.current_serial()?),
+                revoked_files_removed: false,
             })
         }
         IndexKind::Virtual { layers, upload } => virtual_detail(
@@ -104,6 +113,7 @@ async fn resolve_detail_page_with(
         .map(|detail| DetailPage {
             detail,
             last_serial: None,
+            revoked_files_removed: false,
         }),
     };
     page.map(|mut page| {
@@ -340,7 +350,33 @@ fn raw_to_page(state: &ServingState, route: &str, record: &CachedIndex) -> Resul
     Ok(DetailPage {
         detail: raw_to_detail(state, route, record)?,
         last_serial: record.last_serial,
+        revoked_files_removed: false,
     })
+}
+
+fn filter_revoked_files(state: &ServingState, detail: &mut ProjectDetail) -> Result<bool, CacheError> {
+    if !super::has_active_revocations(state)? {
+        return Ok(false);
+    }
+    let mut removed = false;
+    let mut files = Vec::with_capacity(detail.files.len());
+    for file in std::mem::take(&mut detail.files) {
+        let digest = file
+            .hashes
+            .get("sha256")
+            .and_then(|sha256| ArtifactDigest::from_sha256(sha256).ok());
+        let revoked = match digest {
+            Some(digest) => state.revocations.decision(&digest)? == DigestDecision::Revoked,
+            None => false,
+        };
+        if revoked {
+            removed = true;
+        } else {
+            files.push(file);
+        }
+    }
+    detail.files = files;
+    Ok(removed)
 }
 
 /// Turn a raw cached page into the detail served on `route`: parse, drop unverifiable metadata

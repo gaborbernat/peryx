@@ -245,15 +245,26 @@ impl MetaStore {
     /// Check the transactional active count without reading revocation bodies.
     ///
     /// # Errors
-    /// Returns a store error when the count cannot be read.
+    /// Returns a store error when the revocation index cannot be validated or read.
     pub fn has_active_digest_revocation(&self) -> Result<bool, MetaError> {
         let txn = self.db.begin_read()?;
-        let table = match txn.open_table(DIGEST_REVOCATION_STATE) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+        let records_table_exists = match txn.open_table(DIGEST_REVOCATION) {
+            Ok(_) => true,
+            Err(redb::TableError::TableDoesNotExist(_)) => false,
             Err(error) => return Err(error.into()),
         };
-        Ok(table.get(ACTIVE_COUNT_KEY)?.is_some_and(|count| count.value() > 0))
+        let state_table = match txn.open_table(DIGEST_REVOCATION_STATE) {
+            Ok(table) => Some(table),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        match (records_table_exists, state_table) {
+            (false, None) => Ok(false),
+            (true, Some(table)) => Ok(table.get(ACTIVE_COUNT_KEY)?.is_some_and(|count| count.value() > 0)),
+            _ => Err(MetaError::DriverPrecondition(
+                "digest revocation index is incomplete".to_owned(),
+            )),
+        }
     }
 
     /// Inspect one digest with a single indexed lookup.

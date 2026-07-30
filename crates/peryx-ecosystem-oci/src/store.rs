@@ -233,6 +233,21 @@ pub fn list_tags(meta: &MetaStore, index: &str, repo: &str) -> Result<Vec<String
         .collect())
 }
 
+/// List each cached tag and its manifest digest under one repository snapshot.
+///
+/// # Errors
+/// Returns a store error if the scan fails.
+pub fn list_tag_targets(meta: &MetaStore, index: &str, repo: &str) -> Result<Vec<(String, String)>, MetaError> {
+    let prefix = tag_prefix(index, repo);
+    let mut targets = Vec::new();
+    meta.visit_driver_prefix(&prefix, |key, value| {
+        if let (Some(tag), Ok(digest)) = (key.strip_prefix(prefix.as_str()), std::str::from_utf8(value)) {
+            targets.push((tag.to_owned(), digest.to_owned()));
+        }
+    })?;
+    Ok(targets)
+}
+
 /// Remove a manifest by digest, reporting whether it was present.
 ///
 /// # Errors
@@ -593,6 +608,13 @@ mod tests {
         assert_eq!(
             list_tags(&meta, "hub", "library/nginx").unwrap(),
             vec!["1.25", "latest"]
+        );
+        assert_eq!(
+            list_tag_targets(&meta, "hub", "library/nginx").unwrap(),
+            vec![
+                ("1.25".to_owned(), "sha256:2".to_owned()),
+                ("latest".to_owned(), "sha256:1".to_owned()),
+            ]
         );
     }
 

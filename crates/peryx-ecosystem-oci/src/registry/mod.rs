@@ -31,7 +31,7 @@ use peryx_core::Ecosystem;
 use peryx_driver::ServingState;
 use peryx_driver::serving::{EcosystemDriver, RouteMount};
 use peryx_events::webhook::{WebhookEvent, WebhookEventKind};
-use peryx_identity::{Action, Denial, Identity};
+use peryx_identity::{Action, ArtifactDigest, Denial, DigestDecision, Identity};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::PolicyAction;
 use peryx_storage::blob::BlobWrite;
@@ -396,17 +396,31 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let Some(route) = classify(path) else {
             return error_response(ErrorCode::NameUnknown, "repository name unknown");
         };
+        let governed_read = read
+            && matches!(
+                &route,
+                OciRoute::Manifest { .. }
+                    | OciRoute::Blob { .. }
+                    | OciRoute::BlobContents { .. }
+                    | OciRoute::TagsList { .. }
+                    | OciRoute::Referrers { .. }
+            );
         if read
             && let Err(response) = match &route {
                 OciRoute::Catalog => auth::authorize_catalog(&state, &parts.headers),
                 route => read_name(route).map_or(Ok(()), |name| auth::authorize_read(&state, &parts.headers, name)),
             }
         {
+            let mut response = response;
+            if governed_read {
+                apply_revocation_cache_policy(&mut response, parts.headers.contains_key(header::AUTHORIZATION));
+            }
             return response;
         }
         let headers = &parts.headers;
         let query = parts.uri.query().unwrap_or_default();
         let head = method == Method::HEAD;
+        let authenticated = headers.contains_key(header::AUTHORIZATION);
         let result = match route {
             OciRoute::Manifest { name, reference } if read => {
                 let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok());
@@ -445,7 +459,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             }
             _ => Ok(error_response(ErrorCode::Unsupported, "operation not supported")),
         };
-        result.unwrap_or_else(ServeError::into_response)
+        let mut response = result.unwrap_or_else(ServeError::into_response);
+        if governed_read {
+            apply_revocation_cache_policy(&mut response, authenticated);
+        }
+        response
     }
 
     /// Every tag of `repo` on `index`, unioned across a virtual index's members and each proxy
@@ -456,6 +474,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         index: &Index,
         repo: &str,
     ) -> Result<Vec<String>, ServeError> {
+        let active = state.revocations.has_active()?;
         let members = serving_members(state, index);
         let name = if index.route.is_empty() {
             repo.to_owned()
@@ -466,15 +485,44 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         for member in &members {
             match member.proxy_client() {
                 Some(client) => {
-                    if let Some(names) = self.fetch_tag_names(state, &name, &member.name, client, repo).await {
+                    if let Some(names) = self
+                        .fetch_tag_names(state, &name, &member.name, client, repo, active)
+                        .await?
+                    {
                         tags.extend(names);
                     }
                 }
-                None => tags.extend(crate::store::list_tags(&state.meta, &member.name, repo)?),
+                None => tags.extend(discovery::stored_tag_names(state, &member.name, repo, active)?),
             }
         }
         Ok(tags.into_iter().collect())
     }
+}
+
+fn digest_decision(state: &ServingState, digest: &str) -> Result<DigestDecision, ServeError> {
+    if !state.revocations.has_active()? {
+        return Ok(DigestDecision::Clear);
+    }
+    let Ok(digest) = digest.parse::<ArtifactDigest>() else {
+        return Ok(DigestDecision::Clear);
+    };
+    Ok(state.revocations.decision(&digest)?)
+}
+
+fn apply_revocation_cache_policy(response: &mut Response, authenticated: bool) {
+    let value = if response.status().is_success() {
+        format!(
+            "{}, max-age={}, must-revalidate, no-transform",
+            if authenticated { "private" } else { "public" },
+            peryx_driver::revocations::DECISION_CACHE_TTL_SECS,
+        )
+    } else {
+        "no-store".to_owned()
+    };
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_str(&value).expect("cache policy is a valid header"),
+    );
 }
 
 /// The repositories `index` serves for the web index listing: a cached or hosted index reads its own

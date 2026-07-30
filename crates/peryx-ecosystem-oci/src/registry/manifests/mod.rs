@@ -38,6 +38,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         }
         let response = match reference {
             Reference::Digest(digest) => {
+                if digest_decision(state, digest)? == DigestDecision::Revoked {
+                    return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+                }
                 let members = serving_members(state, index);
                 let mut served = if manifest_authorized(state, &members, repo, digest)? {
                     store::get_manifest(&state.meta, digest)?.map(|manifest| manifest_response(manifest, digest, head))
@@ -116,6 +119,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let Some(child) = store::linux_amd64_child(&list.bytes) else {
             return Ok(response);
         };
+        if digest_decision(state, &child)? == DigestDecision::Revoked {
+            return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+        }
         if let Some(manifest) = store::get_manifest(&state.meta, &child)? {
             return Ok(manifest_response(manifest, &child, head));
         }
@@ -184,7 +190,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             Err(UpstreamError::Status(status)) if absent_upstream(status) => return Ok(None),
             Err(err) => return Ok(Some(upstream_manifest_error(&err))),
         };
-        let (manifest, canonical) = store_manifest(state, index, repo, None, response).await?;
+        let Some((manifest, canonical)) = store_manifest(state, index, repo, None, response).await? else {
+            return Ok(Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown")));
+        };
         // A pull by sha256 digest must hash to it, or the upstream bytes are corrupt. A digest in
         // another algorithm the spec permits content-addresses upstream and peryx cannot recompute it,
         // so the bytes are served under the requested digest rather than rejected as a mismatch.
@@ -211,6 +219,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
     ) -> Result<Option<Response>, ServeError> {
         let Some(client) = member.proxy_client() else {
             return Ok(match store::get_tag(&state.meta, &member.name, repo, tag)? {
+                Some(digest) if digest_decision(state, &digest)? == DigestDecision::Revoked => {
+                    Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown"))
+                }
                 Some(digest) => store::get_manifest(&state.meta, &digest)?
                     .map(|manifest| manifest_response(manifest, &digest, head)),
                 None => None,
@@ -242,7 +253,23 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         tag: &str,
         head: bool,
     ) -> Result<Option<Response>, ServeError> {
-        if let Some(response) = self.unchanged_tag(state, client, index, repo, tag, head).await? {
+        let upstream = self
+            .upstream
+            .manifest_digest(
+                client.base_url(),
+                client.auth(),
+                &self.upstream_repo(index, client, repo),
+                tag,
+            )
+            .await
+            .ok()
+            .flatten();
+        if let Some(digest) = upstream.as_deref()
+            && digest_decision(state, digest)? == DigestDecision::Revoked
+        {
+            return Ok(Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown")));
+        }
+        if let Some(response) = unchanged_tag(state, index, repo, tag, upstream.as_deref(), head)? {
             return Ok(Some(response));
         }
         match self
@@ -255,10 +282,12 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             )
             .await
         {
-            Ok(response) => {
-                let (manifest, canonical) = store_manifest(state, index, repo, Some(tag), response).await?;
-                Ok(Some(manifest_response(manifest, &canonical, head)))
-            }
+            Ok(response) => Ok(Some(
+                match store_manifest(state, index, repo, Some(tag), response).await? {
+                    Some((manifest, canonical)) => manifest_response(manifest, &canonical, head),
+                    None => error_response(ErrorCode::ManifestUnknown, "manifest unknown"),
+                },
+            )),
             // A `404` is upstream saying the tag is gone, which is an answer. Everything else is a
             // failure to get one, and a failure to confirm a tag is not a reason to forget it: an
             // expired token draws a `401` from Docker Hub, which must serve the cached image rather
@@ -275,45 +304,27 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             )),
         }
     }
+}
 
-    /// Confirm a stale tag still points where it did, without fetching what it points at.
-    ///
-    /// A `HEAD` answers with the digest and no body, so the common revalidation — a tag that has not
-    /// moved — costs one round trip rather than a manifest. Anything unexpected (no digest header, a
-    /// moved tag, an upstream that will not answer a `HEAD`) returns `None`, and the caller fetches.
-    async fn unchanged_tag(
-        &self,
-        state: &ServingState,
-        client: &UpstreamClient,
-        index: &str,
-        repo: &str,
-        tag: &str,
-        head: bool,
-    ) -> Result<Option<Response>, ServeError> {
-        let Some((_, cached)) = store::tag_freshness(&state.meta, index, repo, tag)? else {
-            return Ok(None);
-        };
-        let Ok(Some(upstream)) = self
-            .upstream
-            .manifest_digest(
-                client.base_url(),
-                client.auth(),
-                &self.upstream_repo(index, client, repo),
-                tag,
-            )
-            .await
-        else {
-            return Ok(None);
-        };
-        if upstream != cached {
-            return Ok(None);
-        }
-        let Some(manifest) = store::get_manifest(&state.meta, &cached)? else {
-            return Ok(None);
-        };
-        store::set_tag_freshness(&state.meta, index, repo, tag, &cached, (state.clock)())?;
-        Ok(Some(manifest_response(manifest, &cached, head)))
+fn unchanged_tag(
+    state: &ServingState,
+    index: &str,
+    repo: &str,
+    tag: &str,
+    upstream: Option<&str>,
+    head: bool,
+) -> Result<Option<Response>, ServeError> {
+    let Some((_, cached)) = store::tag_freshness(&state.meta, index, repo, tag)? else {
+        return Ok(None);
+    };
+    if upstream != Some(&cached) {
+        return Ok(None);
     }
+    let Some(manifest) = store::get_manifest(&state.meta, &cached)? else {
+        return Ok(None);
+    };
+    store::set_tag_freshness(&state.meta, index, repo, tag, &cached, (state.clock)())?;
+    Ok(Some(manifest_response(manifest, &cached, head)))
 }
 
 /// Whether any member the resolved index serves from records this digest as one it holds. A manifest
@@ -345,6 +356,9 @@ fn stale_tag(
     let Some((fetched_at, digest)) = store::tag_freshness(&state.meta, index, repo, tag)? else {
         return Ok(None);
     };
+    if digest_decision(state, &digest)? == DigestDecision::Revoked {
+        return Ok(Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown")));
+    }
     if !within_stale_bound(state, fetched_at) {
         return Ok(None);
     }
@@ -353,13 +367,13 @@ fn stale_tag(
 
 /// Read an upstream manifest response into storage, keyed by the sha256 of its exact bytes, updating
 /// the tag mapping when the pull was by tag. Returns the stored manifest and its canonical digest.
-pub async fn store_manifest(
+async fn store_manifest(
     state: &ServingState,
     index: &str,
     repo: &str,
     tag: Option<&str>,
     response: reqwest::Response,
-) -> Result<(Manifest, String), ServeError> {
+) -> Result<Option<(Manifest, String)>, ServeError> {
     let media_type = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -385,6 +399,9 @@ pub async fn store_manifest(
             "upstream digest {advertised} does not match manifest content {canonical}"
         )));
     }
+    if digest_decision(state, &canonical)? == DigestDecision::Revoked {
+        return Ok(None);
+    }
     let manifest = Manifest {
         media_type,
         bytes: bytes.to_vec(),
@@ -396,7 +413,7 @@ pub async fn store_manifest(
         }
         store::set_tag_freshness(&state.meta, index, repo, tag, &canonical, (state.clock)())?;
     }
-    Ok((manifest, canonical))
+    Ok(Some((manifest, canonical)))
 }
 
 /// The OCI image index media type.
@@ -453,6 +470,9 @@ fn fresh_tag(
     };
     if (state.clock)().saturating_sub(fetched_at) >= state.ttl_secs {
         return Ok(None);
+    }
+    if digest_decision(state, &digest)? == DigestDecision::Revoked {
+        return Ok(Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown")));
     }
     Ok(store::get_manifest(&state.meta, &digest)?.map(|manifest| manifest_response(manifest, &digest, head)))
 }

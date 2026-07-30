@@ -10,6 +10,10 @@ fn digest() -> ArtifactDigest {
     ArtifactDigest::from_str("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap()
 }
 
+fn other_digest() -> ArtifactDigest {
+    ArtifactDigest::from_str("sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap()
+}
+
 fn service() -> (tempfile::TempDir, MetaStore, RevocationService) {
     let dir = tempfile::tempdir().unwrap();
     let store = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
@@ -56,6 +60,22 @@ fn test_revocation_service_exposes_management_records() {
 }
 
 #[test]
+fn test_revocation_service_reads_a_lifted_digest_while_another_is_active() {
+    let (_dir, _store, service) = service();
+    let digest = digest();
+    let other_digest = other_digest();
+    let actor = UserId::random();
+    let reason = RevocationReason::new("incident").unwrap();
+    service.put(&digest, &reason, &actor, 10).unwrap();
+    service.put(&other_digest, &reason, &actor, 11).unwrap();
+    service.lift(&digest, &actor, 12).unwrap();
+
+    assert!(service.has_active().unwrap());
+    assert_eq!(service.decision(&digest).unwrap(), DigestDecision::Clear);
+    assert_eq!(service.decision(&other_digest).unwrap(), DigestDecision::Revoked);
+}
+
+#[test]
 fn test_revocation_service_serializes_misses_against_mutation() {
     let (_dir, _store, service) = service();
     let service = Arc::new(service);
@@ -97,5 +117,6 @@ fn test_revocation_service_fails_closed_on_a_store_type_error() {
     drop(database);
     let service = RevocationService::new(MetaStore::open_existing(path).unwrap());
 
+    assert!(service.has_active().is_err());
     assert!(service.decision(&digest()).is_err());
 }

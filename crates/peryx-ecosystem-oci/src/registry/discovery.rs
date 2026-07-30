@@ -10,10 +10,11 @@ use peryx_core::Ecosystem;
 use peryx_driver::ServingState;
 use peryx_upstream::UpstreamClient;
 
+const TAG_RESOLUTION_CONCURRENCY: usize = 8;
+
 impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> {
-    /// Serve the tag list. A lone online proxy passes upstream through verbatim; every other case
-    /// (a hosted index, or a virtual index) unions its members' tags under the requested name, then
-    /// applies the `n`/`last` pagination the spec defines.
+    /// Serve the tag list. With no active revocations a lone online proxy passes upstream through;
+    /// every other case filters and unions member tags before applying `n`/`last` pagination.
     pub(super) async fn serve_tags(
         &self,
         state: &ServingState,
@@ -26,21 +27,31 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         if policy_blocks(index, PolicyAction::Serve, repo) {
             return Ok(error_response(ErrorCode::NameUnknown, "repository name unknown"));
         }
+        let active = state.revocations.has_active()?;
         let members = serving_members(state, index);
         if let [member] = members.as_slice()
             && let Some(client) = member.proxy_client()
         {
-            return self.proxy_tags(state, name, &member.name, client, repo, query).await;
+            let response = self.proxy_tags(state, name, &member.name, client, repo, query).await?;
+            return if active {
+                self.filter_proxy_tag_page(state, name, &member.name, client, repo, response)
+                    .await
+            } else {
+                Ok(response)
+            };
         }
         let mut tags = std::collections::BTreeSet::new();
         for member in &members {
             match member.proxy_client() {
                 Some(client) => {
-                    if let Some(names) = self.fetch_tag_names(state, name, &member.name, client, repo).await {
+                    if let Some(names) = self
+                        .fetch_tag_names(state, name, &member.name, client, repo, active)
+                        .await?
+                    {
                         tags.extend(names);
                     }
                 }
-                None => tags.extend(store::list_tags(&state.meta, &member.name, repo)?),
+                None => tags.extend(stored_tag_names(state, &member.name, repo, active)?),
             }
         }
         Ok(tag_list_response(name, tags, query))
@@ -106,21 +117,32 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         index: &str,
         client: &UpstreamClient,
         repo: &str,
-    ) -> Option<Vec<String>> {
+        active: bool,
+    ) -> Result<Option<Vec<String>>, ServeError> {
         let mut names = Vec::new();
         let mut query = String::new();
         let mut page = 0;
         loop {
             // Each page is cached under its own query, so a virtual index that unions several proxies
             // no longer re-walks every upstream's pagination on every request.
-            let response = self.proxy_tags(state, name, index, client, repo, &query).await.ok()?;
+            let response = self.proxy_tags(state, name, index, client, repo, &query).await?;
+            let response = if active {
+                self.filter_proxy_tag_page(state, name, index, client, repo, response)
+                    .await?
+            } else {
+                response
+            };
             let (parts, body) = response.into_parts();
             if !parts.status.is_success() {
-                return None;
+                return Ok(None);
             }
             let next = parts.headers.get(header::LINK).and_then(next_page_query_of);
-            let bytes = axum::body::to_bytes(body, MAX_TAGS_BYTES).await.ok()?;
-            let parsed: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+            let bytes = axum::body::to_bytes(body, MAX_TAGS_BYTES)
+                .await
+                .expect("proxy tag pages are bounded before caching");
+            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                return Ok(None);
+            };
             let tags = parsed["tags"].as_array().into_iter().flatten();
             names.extend(tags.filter_map(|tag| tag.as_str().map(str::to_owned)));
             page += 1;
@@ -129,7 +151,101 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 _ => break,
             }
         }
-        Some(names)
+        Ok(Some(names))
+    }
+
+    async fn filter_proxy_tag_page(
+        &self,
+        state: &ServingState,
+        name: &str,
+        index: &str,
+        client: &UpstreamClient,
+        repo: &str,
+        response: Response,
+    ) -> Result<Response, ServeError> {
+        if !response.status().is_success() {
+            return Ok(response);
+        }
+        let (parts, body) = response.into_parts();
+        let body = axum::body::to_bytes(body, MAX_TAGS_BYTES)
+            .await
+            .expect("proxy tag pages are bounded before filtering");
+        let document = serde_json::from_slice::<serde_json::Value>(&body)
+            .map_err(|err| ServeError::Transport(format!("upstream tag list is invalid: {err}")))?;
+        let tags = match &document["tags"] {
+            serde_json::Value::Array(tags) => tags.iter().filter_map(|tag| tag.as_str().map(str::to_owned)).collect(),
+            serde_json::Value::Null => Vec::new(),
+            _ => return Err(ServeError::Transport("upstream tag list is invalid".to_owned())),
+        };
+        let tags = self.visible_proxy_tags(state, index, client, repo, tags).await?;
+        Ok(tag_page_response(
+            name,
+            parts.headers.get(header::LINK).and_then(|value| value.to_str().ok()),
+            serde_json::json!({ "name": name, "tags": tags })
+                .to_string()
+                .into_bytes(),
+        ))
+    }
+
+    async fn visible_proxy_tags(
+        &self,
+        state: &ServingState,
+        index: &str,
+        client: &UpstreamClient,
+        repo: &str,
+        tags: Vec<String>,
+    ) -> Result<std::collections::BTreeSet<String>, ServeError> {
+        let checked = futures_util::stream::iter(tags.into_iter().map(|tag| async move {
+            let digest = self.proxy_tag_digest(state, index, client, repo, &tag).await?;
+            let visible = match digest {
+                Some(digest) => digest_decision(state, &digest)? == DigestDecision::Clear,
+                None => false,
+            };
+            Ok::<_, ServeError>((tag, visible))
+        }))
+        .buffer_unordered(TAG_RESOLUTION_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        let mut visible = std::collections::BTreeSet::new();
+        for checked in checked {
+            let (tag, clear) = checked?;
+            if clear {
+                visible.insert(tag);
+            }
+        }
+        Ok(visible)
+    }
+
+    async fn proxy_tag_digest(
+        &self,
+        state: &ServingState,
+        index: &str,
+        client: &UpstreamClient,
+        repo: &str,
+        tag: &str,
+    ) -> Result<Option<String>, ServeError> {
+        if let Some((fetched_at, digest)) = store::tag_freshness(&state.meta, index, repo, tag)?
+            && (state.clock)().saturating_sub(fetched_at) < state.ttl_secs
+        {
+            return Ok(Some(digest));
+        }
+        let Ok(Some(digest)) = self
+            .upstream
+            .manifest_digest(
+                client.base_url(),
+                client.auth(),
+                &self.upstream_repo(index, client, repo),
+                tag,
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+        if store::put_tag(&state.meta, index, repo, tag, &digest)? {
+            state.bump_search_epoch();
+        }
+        store::set_tag_freshness(&state.meta, index, repo, tag, &digest, (state.clock)())?;
+        Ok(Some(digest))
     }
 
     /// The referrer descriptors upstream records for `repo`/`digest`, or empty on any failure (a
@@ -184,49 +300,83 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 "referrers digest is malformed",
             ));
         }
+        let filter = query_params(query).remove("artifactType");
+        let active = state.revocations.has_active()?;
+        if active && digest_decision(state, digest)? == DigestDecision::Revoked {
+            return Ok(referrers_response(&[], filter.as_deref()));
+        }
         let mut seen = std::collections::HashSet::new();
         let mut manifests = Vec::new();
-        let mut add = |descriptor: serde_json::Value| {
-            if descriptor["digest"]
-                .as_str()
-                .is_some_and(|digest| seen.insert(digest.to_owned()))
-            {
-                manifests.push(descriptor);
-            }
-        };
         for member in serving_members(state, index) {
             for descriptor in store::list_referrers(&state.meta, &member.name, repo, digest)? {
                 if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&descriptor) {
-                    add(value);
+                    add_referrer(state, active, value, &mut seen, &mut manifests)?;
                 }
             }
             if let Some(client) = member.proxy_client() {
                 for descriptor in self.upstream_referrers(&member.name, client, repo, digest).await {
-                    add(descriptor);
+                    add_referrer(state, active, descriptor, &mut seen, &mut manifests)?;
                 }
             }
         }
-        let filter = query_params(query).remove("artifactType");
         if let Some(artifact_type) = &filter {
             manifests.retain(|descriptor| descriptor["artifactType"].as_str() == Some(artifact_type));
         }
-        let document = serde_json::json!({
-            "schemaVersion": 2,
-            "mediaType": "application/vnd.oci.image.index.v1+json",
-            "manifests": manifests,
-        });
-        let mut response = (
-            [(header::CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")],
-            document.to_string(),
-        )
-            .into_response();
-        if filter.is_some() {
-            response
-                .headers_mut()
-                .insert("oci-filters-applied", HeaderValue::from_static("artifactType"));
-        }
-        Ok(response)
+        Ok(referrers_response(&manifests, filter.as_deref()))
     }
+}
+
+pub(super) fn stored_tag_names(
+    state: &ServingState,
+    index: &str,
+    repo: &str,
+    active: bool,
+) -> Result<Vec<String>, ServeError> {
+    if !active {
+        return Ok(store::list_tags(&state.meta, index, repo)?);
+    }
+    let mut names = Vec::new();
+    for (tag, digest) in store::list_tag_targets(&state.meta, index, repo)? {
+        if digest_decision(state, &digest)? == DigestDecision::Clear {
+            names.push(tag);
+        }
+    }
+    Ok(names)
+}
+
+fn add_referrer(
+    state: &ServingState,
+    active: bool,
+    descriptor: serde_json::Value,
+    seen: &mut std::collections::HashSet<String>,
+    manifests: &mut Vec<serde_json::Value>,
+) -> Result<(), ServeError> {
+    let Some(digest) = descriptor["digest"].as_str() else {
+        return Ok(());
+    };
+    if (!active || digest_decision(state, digest)? == DigestDecision::Clear) && seen.insert(digest.to_owned()) {
+        manifests.push(descriptor);
+    }
+    Ok(())
+}
+
+fn referrers_response(manifests: &[serde_json::Value], filter: Option<&str>) -> Response {
+    let document = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": manifests,
+    });
+    let mut response = (
+        [(header::CONTENT_TYPE, "application/vnd.oci.image.index.v1+json")],
+        document.to_string(),
+    )
+        .into_response();
+    if filter.is_some() {
+        response
+            .headers_mut()
+            .insert("oci-filters-applied", HeaderValue::from_static("artifactType"));
+    }
+    response
 }
 
 /// Apply distribution-spec `n`/`last` pagination to a sorted set: the page after `last`, truncated to

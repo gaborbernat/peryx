@@ -46,6 +46,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 "only sha256 blob digests are supported",
             ));
         };
+        if digest_decision(state, digest)? == DigestDecision::Revoked {
+            return Ok(error_response(ErrorCode::BlobUnknown, "blob unknown"));
+        }
         // A blob is content-addressed, so its digest is the strong validator for its bytes.
         let etag = format!("\"{digest}\"");
         let asked = BlobRequest {
@@ -185,6 +188,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 "only sha256 blob digests are supported",
             ));
         };
+        if digest_decision(state, digest)? == DigestDecision::Revoked {
+            return Ok(error_response(ErrorCode::BlobUnknown, "blob unknown"));
+        }
         match self.ensure_blob(state, index, repo, digest, &storage).await? {
             BlobFetch::Stored(_) => {}
             BlobFetch::Absent => return Ok(error_response(ErrorCode::BlobUnknown, "blob unknown")),

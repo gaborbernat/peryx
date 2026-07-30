@@ -1,4 +1,6 @@
 use std::num::NonZeroUsize;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,6 +11,8 @@ use http_body_util::BodyExt as _;
 use peryx_driver::IndexKind as RuntimeKind;
 use peryx_storage::meta::{MetaStore, PolicyDecisionQuery};
 use peryx_upstream::Auth;
+#[cfg(unix)]
+use peryx_upstream::{CredentialFailure, ExecCredentialConfig};
 use rstest::rstest;
 use tower::ServiceExt as _;
 use wiremock::matchers::{header as match_header, header_regex, method, path};
@@ -103,6 +107,7 @@ fn cached(name: &str, upstream: &str) -> IndexConfig {
             username: None,
             password: None,
             token: None,
+            credential_exec: None,
             credential_refresh: None,
             tls: crate::config::UpstreamTlsConfig::default(),
             routing: None,
@@ -203,6 +208,7 @@ fn routed(metadata: &str, artifact: Option<&str>) -> IndexConfig {
             username: None,
             password: None,
             token: None,
+            credential_exec: None,
             credential_refresh: None,
             tls: crate::config::UpstreamTlsConfig::default(),
         }],
@@ -211,6 +217,36 @@ fn routed(metadata: &str, artifact: Option<&str>) -> IndexConfig {
         pins: std::collections::BTreeMap::new(),
     }));
     index
+}
+
+#[cfg(unix)]
+fn exec_credential_helper(dir: &tempfile::TempDir) -> (ExecCredentialConfig, PathBuf, PathBuf) {
+    let executable = dir.path().join("credential-helper");
+    let executions = dir.path().join("credential-executions");
+    let requests = dir.path().join("credential-requests");
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nset -u\nrequest=$(/bin/cat)\nprintf '%s' \"$request\" > {}\nprintf x >> {}\nprintf '%s' \
+             '{{\"version\":1,\"expires_at\":\"2099-01-01T00:00:00Z\",\"type\":\"bearer\",\"token\":\"exec-token\"}}'\n",
+            quote(&requests),
+            quote(&executions),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (
+        ExecCredentialConfig::new(
+            vec![executable.display().to_string()],
+            Duration::from_secs(5),
+            Vec::new(),
+            CredentialFailure::Fail,
+        )
+        .unwrap(),
+        executions,
+        requests,
+    )
 }
 
 #[tokio::test]
@@ -485,6 +521,116 @@ async fn test_routed_metadata_and_artifacts_share_credential_refresh() {
     assert_eq!(
         (metadata_response.status(), artifact.as_slice()),
         (StatusCode::OK, b"wheelbytes".as_slice())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_exec_credential_authenticates_a_cached_upstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/pkg/"))
+        .and(header_regex("authorization", "^Bearer exec-token$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let (exec, executions, requests) = exec_credential_helper(&dir);
+    let mut index = cached("corp", &format!("{}/simple/", upstream.uri()));
+    let IndexKind::Cached { credential_exec, .. } = &mut index.kind else {
+        panic!("expected a cached index");
+    };
+    *credential_exec = Some(exec);
+    let state = build_state(&Config {
+        data_dir: dir.path().join("data"),
+        indexes: vec![index],
+        ..Config::default()
+    })
+    .unwrap();
+    let RuntimeKind::Cached { client, .. } = &state.indexes[0].kind else {
+        panic!("expected a cached index");
+    };
+
+    let response = client
+        .send_conditional(client.base().join("pkg/").unwrap(), "application/json", None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (response.status(), std::fs::read(executions).unwrap().len()),
+        (StatusCode::OK, 1)
+    );
+    assert_eq!(
+        std::fs::read_to_string(requests).unwrap(),
+        format!(r#"{{"version":1,"origin":"{}","scope":"read"}}"#, upstream.uri())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_routed_metadata_and_artifacts_share_an_exec_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let metadata = MockServer::start().await;
+    let artifacts = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/pkg/"))
+        .and(header_regex("authorization", "^Bearer exec-token$"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&metadata)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/packages/pkg.whl"))
+        .and(header_regex("authorization", "^Bearer exec-token$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wheelbytes".to_vec()))
+        .expect(1)
+        .mount(&artifacts)
+        .await;
+    let (exec, executions, _) = exec_credential_helper(&dir);
+    let mut index = routed(
+        &format!("{}/simple/", metadata.uri()),
+        Some(&format!("{}/packages/", artifacts.uri())),
+    );
+    let IndexKind::Cached {
+        routing: Some(routing), ..
+    } = &mut index.kind
+    else {
+        panic!("expected a routed cached index");
+    };
+    routing.upstreams[0].credential_exec = Some(exec);
+    let state = build_state(&Config {
+        data_dir: dir.path().join("data"),
+        indexes: vec![index],
+        ..Config::default()
+    })
+    .unwrap();
+    let source = state.upstream_routes["pypi"].source("primary").unwrap();
+
+    let metadata_response = source
+        .client()
+        .send_conditional(source.client().base().join("pkg/").unwrap(), "application/json", None)
+        .await
+        .unwrap();
+    let artifact = source
+        .artifacts()
+        .stream_bytes(&format!("{}/pkg.whl", artifacts.uri()))
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        (
+            metadata_response.status(),
+            artifact,
+            std::fs::read(executions).unwrap().len()
+        ),
+        (StatusCode::OK, b"wheelbytes".to_vec(), 1)
     );
 }
 

@@ -136,6 +136,104 @@ the `_file`/`_env` reference and refresh policy, not the resolved secret.
 To migrate an inlined credential, move the value into a file or environment variable and replace `password`/`token` with
 its `_file`/`_env` sibling; the inline keys keep working, so migrate one upstream at a time.
 
+### Exec credential helpers
+
+Use `[index.credential_exec]`, or `[index.upstream.credential_exec]` below one routed source, when an identity system
+issues short-lived credentials on demand. An exec helper replaces `username`, `password`, `token`, and their file/env
+forms. Its response expiry also replaces the `credential_refresh_*` controls.
+
+```toml
+[[index]]
+name = "corp"
+cached = "https://packages.corp.example/simple/"
+
+[index.credential_exec]
+argv = ["/usr/local/bin/peryx-credential", "--profile", "production"]
+timeout_secs = 30
+environment = ["UPSTREAM_TOKEN"]
+failure = "fail"
+```
+
+peryx starts `argv` directly, without a shell, and writes one compact JSON object to standard input:
+
+```json
+{
+  "version": 1,
+  "origin": "https://packages.corp.example",
+  "scope": "read"
+}
+```
+
+The helper must write exactly one version-1 Basic or bearer response. `expires_at` is an RFC 3339 timestamp:
+
+```json
+{
+  "version": 1,
+  "expires_at": "2027-01-01T00:00:00Z",
+  "type": "basic",
+  "username": "service",
+  "password": "secret"
+}
+```
+
+```json
+{
+  "version": 1,
+  "expires_at": "2027-01-01T00:00:00Z",
+  "type": "bearer",
+  "token": "secret"
+}
+```
+
+The origin contains only scheme, host, and explicit port. Query strings, paths, and URL credentials never reach the
+helper. `scope` is `read` for upstream metadata and artifacts. Unknown fields, response types, and protocol versions
+fail closed.
+
+The cached credential is shared by concurrent requests and stays on the lock-free provider path until 30 seconds before
+expiry. A response already inside that safety margin fails instead of starting a helper on every request. One eligible
+upstream `401` refreshes and replays a credential generation once; concurrent rejections share that refresh. A failed
+helper is retried after 30 seconds. `failure = "fail"` rejects requests while no valid credential is available;
+`"anonymous"` uses no authorization until a later refresh succeeds.
+
+Execution is bounded to 64 argv items and 32 KiB of argv data, 1–300 seconds, 64 inherited environment names, 64 KiB of
+standard output, and eight helpers across the process. The default timeout is 30 seconds. peryx clears the child
+environment, restores only the named variables that exist, discards standard error, and kills and reaps the process
+group on timeout or oversized output. Process arguments, output, upstream URL details, and returned credentials are not
+included in diagnostics.
+
+Do not put credentials in `argv`: process listings and config snapshots retain arguments. Pass only the environment
+names a helper needs, keep the executable and its parent directories non-writable by the peryx service account, and
+write no secret to standard error. The helper must treat standard input as untrusted and should return immediately after
+writing its response.
+
+A minimal helper can validate the request before returning a credential:
+
+```python
+#!/usr/local/bin/python3
+import json
+import os
+import sys
+from datetime import UTC, datetime, timedelta
+
+request = json.load(sys.stdin)
+if request != {
+    "version": 1,
+    "origin": "https://packages.corp.example",
+    "scope": "read",
+}:
+    raise SystemExit(2)
+json.dump(
+    {
+        "version": 1,
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
+        "type": "bearer",
+        "token": os.environ["UPSTREAM_TOKEN"],
+    },
+    sys.stdout,
+    separators=(",", ":"),
+)
+```
+
 ## Upstream netrc credentials
 
 Set `netrc` to opt into one shared file of Basic credentials for cached upstreams. peryx reads and parses the file once
@@ -287,6 +385,7 @@ the role. peryx rejects unknown keys.
 | `credential_refresh_secs`            | cached  | Minimum seconds between credential source reads                       | (none)             |
 | `credential_refresh_on_unauthorized` | cached  | Reload and replay once after credential rejection                     | `true`             |
 | `credential_failure`                 | cached  | Reload failure behavior: `fail` or `anonymous`                        | `fail`             |
+| `credential_exec`                    | cached  | Nested short-lived credential helper configuration                    | (none)             |
 | `ca_file`                            | cached  | PEM CA bundle added to platform trust for this upstream               | (none)             |
 | `client_cert_file`                   | cached  | PEM client certificate chain; requires `client_key_file`              | (none)             |
 | `client_key_file`                    | cached  | Matching unencrypted PEM client key; requires `client_cert_file`      | (none)             |

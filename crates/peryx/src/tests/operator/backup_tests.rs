@@ -11,6 +11,16 @@ use crate::config::{
 };
 use crate::operator;
 
+#[cfg(windows)]
+const fn exec_path() -> &'static str {
+    r"C:\credential-helper.exe"
+}
+
+#[cfg(not(windows))]
+const fn exec_path() -> &'static str {
+    "/credential-helper"
+}
+
 use super::backup_fixture;
 
 #[test]
@@ -336,9 +346,50 @@ client_key_file = "/run/secrets/internal-client-key.pem"
 [[index.upstream]]
 name = "public"
 url = "https://pypi.org/simple/"
-token = "bearer"
+
+[index.upstream.credential_exec]
+argv = [{:?}, "--profile", "public"]
+timeout_secs = 12
+environment = ["HOME", "AWS_PROFILE"]
+failure = "anonymous"
+
+[[index.upstream]]
+name = "backup"
+url = "https://backup.example/simple/"
+
+[index.upstream.credential_exec]
+argv = [{:?}]
 "#,
-        data_dir.display().to_string()
+        data_dir.display().to_string(),
+        exec_path(),
+        exec_path()
+    );
+    let config = Config::default()
+        .apply(config::from_toml(PathBuf::from("source.toml"), &source).unwrap())
+        .unwrap();
+    let backup = root.path().join("backup");
+
+    operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
+    let snapshot = std::fs::read_to_string(backup.join("config.toml")).unwrap();
+    let restored = Config::default()
+        .apply(config::from_toml(PathBuf::from("config.toml"), &snapshot).unwrap())
+        .unwrap();
+
+    assert_eq!(restored, config);
+}
+
+#[test]
+fn test_backup_config_round_trips_exec_credentials() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    drop(MetaStore::open(data_dir.join("peryx.redb")).unwrap());
+    let source = format!(
+        "data_dir = {:?}\n[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\n\
+         [index.credential_exec]\nargv = [{:?}, \"--profile\", \"public\"]\ntimeout_secs = 12\n\
+         environment = [\"HOME\", \"AWS_PROFILE\"]\nfailure = \"anonymous\"\n",
+        data_dir.display().to_string(),
+        exec_path()
     );
     let config = Config::default()
         .apply(config::from_toml(PathBuf::from("source.toml"), &source).unwrap())

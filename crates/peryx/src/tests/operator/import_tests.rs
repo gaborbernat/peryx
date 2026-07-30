@@ -385,6 +385,7 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
                 username: None,
                 password: None,
                 token: None,
+                credential_exec: None,
                 credential_refresh: None,
                 tls: crate::config::UpstreamTlsConfig::default(),
                 routing: None,

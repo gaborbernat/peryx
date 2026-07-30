@@ -2,6 +2,7 @@
 
 mod credential;
 mod error;
+mod exec;
 mod netrc;
 pub mod retry;
 mod tls;
@@ -30,6 +31,7 @@ pub use self::credential::{
     CredentialRefresh, CredentialSnapshot,
 };
 pub use self::error::{RangeError, UpstreamError};
+pub use self::exec::{CredentialScope, ExecCredentialConfig, ExecCredentialConfigError, ExecCredentialProviderError};
 pub use self::netrc::{Netrc, NetrcError};
 pub use self::response::FileHead;
 pub use self::tls::{UpstreamTls, UpstreamTlsError};

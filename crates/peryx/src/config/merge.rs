@@ -10,6 +10,7 @@ use peryx_driver::jobs::{
 };
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
 use peryx_identity::UPLOAD_TOKEN_NAME;
+use peryx_upstream::{CredentialFailure, ExecCredentialConfig, ExecCredentialConfigError};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -24,8 +25,8 @@ use super::model::{
 };
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawAvailability, RawBlobStorage, RawIndex, RawJobSchedule, RawReplication, RawScheduledJob, RawTls,
-    RawToken, RawUpstream, RawWebhook,
+    RawAcme, RawAvailability, RawBlobStorage, RawCredentialExec, RawIndex, RawJobSchedule, RawReplication,
+    RawScheduledJob, RawTls, RawToken, RawUpstream, RawWebhook,
 };
 
 impl Config {
@@ -443,6 +444,7 @@ fn validate_index_kind(raw: &RawIndex) -> Result<(), ConfigError> {
             || raw.token.is_some()
             || raw.token_file.is_some()
             || raw.token_env.is_some()
+            || raw.credential_exec.is_some()
             || raw.credential_refresh_secs.is_some()
             || raw.credential_refresh_on_unauthorized.is_some()
             || raw.credential_failure.is_some())
@@ -456,11 +458,16 @@ fn validate_index_kind(raw: &RawIndex) -> Result<(), ConfigError> {
         && raw.upstreams.is_empty()
         && (raw.credential_refresh_secs.is_some()
             || raw.credential_refresh_on_unauthorized.is_some()
-            || raw.credential_failure.is_some())
+            || raw.credential_failure.is_some()
+            || raw.credential_exec.is_some())
     {
         return Err(ConfigError::Index {
             name: raw.name.clone(),
-            reason: "credential refresh requires a cached index",
+            reason: if raw.credential_exec.is_some() {
+                "upstream credentials require a cached index"
+            } else {
+                "credential refresh requires a cached index"
+            },
         });
     }
     if !raw.upstreams.is_empty()
@@ -493,6 +500,14 @@ fn classify_legacy_cached(raw: &mut RawIndex, upstream: String) -> Result<IndexK
                 reason,
             }
         })?;
+    let credential_exec = credential_exec(
+        &raw.name,
+        raw.credential_exec.take(),
+        raw.username.is_some() || password.is_some() || token.is_some(),
+        raw.credential_refresh_secs.is_some()
+            || raw.credential_refresh_on_unauthorized.is_some()
+            || raw.credential_failure.is_some(),
+    )?;
     let credential_refresh = credential_refresh(
         &raw.name,
         token.as_ref().or_else(|| raw.username.as_ref().and(password.as_ref())),
@@ -505,6 +520,7 @@ fn classify_legacy_cached(raw: &mut RawIndex, upstream: String) -> Result<IndexK
         username: raw.username.take(),
         password,
         token,
+        credential_exec,
         credential_refresh,
         tls,
         routing: None,
@@ -525,6 +541,7 @@ fn classify_routed_cached(raw: &mut RawIndex) -> Result<IndexKind, ConfigError> 
         username: primary.username.clone(),
         password: primary.password.clone(),
         token: primary.token.clone(),
+        credential_exec: primary.credential_exec.clone(),
         credential_refresh: primary.credential_refresh,
         tls: primary.tls.clone(),
         routing: Some(Box::new(UpstreamRoutingConfig {
@@ -551,6 +568,11 @@ fn classify_upstream(index: &str, raw: RawUpstream) -> Result<UpstreamConfig, Co
             name: index.to_owned(),
             reason,
         })?;
+    let static_credentials = raw.username.is_some() || password.is_some() || token.is_some();
+    let refresh_controls = raw.credential_refresh_secs.is_some()
+        || raw.credential_refresh_on_unauthorized.is_some()
+        || raw.credential_failure.is_some();
+    let credential_exec = credential_exec(index, raw.credential_exec, static_credentials, refresh_controls)?;
     let credential_refresh = credential_refresh(
         index,
         token.as_ref().or_else(|| raw.username.as_ref().and(password.as_ref())),
@@ -566,8 +588,58 @@ fn classify_upstream(index: &str, raw: RawUpstream) -> Result<UpstreamConfig, Co
         credential_refresh,
         password,
         token,
+        credential_exec,
         tls: upstream_tls(index, raw.ca_file, raw.client_cert_file, raw.client_key_file)?,
     })
+}
+
+fn credential_exec(
+    index: &str,
+    raw: Option<RawCredentialExec>,
+    static_credential: bool,
+    refresh_controls: bool,
+) -> Result<Option<ExecCredentialConfig>, ConfigError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if static_credential {
+        return Err(ConfigError::Index {
+            name: index.to_owned(),
+            reason: "`credential_exec` is mutually exclusive with username, password, and token settings",
+        });
+    }
+    if refresh_controls {
+        return Err(ConfigError::Index {
+            name: index.to_owned(),
+            reason: "`credential_exec` controls its own expiry and failure behavior",
+        });
+    }
+    ExecCredentialConfig::new(
+        raw.argv,
+        Duration::from_secs(raw.timeout_secs.unwrap_or(30)),
+        raw.environment,
+        match raw.failure.unwrap_or_default() {
+            CredentialFailureMode::Fail => CredentialFailure::Fail,
+            CredentialFailureMode::Anonymous => CredentialFailure::Anonymous,
+        },
+    )
+    .map(Some)
+    .map_err(|error| ConfigError::Index {
+        name: index.to_owned(),
+        reason: exec_credential_error(error),
+    })
+}
+
+const fn exec_credential_error(error: ExecCredentialConfigError) -> &'static str {
+    match error {
+        ExecCredentialConfigError::EmptyArgv => "`credential_exec.argv` must not be empty",
+        ExecCredentialConfigError::RelativeExecutable => {
+            "`credential_exec.argv` must start with an absolute executable path"
+        }
+        ExecCredentialConfigError::ArgumentNul => "`credential_exec.argv` contains a null byte",
+        ExecCredentialConfigError::ArgvLimit => "`credential_exec.argv` exceeds its item or byte limit",
+        ExecCredentialConfigError::EnvironmentLimit => "`credential_exec.environment` exceeds its item limit",
+        ExecCredentialConfigError::EnvironmentName => "`credential_exec.environment` contains an invalid name",
+        ExecCredentialConfigError::Timeout => "`credential_exec.timeout_secs` must be between 1 and 300",
+    }
 }
 
 fn credential_refresh(

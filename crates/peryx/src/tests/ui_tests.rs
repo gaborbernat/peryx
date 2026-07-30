@@ -61,6 +61,7 @@ fn ui_config(dir: &tempfile::TempDir) -> Config {
                     username: None,
                     password: None,
                     token: None,
+                    credential_exec: None,
                     credential_refresh: None,
                     tls: crate::config::UpstreamTlsConfig::default(),
                     routing: None,

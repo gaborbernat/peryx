@@ -17,8 +17,8 @@ use peryx_policy::{Policy, PolicyDecisionRecorder, PolicyEvaluation};
 use peryx_storage::blob::{BlobStorage, S3Config, S3Credentials};
 use peryx_storage::meta::{MetaStore, NewPolicyDecision};
 use peryx_upstream::{
-    Auth, CredentialError, CredentialFailure, CredentialProvider, CredentialRefresh, NamedUpstream, Netrc,
-    UpstreamClient, UpstreamRouter, UpstreamTls, redact_url,
+    Auth, CredentialError, CredentialFailure, CredentialProvider, CredentialRefresh, CredentialScope,
+    ExecCredentialConfig, NamedUpstream, Netrc, UpstreamClient, UpstreamRouter, UpstreamTls, redact_url,
 };
 
 use crate::config::{
@@ -382,6 +382,7 @@ struct UpstreamCredentials {
     username: Option<String>,
     password: Option<SecretSource>,
     token: Option<SecretSource>,
+    exec: Option<ExecCredentialConfig>,
     refresh: Option<CredentialRefreshConfig>,
 }
 
@@ -448,6 +449,7 @@ fn build_credential_providers(configs: &[IndexConfig], netrc: Option<&Netrc>) ->
                 username,
                 password,
                 token,
+                credential_exec,
                 credential_refresh,
                 routing: None,
                 ..
@@ -461,6 +463,7 @@ fn build_credential_providers(configs: &[IndexConfig], netrc: Option<&Netrc>) ->
                             username: username.clone(),
                             password: password.clone(),
                             token: token.clone(),
+                            exec: credential_exec.clone(),
                             refresh: *credential_refresh,
                         },
                         netrc,
@@ -480,6 +483,7 @@ fn build_credential_providers(configs: &[IndexConfig], netrc: Option<&Netrc>) ->
                                 username: upstream.username.clone(),
                                 password: upstream.password.clone(),
                                 token: upstream.token.clone(),
+                                exec: upstream.credential_exec.clone(),
                                 refresh: upstream.credential_refresh,
                             },
                             netrc,
@@ -499,6 +503,11 @@ fn build_credential_provider(
     credentials: UpstreamCredentials,
     netrc: Option<&Netrc>,
 ) -> anyhow::Result<CredentialProvider> {
+    if let Some(exec) = credentials.exec {
+        return exec
+            .provider(upstream, CredentialScope::Read)
+            .context(format!("configure the credential helper of index {index}"));
+    }
     let mut auth = resolve_upstream_auth(&credentials)
         .with_context(|| format!("read the upstream credentials of index {index}"))?;
     if auth == Auth::None
@@ -582,22 +591,25 @@ fn build_upstream_routes(
                     let Some(artifact_url) = &upstream.artifact_url else {
                         return Ok(named);
                     };
-                    let credentials =
-                        if upstream.token.is_some() || upstream.username.is_some() && upstream.password.is_some() {
-                            credential_provider(credential_providers, &index.name, &upstream.name)
-                        } else {
-                            build_credential_provider(
-                                &index.name,
-                                artifact_url,
-                                UpstreamCredentials {
-                                    username: upstream.username.clone(),
-                                    password: upstream.password.clone(),
-                                    token: upstream.token.clone(),
-                                    refresh: None,
-                                },
-                                netrc,
-                            )?
-                        };
+                    let credentials = if upstream.credential_exec.is_some()
+                        || upstream.token.is_some()
+                        || upstream.username.is_some() && upstream.password.is_some()
+                    {
+                        credential_provider(credential_providers, &index.name, &upstream.name)
+                    } else {
+                        build_credential_provider(
+                            &index.name,
+                            artifact_url,
+                            UpstreamCredentials {
+                                username: upstream.username.clone(),
+                                password: upstream.password.clone(),
+                                token: upstream.token.clone(),
+                                exec: None,
+                                refresh: None,
+                            },
+                            netrc,
+                        )?
+                    };
                     let mirror = build_upstream_client(&index.name, artifact_url, credentials, &tls, &upstream.url)?;
                     Ok(named.with_artifact_mirror(mirror, routing.fallback))
                 })

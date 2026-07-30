@@ -273,6 +273,7 @@ pub struct RawIndex {
     pub token: Option<String>,
     pub token_file: Option<PathBuf>,
     pub token_env: Option<String>,
+    pub credential_exec: Option<RawCredentialExec>,
     pub credential_refresh_secs: Option<u64>,
     pub credential_refresh_on_unauthorized: Option<bool>,
     pub credential_failure: Option<CredentialFailureMode>,
@@ -311,12 +312,25 @@ pub struct RawUpstream {
     pub token: Option<String>,
     pub token_file: Option<PathBuf>,
     pub token_env: Option<String>,
+    pub credential_exec: Option<RawCredentialExec>,
     pub credential_refresh_secs: Option<u64>,
     pub credential_refresh_on_unauthorized: Option<bool>,
     pub credential_failure: Option<CredentialFailureMode>,
     pub ca_file: Option<PathBuf>,
     pub client_cert_file: Option<PathBuf>,
     pub client_key_file: Option<PathBuf>,
+}
+
+/// One short-lived upstream credential helper before command validation.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawCredentialExec {
+    #[serde(default)]
+    pub argv: Vec<String>,
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub environment: Vec<String>,
+    pub failure: Option<CredentialFailureMode>,
 }
 
 /// A raw `[[index.access_token]]` table: one named credential, its grant, and when it stops working.

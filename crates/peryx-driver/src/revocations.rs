@@ -12,7 +12,8 @@ use peryx_storage::meta::{
 };
 
 const CACHE_CAPACITY: u64 = 16_384;
-const CACHE_TTL: Duration = Duration::from_mins(1);
+/// Maximum age shared serving and HTTP caches may retain a digest decision.
+pub const DECISION_CACHE_TTL_SECS: u64 = 60;
 
 /// Shared digest-revocation operations for HTTP management and future download enforcement.
 #[derive(Clone)]
@@ -29,7 +30,7 @@ impl RevocationService {
             store,
             decisions: Cache::builder()
                 .max_capacity(CACHE_CAPACITY)
-                .time_to_live(CACHE_TTL)
+                .time_to_live(Duration::from_secs(DECISION_CACHE_TTL_SECS))
                 .build(),
             cache_gate: Arc::new(RwLock::new(())),
         }

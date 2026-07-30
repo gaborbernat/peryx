@@ -14,6 +14,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
   # The opencontainers/distribution-spec commit whose conformance suite peryx is tested against.
   DISTRIBUTION_SPEC_REF: fcfba1ec55526073f48b2f6d4e3d7eef410ddcbc
 

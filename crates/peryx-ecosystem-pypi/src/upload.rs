@@ -372,11 +372,12 @@ fn prepared_provenance(
 ///
 /// # Errors
 /// Returns [`UploadStoreError`] if a blob write, metadata write, or existing-record decode fails.
-pub async fn store_prepared(
+pub(crate) async fn store_prepared(
     meta: &MetaStore,
     blobs: &BlobStorage,
     name: &str,
     prepared: PreparedUpload,
+    mut quota: Option<crate::quota::PendingQuota>,
 ) -> Result<bool, UploadStoreError> {
     let metadata = blobs.stage_bytes(&prepared.metadata).await?;
     let metadata_digest = metadata.digest().clone();
@@ -391,7 +392,18 @@ pub async fn store_prepared(
     if let Some(provenance) = provenance {
         provenance.commit().await?;
     }
-    store_record(meta, name, record, &metadata_digest, provenance_ref.as_ref())
+    let stored = store_record(
+        meta,
+        name,
+        record,
+        &metadata_digest,
+        provenance_ref.as_ref(),
+        quota.as_ref(),
+    )?;
+    if let Some(quota) = &mut quota {
+        quota.finish();
+    }
+    Ok(stored)
 }
 
 /// Blocking counterpart for offline import commands.
@@ -419,7 +431,7 @@ pub fn store_prepared_blocking(
     if let Some(provenance) = provenance {
         blocking.commit(provenance)?;
     }
-    store_record(meta, name, record, &metadata_digest, provenance_ref.as_ref())
+    store_record(meta, name, record, &metadata_digest, provenance_ref.as_ref(), None)
 }
 
 /// The digest and byte length a staged provenance blob contributes to its store record.
@@ -462,6 +474,7 @@ fn store_record(
     prepared: PreparedRecord,
     metadata_digest: &Digest,
     provenance: Option<&(Digest, u64)>,
+    quota: Option<&crate::quota::PendingQuota>,
 ) -> Result<bool, UploadStoreError> {
     let PreparedRecord {
         normalized,
@@ -476,30 +489,31 @@ fn store_record(
     let hashes = BTreeMap::from([("sha256".to_owned(), metadata_digest.as_str().to_owned())]);
     record.file.set_metadata(CoreMetadata::Hashes(hashes));
     let body = to_json(&record).into_bytes();
-    meta.publish_file_if(
-        &PublishedFile {
-            index: name,
-            normalized: &normalized,
-            display: &display_name,
-            filename: &filename,
-            artifact_sha256: content_digest.as_str(),
-            artifact_size: content_size,
-            record: &body,
-            version: record.version.as_str(),
-            submitted_at_unix,
-            metadata: Some(MetadataSibling {
-                url: "uploaded",
-                metadata_sha256: metadata_digest.as_str(),
-                size: metadata.len() as u64,
-                source: name,
-            }),
-            provenance: provenance.map(|(digest, size)| ProvenanceSibling {
-                provenance_sha256: digest.as_str(),
-                size: *size,
-            }),
-        },
-        |existing| upload_conflict(existing, content_digest.as_str(), &filename),
-    )
+    let file = PublishedFile {
+        index: name,
+        normalized: &normalized,
+        display: &display_name,
+        filename: &filename,
+        artifact_sha256: content_digest.as_str(),
+        artifact_size: content_size,
+        record: &body,
+        version: record.version.as_str(),
+        submitted_at_unix,
+        metadata: Some(MetadataSibling {
+            url: "uploaded",
+            metadata_sha256: metadata_digest.as_str(),
+            size: metadata.len() as u64,
+            source: name,
+        }),
+        provenance: provenance.map(|(digest, size)| ProvenanceSibling {
+            provenance_sha256: digest.as_str(),
+            size: *size,
+        }),
+        quota: quota.map(crate::quota::PendingQuota::record),
+    };
+    meta.publish_file_if(&file, |existing| {
+        upload_conflict(existing, content_digest.as_str(), &filename)
+    })
 }
 
 /// The upload publish precondition, evaluated inside the write transaction: a first upload commits,

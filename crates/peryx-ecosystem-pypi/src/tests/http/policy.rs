@@ -271,4 +271,169 @@ async fn test_policy_quota_allows_reupload_of_a_file_at_the_limit() {
 
     assert_eq!(upload_version(&h.state, "/root/pypi/", "1.0").await, StatusCode::OK);
     assert_eq!(upload_version(&h.state, "/root/pypi/", "1.0").await, StatusCode::OK);
+    assert_eq!(
+        h.state
+            .meta
+            .quota_project_usage("hosted", "peryxpkg")
+            .unwrap()
+            .file_bytes
+            .committed,
+        limit
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_disabled_upload_does_not_create_accounting() {
+    let h = harness_with(true, true).await;
+
+    assert_eq!(upload_version(&h.state, "/root/pypi/", "1.0").await, StatusCode::OK);
+    assert_eq!(
+        h.state.meta.quota_project_usage("hosted", "peryxpkg").unwrap(),
+        peryx_storage::meta::QuotaProjectUsage::default()
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_serializes_parallel_uploads_near_the_limit() {
+    let first = fixture_wheel_for("1.0");
+    let second = fixture_wheel_for("2.0");
+    let limit = first.len().max(second.len()) as u64;
+    let quota_policy = policy(move |neutral, _pypi| neutral.max_project_size_bytes = Some(limit));
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+    let first_fields = [
+        (":action", "file_upload"),
+        ("name", "peryxpkg"),
+        ("version", "1.0"),
+        ("filetype", "bdist_wheel"),
+    ];
+    let second_fields = [
+        (":action", "file_upload"),
+        ("name", "peryxpkg"),
+        ("version", "2.0"),
+        ("filetype", "bdist_wheel"),
+    ];
+    let (first_type, first_body) = multipart_body(&first_fields, Some(("peryxpkg-1.0-py3-none-any.whl", &first)));
+    let (second_type, second_body) = multipart_body(&second_fields, Some(("peryxpkg-2.0-py3-none-any.whl", &second)));
+    let auth = upload_auth();
+
+    let (first, second) = tokio::join!(
+        post_upload_response(&h.state, "/root/pypi/", Some(&auth), &first_type, first_body,),
+        post_upload_response(&h.state, "/root/pypi/", Some(&auth), &second_type, second_body,),
+    );
+    let statuses = [first.0, second.0];
+
+    assert_eq!(statuses.iter().filter(|status| **status == StatusCode::OK).count(), 1);
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::FORBIDDEN)
+            .count(),
+        1
+    );
+    assert!(
+        h.state
+            .meta
+            .quota_project_usage("hosted", "peryxpkg")
+            .unwrap()
+            .file_bytes
+            .committed
+            <= limit
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_audit_accepts_the_route_violation() {
+    let wheel = fixture_wheel_for("1.0");
+    let quota_policy = policy(|neutral, _pypi| {
+        neutral.max_project_size_bytes = Some(0);
+        neutral.quota_audit = true;
+    });
+    let h = harness_with_policies(true, true, Policy::default(), Policy::default(), quota_policy).await;
+
+    assert_eq!(upload_version(&h.state, "/root/pypi/", "1.0").await, StatusCode::OK);
+    assert_eq!(
+        h.state
+            .meta
+            .quota_project_usage("hosted", "peryxpkg")
+            .unwrap()
+            .file_bytes
+            .committed,
+        wheel.len() as u64
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_uses_the_stricter_enforcing_layer() {
+    let local = policy(|neutral, _pypi| neutral.max_project_size_bytes = Some(u64::MAX));
+    let overlay = policy(|neutral, _pypi| {
+        neutral.max_project_size_bytes = Some(0);
+        neutral.quota_audit = true;
+    });
+    let h = harness_with_policies(true, true, Policy::default(), local, overlay).await;
+
+    assert_eq!(
+        upload_version(&h.state, "/root/pypi/", "1.0").await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_releases_capacity_when_project_status_rejects() {
+    let quota_policy = policy(|neutral, _pypi| neutral.max_project_size_bytes = Some(u64::MAX));
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+    let digest = Digest::of(b"archived");
+    mount_status_detail(
+        &h.server,
+        "peryxpkg",
+        "archived",
+        "retired",
+        digest.as_str(),
+        &format!("{}/files/peryxpkg.whl", h.server.uri()),
+    )
+    .await;
+
+    assert_eq!(
+        upload_version(&h.state, "/root/pypi/", "1.0").await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        h.state
+            .meta
+            .quota_project_usage("hosted", "peryxpkg")
+            .unwrap()
+            .file_bytes,
+        peryx_storage::meta::QuotaValue::default()
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_records_admitted_and_rejected_metrics() {
+    let first = fixture_wheel_for("1.0");
+    let second = fixture_wheel_for("2.0");
+    let limit = (first.len() + second.len() - 1) as u64;
+    let quota_policy = policy(move |neutral, _pypi| neutral.max_project_size_bytes = Some(limit));
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+
+    assert_eq!(upload_version(&h.state, "/root/pypi/", "1.0").await, StatusCode::OK);
+    assert_eq!(
+        upload_version(&h.state, "/root/pypi/", "2.0").await,
+        StatusCode::FORBIDDEN
+    );
+
+    let expected = BTreeMap::from([("quota_admitted", 1), ("quota_rejected", 1)]);
+    for _ in 0..500 {
+        let counters = h.state.metrics.index_totals();
+        if counters.get("hosted").is_some_and(|hosted| {
+            expected
+                .iter()
+                .all(|(key, value)| hosted.ecosystem.get(key) == Some(value))
+        }) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "quota metrics never settled: {:?}",
+        h.state.metrics.index_totals().get("hosted")
+    );
 }

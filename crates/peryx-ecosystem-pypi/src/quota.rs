@@ -1,6 +1,28 @@
-use peryx_storage::meta::{AccountingClass, NewQuotaReservation};
+use peryx_core::Role;
+use peryx_driver::ServingState;
+use peryx_events::metrics::{Event, MetricFamily};
+use peryx_index::Index;
+use peryx_storage::meta::{AccountingClass, MetaStore, NewQuotaReservation, QuotaError, QuotaReservationRecord};
 
 use crate::PackageName;
+
+const QUOTA_ADMITTED_FAMILY: MetricFamily = MetricFamily {
+    key: "quota_admitted",
+    prom_name: "peryx_pypi_quota_admitted_total",
+    help: "Hosted PyPI uploads admitted against a project quota.",
+    ui_label: "Quota admitted uploads",
+    roles: &[Role::Hosted],
+};
+
+const QUOTA_REJECTED_FAMILY: MetricFamily = MetricFamily {
+    key: "quota_rejected",
+    prom_name: "peryx_pypi_quota_rejected_total",
+    help: "Hosted PyPI uploads refused by a project quota.",
+    ui_label: "Quota rejected uploads",
+    roles: &[Role::Hosted],
+};
+
+pub const QUOTA_FAMILIES: &[MetricFamily] = &[QUOTA_ADMITTED_FAMILY, QUOTA_REJECTED_FAMILY];
 
 /// Use the PEP 503 project key for quota accounting across equivalent name spellings.
 #[must_use]
@@ -21,5 +43,91 @@ pub const fn quota_reservation<'a>(
         bytes,
         class,
         created_at_unix,
+    }
+}
+
+/// A pending upload allocation that releases itself when its request future is cancelled.
+pub struct PendingQuota {
+    meta: MetaStore,
+    record: Option<QuotaReservationRecord>,
+}
+
+impl PendingQuota {
+    #[must_use]
+    pub(crate) const fn record(&self) -> &QuotaReservationRecord {
+        self.record.as_ref().expect("a pending quota has not finished")
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.record = None;
+    }
+}
+
+impl Drop for PendingQuota {
+    fn drop(&mut self) {
+        let Some(record) = self.record.take() else {
+            return;
+        };
+        let result = self.meta.release_quota_reservation(record.id);
+        log_release_error(result.as_ref().err(), &record.id);
+    }
+}
+
+fn log_release_error(err: Option<&QuotaError>, id: &dyn std::fmt::Display) {
+    if let Some(err) = err {
+        tracing::error!(%id, error = ?err, "failed to release cancelled upload quota");
+    }
+}
+
+/// A metered upload's admission decision.
+pub enum Admission {
+    Reserved(PendingQuota),
+    Rejected { total: u64 },
+}
+
+/// Reserve a project's upload bytes without scanning its stored files.
+///
+/// # Errors
+/// Returns a quota-store or identity error. A configured limit rejection is returned as
+/// [`Admission::Rejected`].
+pub fn admit_upload(
+    meta: &MetaStore,
+    request: NewQuotaReservation<'_>,
+    limit: u64,
+    audit: bool,
+) -> Result<Admission, QuotaError> {
+    match meta.reserve_project_quota(request, limit, audit) {
+        Ok(record) => Ok(Admission::Reserved(PendingQuota {
+            meta: meta.clone(),
+            record: Some(record),
+        })),
+        Err(QuotaError::ProjectExceeded { total }) => Ok(Admission::Rejected { total }),
+        Err(err) => Err(err),
+    }
+}
+
+pub fn record_decision(state: &ServingState, index: &Index, project: &str, rejected: bool) {
+    state.metrics.record(Event::Ecosystem {
+        route: index.route.clone(),
+        project: project.to_owned(),
+        filename: None,
+        family: if rejected {
+            QUOTA_REJECTED_FAMILY.key
+        } else {
+            QUOTA_ADMITTED_FAMILY.key
+        },
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_release_error_accepts_quota_errors() {
+        let error = QuotaError::Empty { field: "project" };
+
+        log_release_error(Some(&error), &"reservation");
+        log_release_error(None, &"reservation");
     }
 }

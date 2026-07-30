@@ -2,8 +2,9 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use crate::quota::PendingQuota;
 use crate::store::PypiStore as _;
-use crate::store::{Guard, PromotedRelease, UploadMutation};
+use crate::store::{Guard, PromotedRelease, UploadMutation, upload_key};
 use crate::upload::{self, PreparedUpload, TrashInfo, Uploaded};
 use crate::{ProjectStatus, Yanked, file_matches_version, parse_distribution_filename, to_json, versions_match};
 use peryx_core::path::local_file_url;
@@ -18,38 +19,30 @@ use super::resolve::resolve_detail_optional;
 ///
 /// # Errors
 /// Returns [`CacheError`] if a blob write, store write, or encode fails.
-pub async fn store_upload(state: &ServingState, name: &str, prepared: PreparedUpload) -> Result<bool, CacheError> {
+pub async fn store_upload(
+    state: &ServingState,
+    name: &str,
+    prepared: PreparedUpload,
+    quota: Option<PendingQuota>,
+) -> Result<bool, CacheError> {
     let project = prepared.normalized.clone();
-    let stored = upload::store_prepared(&state.meta, &state.blobs, name, prepared).await?;
+    let stored = upload::store_prepared(&state.meta, &state.blobs, name, prepared, quota).await?;
     if stored {
         state.invalidate_project(&project);
     }
     Ok(stored)
 }
 
-/// The total bytes a project's uploaded files already occupy on `hosted`, ignoring `filename`.
-///
-/// An accepted upload replaces the `filename` record in place rather than adding to it, so its
-/// bytes are excluded. Read before a hosted upload commits so a per-project size quota can reject
-/// one that would push the project past its limit.
+/// Whether the hosted target already owns a filename, which makes the immutable upload an
+/// idempotent no-op or a content conflict rather than a new quota allocation.
 ///
 /// # Errors
-/// Returns [`CacheError`] if the store read or a stored record's decode fails.
-pub fn project_upload_bytes(
-    state: &ServingState,
-    hosted: &str,
-    normalized: &str,
-    filename: &str,
-) -> Result<u64, CacheError> {
-    let mut total = 0_u64;
-    for (name, bytes) in state.meta.list_upload_entries(hosted, normalized)? {
-        if name == filename {
-            continue;
-        }
-        let uploaded: Uploaded = serde_json::from_slice(&bytes)?;
-        total = total.saturating_add(uploaded.file.size.unwrap_or(0));
-    }
-    Ok(total)
+/// Returns [`CacheError`] if the store lookup fails.
+pub fn upload_exists(state: &ServingState, hosted: &str, normalized: &str, filename: &str) -> Result<bool, CacheError> {
+    Ok(state
+        .meta
+        .get_driver_value(&upload_key(hosted, normalized, filename))?
+        .is_some())
 }
 
 /// Copy one uploaded release from one hosted layer to another without touching blob bytes.

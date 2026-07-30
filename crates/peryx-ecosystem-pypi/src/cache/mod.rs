@@ -29,9 +29,9 @@ pub use fetch::{
 };
 pub use metadata::{metadata_bytes, registered_file_size};
 pub use mutate::{
-    TrashContext, download_status, project_status, project_upload_bytes, promote_release, remove_files, restore_files,
-    set_yanked, store_upload,
+    TrashContext, download_status, project_status, promote_release, remove_files, restore_files, set_yanked,
 };
+pub(crate) use mutate::{store_upload, upload_exists};
 pub use page_stream::{PageOutcome, materialize_detail, stream_detail};
 pub use provenance::provenance_bytes;
 pub use resolve::{DetailPage, list_serial, resolve_detail, resolve_detail_page, resolve_list};
@@ -82,6 +82,8 @@ pub enum CacheError {
     RateLimited { retry_after: u64 },
     #[error(transparent)]
     Policy(#[from] PolicyDenial),
+    #[error(transparent)]
+    Quota(#[from] peryx_storage::meta::QuotaError),
 }
 
 impl From<crate::SimpleError> for CacheError {
@@ -142,6 +144,7 @@ impl CacheError {
             Self::Stream(err) => format!("file stream failed: {err}"),
             Self::RateLimited { retry_after } => format!("rate limit exceeded; retry after {retry_after} seconds"),
             Self::Policy(err) => err.reason.to_string(),
+            Self::Quota(err) => format!("quota accounting error: {err}"),
         }
     }
 }

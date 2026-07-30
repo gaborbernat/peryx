@@ -6,12 +6,12 @@ weight = 9
 
 Repository quotas account for content before a writer publishes package metadata. The storage API reserves capacity,
 then the caller commits the reservation with its metadata transaction or releases it after an error. The PyPI and OCI
-drivers expose identity constructors for this API.
+hosted write paths enforce their limits through this API.
 
 The OCI registry enforces these limits on every hosted push: a blob upload, a cross-repository mount, and a manifest
 publication each reserve capacity before the content becomes discoverable, commit that reservation in the same
-transaction that records the metadata, and release it when the write fails. An index that configures no quota keeps its
-original write path unchanged. PyPI enforcement adopts the same APIs in later work.
+transaction that records the metadata, and release it when the write fails. PyPI uploads reserve project bytes before
+blob storage, then commit with the visible file record. An index that configures no quota keeps its original write path.
 
 ## Limits
 
@@ -50,9 +50,9 @@ files in one repository that reference the same digest add two logical sizes and
 two repositories consumes capacity in both repositories. Peryx rejects a second size for a digest that the repository
 already accounts for.
 
-Project and version counters use reference counts. The first allocation for a project consumes one project slot, and the
-first allocation for a version consumes one slot in that project. Peryx frees each slot after the last allocation leaves
-it.
+PyPI project-limit reservations also track logical file bytes for their project. Project and version counters use
+reference counts. The first allocation for a project consumes one project slot, and the first allocation for a version
+consumes one slot in that project. Peryx frees each slot after the last allocation leaves it.
 
 ## Reservation lifecycle
 
@@ -73,6 +73,26 @@ driver transaction leaves its reservation pending, and a quota finalization fail
 `audit = true` records the limits that would reject a request and admits its reservation. The durable allocation record
 stores those violations for inspection. Audit mode still updates reserved and committed counters, which lets operators
 observe projected enforcement against real write traffic.
+
+## PyPI upload enforcement
+
+`max_project_size_bytes` bounds logical bytes published for one normalized PyPI project. A hosted upload reserves its
+distribution size after validation and before durable blob storage. The reservation commits in the same metadata
+transaction that makes the filename visible. Validation failures allocate nothing, while storage, metadata, project
+status, cancellation, and disconnect failures release pending capacity. An identical filename re-upload remains an
+idempotent success and does not add another allocation.
+
+A virtual upload route combines its project limit with the target hosted index. The lower configured limit applies. If
+both layers configure a limit, audit mode applies only when both layers enable `quota_audit`; an enforcing layer keeps
+the combined policy enforcing. A rejected upload returns the existing `403 Forbidden` policy response with rule
+`max-project-size` and leaves package metadata absent. Reads continue when current counted use exceeds a lowered limit.
+
+Setting `quota_audit = true` records a violation and accepts it when no other configured layer remains enforcing. Each
+metered decision increments `peryx_pypi_quota_admitted_total` or `peryx_pypi_quota_rejected_total`. These counters use
+the hosted role and contain no project label.
+
+The disabled path performs no reservation. Audit and enforcing modes replace the former project-history scan with
+indexed counter reads and one serialized reservation transaction, so request work does not grow with release history.
 
 ## OCI push enforcement
 
@@ -110,8 +130,9 @@ File-level backups contain the quota tables with the rest of the metadata store.
 
 The stored counters form the quota observability contract. Repository usage reports committed and reserved values for
 logical file bytes and accounted bytes, plus project counts. Project usage reports committed and reserved version
-counts. The reservation record identifies its class and state. It stores the creation time, the digest and size, and any
-audit violations.
+counts, plus logical file bytes when the driver enabled project accounting. The reservation record identifies its class
+and state. It stores the creation time, the digest and size, whether it contributes to project bytes, and any audit
+violations.
 
 Peryx does not export repository or project names as Prometheus labels. Such labels would create an unbounded metric
 cardinality and duplicate the durable counters. Management views and retention planning remain outside repository quota

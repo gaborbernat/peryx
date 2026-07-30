@@ -44,6 +44,7 @@ pub struct QuotaUsage {
 /// Version use for one repository project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuotaProjectUsage {
+    pub file_bytes: QuotaValue,
     pub versions: QuotaValue,
 }
 
@@ -100,6 +101,8 @@ pub struct QuotaReservationRecord {
     pub state: QuotaReservationState,
     pub created_at_unix: i64,
     pub violations: Vec<QuotaLimit>,
+    #[serde(default)]
+    pub project_file_bytes: bool,
 }
 
 /// Progress from one bounded restart repair pass.
@@ -131,6 +134,8 @@ pub enum QuotaError {
     ReservationUnavailable { id: Uuid },
     #[error("quota exceeded: {violations:?}")]
     Exceeded { violations: Vec<QuotaLimit> },
+    #[error("project quota exceeded at {total} bytes")]
+    ProjectExceeded { total: u64 },
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -148,6 +153,8 @@ impl References {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ProjectUsage {
     references: References,
+    #[serde(default)]
+    file_bytes: QuotaValue,
     versions: QuotaValue,
 }
 
@@ -167,6 +174,19 @@ struct ReservationRows {
     blob_key: String,
 }
 
+#[derive(Clone, Copy)]
+struct ReservationAdds {
+    accounted_bytes: bool,
+    project: bool,
+    version: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReleaseScope {
+    Any,
+    Pending,
+}
+
 impl MetaStore {
     /// Reserve counters after checking limits in the same write transaction.
     ///
@@ -177,10 +197,43 @@ impl MetaStore {
         request: NewQuotaReservation<'_>,
         limits: QuotaLimits,
     ) -> Result<QuotaReservationRecord, QuotaError> {
+        self.reserve_quota_inner(request, limits, None)
+    }
+
+    /// Reserve one project's logical file bytes after checking its limit in the counter write.
+    ///
+    /// # Errors
+    /// Returns a validation, limit, overflow, decode, or store error without changing counters.
+    pub fn reserve_project_quota(
+        &self,
+        request: NewQuotaReservation<'_>,
+        max_project_file_bytes: u64,
+        audit: bool,
+    ) -> Result<QuotaReservationRecord, QuotaError> {
+        if request.project.is_none() {
+            return Err(QuotaError::Empty { field: "project" });
+        }
+        self.reserve_quota_inner(
+            request,
+            QuotaLimits {
+                audit,
+                ..QuotaLimits::default()
+            },
+            Some(max_project_file_bytes),
+        )
+    }
+
+    fn reserve_quota_inner(
+        &self,
+        request: NewQuotaReservation<'_>,
+        limits: QuotaLimits,
+        max_project_file_bytes: Option<u64>,
+    ) -> Result<QuotaReservationRecord, QuotaError> {
         validate_request(&request)?;
+        let project_file_bytes = max_project_file_bytes.is_some();
         let txn = self.db.begin_write().map_err(MetaError::from)?;
         let mut rows = ReservationRows::read(&txn, &request)?;
-        let violations = rows.reserve(request.bytes, limits)?;
+        let violations = rows.reserve(request.bytes, limits, max_project_file_bytes)?;
 
         let reservation = QuotaReservationRecord {
             id: Uuid::new_v4(),
@@ -193,6 +246,7 @@ impl MetaStore {
             state: QuotaReservationState::Reserved,
             created_at_unix: request.created_at_unix,
             violations,
+            project_file_bytes,
         };
         rows.write(&txn, request.repository)?;
         write_record(&txn, QUOTA_RESERVATION, &reservation.id.to_string(), &reservation)?;
@@ -232,8 +286,40 @@ impl MetaStore {
         self.commit_driver_txn_at(
             None,
             None,
-            |txn| {
+            |txn, _| {
                 commit_reservation(txn, id)?
+                    .then_some(())
+                    .ok_or_else(|| QuotaError::ReservationUnavailable { id }.into())
+            },
+            body,
+        )
+    }
+
+    /// Commit or release a quota reservation in the same transaction as driver metadata, according
+    /// to the value returned by `body`.
+    ///
+    /// # Errors
+    /// Returns the body's error, [`QuotaError::ReservationUnavailable`], or a store error. Peryx
+    /// rolls back driver and quota rows when either step fails.
+    pub fn commit_driver_txn_with_quota_if<T, E>(
+        &self,
+        id: Uuid,
+        commit: impl FnOnce(&T) -> bool,
+        body: impl FnOnce(&mut super::DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
+    ) -> Result<T, E>
+    where
+        E: From<MetaError> + From<QuotaError>,
+    {
+        self.commit_driver_txn_at(
+            None,
+            None,
+            |txn, value| {
+                let available = if commit(value) {
+                    commit_reservation(txn, id)?
+                } else {
+                    release(txn, id, ReleaseScope::Pending)?
+                };
+                available
                     .then_some(())
                     .ok_or_else(|| QuotaError::ReservationUnavailable { id }.into())
             },
@@ -247,7 +333,7 @@ impl MetaStore {
     /// Returns a decode or store error without partially changing counters.
     pub fn release_quota_reservation(&self, id: Uuid) -> Result<bool, QuotaError> {
         let txn = self.db.begin_write().map_err(MetaError::from)?;
-        let released = release(&txn, id)?;
+        let released = release(&txn, id, ReleaseScope::Any)?;
         txn.commit().map_err(MetaError::from)?;
         Ok(released)
     }
@@ -276,7 +362,7 @@ impl MetaStore {
             (ids, entries.next().transpose().map_err(MetaError::from)?.is_some())
         };
         for id in &ids {
-            release(&txn, *id)?;
+            release(&txn, *id, ReleaseScope::Pending)?;
         }
         txn.commit().map_err(MetaError::from)?;
         Ok(QuotaRepairReport {
@@ -304,6 +390,7 @@ impl MetaStore {
         let table = txn.open_table(QUOTA_PROJECT)?;
         let project: ProjectUsage = read_record(&table, &identity_key((repository, project))?)?.unwrap_or_default();
         Ok(QuotaProjectUsage {
+            file_bytes: project.file_bytes,
             versions: project.versions,
         })
     }
@@ -374,18 +461,28 @@ impl ReservationRows {
         })
     }
 
-    fn reserve(&mut self, bytes: u64, limits: QuotaLimits) -> Result<Vec<QuotaLimit>, QuotaError> {
-        let adds_project = self.project_key.is_some() && self.project.references.total() == 0;
-        let adds_version = self.version_key.is_some() && self.version.total() == 0;
-        let adds_accounted_bytes = self.blob.references.total() == 0;
+    fn reserve(
+        &mut self,
+        bytes: u64,
+        limits: QuotaLimits,
+        max_project_file_bytes: Option<u64>,
+    ) -> Result<Vec<QuotaLimit>, QuotaError> {
+        let adds = ReservationAdds {
+            accounted_bytes: self.blob.references.total() == 0,
+            project: self.project_key.is_some() && self.project.references.total() == 0,
+            version: self.version_key.is_some() && self.version.total() == 0,
+        };
         ensure_total_add(self.usage.file_bytes, bytes)?;
-        if adds_accounted_bytes {
+        if max_project_file_bytes.is_some() {
+            ensure_total_add(self.project.file_bytes, bytes)?;
+        }
+        if adds.accounted_bytes {
             ensure_total_add(self.usage.accounted_bytes, bytes)?;
         }
-        if adds_project {
+        if adds.project {
             ensure_total_add(self.usage.projects, 1)?;
         }
-        if adds_version {
+        if adds.version {
             ensure_total_add(self.project.versions, 1)?;
         }
         ensure_references_add(self.blob.references)?;
@@ -395,31 +492,33 @@ impl ReservationRows {
         if self.version_key.is_some() {
             ensure_references_add(self.version)?;
         }
-        let violations = limit_violations(
-            &self.usage,
-            &self.project,
-            bytes,
-            adds_accounted_bytes,
-            adds_project,
-            adds_version,
-            limits,
-        );
+        let project_excess = max_project_file_bytes.and_then(|limit| {
+            let total = self.project.file_bytes.total() + bytes;
+            (total > limit).then_some(total)
+        });
+        let violations = limit_violations(self, bytes, adds, limits, project_excess.is_some());
         if !limits.audit && !violations.is_empty() {
+            if let Some(total) = project_excess {
+                return Err(QuotaError::ProjectExceeded { total });
+            }
             return Err(QuotaError::Exceeded { violations });
         }
 
         checked_add(&mut self.usage.file_bytes.reserved, bytes)?;
-        if adds_accounted_bytes {
+        if max_project_file_bytes.is_some() {
+            checked_add(&mut self.project.file_bytes.reserved, bytes)?;
+        }
+        if adds.accounted_bytes {
             checked_add(&mut self.usage.accounted_bytes.reserved, bytes)?;
         }
         checked_add(&mut self.blob.references.reserved, 1)?;
-        if adds_project {
+        if adds.project {
             checked_add(&mut self.usage.projects.reserved, 1)?;
         }
         if self.project_key.is_some() {
             checked_add(&mut self.project.references.reserved, 1)?;
         }
-        if adds_version {
+        if adds.version {
             checked_add(&mut self.project.versions.reserved, 1)?;
         }
         if self.version_key.is_some() {
@@ -442,21 +541,19 @@ impl ReservationRows {
 }
 
 fn limit_violations(
-    usage: &QuotaUsage,
-    project: &ProjectUsage,
+    rows: &ReservationRows,
     bytes: u64,
-    adds_accounted_bytes: bool,
-    adds_project: bool,
-    adds_version: bool,
+    adds: ReservationAdds,
     limits: QuotaLimits,
+    project_file_bytes_exceeded: bool,
 ) -> Vec<QuotaLimit> {
     let mut violations = Vec::new();
-    if limits.max_file_bytes.is_some_and(|limit| bytes > limit) {
+    if limits.max_file_bytes.is_some_and(|limit| bytes > limit) || project_file_bytes_exceeded {
         violations.push(QuotaLimit::FileBytes);
     }
-    if adds_accounted_bytes
+    if adds.accounted_bytes
         && limits.max_accounted_bytes.is_some_and(|limit| {
-            usage
+            rows.usage
                 .accounted_bytes
                 .total()
                 .checked_add(bytes)
@@ -465,16 +562,20 @@ fn limit_violations(
     {
         violations.push(QuotaLimit::AccountedBytes);
     }
-    if adds_project
-        && limits
-            .max_projects
-            .is_some_and(|limit| usage.projects.total().checked_add(1).is_none_or(|total| total > limit))
+    if adds.project
+        && limits.max_projects.is_some_and(|limit| {
+            rows.usage
+                .projects
+                .total()
+                .checked_add(1)
+                .is_none_or(|total| total > limit)
+        })
     {
         violations.push(QuotaLimit::Projects);
     }
-    if adds_version
+    if adds.version
         && limits.max_versions_per_project.is_some_and(|limit| {
-            project
+            rows.project
                 .versions
                 .total()
                 .checked_add(1)
@@ -550,9 +651,15 @@ fn transition_project(
         if project.references.committed == 0 {
             move_value(&mut usage.projects, 1)?;
         }
+        if reservation.project_file_bytes {
+            move_value(&mut project.file_bytes, reservation.bytes)?;
+        }
         project.references.reserved -= 1;
         checked_add(&mut project.references.committed, 1)?;
     } else {
+        if reservation.project_file_bytes {
+            subtract_value(&mut project.file_bytes, reservation.state, reservation.bytes);
+        }
         subtract_reference(&mut project.references, reservation.state);
         rebalance_or_remove(&mut usage.projects, project.references, reservation.state, 1)?;
     }
@@ -605,7 +712,7 @@ fn transition_version(
     Ok(())
 }
 
-fn release(txn: &redb::WriteTransaction, id: Uuid) -> Result<bool, QuotaError> {
+fn release(txn: &redb::WriteTransaction, id: Uuid, scope: ReleaseScope) -> Result<bool, QuotaError> {
     let key = id.to_string();
     let Some(reservation): Option<QuotaReservationRecord> = ({
         let table = txn.open_table(QUOTA_RESERVATION).map_err(MetaError::from)?;
@@ -613,6 +720,9 @@ fn release(txn: &redb::WriteTransaction, id: Uuid) -> Result<bool, QuotaError> {
     }) else {
         return Ok(false);
     };
+    if reservation.state == QuotaReservationState::Committed && scope == ReleaseScope::Pending {
+        return Ok(false);
+    }
     transition(txn, &reservation, false)?;
     txn.open_table(QUOTA_RESERVATION)
         .map_err(MetaError::from)?

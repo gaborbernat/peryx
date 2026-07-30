@@ -11,6 +11,8 @@ pub enum OciRoute {
     Catalog,
     /// `GET|HEAD|PUT|DELETE /v2/<name>/manifests/<reference>`.
     Manifest { name: String, reference: Reference },
+    /// `PUT /v2/<name>/manifests/<reference>/restore`.
+    ManifestRestore { name: String, reference: Reference },
     /// `GET|HEAD|DELETE /v2/<name>/blobs/<digest>`.
     Blob { name: String, digest: String },
     /// `GET /v2/<name>/blobs/<digest>/contents`: peryx's own layer file browser, listing the tar
@@ -51,6 +53,12 @@ pub fn classify(path: &str) -> Option<OciRoute> {
     let len = segments.len();
     if len < 2 {
         return None;
+    }
+    if len >= 3 && segments[len - 3] == "manifests" && segments[len - 1] == "restore" {
+        return Some(OciRoute::ManifestRestore {
+            name: join_name(&segments[..len - 3])?,
+            reference: parse_reference(segments[len - 2])?,
+        });
     }
     // `blobs/uploads/<session>` (an in-progress upload) is anchored three from the end, before the
     // `blobs/<digest>` shape it would otherwise look like.
@@ -262,6 +270,17 @@ mod tests {
             Some(OciRoute::Manifest {
                 name: "alpine".to_owned(),
                 reference: Reference::Digest(digest.to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_manifest_restore_keeps_the_reference_out_of_the_name() {
+        assert_eq!(
+            classify("/v2/store/team/app/manifests/latest/restore"),
+            Some(OciRoute::ManifestRestore {
+                name: "store/team/app".to_owned(),
+                reference: Reference::Tag("latest".to_owned()),
             })
         );
     }

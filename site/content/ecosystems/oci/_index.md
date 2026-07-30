@@ -57,8 +57,9 @@ Container clients speak the **distribution spec** over a `/v2/` API. peryx serve
 
 - `GET /v2/`: the version check every client pings first; peryx answers `200` with
   `Docker-Distribution-API-Version: registry/2.0`, or a `401` Bearer challenge when an index restricts access.
-- **Manifests**: `GET|HEAD|PUT|DELETE /v2/<name>/manifests/<tag-or-digest>`. peryx keeps a manifest byte-for-byte and
-  addresses it by the sha256 of those exact bytes, so the `Docker-Content-Digest` a client verifies matches.
+- **Manifests**: `GET|HEAD|PUT|DELETE /v2/<name>/manifests/<tag-or-digest>`, plus `PUT .../restore`. peryx keeps a
+  manifest byte-for-byte and addresses it by the sha256 of those exact bytes, so the `Docker-Content-Digest` a client
+  verifies matches.
 - **Blobs**: `GET|HEAD|DELETE /v2/<name>/blobs/<digest>`, plus the upload dance
   (`POST`/`PATCH`/`PUT /v2/<name>/blobs/uploads/…`) for push. peryx deduplicates blob bytes across indexes and requires
   a repository link before serving them. For a cross-repo mount, peryx verifies the source link and pull access before

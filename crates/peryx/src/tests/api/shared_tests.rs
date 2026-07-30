@@ -39,6 +39,7 @@ fn test_openapi_document_covers_every_endpoint() {
         "/_/oidc/mint-token",
         "/v2/",
         "/v2/{name}/manifests/{reference}",
+        "/v2/{name}/manifests/{reference}/restore",
         "/v2/{name}/blobs/{digest}",
         "/v2/{name}/blobs/{digest}/contents",
         "/v2/{name}/blobs/uploads/",
@@ -48,7 +49,7 @@ fn test_openapi_document_covers_every_endpoint() {
     ] {
         assert!(paths.contains_key(path), "missing path {path}");
     }
-    assert_eq!(paths.len(), 40);
+    assert_eq!(paths.len(), 41);
     assert_eq!(spec["info"]["version"], env!("CARGO_PKG_VERSION"));
 }
 

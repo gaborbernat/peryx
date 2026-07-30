@@ -2,7 +2,7 @@
 //! the `write` submodule.
 
 mod write;
-pub(super) use write::{delete_manifest, put_manifest};
+pub(super) use write::{delete_manifest, put_manifest, restore_manifest};
 
 use super::*;
 use crate::error::{ErrorCode, error_response};
@@ -41,33 +41,63 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 if digest_decision(state, digest)? == DigestDecision::Revoked {
                     return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                 }
+                let mut served = None;
                 let members = serving_members(state, index);
-                let mut served = if manifest_authorized(state, &members, repo, digest)? {
-                    store::get_manifest(&state.meta, digest)?.map(|manifest| manifest_response(manifest, digest, head))
-                } else {
-                    None
-                };
-                if served.is_none() {
-                    for member in &members {
-                        if let Some(client) = member.proxy_client() {
-                            served = self
-                                .pull_manifest_by_digest(state, client, &member.name, repo, digest, head)
-                                .await?;
-                            if served.is_some() {
-                                break;
-                            }
-                        }
+                let mut checked = members.len();
+                for (position, member) in members.iter().enumerate() {
+                    if store::manifest_is_trashed(&state.meta, &member.name, repo, digest)? {
+                        return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+                    }
+                    if store::manifest_is_member(&state.meta, &member.name, repo, digest)? {
+                        served = store::get_manifest(&state.meta, digest)?
+                            .map(|manifest| manifest_response(manifest, digest, head));
+                    }
+                    if served.is_none()
+                        && let Some(client) = member.proxy_client()
+                    {
+                        served = self
+                            .pull_manifest_by_digest(state, client, &member.name, repo, digest, head)
+                            .await?;
+                    }
+                    if served.is_some() {
+                        checked = position + 1;
+                        break;
+                    }
+                }
+                for member in members.iter().take(checked) {
+                    if store::manifest_is_trashed(&state.meta, &member.name, repo, digest)? {
+                        return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                     }
                 }
                 served.unwrap_or_else(|| error_response(ErrorCode::ManifestUnknown, "manifest unknown"))
             }
             Reference::Tag(tag) => {
                 let mut served = None;
-                for member in serving_members(state, index) {
-                    if served.is_some() {
-                        break;
+                let members = serving_members(state, index);
+                let mut checked = members.len();
+                for (position, member) in members.iter().enumerate() {
+                    if store::tag_is_trashed(&state.meta, &member.name, repo, tag)? {
+                        return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                     }
                     served = self.member_tag(state, member, repo, tag, head).await?;
+                    if served.is_some() {
+                        checked = position + 1;
+                        break;
+                    }
+                }
+                for member in members.iter().take(checked) {
+                    if store::tag_is_trashed(&state.meta, &member.name, repo, tag)? {
+                        return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+                    }
+                }
+                if let Some(digest) = served.as_ref().and_then(|response| {
+                    response
+                        .headers()
+                        .get(DOCKER_CONTENT_DIGEST)
+                        .and_then(|value| value.to_str().ok())
+                }) && manifest_trashed_in(state, &members[..checked], repo, digest)?
+                {
+                    return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                 }
                 served.unwrap_or_else(|| error_response(ErrorCode::ManifestUnknown, "manifest unknown"))
             }
@@ -120,6 +150,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             return Ok(response);
         };
         if digest_decision(state, &child)? == DigestDecision::Revoked {
+            return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+        }
+        if manifest_trashed_in(state, &serving_members(state, index), repo, &child)? {
             return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
         }
         if let Some(manifest) = store::get_manifest(&state.meta, &child)? {
@@ -325,21 +358,6 @@ fn unchanged_tag(
     };
     store::set_tag_freshness(&state.meta, index, repo, tag, &cached, (state.clock)())?;
     Ok(Some(manifest_response(manifest, &cached, head)))
-}
-
-/// Whether any member the resolved index serves from records this digest as one it holds. A manifest
-/// lives once in the global content store, shared across every index for dedup, so its presence there is
-/// not authority to serve it by digest under an arbitrary repository name: the read authorizes only when
-/// a member tagged it, pushed or pulled it, mirrored it, recorded it as a referrer, or serves an index
-/// that names it as a child. A proxy member still pulls an unauthorized miss through — its upstream,
-/// scoped to this repository, is the authority there — so this only gates answering from the cache.
-fn manifest_authorized(state: &ServingState, members: &[&Index], repo: &str, digest: &str) -> Result<bool, ServeError> {
-    for member in members {
-        if store::manifest_is_member(&state.meta, &member.name, repo, digest)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Serve a proxy tag past its freshness window while the upstream cannot confirm it, bounded by

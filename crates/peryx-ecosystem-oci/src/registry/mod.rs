@@ -51,7 +51,7 @@ mod manifests;
 mod uploads;
 pub use blobs::download_blob;
 use discovery::serve_catalog;
-use manifests::{delete_manifest, put_manifest};
+use manifests::{delete_manifest, put_manifest, restore_manifest};
 /// The header a registry returns the canonical content digest in.
 const DOCKER_CONTENT_DIGEST: HeaderName = HeaderName::from_static("docker-content-digest");
 /// The header carrying an upload session's id.
@@ -430,7 +430,10 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 put_manifest(&state, headers, body, &name, &reference).await
             }
             OciRoute::Manifest { name, reference } if method == Method::DELETE => {
-                delete_manifest(&state, headers, &name, &reference)
+                delete_manifest(&state, headers, &name, &reference, query)
+            }
+            OciRoute::ManifestRestore { name, reference } if method == Method::PUT => {
+                restore_manifest(&state, headers, &name, &reference)
             }
             OciRoute::Blob { name, digest } if read => self.serve_blob(&state, &name, &digest, head, headers).await,
             OciRoute::Blob { name, digest } if method == Method::DELETE => {
@@ -481,21 +484,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         } else {
             format!("{}/{repo}", index.route)
         };
-        let mut tags = std::collections::BTreeSet::new();
-        for member in &members {
-            match member.proxy_client() {
-                Some(client) => {
-                    if let Some(names) = self
-                        .fetch_tag_names(state, &name, &member.name, client, repo, active)
-                        .await?
-                    {
-                        tags.extend(names);
-                    }
-                }
-                None => tags.extend(discovery::stored_tag_names(state, &member.name, repo, active)?),
-            }
-        }
-        Ok(tags.into_iter().collect())
+        Ok(self
+            .visible_tag_names(state, &name, repo, active, &members)
+            .await?
+            .into_iter()
+            .collect())
     }
 }
 
@@ -662,6 +655,19 @@ pub fn serving_members<'a>(state: &'a ServingState, index: &'a Index) -> Vec<&'a
         .into_iter()
         .map(|position| state.index_at(position))
         .collect()
+}
+/// Whether the first member with repository state for a digest has hidden it. A lower tombstone does
+/// not override a live digest in a higher member.
+fn manifest_trashed_in(state: &ServingState, members: &[&Index], repo: &str, digest: &str) -> Result<bool, ServeError> {
+    for member in members {
+        if crate::store::manifest_is_trashed(&state.meta, &member.name, repo, digest)? {
+            return Ok(true);
+        }
+        if crate::store::manifest_is_member(&state.meta, &member.name, repo, digest)? {
+            return Ok(false);
+        }
+    }
+    Ok(false)
 }
 /// Enqueue a webhook for an OCI mutation on a hosted index. `version` is the tag when a tagged
 /// reference was affected; `digest` is the manifest or blob digest. The webhook subsystem is neutral,

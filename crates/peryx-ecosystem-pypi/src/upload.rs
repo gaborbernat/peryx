@@ -24,6 +24,7 @@ use crate::store::PypiStore as _;
 use crate::store::{Guard, MetadataSibling, ProvenanceSibling, PublishedFile};
 use serde::{Deserialize, Serialize};
 
+pub use peryx_core::TrashInfo;
 use peryx_core::path::{local_file_url, validate_filename};
 
 /// An uploaded file plus the version it belongs to, stored per file on a private index and
@@ -37,20 +38,6 @@ pub struct Uploaded {
     /// on a live file, and skipped on the wire so an untrashed record encodes exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trashed: Option<TrashInfo>,
-}
-
-/// The provenance a soft-delete keeps about a trashed file, so a later restore or audit has the
-/// context an immediate delete would have thrown away.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrashInfo {
-    /// When the file was trashed, as a Unix timestamp.
-    pub deleted_at_unix: i64,
-    /// The token or actor that deleted it, when the request carried an identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<String>,
-    /// The operator's stated reason, when the delete request supplied one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }
 
 /// The fields peryx reads from an upload's multipart form. Every field is optional here so the

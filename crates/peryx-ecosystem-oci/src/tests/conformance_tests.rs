@@ -10,6 +10,43 @@ use super::{auth, hosted_writable, oci_digest, proxy, send, send_body, send_with
 const TOKEN: &str = "s3cret";
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
+async fn push_subject_and_referrer(app: &axum::Router) -> (String, String) {
+    let subject_manifest = br#"{"schemaVersion":2,"kind":"subject"}"#;
+    let subject = oci_digest(subject_manifest);
+    let status = send_body(
+        app,
+        Method::PUT,
+        "/v2/store/app/manifests/base",
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        subject_manifest.to_vec(),
+    )
+    .await
+    .0;
+    assert_eq!(status, StatusCode::CREATED);
+    let manifest = format!(r#"{{"schemaVersion":2,"subject":{{"digest":"{subject}"}}}}"#);
+    let digest = oci_digest(manifest.as_bytes());
+    let status = send_body(
+        app,
+        Method::PUT,
+        "/v2/store/app/manifests/sig",
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        manifest.into_bytes(),
+    )
+    .await
+    .0;
+    assert_eq!(status, StatusCode::CREATED);
+    (subject, digest)
+}
+
+async fn referrer_count(app: &axum::Router, subject: &str) -> usize {
+    let (status, _, body) = send(app, Method::GET, &format!("/v2/store/app/referrers/{subject}")).await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["manifests"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
 #[tokio::test]
 async fn test_manifest_with_subject_records_a_referrer_and_echoes_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -40,6 +77,66 @@ async fn test_manifest_with_subject_records_a_referrer_and_echoes_it() {
     assert_eq!(manifests.len(), 1);
     assert_eq!(manifests[0]["digest"], digest);
     assert_eq!(manifests[0]["artifactType"], "application/vnd.example+type");
+}
+
+#[tokio::test]
+async fn test_referrer_discovery_follows_referrer_trash_and_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let (subject, digest) = push_subject_and_referrer(&app).await;
+    let status = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/store/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await
+    .0;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(referrer_count(&app, &subject).await, 0);
+
+    let status = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{digest}/restore"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await
+    .0;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(referrer_count(&app, &subject).await, 1);
+}
+
+#[tokio::test]
+async fn test_referrer_discovery_follows_subject_trash_and_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let (subject, _digest) = push_subject_and_referrer(&app).await;
+    let status = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/store/app/manifests/{subject}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await
+    .0;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(referrer_count(&app, &subject).await, 0);
+
+    let status = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{subject}/restore"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await
+    .0;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(referrer_count(&app, &subject).await, 1);
 }
 
 #[tokio::test]

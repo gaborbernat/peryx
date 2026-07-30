@@ -261,6 +261,7 @@ async fn test_manifest_delete_by_tag() {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = hosted_writable(&dir, TOKEN);
     let manifest = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(manifest);
     send_body(
         &app,
         Method::PUT,
@@ -272,7 +273,7 @@ async fn test_manifest_delete_by_tag() {
     let (status, _, _) = send_body(
         &app,
         Method::DELETE,
-        "/v2/store/app/manifests/v1",
+        "/v2/store/app/manifests/v1?reason=bad%20build",
         &[("authorization", &auth(TOKEN))],
         Vec::new(),
     )
@@ -280,23 +281,48 @@ async fn test_manifest_delete_by_tag() {
     assert_eq!(status, StatusCode::ACCEPTED);
     let (status, _, _) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &manifest[..]);
+    let (status, _, body) = send_body(
+        &app,
+        Method::DELETE,
+        "/v2/store/app/manifests/v1",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&body, "MANIFEST_UNKNOWN"), "{body:?}");
+    let (status, headers, _) = send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/app/manifests/v1/restore",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(headers["docker-content-digest"], digest);
+    let (status, _, got) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &manifest[..]);
 }
 
 #[tokio::test]
 async fn test_manifest_delete_by_digest_and_missing() {
     let dir = tempfile::tempdir().unwrap();
-    let (state, app) = hosted_writable(&dir, TOKEN);
+    let (_state, app) = hosted_writable(&dir, TOKEN);
     let manifest = br#"{"schemaVersion":2}"#;
     let digest = oci_digest(manifest);
-    crate::store::put_manifest(
-        &state.meta,
-        &digest,
-        &crate::store::Manifest {
-            media_type: MANIFEST_TYPE.to_owned(),
-            bytes: manifest.to_vec(),
-        },
+    send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/app/manifests/v1",
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        manifest.to_vec(),
     )
-    .unwrap();
+    .await;
     let (status, _, _) = send_body(
         &app,
         Method::DELETE,
@@ -317,6 +343,25 @@ async fn test_manifest_delete_by_digest_and_missing() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(super::body_has_code(&body, "MANIFEST_UNKNOWN"), "{body:?}");
+}
+
+#[rstest]
+#[case("missing")]
+#[case("sha256:1111111111111111111111111111111111111111111111111111111111111111")]
+#[tokio::test]
+async fn test_manifest_restore_rejects_an_unknown_reference(#[case] reference: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let (status, _, body) = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{reference}/restore"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&body, "MANIFEST_UNKNOWN"), "{body:?}");
 }
 
 #[tokio::test]
@@ -376,7 +421,9 @@ async fn test_manifest_delete_by_digest_retains_an_image_index_child() {
         child.to_vec(),
     )
     .await;
-    let index = format!(r#"{{"schemaVersion":2,"manifests":[{{"digest":"{child_digest}"}}]}}"#);
+    let index = format!(
+        r#"{{"schemaVersion":2,"manifests":[{{"digest":"{child_digest}","platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#
+    );
     send_body(
         &app,
         Method::PUT,
@@ -398,14 +445,21 @@ async fn test_manifest_delete_by_digest_retains_an_image_index_child() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    // The index still lists it as a child, so the child manifest is retained.
-    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/manifests/{child_digest}")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(got, &child[..]);
+    // The index still retains the child bytes, but the repository tombstone hides a direct pull.
+    let (status, _, _) = send(&app, Method::GET, &format!("/v2/store/app/manifests/{child_digest}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/latest",
+        &[("accept", MANIFEST_TYPE)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn test_manifest_delete_by_digest_unlinks_when_unreferenced() {
+async fn test_manifest_delete_by_digest_restores_the_same_bytes_and_tags() {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = hosted_writable(&dir, TOKEN);
     let manifest = br#"{"schemaVersion":2}"#;
@@ -413,7 +467,7 @@ async fn test_manifest_delete_by_digest_unlinks_when_unreferenced() {
     send_body(
         &app,
         Method::PUT,
-        &format!("/v2/store/app/manifests/{digest}"),
+        "/v2/store/app/manifests/v1",
         &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
         manifest.to_vec(),
     )
@@ -427,32 +481,153 @@ async fn test_manifest_delete_by_digest_unlinks_when_unreferenced() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    // Nothing references it, so the record is unlinked and no longer served.
     let (status, _, _) = send(&app, Method::GET, &format!("/v2/store/app/manifests/{digest}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn test_manifest_delete_by_digest_clears_a_dangling_tag() {
-    let dir = tempfile::tempdir().unwrap();
-    let (state, app) = hosted_writable(&dir, TOKEN);
-    // A tag left pointing at a digest whose manifest is already gone.
-    let absent = format!("sha256:{}", "3".repeat(64));
-    crate::store::put_tag(&state.meta, "store", "app", "ghost", &absent).unwrap();
-
-    let (status, _, _) = send_body(
+    let (status, headers, _) = send_body(
         &app,
-        Method::DELETE,
-        &format!("/v2/store/app/manifests/{absent}"),
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{digest}/restore"),
         &[("authorization", &auth(TOKEN))],
         Vec::new(),
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(headers["oci-restored-tags"], "1");
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &manifest[..]);
+    let (status, _, got) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &manifest[..]);
+}
+
+#[tokio::test]
+async fn test_republish_by_digest_leaves_deleted_tags_in_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let manifest = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(manifest);
+    send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/app/manifests/v1",
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        manifest.to_vec(),
+    )
+    .await;
+    send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/store/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+
+    let (status, _, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        manifest.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
     assert_eq!(
-        crate::store::get_tag(&state.meta, "store", "app", "ghost").unwrap(),
-        None
+        send(&app, Method::GET, &format!("/v2/store/app/manifests/{digest}"))
+            .await
+            .0,
+        StatusCode::OK
     );
+    assert_eq!(
+        send(&app, Method::GET, "/v2/store/app/manifests/v1").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn test_digest_restore_keeps_a_concurrently_reused_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let old = br#"{"schemaVersion":2,"annotations":{"build":"old"}}"#;
+    let new = br#"{"schemaVersion":2,"annotations":{"build":"new"}}"#;
+    let old_digest = oci_digest(old);
+    let new_digest = oci_digest(new);
+    for manifest in [old.as_slice(), new.as_slice()] {
+        let reference = if manifest == old { "v1" } else { "next" };
+        send_body(
+            &app,
+            Method::PUT,
+            &format!("/v2/store/app/manifests/{reference}"),
+            &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+            manifest.to_vec(),
+        )
+        .await;
+    }
+    send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/store/app/manifests/{old_digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/app/manifests/v1",
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        new.to_vec(),
+    )
+    .await;
+
+    let (status, headers, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{old_digest}/restore"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(headers["oci-tag-conflicts"], "v1");
+    let (status, headers, got) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], new_digest);
+    assert_eq!(got, &new[..]);
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/manifests/{old_digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &old[..]);
+}
+
+#[tokio::test]
+async fn test_manifest_trash_keeps_shared_layer_bytes_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let blob = b"shared-layer";
+    let blob_digest = upload_blob(&app, "store/app", blob).await;
+    let manifest = format!(r#"{{"schemaVersion":2,"layers":[{{"digest":"{blob_digest}"}}]}}"#);
+    let manifest_digest = oci_digest(manifest.as_bytes());
+    send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/app/manifests/v1",
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        manifest.into_bytes(),
+    )
+    .await;
+    send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/store/app/manifests/{manifest_digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{blob_digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
 }
 
 #[tokio::test]
@@ -597,6 +772,16 @@ async fn test_a_write_only_token_may_not_delete() {
     )
     .await;
 
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _, _) = send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/team/app/manifests/v1/restore",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 

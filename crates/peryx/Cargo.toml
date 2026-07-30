@@ -46,6 +46,7 @@ peryx-storage.workspace = true
 peryx-upstream.workspace = true
 peryx-http.workspace = true
 peryx-web.workspace = true
+reqwest.workspace = true
 axum.workspace = true
 axum-server.workspace = true
 rustls-acme.workspace = true

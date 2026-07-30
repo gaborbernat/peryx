@@ -44,7 +44,9 @@ impl ResponseAuthorization {
             peryx_identity::Scope::OperatorRead | peryx_identity::Scope::AnalyticsRead => {
                 Ok(FieldClassification::Operator)
             }
-            peryx_identity::Scope::AdministrationRead => Ok(FieldClassification::Administrator),
+            peryx_identity::Scope::AdministrationRead | peryx_identity::Scope::AdministrationWrite => {
+                Ok(FieldClassification::Administrator)
+            }
             peryx_identity::Scope::RepositoryRead
             | peryx_identity::Scope::RepositoryWrite
             | peryx_identity::Scope::RepositoryDelete => Err(ResponseDenied),

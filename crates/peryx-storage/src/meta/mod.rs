@@ -17,6 +17,7 @@ mod job;
 mod journal;
 mod policy_decision;
 mod quota;
+mod revocation;
 mod role_grant;
 mod user;
 mod webhook;
@@ -35,6 +36,10 @@ pub use policy_decision::{
 pub use quota::{
     AccountingClass, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage, QuotaRepairReport,
     QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
+};
+pub use revocation::{
+    DigestRevocation, DigestRevocationPage, DigestRevocationQuery, DigestRevocationQueryError, DigestRevocationState,
+    DigestRevocationStatus, LiftRevocationOutcome, PutRevocationError, PutRevocationOutcome,
 };
 pub use role_grant::RoleGrantStoreError;
 pub use user::UserStoreError;
@@ -70,6 +75,8 @@ const USER_NAME: TableDefinition<&str, &str> = TableDefinition::new("server_user
 const USER_EVENT: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_event");
 const USER_VERIFIER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_verifier");
 const ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant");
+const DIGEST_REVOCATION: TableDefinition<&str, &[u8]> = TableDefinition::new("digest_revocation");
+const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new("digest_revocation_state");
 const SERIAL_KEY: &str = "serial";
 const WEBHOOK_SERIAL_KEY: &str = "webhook_delivery";
 const JOB_SERIAL_KEY: &str = "job_run";
@@ -147,6 +154,8 @@ impl MetaStore {
             txn.open_table(USER_EVENT)?;
             txn.open_table(USER_VERIFIER)?;
             txn.open_table(ROLE_GRANT)?;
+            txn.open_table(DIGEST_REVOCATION)?;
+            txn.open_table(DIGEST_REVOCATION_STATE)?;
         }
         txn.commit()?;
         Ok(Self { db: Arc::new(db) })

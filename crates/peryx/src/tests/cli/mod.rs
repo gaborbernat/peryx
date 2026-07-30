@@ -8,6 +8,7 @@ mod job_tests;
 mod maintenance_tests;
 mod mirror_tests;
 mod parse_tests;
+mod revocation_tests;
 mod snippet_tests;
 
 pub(super) fn parse(args: &[&str]) -> Cli {

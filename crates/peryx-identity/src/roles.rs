@@ -100,6 +100,7 @@ impl Role {
                 Scope::OperatorRead,
                 Scope::AnalyticsRead,
                 Scope::AdministrationRead,
+                Scope::AdministrationWrite,
             ],
             Self::RepositoryPublisher => &[Scope::RepositoryRead, Scope::RepositoryWrite, Scope::RepositoryDelete],
             Self::RepositoryReader => &[Scope::RepositoryRead],
@@ -122,6 +123,7 @@ pub enum Scope {
     OperatorRead,
     AnalyticsRead,
     AdministrationRead,
+    AdministrationWrite,
 }
 
 impl Scope {
@@ -136,6 +138,7 @@ impl Scope {
             Self::OperatorRead => "operator:read",
             Self::AnalyticsRead => "analytics:read",
             Self::AdministrationRead => "administration:read",
+            Self::AdministrationWrite => "administration:write",
         }
     }
 
@@ -146,7 +149,7 @@ impl Scope {
                 Self::RepositoryRead | Self::RepositoryWrite | Self::RepositoryDelete,
                 Resource::Repository(_)
             ) | (
-                Self::OperatorRead | Self::AnalyticsRead | Self::AdministrationRead,
+                Self::OperatorRead | Self::AnalyticsRead | Self::AdministrationRead | Self::AdministrationWrite,
                 Resource::Operator
             )
         )

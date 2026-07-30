@@ -470,6 +470,10 @@ pub async fn enforce(State(state): State<Arc<AppState>>, request: axum::extract:
 /// for one that owns a top-level namespace.
 #[must_use]
 pub fn service_route_class(method: &Method, path: &str) -> Option<RouteClass> {
+    let path = path.trim_start_matches('/');
+    if path == "+revocations" || path.starts_with("+revocations/") {
+        return Some(RouteClass::Admin);
+    }
     // HEAD and OPTIONS are reads (an OCI client HEADs every manifest and blob before a pull); only a
     // body-bearing write method is an upload. Classifying them here as reads lets the owning driver's
     // `classify_route` bucket them with GET instead of spending the strict upload budget.
@@ -479,7 +483,6 @@ pub fn service_route_class(method: &Method, path: &str) -> Option<RouteClass> {
     if method != Method::GET && method != Method::HEAD && method != Method::OPTIONS {
         return Some(RouteClass::Upload);
     }
-    let path = path.trim_start_matches('/');
     if matches!(
         path,
         "" | "+api"
@@ -596,6 +599,18 @@ mod tests {
         );
         assert_eq!(service_route_class(&Method::GET, "/+status"), Some(RouteClass::Admin));
         assert_eq!(service_route_class(&Method::GET, "/+acl"), Some(RouteClass::Admin));
+        assert_eq!(
+            service_route_class(&Method::GET, "/+revocations"),
+            Some(RouteClass::Admin)
+        );
+        assert_eq!(
+            service_route_class(&Method::PUT, "/+revocations/sha256:digest"),
+            Some(RouteClass::Admin)
+        );
+        assert_eq!(
+            service_route_class(&Method::POST, "/+revocations/sha256:digest/lift"),
+            Some(RouteClass::Admin)
+        );
         assert_eq!(
             service_route_class(&Method::GET, "/pypi/hosted/+api"),
             Some(RouteClass::Admin)

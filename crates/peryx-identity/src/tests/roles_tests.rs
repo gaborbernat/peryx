@@ -83,6 +83,12 @@ fn repository_grant(role: Role, name: &str) -> RoleGrant {
     Resource::Operator,
     false
 )]
+#[case::operator_cannot_write_administration(
+    server_grant(Role::Operator),
+    Scope::AdministrationWrite,
+    Resource::Operator,
+    false
+)]
 #[case::operator_cannot_read_a_repository(
     server_grant(Role::Operator),
     Scope::RepositoryRead,
@@ -122,6 +128,12 @@ fn repository_grant(role: Role, name: &str) -> RoleGrant {
 #[case::administrator_reads_administration(
     server_grant(Role::Administrator),
     Scope::AdministrationRead,
+    Resource::Operator,
+    true
+)]
+#[case::administrator_writes_administration(
+    server_grant(Role::Administrator),
+    Scope::AdministrationWrite,
     Resource::Operator,
     true
 )]
@@ -180,6 +192,7 @@ fn test_no_grant_denies_every_scope() {
         Scope::OperatorRead,
         Scope::AnalyticsRead,
         Scope::AdministrationRead,
+        Scope::AdministrationWrite,
     ] {
         assert!(!grants_permit(&[], scope, &repository("team/api")));
         assert!(!grants_permit(&[], scope, &Resource::Operator));
@@ -209,6 +222,7 @@ fn test_role_scope_sets_are_fixed() {
             Scope::OperatorRead,
             Scope::AnalyticsRead,
             Scope::AdministrationRead,
+            Scope::AdministrationWrite,
         ]
     );
     assert_eq!(
@@ -240,6 +254,7 @@ fn test_role_and_scope_names_are_stable() {
     assert_eq!(Scope::OperatorRead.as_str(), "operator:read");
     assert_eq!(Scope::AnalyticsRead.as_str(), "analytics:read");
     assert_eq!(Scope::AdministrationRead.as_str(), "administration:read");
+    assert_eq!(Scope::AdministrationWrite.as_str(), "administration:write");
 }
 
 #[test]

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use axum::{Extension, Router};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
@@ -32,6 +32,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/+stats", get(handlers::stats))
         .route("/+analytics/top-packages", get(handlers::top_packages))
         .route("/+policy/decisions", get(handlers::policy_decisions))
+        .route("/+revocations", get(handlers::list_revocations))
+        .route(
+            "/+revocations/{digest}",
+            get(handlers::inspect_revocation).merge(put(handlers::put_revocation)),
+        )
+        .route("/+revocations/{digest}/lift", post(handlers::lift_revocation))
         .route("/+ui/projects", get(handlers::ui_projects))
         .route("/+ui/project", get(handlers::ui_project))
         .route("/+ui/manifest", get(handlers::ui_manifest))

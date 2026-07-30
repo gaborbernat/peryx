@@ -54,6 +54,17 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         active: bool,
         members: &[&Index],
     ) -> Result<std::collections::BTreeSet<String>, ServeError> {
+        if let [member] = members
+            && member.proxy_client().is_none()
+        {
+            let mut tags = stored_tag_names(state, &member.name, repo, active)?
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            for tag in store::list_trashed_tags(&state.meta, &member.name, repo)? {
+                tags.remove(&tag);
+            }
+            return Ok(tags);
+        }
         let mut tags = std::collections::BTreeMap::new();
         let mut hidden = std::collections::BTreeMap::new();
         for (position, member) in members.iter().enumerate() {

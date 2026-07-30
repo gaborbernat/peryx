@@ -281,6 +281,12 @@ async fn test_manifest_delete_by_tag() {
     assert_eq!(status, StatusCode::ACCEPTED);
     let (status, _, _) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, tags) = send(&app, Method::GET, "/v2/store/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&tags).unwrap()["tags"],
+        serde_json::json!([])
+    );
     let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/manifests/{digest}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, &manifest[..]);
@@ -307,6 +313,12 @@ async fn test_manifest_delete_by_tag() {
     let (status, _, got) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, &manifest[..]);
+    let (status, _, tags) = send(&app, Method::GET, "/v2/store/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&tags).unwrap()["tags"],
+        serde_json::json!(["v1"])
+    );
 }
 
 #[tokio::test]

@@ -12,6 +12,8 @@ permissions:
   contents: read
 
 env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
   TWINE_VERSION: "6.2.0"
   UV_VERSION: "0.11.29"
 

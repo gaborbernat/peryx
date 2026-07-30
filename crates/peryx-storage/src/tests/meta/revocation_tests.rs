@@ -287,3 +287,34 @@ fn test_digest_revocation_active_count_fails_closed_on_a_store_type_error() {
             .is_err()
     );
 }
+
+#[rstest]
+#[case::records_only(true, false)]
+#[case::state_only(false, true)]
+fn test_digest_revocation_active_count_fails_closed_on_an_incomplete_index(
+    #[case] records_table: bool,
+    #[case] state_table: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let database = redb::Database::create(&path).unwrap();
+    let txn = database.begin_write().unwrap();
+    if records_table {
+        txn.open_table(redb::TableDefinition::<&str, &[u8]>::new("digest_revocation"))
+            .unwrap();
+    }
+    if state_table {
+        txn.open_table(redb::TableDefinition::<&str, u64>::new("digest_revocation_state"))
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    drop(database);
+
+    assert!(matches!(
+        MetaStore::open_existing(path)
+            .unwrap()
+            .has_active_digest_revocation(),
+        Err(crate::meta::MetaError::DriverPrecondition(message))
+            if message == "digest revocation index is incomplete"
+    ));
+}

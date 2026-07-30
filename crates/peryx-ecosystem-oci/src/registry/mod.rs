@@ -500,6 +500,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
 }
 
 fn digest_decision(state: &ServingState, digest: &str) -> Result<DigestDecision, ServeError> {
+    if !state.revocations.has_active()? {
+        return Ok(DigestDecision::Clear);
+    }
     let Ok(digest) = digest.parse::<ArtifactDigest>() else {
         return Ok(DigestDecision::Clear);
     };

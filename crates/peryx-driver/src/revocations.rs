@@ -1,5 +1,6 @@
 //! Transactional digest-revocation operations and the bounded serving-decision cache.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -12,6 +13,9 @@ use peryx_storage::meta::{
 };
 
 const CACHE_CAPACITY: u64 = 16_384;
+const ACTIVE_UNKNOWN: u8 = 0;
+const ACTIVE_NONE: u8 = 1;
+const ACTIVE_SOME: u8 = 2;
 /// Maximum age shared serving and HTTP caches may retain a digest decision.
 pub const DECISION_CACHE_TTL_SECS: u64 = 60;
 
@@ -21,6 +25,7 @@ pub struct RevocationService {
     store: MetaStore,
     decisions: Cache<ArtifactDigest, DigestDecision>,
     cache_gate: Arc<RwLock<()>>,
+    active: Arc<AtomicU8>,
 }
 
 impl RevocationService {
@@ -33,6 +38,7 @@ impl RevocationService {
                 .time_to_live(Duration::from_secs(DECISION_CACHE_TTL_SECS))
                 .build(),
             cache_gate: Arc::new(RwLock::new(())),
+            active: Arc::new(AtomicU8::new(ACTIVE_UNKNOWN)),
         }
     }
 
@@ -42,6 +48,9 @@ impl RevocationService {
     /// # Errors
     /// Returns a store error when the authoritative row cannot be read.
     pub fn decision(&self, digest: &ArtifactDigest) -> Result<DigestDecision, MetaError> {
+        if !self.has_active()? {
+            return Ok(DigestDecision::Clear);
+        }
         if let Some(decision) = self.decisions.get(digest) {
             return Ok(decision);
         }
@@ -76,6 +85,7 @@ impl RevocationService {
             .cache_gate
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.active.store(ACTIVE_UNKNOWN, Ordering::Release);
         let outcome = self.store.put_digest_revocation(digest, reason, actor, now)?;
         self.decisions.invalidate(digest);
         drop(guard);
@@ -103,6 +113,7 @@ impl RevocationService {
             .cache_gate
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.active.store(ACTIVE_UNKNOWN, Ordering::Release);
         let outcome = self.store.lift_digest_revocation(digest, actor, now)?;
         self.decisions.invalidate(digest);
         drop(guard);
@@ -128,7 +139,17 @@ impl RevocationService {
     /// # Errors
     /// Returns a store error when the transactional active index cannot be read.
     pub fn has_active(&self) -> Result<bool, MetaError> {
-        self.store.has_active_digest_revocation()
+        let mut state = self.active.load(Ordering::Acquire);
+        if state == ACTIVE_UNKNOWN {
+            let _guard = self
+                .cache_gate
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let active = self.store.has_active_digest_revocation()?;
+            state = if active { ACTIVE_SOME } else { ACTIVE_NONE };
+            self.active.store(state, Ordering::Release);
+        }
+        Ok(state == ACTIVE_SOME)
     }
 
     /// List a bounded page of current rows.

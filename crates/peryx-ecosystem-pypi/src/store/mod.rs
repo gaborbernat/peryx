@@ -31,7 +31,7 @@ pub use journal::{JournalEntry, JournalSnapshot, read_journal_entries};
 pub use peryx_driver::serving::{IndexSummary, RecentUpload};
 pub use projects::{
     CatalogGeneration, CatalogState, ProjectCachePurgeCounts, abort_catalog_generation, begin_catalog_generation,
-    catalog_state, count_project_cache_purge, delete_project_cache, get_project, list_projects,
+    catalog_state, count_project_cache_purge, delete_project_cache, get_project, list_catalog_projects, list_projects,
     publish_catalog_generation, put_catalog_projects, put_project, recover_catalog_generations,
     refresh_catalog_generation, scan_project_records,
 };

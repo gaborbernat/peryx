@@ -220,6 +220,13 @@ impl EcosystemDriver for PypiServing {
         Ecosystem::Pypi
     }
 
+    fn node_job(
+        &self,
+        job: &peryx_driver::jobs::ScheduledJob,
+    ) -> Option<Result<Arc<dyn peryx_driver::jobs::NodeJob>, String>> {
+        crate::catalog_job::catalog_job(job)
+    }
+
     fn classify_service_post(&self, path: &str, headers: &HeaderMap) -> Option<RouteClass> {
         is_changelog_path(path, headers).then_some(RouteClass::Listing)
     }

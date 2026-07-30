@@ -13,6 +13,8 @@ pub mod attestation;
 pub mod cache;
 #[cfg(feature = "serving")]
 pub mod catalog;
+#[cfg(feature = "serving")]
+mod catalog_job;
 mod changelog;
 #[cfg(feature = "serving")]
 mod classifier;

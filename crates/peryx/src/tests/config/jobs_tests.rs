@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use peryx_driver::jobs::{MAINTENANCE_INTERVAL, Schedule, ScheduledJob};
+use peryx_driver::jobs::{
+    DEFAULT_CATALOG_CONCURRENCY, DEFAULT_CATALOG_PROJECTS, DEFAULT_CATALOG_TIMEOUT, MAINTENANCE_INTERVAL, Schedule,
+    ScheduledJob,
+};
 use rstest::rstest;
 
 use super::toml_config;
@@ -94,4 +97,115 @@ fn test_an_unknown_job_kind_is_rejected_at_parse_time() {
     .unwrap_err();
 
     assert!(error.to_string().contains("job"), "{error}");
+}
+
+#[test]
+fn test_catalog_schedule_resolves_default_and_explicit_limits() {
+    let config = toml_config(
+        "[[jobs.schedule]]\njob = \"catalog_sync\"\ninterval_secs = 3600\nrepository = \"pypi\"\n\
+         [[jobs.schedule]]\njob = \"catalog_sync\"\ninterval_secs = 60\nrepository = \"pypi\"\nsource = \"public\"\nmax_projects = 9\nconcurrency = 2\ntimeout_secs = 30\n\
+         [[index]]\nname = \"pypi\"\n[[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
+    );
+    let ScheduledJob::CatalogSync(defaults) = &config.jobs.schedules[0].job else {
+        panic!("expected catalog sync");
+    };
+    assert_eq!(defaults.repository, "pypi");
+    assert_eq!(defaults.max_projects.get(), DEFAULT_CATALOG_PROJECTS);
+    assert_eq!(defaults.concurrency.get(), DEFAULT_CATALOG_CONCURRENCY);
+    assert_eq!(defaults.timeout, DEFAULT_CATALOG_TIMEOUT);
+    let ScheduledJob::CatalogSync(explicit) = &config.jobs.schedules[1].job else {
+        panic!("expected catalog sync");
+    };
+    assert_eq!(explicit.source.as_deref(), Some("public"));
+    assert_eq!(explicit.max_projects.get(), 9);
+    assert_eq!(explicit.concurrency.get(), 2);
+    assert_eq!(explicit.timeout, Duration::from_secs(30));
+}
+
+#[rstest]
+#[case::cache_fields(
+    "job = \"cache_maintenance\"\nrepository = \"pypi\"",
+    "accepts no catalog-sync fields"
+)]
+#[case::missing_repository("job = \"catalog_sync\"", "needs a non-empty `repository`")]
+#[case::empty_repository("job = \"catalog_sync\"\nrepository = \" \"", "needs a non-empty `repository`")]
+#[case::empty_source(
+    "job = \"catalog_sync\"\nrepository = \"pypi\"\nsource = \" \"",
+    "`source` must not be empty"
+)]
+#[case::zero_projects(
+    "job = \"catalog_sync\"\nrepository = \"pypi\"\nmax_projects = 0",
+    "`max_projects` must be positive"
+)]
+#[case::too_many_projects(
+    "job = \"catalog_sync\"\nrepository = \"pypi\"\nmax_projects = 100001",
+    "`max_projects` exceeds the per-run limit"
+)]
+#[case::zero_concurrency(
+    "job = \"catalog_sync\"\nrepository = \"pypi\"\nconcurrency = 0",
+    "`concurrency` must be positive"
+)]
+#[case::too_much_concurrency(
+    "job = \"catalog_sync\"\nrepository = \"pypi\"\nconcurrency = 33",
+    "`concurrency` exceeds the per-run limit"
+)]
+#[case::zero_timeout(
+    "job = \"catalog_sync\"\nrepository = \"pypi\"\ntimeout_secs = 0",
+    "`timeout_secs` must be between 1 and 86400"
+)]
+#[case::long_timeout(
+    "job = \"catalog_sync\"\nrepository = \"pypi\"\ntimeout_secs = 86401",
+    "`timeout_secs` must be between 1 and 86400"
+)]
+fn test_schedule_rejects_invalid_kind_parameters(#[case] fields: &str, #[case] expected: &str) {
+    let partial = config::from_toml(
+        PathBuf::from("x.toml"),
+        &format!("[[jobs.schedule]]\n{fields}\ninterval_secs = 60\n"),
+    )
+    .unwrap();
+
+    let error = Config::default().apply(partial).unwrap_err();
+
+    assert!(error.to_string().contains(expected), "{error}");
+}
+
+#[rstest]
+#[case::unknown("missing", "", "must name a configured index")]
+#[case::hosted("corp", "[[index]]\nname = \"corp\"\nhosted = true\n", "must name a cached index")]
+#[case::oci(
+    "corp",
+    "[[index]]\nname = \"corp\"\necosystem = \"oci\"\ncached = \"https://registry.example/\"\n",
+    "needs an online PyPI repository"
+)]
+#[case::offline(
+    "corp",
+    "[[index]]\nname = \"corp\"\ncached = \"https://pypi.org/simple/\"\noffline = true\n",
+    "needs an online PyPI repository"
+)]
+#[case::legacy_source(
+    "corp",
+    "[[index]]\nname = \"corp\"\ncached = \"https://pypi.org/simple/\"\n",
+    "`source` must name a repository upstream"
+)]
+#[case::unknown_source(
+    "corp",
+    "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n",
+    "`source` must name a repository upstream"
+)]
+fn test_catalog_schedule_rejects_incompatible_repository(
+    #[case] repository: &str,
+    #[case] indexes: &str,
+    #[case] expected: &str,
+) {
+    let partial = config::from_toml(
+        PathBuf::from("x.toml"),
+        &format!(
+            "{indexes}[[jobs.schedule]]\njob = \"catalog_sync\"\ninterval_secs = 60\nrepository = \"{repository}\"\nsource = \"missing\"\n"
+        ),
+    )
+    .unwrap();
+
+    let error = Config::default().apply(partial).unwrap_err();
+
+    assert!(error.to_string().contains(expected), "{error}");
 }

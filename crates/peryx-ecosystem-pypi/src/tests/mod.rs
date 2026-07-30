@@ -42,7 +42,7 @@ thread_local! {
 /// events from capturing tests on other threads under parallel runs. This subscriber instead routes
 /// every event to the current thread's [`ACTIVE_CAPTURE`] buffer, so tests stay isolated without
 /// poisoning the cache.
-fn install_global_subscriber() {
+pub fn install_global_subscriber() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     INSTALLED.get_or_init(|| {
         tracing_subscriber::fmt()

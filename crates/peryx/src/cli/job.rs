@@ -11,6 +11,26 @@ pub enum JobCommand {
     List(JobListArgs),
     /// Show one job run in detail.
     Show(JobShowArgs),
+    /// Refresh a remote `PyPI` project catalog and bounded project metadata set.
+    Run {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        /// Configured cached repository name.
+        #[arg(long)]
+        repository: String,
+        /// Named upstream source; omit to use repository routing.
+        #[arg(long)]
+        source: Option<String>,
+        /// Maximum catalog projects to refresh.
+        #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_CATALOG_PROJECTS)]
+        max_projects: usize,
+        /// Maximum project-metadata requests in flight.
+        #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_CATALOG_CONCURRENCY)]
+        concurrency: usize,
+        /// Overall wall-time budget in seconds.
+        #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_CATALOG_TIMEOUT.as_secs())]
+        timeout_secs: u64,
+    },
 }
 
 impl JobCommand {
@@ -19,6 +39,7 @@ impl JobCommand {
         match self {
             Self::List(args) => &args.runtime,
             Self::Show(args) => &args.runtime,
+            Self::Run { runtime, .. } => runtime,
         }
     }
 }

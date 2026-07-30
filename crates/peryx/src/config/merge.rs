@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use peryx_core::Ecosystem;
-use peryx_driver::jobs::Schedule;
+use peryx_driver::jobs::{
+    CatalogSyncParameters, MAX_CATALOG_CONCURRENCY, MAX_CATALOG_PROJECTS_PER_RUN, MAX_CATALOG_TIMEOUT, Schedule,
+    ScheduledJob,
+};
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
 use peryx_identity::UPLOAD_TOKEN_NAME;
 use time::OffsetDateTime;
@@ -21,8 +24,8 @@ use super::model::{
 };
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawAvailability, RawBlobStorage, RawIndex, RawJobSchedule, RawReplication, RawTls, RawToken, RawUpstream,
-    RawWebhook,
+    RawAcme, RawAvailability, RawBlobStorage, RawIndex, RawJobSchedule, RawReplication, RawScheduledJob, RawTls,
+    RawToken, RawUpstream, RawWebhook,
 };
 
 impl Config {
@@ -81,6 +84,7 @@ impl Config {
             self.blob = classify_blob(blob)?;
         }
         self.jobs = self.jobs.apply(partial.jobs)?;
+        validate_schedules(&self.indexes, &self.jobs.schedules)?;
         Ok(self)
     }
 }
@@ -101,17 +105,122 @@ impl JobsConfig {
     }
 }
 
-const fn classify_schedule(index: usize, raw: RawJobSchedule) -> Result<Schedule, ConfigError> {
+fn classify_schedule(index: usize, raw: RawJobSchedule) -> Result<Schedule, ConfigError> {
     let Some(interval) = std::num::NonZeroU64::new(raw.interval_secs) else {
         return Err(ConfigError::Jobs {
             index,
             reason: "`interval_secs` must be positive",
         });
     };
+    let job = match raw.job {
+        RawScheduledJob::CacheMaintenance => {
+            if raw.repository.is_some()
+                || raw.source.is_some()
+                || raw.max_projects.is_some()
+                || raw.concurrency.is_some()
+                || raw.timeout_secs.is_some()
+            {
+                return Err(ConfigError::Jobs {
+                    index,
+                    reason: "cache maintenance accepts no catalog-sync fields",
+                });
+            }
+            ScheduledJob::CacheMaintenance
+        }
+        RawScheduledJob::CatalogSync => ScheduledJob::CatalogSync(classify_catalog_sync(index, raw)?),
+    };
     Ok(Schedule {
-        job: raw.job,
+        job,
         interval: Duration::from_secs(interval.get()),
     })
+}
+
+fn classify_catalog_sync(index: usize, raw: RawJobSchedule) -> Result<CatalogSyncParameters, ConfigError> {
+    let Some(repository) = raw.repository.filter(|repository| !repository.trim().is_empty()) else {
+        return Err(ConfigError::Jobs {
+            index,
+            reason: "catalog sync needs a non-empty `repository`",
+        });
+    };
+    if raw.source.as_deref().is_some_and(|source| source.trim().is_empty()) {
+        return Err(ConfigError::Jobs {
+            index,
+            reason: "catalog sync `source` must not be empty",
+        });
+    }
+    let mut parameters = CatalogSyncParameters::new(repository);
+    parameters.source = raw.source;
+    if let Some(max_projects) = raw.max_projects {
+        parameters.max_projects = std::num::NonZeroUsize::new(max_projects).ok_or(ConfigError::Jobs {
+            index,
+            reason: "catalog sync `max_projects` must be positive",
+        })?;
+    }
+    if parameters.max_projects.get() > MAX_CATALOG_PROJECTS_PER_RUN {
+        return Err(ConfigError::Jobs {
+            index,
+            reason: "catalog sync `max_projects` exceeds the per-run limit",
+        });
+    }
+    if let Some(concurrency) = raw.concurrency {
+        parameters.concurrency = std::num::NonZeroUsize::new(concurrency).ok_or(ConfigError::Jobs {
+            index,
+            reason: "catalog sync `concurrency` must be positive",
+        })?;
+    }
+    if parameters.concurrency.get() > MAX_CATALOG_CONCURRENCY {
+        return Err(ConfigError::Jobs {
+            index,
+            reason: "catalog sync `concurrency` exceeds the per-run limit",
+        });
+    }
+    if let Some(timeout_secs) = raw.timeout_secs {
+        parameters.timeout = Duration::from_secs(timeout_secs);
+    }
+    if parameters.timeout.is_zero() || parameters.timeout > MAX_CATALOG_TIMEOUT {
+        return Err(ConfigError::Jobs {
+            index,
+            reason: "catalog sync `timeout_secs` must be between 1 and 86400",
+        });
+    }
+    Ok(parameters)
+}
+
+fn validate_schedules(indexes: &[IndexConfig], schedules: &[Schedule]) -> Result<(), ConfigError> {
+    for (position, schedule) in schedules.iter().enumerate() {
+        let ScheduledJob::CatalogSync(parameters) = &schedule.job else {
+            continue;
+        };
+        let Some(repository) = indexes.iter().find(|index| index.name == parameters.repository) else {
+            return Err(ConfigError::Jobs {
+                index: position,
+                reason: "catalog sync `repository` must name a configured index",
+            });
+        };
+        let IndexKind::Cached { routing, offline, .. } = &repository.kind else {
+            return Err(ConfigError::Jobs {
+                index: position,
+                reason: "catalog sync `repository` must name a cached index",
+            });
+        };
+        if repository.ecosystem != Ecosystem::Pypi || *offline {
+            return Err(ConfigError::Jobs {
+                index: position,
+                reason: "catalog sync needs an online PyPI repository",
+            });
+        }
+        if let Some(source) = &parameters.source
+            && !routing
+                .as_ref()
+                .is_some_and(|routing| routing.upstreams.iter().any(|upstream| upstream.name == *source))
+        {
+            return Err(ConfigError::Jobs {
+                index: position,
+                reason: "catalog sync `source` must name a repository upstream",
+            });
+        }
+    }
+    Ok(())
 }
 
 fn classify_blob(raw: RawBlobStorage) -> Result<BlobStorageConfig, ConfigError> {

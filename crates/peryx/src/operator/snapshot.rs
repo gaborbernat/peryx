@@ -84,6 +84,16 @@ struct SnapshotJobs {
 struct SnapshotSchedule {
     job: &'static str,
     interval_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_projects: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    concurrency: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -430,9 +440,26 @@ fn snapshot_jobs(jobs: &JobsConfig) -> Option<SnapshotJobs> {
     } else {
         jobs.schedules
             .iter()
-            .map(|schedule| SnapshotSchedule {
-                job: schedule.job.as_str(),
-                interval_secs: schedule.interval.as_secs(),
+            .map(|schedule| {
+                let (repository, source, max_projects, concurrency, timeout_secs) = match &schedule.job {
+                    peryx_driver::jobs::ScheduledJob::CacheMaintenance => (None, None, None, None, None),
+                    peryx_driver::jobs::ScheduledJob::CatalogSync(parameters) => (
+                        Some(parameters.repository.clone()),
+                        parameters.source.clone(),
+                        Some(parameters.max_projects.get()),
+                        Some(parameters.concurrency.get()),
+                        Some(parameters.timeout.as_secs()),
+                    ),
+                };
+                SnapshotSchedule {
+                    job: schedule.job.as_str(),
+                    interval_secs: schedule.interval.as_secs(),
+                    repository,
+                    source,
+                    max_projects,
+                    concurrency,
+                    timeout_secs,
+                }
             })
             .collect()
     };

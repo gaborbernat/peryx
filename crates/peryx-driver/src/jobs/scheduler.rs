@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -156,6 +156,28 @@ impl JobScheduler {
     /// saturated queue is [`QueueFull`](Submit::QueueFull), and a draining scheduler is
     /// [`ShuttingDown`](Submit::ShuttingDown). Only an admitted job spawns.
     pub fn submit(&self, job: Arc<dyn NodeJob>) -> Submit {
+        self.admit(job, None)
+    }
+
+    /// Admit one job and wait for its persisted result.
+    ///
+    /// # Panics
+    /// Panics if an admitted worker exits without sending its result, which violates the scheduler's
+    /// completion invariant.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when admission is refused or execution fails.
+    pub async fn run(&self, job: Arc<dyn NodeJob>) -> Result<JobReport, String> {
+        let (sender, receiver) = oneshot::channel();
+        match self.admit(job, Some(sender)) {
+            Submit::Queued => receiver.await.expect("an admitted job sends its result"),
+            Submit::Conflict => Err("a matching node-local job is already running".to_owned()),
+            Submit::QueueFull => Err("the node-local job queue is full".to_owned()),
+            Submit::ShuttingDown => Err("the node-local job scheduler is shutting down".to_owned()),
+        }
+    }
+
+    fn admit(&self, job: Arc<dyn NodeJob>, completion: Option<oneshot::Sender<Result<JobReport, String>>>) -> Submit {
         let kind = job.kind();
         if self.shared.cancel.is_cancelled() {
             return Submit::ShuttingDown;
@@ -170,7 +192,8 @@ impl JobScheduler {
             self.shared.metrics.rejected(kind, Reject::QueueFull);
             return Submit::QueueFull;
         };
-        self.tracker.spawn(run_admitted(self.shared.clone(), job, key, slot));
+        self.tracker
+            .spawn(run_admitted(self.shared.clone(), job, key, slot, completion));
         Submit::Queued
     }
 
@@ -185,7 +208,13 @@ impl JobScheduler {
     }
 }
 
-async fn run_admitted(shared: Arc<Shared>, job: Arc<dyn NodeJob>, key: String, slot: OwnedSemaphorePermit) {
+async fn run_admitted(
+    shared: Arc<Shared>,
+    job: Arc<dyn NodeJob>,
+    key: String,
+    slot: OwnedSemaphorePermit,
+    completion: Option<oneshot::Sender<Result<JobReport, String>>>,
+) {
     let _slot = slot;
     let _worker = shared
         .workers
@@ -195,21 +224,33 @@ async fn run_admitted(shared: Arc<Shared>, job: Arc<dyn NodeJob>, key: String, s
         .expect("worker semaphore stays open");
     let _kind = shared.per_kind.acquire(job.kind()).await;
     let _repository = shared.per_repository.acquire(job.scope()).await;
-    execute(job.as_ref(), &shared.state, &shared.cancel, &shared.metrics).await;
+    let result = execute(job.as_ref(), &shared.state, &shared.cancel, &shared.metrics).await;
     shared.lock_inflight().remove(&key);
+    if let Some(completion) = completion {
+        let _ = completion.send(result.map_err(|error| error.to_string()));
+    }
 }
 
 fn conflict_key(kind: &str, scope: &str) -> String {
     format!("{kind}\u{0}{scope}")
 }
 
-async fn execute(job: &dyn NodeJob, state: &Arc<ServingState>, cancel: &CancellationToken, metrics: &JobMetrics) {
+async fn execute(
+    job: &dyn NodeJob,
+    state: &Arc<ServingState>,
+    cancel: &CancellationToken,
+    metrics: &JobMetrics,
+) -> Result<JobReport, JobError> {
     let kind = job.kind();
     metrics.started(kind);
-    let outcome = if cancel.is_cancelled() {
-        Outcome::Cancelled
+    let (outcome, result) = if cancel.is_cancelled() {
+        (
+            Outcome::Cancelled,
+            Err(JobError::Job("node-local job cancelled before it started".to_owned())),
+        )
     } else {
-        match run_persisted(job, state, cancel).await {
+        let result = run_persisted(job, state, cancel).await;
+        let outcome = match &result {
             Ok(_) if cancel.is_cancelled() => Outcome::Cancelled,
             Ok(report) => {
                 tracing::info!(kind, scope = job.scope(), ?report, "node-local job finished");
@@ -219,9 +260,11 @@ async fn execute(job: &dyn NodeJob, state: &Arc<ServingState>, cancel: &Cancella
                 tracing::error!(kind, scope = job.scope(), %error, "node-local job failed");
                 Outcome::Failed
             }
-        }
+        };
+        (outcome, result)
     };
     metrics.finished(kind, outcome);
+    result
 }
 
 async fn run_persisted(

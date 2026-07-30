@@ -9,6 +9,14 @@
 [profile.default]
 slow-timeout = { period = "90s", terminate-after = 2 }
 
+# On macOS, Rust calls pipe() before it marks the descriptors close-on-exec. A nextest sibling can
+# spawn in that window, inherit another test's output descriptor, and hold it past the leak deadline.
+# Reserve all runner slots for each macOS test; other hosts keep nextest's default parallelism.
+[[profile.default.overrides]]
+platform = { host = 'cfg(target_os = "macos")' }
+filter = "all()"
+threads-required = "num-test-threads"
+
 [test-groups]
 e2e-servers = { max-threads = 4 }
 

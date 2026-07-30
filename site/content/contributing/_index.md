@@ -43,6 +43,11 @@ reactive graph through process-global arenas, so two page renders at once in one
 flaky under `cargo test`, impossible under nextest's isolation. The tests also cache the deterministic route table and
 serialize their own renders, so a stray `cargo test` no longer hangs; nextest stays the supported runner.
 
+On macOS hosts, nextest starts one test process at a time. Rust creates an output pipe before marking it close-on-exec
+on macOS, so concurrent starts can pass one test's descriptor to a sibling and report a false leak. Serial starts close
+that race at the cost of a longer local run; Linux and Windows keep nextest's CPU-sized parallelism. Nextest tracks the
+underlying race in [nextest#1469](https://github.com/nextest-rs/nextest/issues/1469).
+
 ## End-to-end tests
 
 The e2e suite drives real pip, uv, and twine against a spawned peryx binary:

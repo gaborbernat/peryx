@@ -9,7 +9,7 @@ use peryx_storage::blob::Digest;
 
 use crate::store::PypiStore as _;
 
-use super::CacheError;
+use super::{CacheError, ensure_digest_clear};
 
 /// The largest provenance blob peryx serves. An upload's `attestations` field is capped at 1 MiB, so
 /// the wrapped provenance object stays comfortably under this ceiling; it bounds the read all the same.
@@ -21,6 +21,7 @@ const MAX_PROVENANCE_BYTES: u64 = 2 * 1024 * 1024;
 /// Returns [`CacheError::FileNotFound`] when the artifact carries no provenance sibling or its blob is
 /// gone, or another error on a store or blob failure.
 pub async fn provenance_bytes(state: &Arc<ServingState>, artifact_digest: &Digest) -> Result<Bytes, CacheError> {
+    ensure_digest_clear(state, artifact_digest)?;
     let (provenance_hex, _size) = state
         .meta
         .get_provenance(artifact_digest.as_str())?

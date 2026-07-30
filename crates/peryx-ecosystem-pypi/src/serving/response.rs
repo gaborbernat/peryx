@@ -272,7 +272,9 @@ fn cache_error_status(err: &CacheError, context: &CacheContext<'_>) -> StatusCod
         CacheError::Meta(_) | CacheError::Blob(_) | CacheError::MissingSha256(_) | CacheError::Quota(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
-        CacheError::FileNotFound | CacheError::NoPromotableFiles { .. } => StatusCode::NOT_FOUND,
+        CacheError::FileNotFound | CacheError::ArtifactRevoked | CacheError::NoPromotableFiles { .. } => {
+            StatusCode::NOT_FOUND
+        }
         CacheError::OfflineMissing(_) => StatusCode::SERVICE_UNAVAILABLE,
         CacheError::FileExists(_) => StatusCode::CONFLICT,
         CacheError::NotVolatile | CacheError::Policy(_) => StatusCode::FORBIDDEN,

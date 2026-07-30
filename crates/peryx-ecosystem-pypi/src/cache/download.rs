@@ -11,7 +11,10 @@ use peryx_driver::state::ServingState;
 use peryx_events::metrics::Event;
 use peryx_storage::blob::{BlobLease, BlobMetadata, BlobWrite, Digest};
 
-use super::{CacheError, flight_gate, release_flight, source_artifact_client, source_client, upstream_permit};
+use super::{
+    CacheError, ensure_digest_clear, flight_gate, release_flight, source_artifact_client, source_client,
+    upstream_permit,
+};
 
 /// Resolve a file to a hosted blob path. A cache miss is fetched through the same streaming path as
 /// downloads, so the archive inspector never buffers the whole artifact in memory.
@@ -30,6 +33,7 @@ pub async fn file_path(
     route: String,
     filename: String,
 ) -> Result<BlobLease, CacheError> {
+    ensure_digest_clear(&state, &digest)?;
     if state.blobs.head(&digest).await?.is_some() {
         return Ok(state.blobs.materialize(&digest).await?);
     }
@@ -70,6 +74,7 @@ pub enum FileProbe {
 /// Returns [`CacheError::FileNotFound`] if the digest has no known source, [`CacheError::OfflineMissing`]
 /// if the index it came from is offline, or another error on a store failure.
 pub async fn probe_file(state: &ServingState, digest: &Digest) -> Result<FileProbe, CacheError> {
+    ensure_digest_clear(state, digest)?;
     // One stat answers "is it cached", sizes it, and dates it, where the streaming path needs the
     // handle too. The date is what a `GET` of the same blob validates on, so a `HEAD` states it too.
     if let Some(blob) = state.blobs.head(digest).await? {
@@ -114,6 +119,7 @@ pub async fn stream_file(
     route: String,
     filename: String,
 ) -> Result<FileOutcome, CacheError> {
+    ensure_digest_clear(&state, &digest)?;
     if let Some(metadata) = state.blobs.head(&digest).await? {
         return Ok(FileOutcome::Cached(metadata));
     }

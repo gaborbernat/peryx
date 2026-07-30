@@ -16,6 +16,7 @@ mod overlay;
 mod policy;
 mod promote;
 mod render_cache;
+mod revocations;
 mod routing;
 mod security;
 mod status;

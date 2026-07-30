@@ -309,6 +309,22 @@ pub fn list_projects(meta: &MetaStore, index: &str) -> Result<Vec<String>, MetaE
     Ok(names)
 }
 
+/// List at most `limit` projects from the active remote catalog in canonical-name order.
+///
+/// # Errors
+/// Returns a store error if the catalog state or project-key scan cannot be read.
+pub fn list_catalog_projects(meta: &MetaStore, index: &str, limit: usize) -> Result<Vec<String>, MetaError> {
+    let Some(active) = catalog_state(meta, index)?.active else {
+        return Ok(Vec::new());
+    };
+    let prefix = catalog_generation_prefix(index, active.generation);
+    Ok(meta
+        .driver_prefix_keys_limited(&prefix, limit)?
+        .into_iter()
+        .map(|key| key[prefix.len()..].to_owned())
+        .collect())
+}
+
 /// Count the rows a project-cache purge would remove.
 ///
 /// # Errors
@@ -379,8 +395,8 @@ pub fn delete_project_cache(
 mod tests {
     use super::{
         CatalogGeneration, MetaStore, ProjectCachePurgeCounts, abort_catalog_generation, begin_catalog_generation,
-        catalog_generation_prefix, catalog_state, freshness_key, project_key, publish_catalog_generation,
-        put_catalog_projects, recover_catalog_generations, refresh_catalog_generation,
+        catalog_generation_prefix, catalog_state, freshness_key, list_catalog_projects, project_key,
+        publish_catalog_generation, put_catalog_projects, recover_catalog_generations, refresh_catalog_generation,
     };
     use crate::store::PypiStore as _;
 
@@ -403,6 +419,26 @@ mod tests {
             bytes: 100,
             projects: 2,
         }
+    }
+
+    #[test]
+    fn test_list_catalog_projects_is_bounded_and_canonical() {
+        let (_dir, meta) = store();
+        let (id, expected) = begin_catalog_generation(&meta, "pypi").unwrap();
+        put_catalog_projects(
+            &meta,
+            "pypi",
+            id,
+            &[
+                ("zulu".to_owned(), "Zulu".to_owned()),
+                ("alpha".to_owned(), "Alpha".to_owned()),
+            ],
+        )
+        .unwrap();
+        publish_catalog_generation(&meta, "pypi", expected, generation(id, None, None)).unwrap();
+
+        assert_eq!(list_catalog_projects(&meta, "pypi", 1).unwrap(), vec!["alpha"]);
+        assert!(list_catalog_projects(&meta, "missing", 1).unwrap().is_empty());
     }
 
     #[test]

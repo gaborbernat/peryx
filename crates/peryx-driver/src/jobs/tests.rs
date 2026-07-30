@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::scheduler::{JobLimits, Submit};
 use super::{
-    CACHE_MAINTENANCE, JobContext, JobReport, JobScheduler, MaintenanceJob, NodeJob, Schedule, ScheduledJob,
-    run_schedules, submit_maintenance,
+    CACHE_MAINTENANCE, CatalogSyncParameters, JobContext, JobReport, JobScheduler, MaintenanceJob, NodeJob, Schedule,
+    ScheduledJob, run_schedules, scheduled_job, submit_maintenance,
 };
 use crate::serving::{EcosystemDriver, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
@@ -219,6 +219,66 @@ async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
     assert_eq!(job.ran.load(Ordering::SeqCst), 1);
     assert!(state.meta.list_job_runs().unwrap().is_empty());
     scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_run_waits_for_and_returns_a_jobs_report() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+    let report = JobReport {
+        processed: 4,
+        changed: 2,
+    };
+
+    assert_eq!(
+        scheduler
+            .run(TestJob::new("probe", "a", Action::Return(Ok(report))))
+            .await
+            .unwrap(),
+        report
+    );
+    assert_eq!(
+        scheduler
+            .run(TestJob::new("probe", "b", Action::Return(Err("boom".to_owned()))))
+            .await
+            .unwrap_err(),
+        "boom"
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_run_reports_each_admission_refusal() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(1, 1, 1, 1));
+    let release = Arc::new(Notify::new());
+    let held = TestJob::new("probe", "a", Action::Block(release.clone()));
+    scheduler.submit(held.clone());
+    held.started.notified().await;
+
+    assert_eq!(
+        scheduler
+            .run(TestJob::new("probe", "a", Action::Return(Ok(JobReport::default()))))
+            .await
+            .unwrap_err(),
+        "a matching node-local job is already running"
+    );
+    assert_eq!(
+        scheduler
+            .run(TestJob::new("probe", "b", Action::Return(Ok(JobReport::default()))))
+            .await
+            .unwrap_err(),
+        "the node-local job queue is full"
+    );
+    release.notify_one();
+    scheduler.shutdown().await;
+    assert_eq!(
+        scheduler
+            .run(TestJob::new("probe", "c", Action::Return(Ok(JobReport::default()))))
+            .await
+            .unwrap_err(),
+        "the node-local job scheduler is shutting down"
+    );
 }
 
 #[tokio::test]
@@ -503,6 +563,43 @@ fn cache_schedule(secs: u64) -> Vec<Schedule> {
 #[test]
 fn test_a_scheduled_job_reports_its_stable_label() {
     assert_eq!(ScheduledJob::CacheMaintenance.as_str(), CACHE_MAINTENANCE);
+}
+
+fn catalog_schedule(secs: u64) -> Vec<Schedule> {
+    vec![Schedule {
+        job: ScheduledJob::CatalogSync(CatalogSyncParameters {
+            repository: "pypi".to_owned(),
+            source: None,
+            max_projects: NonZeroUsize::new(1).unwrap(),
+            concurrency: NonZeroUsize::new(1).unwrap(),
+            timeout: Duration::from_secs(1),
+        }),
+        interval: Duration::from_secs(secs),
+    }]
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_an_unsupported_scheduled_job_is_rejected_without_submission() {
+    let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
+    let plan = catalog_schedule(60);
+    let Err(error) = scheduled_job(&app, &plan[0].job) else {
+        panic!("the stub driver must decline catalog sync")
+    };
+    assert_eq!(error, "no installed ecosystem supports catalog_sync");
+    let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
+    let cancel = CancellationToken::new();
+    let timer = tokio::spawn(run_schedules(app.clone(), scheduler.clone(), plan, cancel.clone()));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_mins(1)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    cancel.cancel();
+    timer.await.unwrap();
+    scheduler.shutdown().await;
+    assert!(app.meta.list_job_runs().unwrap().is_empty());
 }
 
 #[test]

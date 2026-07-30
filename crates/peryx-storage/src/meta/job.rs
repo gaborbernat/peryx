@@ -11,6 +11,8 @@ use super::{JOB_RUN, JOB_SERIAL_KEY, MetaStore, SERIAL};
 pub enum JobKind {
     /// The background sweep that revalidates stale cached pages.
     CacheRefresh,
+    /// A bounded remote project-catalog and file-metadata refresh.
+    CatalogSync,
 }
 
 /// Where a job run stands: in flight, or finished one way or the other.

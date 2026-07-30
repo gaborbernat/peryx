@@ -19,6 +19,7 @@ mod timer;
 #[cfg(test)]
 mod tests;
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,43 @@ pub use timer::{Schedule, ScheduledJob, run_schedules};
 
 /// How often the server runs a maintenance pass when node-local jobs are enabled.
 pub const MAINTENANCE_INTERVAL: Duration = Duration::from_mins(1);
+
+/// Default projects admitted by one catalog-sync run.
+pub const DEFAULT_CATALOG_PROJECTS: usize = 10_000;
+/// Default concurrent project-metadata requests in one catalog-sync run.
+pub const DEFAULT_CATALOG_CONCURRENCY: usize = 4;
+/// Default wall-time budget for one catalog-sync run.
+pub const DEFAULT_CATALOG_TIMEOUT: Duration = Duration::from_mins(15);
+/// Startup rejects larger project budgets to keep each run's memory and request count bounded.
+pub const MAX_CATALOG_PROJECTS_PER_RUN: usize = 100_000;
+/// Startup rejects larger request pools to protect the upstream and foreground traffic.
+pub const MAX_CATALOG_CONCURRENCY: usize = 32;
+/// Startup rejects longer runs so a stuck source cannot occupy a worker indefinitely.
+pub const MAX_CATALOG_TIMEOUT: Duration = Duration::from_hours(24);
+
+/// The source, repository, and work limits shared by scheduled and one-shot catalog syncs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSyncParameters {
+    pub repository: String,
+    pub source: Option<String>,
+    pub max_projects: NonZeroUsize,
+    pub concurrency: NonZeroUsize,
+    pub timeout: Duration,
+}
+
+impl CatalogSyncParameters {
+    /// Build the default bounded work budget for `repository`.
+    #[must_use]
+    pub fn new(repository: impl Into<String>) -> Self {
+        Self {
+            repository: repository.into(),
+            source: None,
+            max_projects: NonZeroUsize::MIN.saturating_add(DEFAULT_CATALOG_PROJECTS - 1),
+            concurrency: NonZeroUsize::MIN.saturating_add(DEFAULT_CATALOG_CONCURRENCY - 1),
+            timeout: DEFAULT_CATALOG_TIMEOUT,
+        }
+    }
+}
 
 /// The counts a finished job reports, for its durable run record and lifecycle metrics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -140,4 +178,15 @@ pub fn submit_maintenance(app: &AppState, scheduler: &JobScheduler) {
     for driver in app.drivers() {
         scheduler.submit(Arc::new(MaintenanceJob { driver: driver.clone() }));
     }
+}
+
+/// Resolve one configured job through the installed ecosystem drivers.
+///
+/// # Errors
+/// Returns a user-visible message when no installed driver supports the kind or its parameters do
+/// not resolve against the runtime state.
+pub fn scheduled_job(app: &AppState, job: &ScheduledJob) -> Result<Arc<dyn NodeJob>, String> {
+    app.drivers()
+        .find_map(|driver| driver.node_job(job))
+        .unwrap_or_else(|| Err(format!("no installed ecosystem supports {}", job.as_str())))
 }

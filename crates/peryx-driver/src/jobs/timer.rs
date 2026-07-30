@@ -10,42 +10,49 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{CACHE_MAINTENANCE, JobScheduler, submit_maintenance};
+use super::{CACHE_MAINTENANCE, CatalogSyncParameters, JobScheduler, scheduled_job, submit_maintenance};
 use crate::state::AppState;
 
 /// A registered node-local job kind a schedule can name.
 ///
 /// Each kind expands into the concrete [`NodeJob`](super::NodeJob)s to run when it fires: cache
 /// maintenance fans out one per installed ecosystem driver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduledJob {
     /// Reclaim idle process resources and revalidate stale cached pages, per ecosystem.
     CacheMaintenance,
+    /// Refresh one remote project catalog and a bounded set of its project metadata.
+    CatalogSync(CatalogSyncParameters),
 }
 
 impl ScheduledJob {
     /// The stable label this kind carries in configuration and logs.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::CacheMaintenance => CACHE_MAINTENANCE,
+            Self::CatalogSync(_) => "catalog_sync",
         }
     }
 
-    fn submit(self, app: &AppState, scheduler: &JobScheduler) {
+    fn submit(&self, app: &AppState, scheduler: &JobScheduler) {
         match self {
             Self::CacheMaintenance => submit_maintenance(app, scheduler),
+            Self::CatalogSync(_) => match scheduled_job(app, self) {
+                Ok(job) => {
+                    scheduler.submit(job);
+                }
+                Err(error) => tracing::error!(job = self.as_str(), %error, "scheduled job rejected"),
+            },
         }
     }
 }
 
 /// One configured schedule: a job kind and the interval between its runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schedule {
     pub job: ScheduledJob,
     pub interval: Duration,
@@ -76,7 +83,7 @@ pub async fn run_schedules(
             () = cancel.cancelled() => return,
             () = tokio::time::sleep_until(at) => {}
         }
-        let schedule = plan[index];
+        let schedule = &plan[index];
         tracing::debug!(job = schedule.job.as_str(), "schedule fired");
         schedule.job.submit(&app, &scheduler);
         let next = reschedule(at, Instant::now(), schedule.interval);

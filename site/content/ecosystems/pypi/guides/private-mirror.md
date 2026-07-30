@@ -179,6 +179,33 @@ any prior generation in place. A detail response is limited to 256 MiB and 2,000
 at most ten redirects, and concurrent syncs of one project inside a process share a lock and one fetch. Persisted source
 and final URLs strip user information, query strings, and fragments.
 
+### Schedule bounded metadata refreshes
+
+A catalog job combines the atomic root and project-generation paths without downloading artifact bytes. Schedule it on
+an online cached index when installers should find project metadata before their first request:
+
+```toml
+[[jobs.schedule]]
+job = "catalog_sync"
+interval_secs = 21600
+repository = "corp"
+max_projects = 10000
+concurrency = 4
+timeout_secs = 900
+```
+
+Run the identical job once while validating an upstream or warming a new node:
+
+```shell
+peryx job run --config peryx.toml --repository corp --max-projects 10000 --concurrency 4 --timeout-secs 900
+```
+
+The root publishes before project work begins. Cancellation or timeout stops new project requests and drops in-flight
+transfers; each previously completed generation stays serviceable. A run admits projects in canonical-name order up to
+`max_projects`, bounds concurrent metadata requests separately from the node's job-worker limit, and emits at most 100
+progress updates. Named multi-source routes use their normal fallback rules unless `source` selects one configured
+upstream explicitly. Keep the interval longer than a typical run and place it outside peak request periods.
+
 ## HTML upstreams
 
 Some upstreams, including [Artifactory](https://jfrog.com/artifactory/), serve the

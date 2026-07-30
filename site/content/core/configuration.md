@@ -653,15 +653,33 @@ rejects a non-positive interval at startup, naming the schedule's index (`jobs s
 [[jobs.schedule]]
 job = "cache_maintenance"
 interval_secs = 300
+
+[[jobs.schedule]]
+job = "catalog_sync"
+interval_secs = 21600
+repository = "pypi"
+max_projects = 10000
+concurrency = 4
+timeout_secs = 900
 ```
 
-| Key             | Meaning                                        | Default    |
-| --------------- | ---------------------------------------------- | ---------- |
-| `job`           | The registered job to run; `cache_maintenance` | (required) |
-| `interval_secs` | Seconds between runs, must be positive         | (required) |
+| Key             | Meaning                                                | Default    |
+| --------------- | ------------------------------------------------------ | ---------- |
+| `job`           | `cache_maintenance` or `catalog_sync`                  | (required) |
+| `interval_secs` | Seconds between runs, must be positive                 | (required) |
+| `repository`    | Cached online PyPI index for `catalog_sync`            | (required) |
+| `source`        | Named upstream to use instead of repository routing    | routing    |
+| `max_projects`  | Maximum projects refreshed per run; range `1..=100000` | `10000`    |
+| `concurrency`   | Project metadata requests in flight; range `1..=32`    | `4`        |
+| `timeout_secs`  | Whole-run wall-time limit; range `1..=86400`           | `900`      |
 
 `cache_maintenance` reclaims expired process resources and revalidates stale cached pages, fanning out one run per
 installed ecosystem so independent repositories sweep together while one repository never sweeps itself twice at once.
+
+`catalog_sync` refreshes the repository's remote root and then a canonical, bounded slice of project metadata. It does
+not download distributions. The same repository cannot run two catalog syncs at once, while different repositories may
+run within the node-local worker limits. Cancellation stops admitting project requests; completed root and project
+generations remain valid because each source document publishes atomically.
 
 One bounded timer drives every schedule, so a large set costs no per-tick scan. When a tick arrives while the same job's
 previous run is still going, peryx skips it rather than queueing it, and counts the skip in the job metrics. Pick an
@@ -670,6 +688,12 @@ contend for upstream bandwidth.
 
 The timer keeps no durable state. On restart it sets each schedule's next run one full interval after startup and drops
 the occurrences missed while the process was down rather than replaying them as a backlog.
+
+Run the same typed job once with `peryx job run --repository pypi`. The command accepts the schedule's `source`,
+`max-projects`, `concurrency`, and `timeout-secs` controls, prints processed and changed counts, and writes the same
+durable job history as a scheduled run. `peryx job list` and `peryx job show <id>` inspect that history. A failed run's
+error begins with a stable category such as `retryable_upstream`, `retryable_timeout`, `upstream`, `catalog_sync`, or
+`project_sync`; automation can retry only the retryable categories.
 
 ## `[blob]`
 

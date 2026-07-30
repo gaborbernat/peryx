@@ -9,8 +9,6 @@ use peryx_policy::PolicyConfig;
 use serde::Deserialize;
 use toml::Table;
 
-use peryx_driver::jobs::ScheduledJob;
-
 use super::model::{
     AvailabilityMode, CredentialFailureMode, JobsMode, LogFormat, LogSink, PrefetchConfig, PrefetchMode,
 };
@@ -127,13 +125,26 @@ pub struct PartialJobsConfig {
 }
 
 /// One `[[jobs.schedule]]` table before cadence validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawJobSchedule {
     /// The registered job kind to run.
-    pub job: ScheduledJob,
+    pub job: RawScheduledJob,
     /// Seconds between runs; validated positive.
     pub interval_secs: u64,
+    pub repository: Option<String>,
+    pub source: Option<String>,
+    pub max_projects: Option<usize>,
+    pub concurrency: Option<usize>,
+    pub timeout_secs: Option<u64>,
+}
+
+/// A configured job kind before its kind-specific fields are classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawScheduledJob {
+    CacheMaintenance,
+    CatalogSync,
 }
 
 /// One process replication role before secret and numeric validation.

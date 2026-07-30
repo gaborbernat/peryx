@@ -101,6 +101,11 @@ pub trait EcosystemDriver: Send + Sync {
     /// The ecosystem this driver serves.
     fn ecosystem(&self) -> Ecosystem;
 
+    /// Build an ecosystem-specific node-local job, or decline a kind owned by another driver.
+    fn node_job(&self, _job: &crate::jobs::ScheduledJob) -> Option<Result<Arc<dyn crate::jobs::NodeJob>, String>> {
+        None
+    }
+
     /// Where this ecosystem's wire protocol mounts. Indexed by default (`PyPI`'s Simple API).
     fn mount(&self) -> RouteMount {
         RouteMount::Indexed

@@ -12,6 +12,10 @@ on:
 
 permissions: {}
 
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   wheels:
     name: wheel ${{ matrix.platform.os }}-${{ matrix.platform.target }}

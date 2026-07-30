@@ -1,5 +1,6 @@
 mod acl_tests;
 mod basic_tests;
+mod external_tests;
 mod password_tests;
 mod revocation_tests;
 mod roles_tests;

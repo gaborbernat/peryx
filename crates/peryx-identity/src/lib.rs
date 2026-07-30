@@ -25,6 +25,7 @@
 //! the token ACL, so a legacy `upload_token` keeps resolving through [`authorize`] untouched.
 
 mod acl;
+mod external;
 mod oidc;
 mod password;
 mod revocation;
@@ -39,6 +40,11 @@ use base64::engine::general_purpose::STANDARD;
 pub use acl::{
     Action, Denial, Glob, Grant, Identity, IndexAcl, NamedToken, Principal, UPLOAD_TOKEN_NAME, authorize,
     authorize_all, authorize_exact_grants, authorize_grants,
+};
+pub use external::{
+    ExternalGroup, ExternalGroupGrant, ExternalIdentity, ExternalIdentityError, ExternalIdentityLinker,
+    ExternalIdentityResolution, ExternalIdentityStore, ExternalLinkRequest, ExternalLogin, ExternalSubject,
+    MAX_EXTERNAL_GROUPS, ManagedRoleGrant, ProviderId,
 };
 pub use oidc::{ExchangeError, ExchangedToken, IdentityExchange, OidcRuntime, PublisherBinding};
 pub use password::{PasswordCheck, PasswordError, PasswordPolicy, PasswordVerifier};

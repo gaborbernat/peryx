@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
+
 use peryx_identity::{GrantScope, Role, RoleGrant, UserId};
 use redb::{ReadableDatabase as _, ReadableTable as _, WriteTransaction};
 
-use super::{MetaError, MetaStore, ROLE_GRANT, USER};
+use super::{EXTERNAL_ROLE_GRANT, MetaError, MetaStore, ROLE_GRANT, USER};
 
 /// A rejected role-grant operation.
 #[derive(Debug, thiserror::Error)]
@@ -57,18 +59,32 @@ impl MetaStore {
     /// Returns a store error when a record cannot be read or decoded.
     pub fn user_role_grants(&self, id: &UserId) -> Result<Vec<RoleGrant>, MetaError> {
         let txn = self.db.begin_read()?;
-        let table = match txn.open_table(ROLE_GRANT) {
-            Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        };
         let (start, end) = (format!("{id}/"), format!("{id}0"));
-        let mut grants = Vec::new();
-        for entry in table.range(start.as_str()..end.as_str())? {
-            let (_, value) = entry?;
-            grants.push(serde_json::from_slice(value.value())?);
+        let mut grants = BTreeMap::new();
+        match txn.open_table(ROLE_GRANT) {
+            Ok(table) => {
+                for entry in table.range(start.as_str()..end.as_str())? {
+                    let (key, value) = entry?;
+                    grants.insert(key.value().to_owned(), serde_json::from_slice(value.value())?);
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(error) => return Err(error.into()),
         }
-        Ok(grants)
+        match txn.open_table(EXTERNAL_ROLE_GRANT) {
+            Ok(table) => {
+                for entry in table.range(start.as_str()..end.as_str())? {
+                    let (_, value) = entry?;
+                    let grant: RoleGrant = serde_json::from_slice(value.value())?;
+                    grants
+                        .entry(grant_key_of(&grant.user, grant.role, &grant.scope))
+                        .or_insert(grant);
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(grants.into_values().collect())
     }
 }
 

@@ -269,7 +269,7 @@ impl MetaStore {
     }
 }
 
-fn read_user(txn: &WriteTransaction, id: &UserId) -> Result<Option<ServerUser>, MetaError> {
+pub(super) fn read_user(txn: &WriteTransaction, id: &UserId) -> Result<Option<ServerUser>, MetaError> {
     let table = txn.open_table(USER)?;
     Ok(table
         .get(id.as_str())?
@@ -277,13 +277,13 @@ fn read_user(txn: &WriteTransaction, id: &UserId) -> Result<Option<ServerUser>, 
         .transpose()?)
 }
 
-fn write_user(txn: &WriteTransaction, user: &ServerUser) -> Result<(), MetaError> {
+pub(super) fn write_user(txn: &WriteTransaction, user: &ServerUser) -> Result<(), MetaError> {
     let bytes = serde_json::to_vec(user)?;
     txn.open_table(USER)?.insert(user.id.as_str(), bytes.as_slice())?;
     Ok(())
 }
 
-fn append_event(txn: &WriteTransaction, event: &UserLifecycleEvent) -> Result<(), MetaError> {
+pub(super) fn append_event(txn: &WriteTransaction, event: &UserLifecycleEvent) -> Result<(), MetaError> {
     let key = format!("{}/{:020}", event.user_id, event.sequence);
     let bytes = serde_json::to_vec(event)?;
     txn.open_table(USER_EVENT)?.insert(key.as_str(), bytes.as_slice())?;

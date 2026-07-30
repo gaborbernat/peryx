@@ -188,12 +188,15 @@ async fn test_ldap_provider_rejects_empty_credentials_without_connecting() {
 
 #[tokio::test]
 async fn test_ldap_provider_reports_an_unavailable_directory() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    let disconnected = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        socket.set_zero_linger().unwrap();
+        drop(socket);
+    });
     let mut settings = settings();
     settings.url = Url::parse(&format!("ldap://127.0.0.1:{port}")).unwrap();
-    settings.connect_timeout = Duration::from_secs(1);
     settings.request_timeout = Duration::from_secs(1);
     let provider = LdapProvider::new(settings).unwrap();
 
@@ -201,6 +204,7 @@ async fn test_ldap_provider_reports_an_unavailable_directory() {
         provider.authenticate("alice", "secret").await.unwrap_err(),
         LdapProviderError::Unavailable
     );
+    disconnected.await.unwrap();
 }
 
 #[tokio::test]

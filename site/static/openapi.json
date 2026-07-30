@@ -1464,7 +1464,52 @@
         "tags": [
           "oci"
         ],
-        "summary": "Delete a manifest or untag",
+        "summary": "Trash a manifest or tag",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The repository name, carrying the OCI index route as a prefix",
+            "required": true,
+            "example": "dockerhub/library/alpine"
+          },
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "A tag or an `algorithm:hex` digest",
+            "required": true,
+            "example": "latest"
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "Optional deletion reason retained for audit",
+            "required": false,
+            "example": "build metadata is incorrect"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Hidden and retained"
+          },
+          "404": {
+            "description": "`MANIFEST_UNKNOWN`"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          }
+        ]
+      }
+    },
+    "/v2/{name}/manifests/{reference}/restore": {
+      "put": {
+        "tags": [
+          "oci"
+        ],
+        "summary": "Restore a trashed manifest or tag",
+        "description": "Makes retained manifest bytes visible again. Digest restore reclaims tags whose live slot is empty and reports reused tags without overwriting them.",
         "parameters": [
           {
             "name": "name",
@@ -1483,7 +1528,7 @@
         ],
         "responses": {
           "202": {
-            "description": "Removed"
+            "description": "Restored"
           },
           "404": {
             "description": "`MANIFEST_UNKNOWN`"

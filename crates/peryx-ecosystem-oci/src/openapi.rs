@@ -26,6 +26,12 @@ pub fn openapi_paths(paths: PathsBuilder) -> PathsBuilder {
                 .build(),
         )
         .path(
+            "/v2/{name}/manifests/{reference}/restore",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Put, oci_manifest_restore())
+                .build(),
+        )
+        .path(
             "/v2/{name}/blobs/{digest}",
             PathItemBuilder::new()
                 .operation(HttpMethod::Get, oci_blob_pull())
@@ -148,11 +154,33 @@ fn oci_manifest_push() -> OperationBuilder {
 fn oci_manifest_delete() -> OperationBuilder {
     OperationBuilder::new()
         .tag("oci")
-        .summary(Some("Delete a manifest or untag"))
+        .summary(Some("Trash a manifest or tag"))
         .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
         .parameter(name_param())
         .parameter(reference_param())
-        .response("202", ResponseBuilder::new().description("Removed"))
+        .parameter(
+            ParameterBuilder::new()
+                .name("reason")
+                .parameter_in(ParameterIn::Query)
+                .description(Some("Optional deletion reason retained for audit"))
+                .example(Some(json!("build metadata is incorrect"))),
+        )
+        .response("202", ResponseBuilder::new().description("Hidden and retained"))
+        .response("404", ResponseBuilder::new().description("`MANIFEST_UNKNOWN`"))
+}
+
+fn oci_manifest_restore() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("oci")
+        .summary(Some("Restore a trashed manifest or tag"))
+        .description(Some(
+            "Makes retained manifest bytes visible again. Digest restore reclaims tags whose live slot is \
+             empty and reports reused tags without overwriting them.",
+        ))
+        .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
+        .parameter(name_param())
+        .parameter(reference_param())
+        .response("202", ResponseBuilder::new().description("Restored"))
         .response("404", ResponseBuilder::new().description("`MANIFEST_UNKNOWN`"))
 }
 

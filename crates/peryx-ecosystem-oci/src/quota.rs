@@ -194,11 +194,11 @@ pub fn publish_manifest(
     reservation: Option<QuotaReservationRecord>,
 ) -> Result<bool, ServeError> {
     let body = |txn: &mut DriverTxn| -> Result<(bool, Vec<Vec<u8>>), ServeError> {
-        store::record_manifest_txn(txn, index, repo, canonical, manifest)?;
-        let grew = match reference {
-            Reference::Tag(tag) => store::put_tag_txn(txn, index, repo, tag, canonical)?,
-            Reference::Digest(_) => false,
+        let tag = match reference {
+            Reference::Tag(tag) => Some(tag.as_str()),
+            Reference::Digest(_) => None,
         };
+        let grew = store::publish_manifest_txn(txn, index, repo, canonical, manifest, tag)?;
         Ok((grew, Vec::new()))
     };
     finalize(meta, reservation, body)
@@ -235,7 +235,8 @@ pub fn manifest_already_published(
     }
     match reference {
         Reference::Digest(_) => Ok(true),
-        Reference::Tag(tag) => Ok(store::get_tag(meta, index, repo, tag)?.as_deref() == Some(canonical)),
+        Reference::Tag(tag) => Ok(store::get_tag(meta, index, repo, tag)?.as_deref() == Some(canonical)
+            || store::trashed_tag_digest(meta, index, repo, tag)?.as_deref() == Some(canonical)),
     }
 }
 

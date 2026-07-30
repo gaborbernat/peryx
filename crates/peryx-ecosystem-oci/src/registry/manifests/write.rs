@@ -162,30 +162,38 @@ fn record_referrer(
     store::put_referrer(&state.meta, index, repo, subject, canonical, descriptor.as_bytes())?;
     Ok(Some(subject.to_owned()))
 }
-/// Delete a manifest by tag or digest.
+/// Move a manifest reference into repository trash.
 pub(in crate::registry) fn delete_manifest(
     state: &Arc<ServingState>,
     headers: &HeaderMap,
     name: &str,
     reference: &Reference,
+    query: &str,
 ) -> Result<Response, ServeError> {
     let (index, repo, identity) = match resolve_writable(state, name, headers, Action::Delete) {
         Ok(target) => target,
         Err(response) => return Ok(response),
     };
+    let info = store::TrashInfo {
+        deleted_at_unix: (state.clock)(),
+        actor: peryx_events::security::actor(&identity),
+        reason: query_params(query).remove("reason"),
+    };
     let (removed, version, digest) = match reference {
         Reference::Tag(tag) => {
-            let removed = store::delete_tag(&state.meta, &index.name, &repo, tag)?;
-            if removed {
+            let digest = store::trash_tag(&state.meta, &index.name, &repo, tag, &info)?;
+            if digest.is_some() {
                 state.bump_search_epoch();
             }
-            (removed, Some(tag.clone()), None)
+            (digest.is_some(), Some(tag.clone()), digest)
         }
-        Reference::Digest(digest) => (
-            delete_manifest_by_digest(state, &index.name, &repo, digest)?,
-            None,
-            Some(digest.clone()),
-        ),
+        Reference::Digest(digest) => {
+            let removed = store::trash_manifest(&state.meta, &index.name, &repo, digest, &info)?;
+            if removed.is_some_and(|tags| tags > 0) {
+                state.bump_search_epoch();
+            }
+            (removed.is_some(), None, Some(digest.clone()))
+        }
     };
     Ok(if removed {
         emit_webhook(
@@ -205,22 +213,59 @@ pub(in crate::registry) fn delete_manifest(
         error_response(ErrorCode::ManifestUnknown, "manifest unknown")
     })
 }
-/// Delete a manifest by digest, mirroring blob retention. Manifests are one global content-addressed
-/// pool shared across indexes, so clean this repo's own tags and referrers to the digest, drop its
-/// record that this repo serves the digest, then unlink the global record only when nothing else still
-/// references it. Reports whether anything changed, so an untouched absent digest still answers
-/// `404 MANIFEST_UNKNOWN`.
-fn delete_manifest_by_digest(state: &ServingState, index: &str, repo: &str, digest: &str) -> Result<bool, ServeError> {
-    let present = store::get_manifest(&state.meta, digest)?.is_some();
-    let (removed_tags, removed_referrers) = store::delete_repo_tags_to(&state.meta, index, repo, digest)?;
-    if removed_tags > 0 {
+
+/// Restore a retained manifest reference without overwriting a tag concurrently pushed elsewhere.
+pub(in crate::registry) fn restore_manifest(
+    state: &Arc<ServingState>,
+    headers: &HeaderMap,
+    name: &str,
+    reference: &Reference,
+) -> Result<Response, ServeError> {
+    let (index, repo, identity) = match resolve_writable(state, name, headers, Action::Delete) {
+        Ok(target) => target,
+        Err(response) => return Ok(response),
+    };
+    let (version, digest, restored, conflicts) = match reference {
+        Reference::Tag(tag) => match store::restore_tag(&state.meta, &index.name, &repo, tag)? {
+            store::RestoreTagOutcome::Missing => {
+                return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+            }
+            store::RestoreTagOutcome::Restored { digest } => (Some(tag.clone()), digest, 1, Vec::new()),
+        },
+        Reference::Digest(digest) => match store::restore_manifest(&state.meta, &index.name, &repo, digest)? {
+            store::RestoreManifestOutcome::Missing => {
+                return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+            }
+            store::RestoreManifestOutcome::Restored { restored, conflicts } => {
+                (None, digest.clone(), restored.len(), conflicts)
+            }
+        },
+    };
+    if restored > 0 {
         state.bump_search_epoch();
     }
-    if present && !store::referenced_manifest_digests(&state.meta)?.contains(digest) {
-        store::delete_manifest(&state.meta, digest)?;
+    emit_webhook(
+        state,
+        &Requester {
+            headers,
+            identity: &identity,
+        },
+        WebhookEventKind::Restore,
+        index,
+        &repo,
+        version,
+        Some(digest.clone()),
+    );
+    let mut builder = Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .header(DOCKER_CONTENT_DIGEST, digest)
+        .header("oci-restored-tags", restored);
+    if !conflicts.is_empty() {
+        builder = builder.header("oci-tag-conflicts", conflicts.join(","));
     }
-    store::prune_manifest_membership(&state.meta, index, repo, digest)?;
-    Ok(present || removed_tags > 0 || removed_referrers > 0)
+    Ok(builder
+        .body(Body::empty())
+        .expect("restore response builds from validated parts"))
 }
 /// A `201 Created` for a stored manifest, echoing `OCI-Subject` when the manifest declared a subject.
 fn manifest_created(location: &str, digest: &str, subject: Option<&str>) -> Response {

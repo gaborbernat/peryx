@@ -127,6 +127,31 @@ async fn test_browse_project_lists_a_repository_tags() {
 }
 
 #[tokio::test]
+async fn test_browse_project_hides_a_trashed_tag() {
+    let (_dir, state, app, _layer) = populated().await;
+    let (status, ..) = send_body(
+        &app,
+        Method::DELETE,
+        "/v2/store/app/manifests/1.0",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (driver, serving) = oci_driver(&state);
+    let view = driver
+        .browse_project(serving, 0, "app".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    match view {
+        UiProjectView::References { names } => assert_eq!(names, vec!["multi".to_owned()]),
+        other => panic!("expected a reference listing, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_browse_project_on_a_root_route_index_uses_the_bare_repository_name() {
     let dir = tempfile::tempdir().unwrap();
     let index = oci_index("root", "", peryx_index::IndexKind::Hosted { volatile: false });

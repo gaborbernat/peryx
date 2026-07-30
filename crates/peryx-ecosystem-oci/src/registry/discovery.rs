@@ -40,21 +40,55 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 Ok(response)
             };
         }
-        let mut tags = std::collections::BTreeSet::new();
-        for member in &members {
-            match member.proxy_client() {
-                Some(client) => {
-                    if let Some(names) = self
-                        .fetch_tag_names(state, name, &member.name, client, repo, active)
-                        .await?
-                    {
-                        tags.extend(names);
-                    }
-                }
-                None => tags.extend(stored_tag_names(state, &member.name, repo, active)?),
+        let tags = self.visible_tag_names(state, name, repo, active, &members).await?;
+        Ok(tag_list_response(name, tags, query))
+    }
+
+    /// Collect tag names in member-shadowing order, with tombstones masking only their own or lower
+    /// layers. The second tombstone pass closes a delete race while upstream pages are fetched.
+    pub(super) async fn visible_tag_names(
+        &self,
+        state: &ServingState,
+        name: &str,
+        repo: &str,
+        active: bool,
+        members: &[&Index],
+    ) -> Result<std::collections::BTreeSet<String>, ServeError> {
+        if let [member] = members
+            && member.proxy_client().is_none()
+        {
+            let mut tags = stored_tag_names(state, &member.name, repo, active)?
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            for tag in store::list_trashed_tags(&state.meta, &member.name, repo)? {
+                tags.remove(&tag);
+            }
+            return Ok(tags);
+        }
+        let mut tags = std::collections::BTreeMap::new();
+        let mut hidden = std::collections::BTreeMap::new();
+        for (position, member) in members.iter().enumerate() {
+            let names = match member.proxy_client() {
+                Some(client) => self
+                    .fetch_tag_names(state, name, &member.name, client, repo, active)
+                    .await?
+                    .unwrap_or_default(),
+                None => stored_tag_names(state, &member.name, repo, active)?,
+            };
+            for tag in names {
+                tags.entry(tag).or_insert(position);
+            }
+            for tag in store::list_trashed_tags(&state.meta, &member.name, repo)? {
+                hidden.entry(tag).or_insert(position);
             }
         }
-        Ok(tag_list_response(name, tags, query))
+        for (position, member) in members.iter().enumerate() {
+            for tag in store::list_trashed_tags(&state.meta, &member.name, repo)? {
+                hidden.entry(tag).or_insert(position);
+            }
+        }
+        tags.retain(|tag, source| hidden.get(tag).is_none_or(|tombstone| tombstone > source));
+        Ok(tags.into_keys().collect())
     }
 
     /// Serve a lone proxy's tag list, from the store while it is fresh.
@@ -305,22 +339,29 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         if active && digest_decision(state, digest)? == DigestDecision::Revoked {
             return Ok(referrers_response(&[], filter.as_deref()));
         }
+        let members = serving_members(state, index);
+        if manifest_trashed_in(state, &members, repo, digest)? {
+            return Ok(referrers_response(&[], filter.as_deref()));
+        }
         let mut seen = std::collections::HashSet::new();
         let mut manifests = Vec::new();
-        for member in serving_members(state, index) {
+        for member in &members {
             for descriptor in store::list_referrers(&state.meta, &member.name, repo, digest)? {
                 if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&descriptor) {
-                    add_referrer(state, active, value, &mut seen, &mut manifests)?;
+                    add_referrer(state, &members, repo, active, value, &mut seen, &mut manifests)?;
                 }
             }
             if let Some(client) = member.proxy_client() {
                 for descriptor in self.upstream_referrers(&member.name, client, repo, digest).await {
-                    add_referrer(state, active, descriptor, &mut seen, &mut manifests)?;
+                    add_referrer(state, &members, repo, active, descriptor, &mut seen, &mut manifests)?;
                 }
             }
         }
         if let Some(artifact_type) = &filter {
             manifests.retain(|descriptor| descriptor["artifactType"].as_str() == Some(artifact_type));
+        }
+        if manifest_trashed_in(state, &members, repo, digest)? {
+            manifests.clear();
         }
         Ok(referrers_response(&manifests, filter.as_deref()))
     }
@@ -346,6 +387,8 @@ pub(super) fn stored_tag_names(
 
 fn add_referrer(
     state: &ServingState,
+    members: &[&Index],
+    repo: &str,
     active: bool,
     descriptor: serde_json::Value,
     seen: &mut std::collections::HashSet<String>,
@@ -354,7 +397,10 @@ fn add_referrer(
     let Some(digest) = descriptor["digest"].as_str() else {
         return Ok(());
     };
-    if (!active || digest_decision(state, digest)? == DigestDecision::Clear) && seen.insert(digest.to_owned()) {
+    if (!active || digest_decision(state, digest)? == DigestDecision::Clear)
+        && !manifest_trashed_in(state, members, repo, digest)?
+        && seen.insert(digest.to_owned())
+    {
         manifests.push(descriptor);
     }
     Ok(())

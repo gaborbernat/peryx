@@ -37,8 +37,8 @@ referrer and image-index child pulls. A digest that no member records and no pro
 is stored elsewhere.
 
 The membership record is written wherever peryx stores a manifest: its own digest, plus each child an image index or
-manifest list names. A by-digest delete drops the record unless an index the repository still serves names the digest as
-a child, so deleting an image and re-pushing it under another repository cannot revive a stale grant.
+manifest list names. A by-digest delete keeps that record and adds a repository tombstone. The tombstone blocks reads
+while the membership retains the scope needed for restore; another repository's push cannot expose the deleted digest.
 
 ## Blob bytes and repository links stay separate
 

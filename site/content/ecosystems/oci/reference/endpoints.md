@@ -19,24 +19,25 @@ map, see [OCI](@/ecosystems/oci/_index.md); for the wire standards, see
 
 ## Endpoints
 
-| Method       | Path                                 | Purpose                                | Success       |
-| ------------ | ------------------------------------ | -------------------------------------- | ------------- |
-| `GET`        | `/v2/`                               | API version check                      | `200` / `401` |
-| `GET`        | `/v2/token`                          | Mint a scoped Bearer token             | `200`         |
-| `GET`        | `/v2/_catalog`                       | List every repository, paginated       | `200`         |
-| `GET` `HEAD` | `/v2/<name>/manifests/<reference>`   | Pull a manifest by tag or digest       | `200`         |
-| `PUT`        | `/v2/<name>/manifests/<reference>`   | Push a manifest                        | `201`         |
-| `DELETE`     | `/v2/<name>/manifests/<reference>`   | Delete a manifest or untag             | `202`         |
-| `GET` `HEAD` | `/v2/<name>/blobs/<digest>`          | Pull a blob (range-capable)            | `200` / `206` |
-| `DELETE`     | `/v2/<name>/blobs/<digest>`          | Delete a blob                          | `202`         |
-| `GET`        | `/v2/<name>/blobs/<digest>/contents` | List a layer's files, or preview one   | `200`         |
-| `POST`       | `/v2/<name>/blobs/uploads/`          | Begin, mount, or monolithically push   | `202` / `201` |
-| `GET`        | `/v2/<name>/blobs/uploads/<session>` | Report upload progress                 | `204`         |
-| `PATCH`      | `/v2/<name>/blobs/uploads/<session>` | Append a chunk                         | `202`         |
-| `PUT`        | `/v2/<name>/blobs/uploads/<session>` | Finish an upload                       | `201`         |
-| `DELETE`     | `/v2/<name>/blobs/uploads/<session>` | Cancel an upload session               | `204`         |
-| `GET`        | `/v2/<name>/tags/list`               | List tags, paginated                   | `200`         |
-| `GET`        | `/v2/<name>/referrers/<digest>`      | List manifests referring to `<digest>` | `200`         |
+| Method       | Path                                       | Purpose                                | Success       |
+| ------------ | ------------------------------------------ | -------------------------------------- | ------------- |
+| `GET`        | `/v2/`                                     | API version check                      | `200` / `401` |
+| `GET`        | `/v2/token`                                | Mint a scoped Bearer token             | `200`         |
+| `GET`        | `/v2/_catalog`                             | List every repository, paginated       | `200`         |
+| `GET` `HEAD` | `/v2/<name>/manifests/<reference>`         | Pull a manifest by tag or digest       | `200`         |
+| `PUT`        | `/v2/<name>/manifests/<reference>`         | Push a manifest                        | `201`         |
+| `DELETE`     | `/v2/<name>/manifests/<reference>`         | Trash a manifest or tag                | `202`         |
+| `PUT`        | `/v2/<name>/manifests/<reference>/restore` | Restore a manifest or tag              | `202`         |
+| `GET` `HEAD` | `/v2/<name>/blobs/<digest>`                | Pull a blob (range-capable)            | `200` / `206` |
+| `DELETE`     | `/v2/<name>/blobs/<digest>`                | Delete a blob                          | `202`         |
+| `GET`        | `/v2/<name>/blobs/<digest>/contents`       | List a layer's files, or preview one   | `200`         |
+| `POST`       | `/v2/<name>/blobs/uploads/`                | Begin, mount, or monolithically push   | `202` / `201` |
+| `GET`        | `/v2/<name>/blobs/uploads/<session>`       | Report upload progress                 | `204`         |
+| `PATCH`      | `/v2/<name>/blobs/uploads/<session>`       | Append a chunk                         | `202`         |
+| `PUT`        | `/v2/<name>/blobs/uploads/<session>`       | Finish an upload                       | `201`         |
+| `DELETE`     | `/v2/<name>/blobs/uploads/<session>`       | Cancel an upload session               | `204`         |
+| `GET`        | `/v2/<name>/tags/list`                     | List tags, paginated                   | `200`         |
+| `GET`        | `/v2/<name>/referrers/<digest>`            | List manifests referring to `<digest>` | `200`         |
 
 ## Version check
 
@@ -83,8 +84,32 @@ manifest names a config or layer that this repository cannot serve. A missing ch
 success, peryx returns `201` with `Location` and `Docker-Content-Digest`. When the manifest declares a `subject`, peryx
 sends its digest in `OCI-Subject` and records it for the referrers API.
 
-`DELETE /v2/<name>/manifests/<reference>` removes the manifest by digest, or drops the tag mapping when `<reference>` is
-a tag. Success is `202`; a reference that was not present is `404 MANIFEST_UNKNOWN`.
+`DELETE /v2/<name>/manifests/<reference>` moves repository metadata to trash. Deleting a tag hides only that tag; the
+manifest remains readable by digest and through its other tags. Deleting a digest hides the digest and every tag in that
+repository that pointed to it. Both forms retain the manifest, repository memberships, referrers, and layer and config
+links. Other repositories that share the same content remain visible. Success is `202`; an absent or already-trashed
+reference is `404 MANIFEST_UNKNOWN`. A `reason` query parameter records an operator-supplied reason with the deletion
+timestamp and actor.
+
+`PUT /v2/<name>/manifests/<reference>/restore` restores retained content and returns `202`. The response carries
+`Docker-Content-Digest` and `OCI-Restored-Tags`; a digest restore that skips reused tags also carries their
+comma-separated names in `OCI-Tag-Conflicts`. The same delete permission as `DELETE` is required. For example:
+
+```shell
+curl -u _:$TOKEN -X DELETE 'http://127.0.0.1:4433/v2/store/team/app/manifests/v1?reason=bad-build'
+curl -u _:$TOKEN -X PUT http://127.0.0.1:4433/v2/store/team/app/manifests/v1/restore
+```
+
+Restore and republish use this conflict table. Every row is one atomic metadata transaction; no transition calls blob
+storage.
+
+| Operation           | Live tag slot  | Result                                                    |
+| ------------------- | -------------- | --------------------------------------------------------- |
+| restore tag         | empty          | restore the tag and digest                                |
+| restore digest      | empty          | restore the tag                                           |
+| restore digest      | another digest | restore the digest, skip and report the tag               |
+| republish by digest | any            | restore only that digest; leave old tags trashed          |
+| republish by tag    | any            | publish wins; replace the tag and retire its trash record |
 
 ## Blobs
 

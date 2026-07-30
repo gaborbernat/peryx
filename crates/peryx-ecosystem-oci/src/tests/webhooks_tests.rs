@@ -152,6 +152,38 @@ async fn test_manifest_delete_fires_a_delete_webhook() {
 }
 
 #[tokio::test]
+async fn test_manifest_restore_fires_a_restore_webhook() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_with_webhook(&dir, &["restore"]);
+    push_manifest(&app, b"layer", br#"{"schemaVersion":2}"#, "2.0").await;
+    send_body(
+        &app,
+        Method::DELETE,
+        "/v2/store/app/manifests/2.0",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+
+    let status = send_body(
+        &app,
+        Method::PUT,
+        "/v2/store/app/manifests/2.0/restore",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let delivery = wait_for_delivery(&state);
+    assert_eq!(delivery.event, "restore");
+    let payload: serde_json::Value = serde_json::from_str(&delivery.payload).unwrap();
+    assert_eq!(payload["project"], "app");
+    assert_eq!(payload["version"], "2.0");
+    assert!(payload["file"]["sha256"].as_str().is_some());
+}
+
+#[tokio::test]
 async fn test_blob_delete_fires_a_delete_webhook() {
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = hosted_with_webhook(&dir, &["delete"]);

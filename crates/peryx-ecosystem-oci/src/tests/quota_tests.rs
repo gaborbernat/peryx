@@ -387,6 +387,40 @@ async fn test_manifest_re_push_under_the_same_tag_is_not_double_counted() {
 }
 
 #[tokio::test]
+async fn test_manifest_re_push_from_trash_is_not_double_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = quota_store(
+        &dir,
+        &PolicyConfig {
+            max_versions_per_project: Some(1),
+            ..PolicyConfig::default()
+        },
+    );
+    let manifest = br#"{"schemaVersion":2}"#;
+    assert_eq!(
+        push_manifest(&app, "store/app", "v1", manifest).await,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        send_body(
+            &app,
+            Method::DELETE,
+            "/v2/store/app/manifests/v1",
+            &[("authorization", &auth(TOKEN))],
+            Vec::new(),
+        )
+        .await
+        .0,
+        StatusCode::ACCEPTED
+    );
+
+    assert_eq!(
+        push_manifest(&app, "store/app", "v1", manifest).await,
+        StatusCode::CREATED
+    );
+}
+
+#[tokio::test]
 async fn test_a_new_tag_on_an_existing_manifest_counts_a_version() {
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = quota_store(

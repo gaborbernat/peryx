@@ -22,6 +22,25 @@ async fn push_to_virtual(app: &axum::Router, tag: &str, manifest: &[u8]) {
     assert_eq!(status, StatusCode::CREATED);
 }
 
+async fn wait_for_upstream(server: &MockServer, wanted: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path() == wanted)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn test_virtual_hosted_manifest_shadows_upstream() {
     let server = MockServer::start().await;
@@ -59,6 +78,272 @@ async fn test_virtual_falls_through_to_upstream() {
     let (status, _, got) = send(&app, Method::GET, "/v2/reg/app/manifests/edge").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, &upstream[..]);
+}
+
+#[tokio::test]
+async fn test_virtual_manifest_trash_blocks_proxy_fallback_and_tag_discovery() {
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"from":"shared"}"#;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest.to_vec(), MANIFEST_TYPE))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(br#"{"name":"app","tags":["latest"]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+    push_to_virtual(&app, "latest", manifest).await;
+    let digest = oci_digest(manifest);
+    let (status, _, _) = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/reg/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    for reference in ["latest", &digest] {
+        assert_eq!(
+            send(&app, Method::GET, &format!("/v2/reg/app/manifests/{reference}"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    let (status, _, body) = send(&app, Method::GET, "/v2/reg/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!std::str::from_utf8(&body).unwrap().contains("latest"));
+}
+
+#[tokio::test]
+async fn test_virtual_digest_delete_wins_an_inflight_proxy_pull() {
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"from":"upstream"}"#;
+    let digest = oci_digest(manifest);
+    let upstream_path = format!("/v2/app/manifests/{digest}");
+    Mock::given(method("GET"))
+        .and(path(upstream_path.clone()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(manifest.to_vec(), MANIFEST_TYPE)
+                .set_delay(std::time::Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+    let pull_app = app.clone();
+    let pull_uri = format!("/v2/reg/app/manifests/{digest}");
+    let pull = tokio::spawn(async move { send(&pull_app, Method::GET, &pull_uri).await });
+    wait_for_upstream(&server, &upstream_path).await;
+    let push = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/reg/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        manifest.to_vec(),
+    )
+    .await;
+    assert_eq!(push.0, StatusCode::CREATED);
+    let delete = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/reg/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(delete.0, StatusCode::ACCEPTED);
+
+    assert_eq!(pull.await.unwrap().0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_virtual_tag_delete_wins_an_inflight_proxy_pull() {
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"from":"upstream"}"#;
+    let digest = oci_digest(manifest);
+    let upstream_path = "/v2/app/manifests/latest";
+    Mock::given(method("HEAD"))
+        .and(path(upstream_path))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .set_delay(std::time::Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(upstream_path))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest.to_vec(), MANIFEST_TYPE))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+    let pull_app = app.clone();
+    let pull = tokio::spawn(async move { send(&pull_app, Method::GET, "/v2/reg/app/manifests/latest").await });
+    wait_for_upstream(&server, upstream_path).await;
+    push_to_virtual(&app, "latest", manifest).await;
+    let delete = send_body(
+        &app,
+        Method::DELETE,
+        "/v2/reg/app/manifests/latest",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(delete.0, StatusCode::ACCEPTED);
+
+    assert_eq!(pull.await.unwrap().0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_virtual_digest_tombstone_blocks_a_lower_proxy_tag() {
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"from":"shared"}"#;
+    let digest = oci_digest(manifest);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).insert_header("docker-content-digest", digest.as_str()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest.to_vec(), MANIFEST_TYPE))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+    let push = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/reg/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+        manifest.to_vec(),
+    )
+    .await;
+    assert_eq!(push.0, StatusCode::CREATED);
+    let delete = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/reg/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(delete.0, StatusCode::ACCEPTED);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/reg/app/manifests/latest").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn test_virtual_subject_delete_wins_inflight_referrer_discovery() {
+    let server = MockServer::start().await;
+    let manifest = br#"{"schemaVersion":2,"kind":"subject"}"#;
+    let subject = oci_digest(manifest);
+    let referrer = format!("sha256:{}", "a".repeat(64));
+    let upstream_path = format!("/v2/app/referrers/{subject}");
+    Mock::given(method("GET"))
+        .and(path(upstream_path.clone()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(
+                    serde_json::json!({
+                        "schemaVersion": 2,
+                        "manifests": [{"digest": referrer}],
+                    })
+                    .to_string()
+                    .into_bytes(),
+                    "application/vnd.oci.image.index.v1+json",
+                )
+                .set_delay(std::time::Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+    push_to_virtual(&app, "base", manifest).await;
+    let pull_app = app.clone();
+    let pull_uri = format!("/v2/reg/app/referrers/{subject}");
+    let pull = tokio::spawn(async move { send(&pull_app, Method::GET, &pull_uri).await });
+    wait_for_upstream(&server, &upstream_path).await;
+    let delete = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/reg/app/manifests/{subject}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(delete.0, StatusCode::ACCEPTED);
+
+    let (status, _, body) = pull.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    let index: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(index["manifests"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_virtual_lower_tombstone_does_not_hide_a_higher_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = app_with_indexes(
+        &dir,
+        vec![
+            writable_index("high", "high", true, TOKEN),
+            writable_index("low", "low", true, TOKEN),
+            oci_index(
+                "reg",
+                "reg",
+                peryx_index::IndexKind::Virtual {
+                    layers: vec![0, 1],
+                    upload: Some(0),
+                },
+            ),
+        ],
+    );
+    let bytes = br#"{"schemaVersion":2,"from":"high"}"#;
+    let digest = oci_digest(bytes);
+    for index in ["high", "low"] {
+        let (status, _, _) = send_body(
+            &app,
+            Method::PUT,
+            &format!("/v2/{index}/app/manifests/latest"),
+            &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+            bytes.to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, _, _) = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/low/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    for reference in ["latest", &digest] {
+        let (status, _, got) = send(&app, Method::GET, &format!("/v2/reg/app/manifests/{reference}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(got, &bytes[..]);
+    }
+    let (status, _, body) = send(&app, Method::GET, "/v2/reg/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(std::str::from_utf8(&body).unwrap().contains("latest"));
 }
 
 #[tokio::test]

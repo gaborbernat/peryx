@@ -40,6 +40,59 @@ pub async fn harness_with_stale(
     overlay_policy: Policy,
     max_stale_secs: i64,
 ) -> Harness {
+    harness_with_options(
+        token,
+        volatile,
+        mirror_policy,
+        local_policy,
+        overlay_policy,
+        HarnessOptions {
+            max_stale_secs,
+            ..HarnessOptions::default()
+        },
+    )
+    .await
+}
+pub async fn offline_harness(mirror_policy: Policy) -> Harness {
+    harness_with_options(
+        true,
+        true,
+        mirror_policy,
+        Policy::default(),
+        Policy::default(),
+        HarnessOptions {
+            offline: true,
+            ..HarnessOptions::default()
+        },
+    )
+    .await
+}
+pub async fn harness_with_upstream_concurrency(
+    mirror_policy: Policy,
+    overlay_policy: Policy,
+    upstream_concurrency: usize,
+) -> Harness {
+    harness_with_options(
+        true,
+        true,
+        mirror_policy,
+        Policy::default(),
+        overlay_policy,
+        HarnessOptions {
+            upstream_concurrency,
+            ..HarnessOptions::default()
+        },
+    )
+    .await
+}
+async fn harness_with_options(
+    token: bool,
+    volatile: bool,
+    mirror_policy: Policy,
+    local_policy: Policy,
+    overlay_policy: Policy,
+    options: HarnessOptions,
+) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
@@ -54,7 +107,7 @@ pub async fn harness_with_stale(
             ecosystem: peryx_core::Ecosystem::Pypi,
             kind: IndexKind::Cached {
                 client: upstream,
-                offline: false,
+                offline: options.offline,
             },
             policy: mirror_policy,
             acl: IndexAcl::default(),
@@ -83,14 +136,16 @@ pub async fn harness_with_stale(
             },
         },
     ];
-    let mut state = AppState::with_clock(
+    let mut state = AppState::with_limits(
         meta,
         blobs,
         60,
         indexes,
         Arc::new(move || ticks.load(Ordering::Relaxed)),
+        peryx_driver::rate_limit::RateLimitConfig::default(),
+        [("pypi".to_owned(), options.upstream_concurrency)],
     );
-    state.max_stale_secs = max_stale_secs;
+    state.max_stale_secs = options.max_stale_secs;
     let state = crate::tests::wired(state);
     Harness {
         dir,
@@ -99,8 +154,63 @@ pub async fn harness_with_stale(
         clock,
     }
 }
+
+struct HarnessOptions {
+    max_stale_secs: i64,
+    offline: bool,
+    upstream_concurrency: usize,
+}
+
+impl Default for HarnessOptions {
+    fn default() -> Self {
+        Self {
+            max_stale_secs: DEFAULT_MAX_STALE_SECS,
+            offline: false,
+            upstream_concurrency: peryx_driver::rate_limit::DEFAULT_UPSTREAM_CONCURRENCY,
+        }
+    }
+}
 pub async fn harness() -> Harness {
     harness_with(true, true).await
+}
+
+pub fn restarted_state(harness: &Harness) -> Arc<AppState> {
+    restarted_state_with_ttl(harness, harness.state.ttl_secs)
+}
+
+pub fn restarted_state_with_ttl(harness: &Harness, ttl_secs: i64) -> Arc<AppState> {
+    let clock = harness.clock.clone();
+    let mut state = AppState::with_clock(
+        harness.state.meta.clone(),
+        harness.state.blobs.clone(),
+        ttl_secs,
+        harness
+            .state
+            .indexes
+            .iter()
+            .map(|index| Index {
+                name: index.name.clone(),
+                route: index.route.clone(),
+                ecosystem: index.ecosystem,
+                kind: match &index.kind {
+                    IndexKind::Cached { client, offline } => IndexKind::Cached {
+                        client: client.clone(),
+                        offline: *offline,
+                    },
+                    IndexKind::Hosted { volatile } => IndexKind::Hosted { volatile: *volatile },
+                    IndexKind::Virtual { layers, upload } => IndexKind::Virtual {
+                        layers: layers.clone(),
+                        upload: *upload,
+                    },
+                },
+                policy: index.policy.clone(),
+                acl: index.acl.clone(),
+            })
+            .collect(),
+        Arc::new(move || clock.load(Ordering::Relaxed)),
+    );
+    state.max_stale_secs = harness.state.max_stale_secs;
+    crate::tests::wired(state)
 }
 
 pub fn routed_state(dir: &tempfile::TempDir, primary: UpstreamClient, router: UpstreamRouter) -> Arc<AppState> {

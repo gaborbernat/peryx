@@ -137,7 +137,7 @@ fn anchor_to_file(tag: &HTMLTag, base: &Url) -> Option<File> {
     let hashes = fragment_hash(resolved.fragment());
     let filename = filename_from_url(&resolved)?;
     resolved.set_fragment(None);
-    Some(File {
+    let mut file = File {
         filename,
         url: resolved.to_string(),
         hashes,
@@ -149,7 +149,9 @@ fn anchor_to_file(tag: &HTMLTag, base: &Url) -> Option<File> {
         dist_info_metadata: parse_metadata_attr(tag, "data-dist-info-metadata"),
         gpg_sig: parse_gpg_sig(tag),
         provenance: attr_string(tag, "data-provenance").map_or(Provenance::Absent, Provenance::Url),
-    })
+    };
+    file.provenance.retain_secure_url();
+    Some(file)
 }
 
 fn filename_from_url(url: &Url) -> Option<String> {

@@ -593,6 +593,7 @@ mod tests {
                 "https://files/flask.whl.metadata".to_owned(),
                 "c".repeat(64),
             )],
+            &[],
         )
         .unwrap();
 

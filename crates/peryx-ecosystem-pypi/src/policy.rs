@@ -11,7 +11,9 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 
 use pep440_rs::{Version, VersionSpecifiers};
-use peryx_policy::{ArtifactFacts, ArtifactRule, FallbackMode, Policy, PolicyAction, PolicyDenial, retain_versions};
+use peryx_policy::{
+    ArtifactFacts, ArtifactRule, FallbackMode, Policy, PolicyAction, PolicyDenial, RemoteMetadataMode, retain_versions,
+};
 use serde::Deserialize;
 
 use crate::{DistributionKind, File, ProjectDetail, ProjectList, normalize_name, parse_distribution_filename};
@@ -22,6 +24,7 @@ use crate::{DistributionKind, File, ProjectDetail, ProjectList, normalize_name, 
 #[serde(default)]
 pub struct PypiPolicyConfig {
     pub fallback_mode: FallbackMode,
+    pub upstream_attestations: RemoteMetadataMode,
     pub allow_versions: Option<String>,
     pub allow_package_types: Vec<PackageType>,
     pub block_package_types: Vec<PackageType>,
@@ -41,6 +44,7 @@ impl PypiPolicyConfig {
     /// key that belongs to neither.
     pub const KEYS: &'static [&'static str] = &[
         "fallback_mode",
+        "upstream_attestations",
         "allow_versions",
         "allow_package_types",
         "block_package_types",
@@ -136,6 +140,9 @@ pub fn compile_rules(config: &PypiPolicyConfig) -> Result<Vec<Arc<dyn ArtifactRu
     if config.fallback_mode != FallbackMode::Fallback {
         rules.push(Arc::new(FallbackRule(config.fallback_mode)));
     }
+    if config.upstream_attestations != RemoteMetadataMode::Direct {
+        rules.push(Arc::new(RemoteMetadataRule(config.upstream_attestations)));
+    }
     if let Some(specifier) = &config.allow_versions {
         let allowed = VersionSpecifiers::from_str(specifier)
             .map_err(|_| PypiPolicyError::VersionSpecifiers(specifier.clone()))?;
@@ -200,6 +207,23 @@ impl ArtifactRule for FallbackRule {
     }
 
     fn fallback_mode(&self) -> Option<FallbackMode> {
+        Some(self.0)
+    }
+}
+
+#[derive(Debug)]
+struct RemoteMetadataRule(RemoteMetadataMode);
+
+impl ArtifactRule for RemoteMetadataRule {
+    fn check(&self, _action: PolicyAction, _facts: &ArtifactFacts) -> Result<(), PolicyDenial> {
+        Ok(())
+    }
+
+    fn filters_artifacts(&self) -> bool {
+        false
+    }
+
+    fn remote_metadata_mode(&self) -> Option<RemoteMetadataMode> {
         Some(self.0)
     }
 }
@@ -488,7 +512,10 @@ impl PypiPolicy for Policy {
     }
 
     fn check_download(&self, action: PolicyAction, filename: &str, size: Option<u64>) -> Result<(), PolicyDenial> {
-        let artifact = filename.strip_suffix(".metadata").unwrap_or(filename);
+        let artifact = filename
+            .strip_suffix(".metadata")
+            .or_else(|| filename.strip_suffix(crate::attestation::PROVENANCE_SUFFIX))
+            .unwrap_or(filename);
         self.check_facts(action, &facts_from_filename(artifact, size))
     }
 

@@ -175,6 +175,7 @@ async fn test_routed_metadata_ranges_use_the_advertising_source_credentials() {
             None,
             &[(digest.as_str().to_owned(), file_url, Some(wheel_size as u64))],
             &[],
+            &[],
         )
         .unwrap();
 

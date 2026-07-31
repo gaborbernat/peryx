@@ -70,6 +70,15 @@ fn test_parse_full_anchor() {
 }
 
 #[test]
+fn test_parse_anchor_drops_an_insecure_provenance_url() {
+    let html = r#"<a href="pkg-1.0.whl" data-provenance="http://example.test/pkg.provenance">pkg-1.0.whl</a>"#;
+
+    let file = &parse_detail_html("pkg", html, &base()).unwrap().files[0];
+
+    assert_eq!(file.provenance, Provenance::Absent);
+}
+
+#[test]
 fn test_fragment_keeps_every_supported_hash_including_sha256() {
     let html = r#"<a href="pkg-1.0.whl#md5=deadbeef&sha256=abc123">pkg-1.0.whl</a>"#;
     let file = &parse_detail_html("pkg", html, &base()).unwrap().files[0];

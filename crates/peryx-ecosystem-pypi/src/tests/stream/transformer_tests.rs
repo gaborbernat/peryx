@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use peryx_policy::{Policy, PolicyConfig};
+use peryx_policy::{Policy, PolicyConfig, RemoteMetadataMode};
 
 use super::page_context;
 use crate::policy::{PackageType, PypiPolicyConfig, compile_rules};
@@ -426,7 +426,7 @@ fn test_preserves_simple_api_fields_during_streaming() {
          "gpg-sig":false,"provenance":"https://up/demo-1.0-py3-none-any.whl.provenance"}
     ]}"#;
     for chunk in [1, 11, 4096] {
-        let (out, _) = transform(page, plain_context(), chunk);
+        let (out, registrations) = transform(page, plain_context(), chunk);
         let detail = parse_detail(out.as_bytes()).unwrap();
         assert_eq!(
             (
@@ -457,7 +457,45 @@ fn test_preserves_simple_api_fields_during_streaming() {
             ),
             "chunk size {chunk}"
         );
+        assert_eq!(
+            registrations[0].provenance.as_deref(),
+            Some("https://up/demo-1.0-py3-none-any.whl.provenance")
+        );
     }
+}
+
+#[test]
+fn test_proxy_mode_rewrites_a_secure_provenance_url() {
+    let page = r#"{"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
+        "url":"https://up/demo.whl","hashes":{"sha256":"aa11"},
+        "provenance":"https://up/demo.whl.provenance"}]}"#;
+    let mut context = plain_context();
+    context.policy = policy(|config| config.upstream_attestations = RemoteMetadataMode::Proxy);
+
+    let (out, registrations) = transform(page, context, 5);
+    let detail = parse_detail(out.as_bytes()).unwrap();
+
+    assert_eq!(
+        detail.files[0].provenance,
+        Provenance::Url("/root/pypi/files/aa11/demo-1.0-py3-none-any.whl.provenance".to_owned())
+    );
+    assert_eq!(
+        registrations[0].provenance.as_deref(),
+        Some("https://up/demo.whl.provenance")
+    );
+}
+
+#[test]
+fn test_streaming_drops_an_insecure_provenance_url() {
+    let page = r#"{"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
+        "url":"https://up/demo.whl","hashes":{"sha256":"aa11"},
+        "provenance":"http://up/demo.whl.provenance"}]}"#;
+
+    let (out, registrations) = transform(page, plain_context(), 5);
+    let detail = parse_detail(out.as_bytes()).unwrap();
+
+    assert_eq!(detail.files[0].provenance, Provenance::Absent);
+    assert_eq!(registrations[0].provenance, None);
 }
 
 #[test]

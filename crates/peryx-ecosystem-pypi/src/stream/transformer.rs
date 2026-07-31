@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use peryx_core::path::{is_local_file_url, local_file_url};
 use peryx_policy::PolicyAction;
+use peryx_policy::RemoteMetadataMode;
 use serde::Serialize;
 
 use super::{PageContext, PageSummary, Registration, TransformError};
@@ -464,6 +465,7 @@ impl PageTransformer {
             return Err(TransformError::TooLarge);
         }
         let mut file: File = serde_json::from_slice(&self.capture)?;
+        file.provenance.retain_secure_url();
         if self.project_is_quarantined() {
             return Ok(());
         }
@@ -515,6 +517,7 @@ impl PageTransformer {
                 url: file.url.clone(),
                 size: file.size,
                 metadata,
+                provenance: file.provenance.secure_url().map(str::to_owned),
             });
             if file.metadata().is_absent()
                 && let Some(metadata) = self.context.known_metadata.get(&sha256)
@@ -525,6 +528,15 @@ impl PageTransformer {
                 )])));
             }
             file.url = local_file_url(&self.context.route, &sha256, &file.filename);
+            if self.context.policy.remote_metadata_mode() != RemoteMetadataMode::Direct
+                && file.provenance.secure_url().is_some()
+            {
+                file.provenance = crate::Provenance::Url(local_file_url(
+                    &self.context.route,
+                    &sha256,
+                    &format!("{}.provenance", file.filename),
+                ));
+            }
             // The URL now points at peryx's route, which never serves the detached `.asc` sibling,
             // so drop any inherited gpg-sig rather than advertise a signature peryx cannot serve.
             file.gpg_sig = None;

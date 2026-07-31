@@ -198,6 +198,7 @@ impl<'de, S: DetailSink> Visitor<'de> for FilesVisitor<'_, S> {
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         while let Some(mut file) = sequence.next_element::<File>()? {
             absolutize(self.base, &mut file.url);
+            file.provenance.retain_secure_url();
             self.sink.file(file).map_err(serde::de::Error::custom)?;
         }
         Ok(())

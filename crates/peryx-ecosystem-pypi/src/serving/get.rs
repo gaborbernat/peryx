@@ -268,6 +268,9 @@ async fn file_route(state: &Arc<ServingState>, index: &Index, file: &str, header
         );
     }
     if filename.ends_with(attestation::PROVENANCE_SUFFIX) {
+        let artifact_filename = filename
+            .strip_suffix(attestation::PROVENANCE_SUFFIX)
+            .expect("suffix was checked");
         state.metrics.record(Event::Ecosystem {
             route: route.clone(),
             project: crate::project_of_filename(&filename),
@@ -275,7 +278,7 @@ async fn file_route(state: &Arc<ServingState>, index: &Index, file: &str, header
             family: PROVENANCE_FAMILY.key,
         });
         return provenance_response(
-            cache::provenance_bytes(state, &digest).await,
+            cache::provenance_bytes(state, index, &digest, artifact_filename).await,
             CacheContext::provenance(&route, digest.as_str(), &filename),
         );
     }
@@ -619,6 +622,21 @@ fn revocation_safe_hot_page(
 }
 
 fn apply_revocation_cache_policy(response: &mut Response, authenticated: bool) {
+    if response
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .is_some_and(|value| value == "no-cache")
+    {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(if authenticated {
+                "private, no-cache"
+            } else {
+                "public, no-cache"
+            }),
+        );
+        return;
+    }
     let value = if response.status().is_success() {
         format!(
             "{}, max-age={}, must-revalidate, no-transform",

@@ -113,6 +113,40 @@ fn test_commit_driver_txn_without_a_journal_leaves_the_serial_untouched() {
 }
 
 #[test]
+fn test_commit_driver_cache_txn_reads_and_writes_without_advancing_the_serial() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("k", b"old").unwrap();
+
+    let previous = store
+        .commit_driver_cache_txn(|txn| {
+            let previous = txn.get("k")?.unwrap();
+            txn.put_local("k", b"new")?;
+            Ok::<_, MetaError>(previous)
+        })
+        .unwrap();
+
+    assert_eq!(previous, b"old");
+    assert_eq!(store.current_serial().unwrap(), 0);
+    assert_eq!(store.get_driver_value("k").unwrap().as_deref(), Some(b"new".as_slice()));
+}
+
+#[test]
+fn test_commit_driver_cache_txn_rolls_back_when_the_body_errors() {
+    let (_dir, store) = super::store();
+
+    let result = store.commit_driver_cache_txn(|txn| {
+        txn.put_local("k", b"v")?;
+        Err::<(), _>(decode_error())
+    });
+
+    assert!(result.is_err(), "the body's error propagates");
+    assert!(
+        store.get_driver_value("k").unwrap().is_none(),
+        "the cache row was not committed"
+    );
+}
+
+#[test]
 fn test_commit_driver_txn_rolls_back_when_the_body_errors() {
     let (_dir, store) = super::store();
 

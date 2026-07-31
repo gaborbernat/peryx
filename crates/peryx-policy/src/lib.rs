@@ -117,9 +117,19 @@ pub trait ArtifactRule: Send + Sync + fmt::Debug {
     /// criteria.
     fn check(&self, action: PolicyAction, facts: &ArtifactFacts) -> Result<(), PolicyDenial>;
 
+    /// Whether this rule can filter a project or artifact.
+    fn filters_artifacts(&self) -> bool {
+        true
+    }
+
     /// A virtual repository's source policy, when this rule defines one. Most artifact rules do not
     /// affect repository composition and keep the default `None`.
     fn fallback_mode(&self) -> Option<FallbackMode> {
+        None
+    }
+
+    /// How a repository exposes mutable metadata held by its upstream, when this rule defines one.
+    fn remote_metadata_mode(&self) -> Option<RemoteMetadataMode> {
         None
     }
 }
@@ -136,6 +146,19 @@ pub enum FallbackMode {
     PrivateFirst,
     /// Never consult this virtual repository's immediate cached members.
     NoFallback,
+}
+
+/// How a repository exposes mutable metadata advertised by an upstream artifact index.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoteMetadataMode {
+    /// Keep the upstream URL in the repository response.
+    #[default]
+    Direct,
+    /// Route each body request through this repository without retaining the body.
+    Proxy,
+    /// Route body requests through this repository and retain validated responses.
+    Cache,
 }
 
 impl FallbackMode {
@@ -351,6 +374,15 @@ impl Policy {
             .unwrap_or_default()
     }
 
+    /// The mutable remote-metadata policy contributed by this ecosystem.
+    #[must_use]
+    pub fn remote_metadata_mode(&self) -> RemoteMetadataMode {
+        self.rules
+            .iter()
+            .find_map(|rule| rule.remote_metadata_mode())
+            .unwrap_or_default()
+    }
+
     fn compute_active(&self) -> bool {
         !self.allow_projects.is_empty()
             || !self.block_projects.is_empty()
@@ -358,7 +390,7 @@ impl Policy {
             || self.max_file_size_bytes.is_some()
             || self.max_project_size_bytes.is_some()
             || self.enforces_quota()
-            || !self.rules.is_empty()
+            || self.rules.iter().any(|rule| rule.filters_artifacts())
     }
 
     #[must_use]

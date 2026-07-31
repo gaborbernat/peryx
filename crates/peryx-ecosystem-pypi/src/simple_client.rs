@@ -21,6 +21,13 @@ use url::Url;
 pub const ACCEPT_SIMPLE: &str =
     "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html;q=0.2, text/html;q=0.01";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseCachePolicy {
+    pub fresh_secs: Option<i64>,
+    pub must_revalidate: Option<bool>,
+    pub storable: bool,
+}
+
 /// A response to an upstream simple-page fetch. Kept status-agnostic: `304` and `404` are returned
 /// to the caller rather than raised, so the cache layer decides what to do.
 #[derive(Debug, Clone)]
@@ -34,8 +41,8 @@ pub struct SimpleResponse {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub last_serial: Option<u64>,
-    /// The freshness lifetime upstream granted via `Cache-Control`; `None` when the response
-    /// carried no positive lifetime (absent header, `no-cache`, `no-store`, or zero).
+    /// The freshness lifetime upstream granted via `Cache-Control`; `None` when absent or invalid,
+    /// and zero when the response requires immediate revalidation.
     pub max_age: Option<i64>,
     pub body: Bytes,
 }
@@ -53,8 +60,8 @@ pub struct SimpleHead {
     pub last_modified: Option<String>,
     pub content_length: Option<u64>,
     pub last_serial: Option<u64>,
-    /// The freshness lifetime upstream granted via `Cache-Control`; `None` when the response
-    /// carried no positive lifetime (absent header, `no-cache`, `no-store`, or zero).
+    /// The freshness lifetime upstream granted via `Cache-Control`; `None` when absent or invalid,
+    /// and zero when the response requires immediate revalidation.
     pub max_age: Option<i64>,
     response: reqwest::Response,
 }
@@ -338,25 +345,65 @@ fn validate_simple_content_type(url: &Url, content_type: Option<&str>) -> Result
     })
 }
 
-/// The freshness lifetime a `Cache-Control` header grants a shared cache: `s-maxage` beats
-/// `max-age`, `no-cache`/`no-store` disable caching, and a non-positive lifetime counts as none.
+/// The freshness lifetime a `Cache-Control` header grants a shared cache.
 fn max_age(headers: &HeaderMap) -> Option<i64> {
-    let value = headers.get(CACHE_CONTROL)?.to_str().ok()?;
+    response_cache_policy(headers).fresh_secs
+}
+
+/// Parse the storage and revalidation directives a shared cache must apply to one response.
+pub fn response_cache_policy(headers: &HeaderMap) -> ResponseCachePolicy {
+    let mut values = headers.get_all(CACHE_CONTROL).iter();
+    let Some(first) = values.next() else {
+        return ResponseCachePolicy {
+            fresh_secs: None,
+            must_revalidate: None,
+            storable: true,
+        };
+    };
     let mut max_age = None;
     let mut s_maxage = None;
-    for directive in value.split(',') {
-        let directive = directive.trim().to_ascii_lowercase();
-        if directive == "no-cache" || directive == "no-store" {
-            return None;
-        }
-        if let Some(secs) = directive.strip_prefix("max-age=").and_then(|v| v.parse().ok()) {
-            max_age = Some(secs);
-        }
-        if let Some(secs) = directive.strip_prefix("s-maxage=").and_then(|v| v.parse().ok()) {
-            s_maxage = Some(secs);
+    let mut validate_before_reuse = false;
+    let mut revalidate_when_stale = false;
+    let mut storable = true;
+    for value in std::iter::once(first)
+        .chain(values)
+        .filter_map(|value| value.to_str().ok())
+    {
+        for directive in value.split(',') {
+            let directive = directive.trim().to_ascii_lowercase();
+            let (name, value) = directive
+                .split_once('=')
+                .map_or((directive.as_str(), None), |(name, value)| (name, Some(value)));
+            match name {
+                "no-cache" => validate_before_reuse = true,
+                "must-revalidate" | "proxy-revalidate" => revalidate_when_stale = true,
+                "no-store" => {
+                    validate_before_reuse = true;
+                    storable = false;
+                }
+                "private" => storable = false,
+                "max-age" => max_age = value.and_then(delta_seconds),
+                "s-maxage" => {
+                    s_maxage = value.and_then(delta_seconds);
+                    revalidate_when_stale = true;
+                }
+                _ => {}
+            }
         }
     }
-    s_maxage.or(max_age).filter(|&secs| secs > 0)
+    ResponseCachePolicy {
+        fresh_secs: if validate_before_reuse {
+            Some(0)
+        } else {
+            s_maxage.or(max_age).map(|seconds| seconds.max(0))
+        },
+        must_revalidate: Some(validate_before_reuse || revalidate_when_stale),
+        storable,
+    }
+}
+
+fn delta_seconds(value: &str) -> Option<i64> {
+    value.trim_matches('"').parse().ok()
 }
 
 /// The upstream fetch protocol a proxy index speaks.

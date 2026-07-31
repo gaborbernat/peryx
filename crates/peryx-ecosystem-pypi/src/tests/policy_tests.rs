@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use peryx_policy::{
     ArtifactFacts, FallbackMode, Policy, PolicyAction, PolicyConfig, PolicyDecisionRecorder, PolicyDecisionState,
-    PolicyEvaluation,
+    PolicyEvaluation, RemoteMetadataMode,
 };
 use rstest::rstest;
 
@@ -44,6 +44,26 @@ fn test_fallback_mode_deserializes_kebab_case(#[case] value: &str, #[case] expec
 #[test]
 fn test_fallback_mode_rejects_unknown_values() {
     serde_json::from_str::<PypiPolicyConfig>(r#"{"fallback_mode":"prefer-private"}"#).unwrap_err();
+}
+
+#[rstest]
+#[case("direct", RemoteMetadataMode::Direct)]
+#[case("proxy", RemoteMetadataMode::Proxy)]
+#[case("cache", RemoteMetadataMode::Cache)]
+fn test_upstream_attestation_mode_compiles_without_artifact_filters(
+    #[case] value: &str,
+    #[case] expected: RemoteMetadataMode,
+) {
+    let config: PypiPolicyConfig = serde_json::from_str(&format!(r#"{{"upstream_attestations":"{value}"}}"#)).unwrap();
+    let policy = policy(|_neutral, pypi| pypi.upstream_attestations = config.upstream_attestations);
+
+    assert_eq!(policy.remote_metadata_mode(), expected);
+    assert!(!policy.active());
+}
+
+#[test]
+fn test_upstream_attestation_mode_rejects_unknown_values() {
+    serde_json::from_str::<PypiPolicyConfig>(r#"{"upstream_attestations":"mirror"}"#).unwrap_err();
 }
 
 #[test]
@@ -151,6 +171,20 @@ fn test_check_download_denies_unknown_file_attributes() {
         assert_eq!(denial.field, case.field, "{}", case.label);
         assert_eq!(denial.reason.as_ref(), case.reason, "{}", case.label);
     }
+}
+
+#[rstest]
+#[case(".metadata")]
+#[case(".provenance")]
+fn test_check_download_applies_distribution_rules_to_metadata_siblings(#[case] suffix: &str) {
+    let policy = policy(|_neutral, pypi| pypi.block_package_types = vec![PackageType::Wheel]);
+
+    let denial = policy
+        .check_download(PolicyAction::Serve, &format!("demo-1.0-py3-none-any.whl{suffix}"), None)
+        .unwrap_err();
+
+    assert_eq!(denial.rule, "package-type-block-list");
+    assert_eq!(denial.reason.as_ref(), "package type wheel is blocked");
 }
 
 #[test]

@@ -1,10 +1,12 @@
 use futures_util::TryStreamExt as _;
 use peryx_upstream::UpstreamError;
+use reqwest::header::{CACHE_CONTROL, HeaderMap, HeaderValue};
+use rstest::rstest;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{mount_get, simple_client};
-use crate::simple_client::SimpleClientExt as _;
+use crate::simple_client::{ResponseCachePolicy, SimpleClientExt as _, response_cache_policy};
 
 #[tokio::test]
 async fn test_fetch_project_json_with_metadata() {
@@ -175,20 +177,68 @@ async fn test_s_maxage_beats_max_age() {
 
 #[tokio::test]
 async fn test_no_cache_disables_freshness() {
-    assert_eq!(max_age_of(Some("no-cache, max-age=600")).await, None);
+    assert_eq!(max_age_of(Some("no-cache, max-age=600")).await, Some(0));
 }
 
 #[tokio::test]
 async fn test_no_store_disables_freshness() {
-    assert_eq!(max_age_of(Some("no-store")).await, None);
+    assert_eq!(max_age_of(Some("no-store")).await, Some(0));
 }
 
 #[tokio::test]
 async fn test_zero_max_age_counts_as_none() {
-    assert_eq!(max_age_of(Some("max-age=0")).await, None);
+    assert_eq!(max_age_of(Some("max-age=0")).await, Some(0));
 }
 
 #[tokio::test]
 async fn test_absent_cache_control_is_none() {
     assert_eq!(max_age_of(None).await, None);
+}
+
+#[test]
+fn test_cache_control_combines_repeated_header_fields() {
+    let mut headers = HeaderMap::new();
+    headers.append(CACHE_CONTROL, HeaderValue::from_static("max-age=60"));
+    headers.append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+    assert_eq!(
+        response_cache_policy(&headers),
+        ResponseCachePolicy {
+            fresh_secs: Some(0),
+            must_revalidate: Some(true),
+            storable: false,
+        }
+    );
+}
+
+#[rstest]
+#[case::must_revalidate(
+    "max-age=60, must-revalidate",
+    ResponseCachePolicy { fresh_secs: Some(60), must_revalidate: Some(true), storable: true }
+)]
+#[case::proxy_revalidate(
+    "max-age=60, proxy-revalidate",
+    ResponseCachePolicy { fresh_secs: Some(60), must_revalidate: Some(true), storable: true }
+)]
+#[case::shared_max_age(
+    "max-age=600, s-maxage=\"60\"",
+    ResponseCachePolicy { fresh_secs: Some(60), must_revalidate: Some(true), storable: true }
+)]
+#[case::private(
+    "private, max-age=60",
+    ResponseCachePolicy { fresh_secs: Some(60), must_revalidate: Some(false), storable: false }
+)]
+#[case::qualified_private(
+    "private=\"set-cookie\", max-age=60",
+    ResponseCachePolicy { fresh_secs: Some(60), must_revalidate: Some(false), storable: false }
+)]
+#[test]
+fn test_response_cache_policy_applies_shared_cache_directives(
+    #[case] value: &str,
+    #[case] expected: ResponseCachePolicy,
+) {
+    let mut headers = HeaderMap::new();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_str(value).unwrap());
+
+    assert_eq!(response_cache_policy(&headers), expected);
 }

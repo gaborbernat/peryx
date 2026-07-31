@@ -5138,6 +5138,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uv-netrc",
  "wiremock",

@@ -1,9 +1,84 @@
-use wiremock::matchers::{header, method, path};
+use std::fs::File;
+use std::io::{Read as _, Seek as _};
+use std::sync::Mutex;
+
+use tracing::dispatcher::DefaultGuard;
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::simple_client;
 use crate::client::UpstreamClient;
 use crate::client::retry::MAX_RETRIES;
+
+#[tokio::test(start_paused = true)]
+async fn test_sleep_before_retry_logs_a_redacted_url_and_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let error = reqwest::get(server.uri())
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap_err();
+    let url = url::Url::parse("https://user:secret@example.test/private?token=signed#fragment").unwrap();
+    let (capture, guard) = capture_debug_events();
+
+    crate::retry::sleep_before_retry(&url, 0, &error).await;
+
+    let mut event = captured_event(capture, guard, "upstream retry");
+    let delay: u64 = event["fields"]["delay_ms"].as_str().unwrap().parse().unwrap();
+    assert!((50..=100).contains(&delay));
+    event["fields"]["delay_ms"] = "jitter".into();
+    assert_eq!(
+        event["fields"],
+        serde_json::json!({
+            "message": "upstream retry",
+            "url": "https://example.test/private",
+            "error": "503",
+            "delay_ms": "jitter",
+        })
+    );
+}
+
+#[tokio::test]
+async fn test_status_retry_logs_a_redacted_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/pkg.whl"))
+        .and(query_param("token", "secret"))
+        .respond_with(ResponseTemplate::new(408))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/pkg.whl"))
+        .and(query_param("token", "secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wheelbytes".to_vec()))
+        .mount(&server)
+        .await;
+    let client = simple_client(&server);
+    let (capture, guard) = capture_debug_events();
+
+    client
+        .fetch_bytes(&format!("{}/files/pkg.whl?token=secret", server.uri()))
+        .await
+        .unwrap();
+
+    let mut event = captured_event(capture, guard, "upstream returned retryable status");
+    event["fields"]["delay_ms"] = "jitter".into();
+    assert_eq!(
+        event["fields"],
+        serde_json::json!({
+            "message": "upstream returned retryable status",
+            "url": format!("{}/files/pkg.whl", server.uri()),
+            "status": "408 Request Timeout",
+            "delay_ms": "jitter",
+        })
+    );
+}
 
 #[tokio::test]
 async fn test_fetch_bytes_retries_transient_statuses() {
@@ -98,6 +173,28 @@ fn response_server(responses: Vec<(&'static [u8], usize)>, content_type: Option<
         }
     });
     format!("http://{addr}/simple/")
+}
+
+fn capture_debug_events() -> (File, DefaultGuard) {
+    let capture = tempfile::tempfile().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(Mutex::new(capture.try_clone().unwrap()))
+        .finish();
+    (capture, tracing::subscriber::set_default(subscriber))
+}
+
+fn captured_event(mut capture: File, guard: DefaultGuard, message: &str) -> serde_json::Value {
+    drop(guard);
+    capture.rewind().unwrap();
+    let mut text = String::new();
+    capture.read_to_string(&mut text).unwrap();
+    text.lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["fields"]["message"] == message)
+        .unwrap()
 }
 
 fn write_response(mut socket: std::net::TcpStream, body: &[u8], content_length: usize, content_type: Option<&str>) {

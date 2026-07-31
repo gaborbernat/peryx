@@ -50,6 +50,7 @@ fn put_cached_page(data_dir: &Path, key: &str, name: &str, files: Vec<serde_json
             None,
             &[],
             &[],
+            &[],
         )
         .unwrap();
 }
@@ -732,6 +733,7 @@ async fn test_mirror_verify_reports_missing_blob() {
             format!("{}/files/flask-1.0-py3-none-any.whl.metadata", server.uri()),
             metadata_digest.as_str().to_owned(),
         )],
+        &[],
     )
     .unwrap();
     drop(meta);

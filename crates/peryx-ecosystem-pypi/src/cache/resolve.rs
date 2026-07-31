@@ -11,7 +11,7 @@ use peryx_core::path::{is_local_file_url, local_file_url};
 use peryx_driver::state::ServingState;
 use peryx_identity::{ArtifactDigest, DigestDecision};
 use peryx_index::{Index, IndexKind};
-use peryx_policy::{FallbackMode, PolicyAction, PolicyDenial};
+use peryx_policy::{FallbackMode, PolicyAction, PolicyDenial, RemoteMetadataMode};
 use peryx_upstream::UpstreamClient;
 
 use super::fetch::fetch_and_store;
@@ -41,6 +41,7 @@ pub async fn resolve_detail(
         return Ok(None);
     };
     filter_revoked_files(state, &mut page.detail)?;
+    rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     Ok(Some(page.detail))
 }
 
@@ -50,9 +51,11 @@ pub(super) async fn resolve_detail_optional(
     project: &str,
     serve_route: &str,
 ) -> Result<Option<ProjectDetail>, CacheError> {
-    Ok(resolve_detail_page_with(state, index, project, serve_route, false)
-        .await?
-        .map(|page| page.detail))
+    let mut page = resolve_detail_page_with(state, index, project, serve_route, false).await?;
+    if let Some(page) = &mut page {
+        rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
+    }
+    Ok(page.map(|page| page.detail))
 }
 
 /// Resolve a project's detail with the serial represented by that page.
@@ -69,6 +72,7 @@ pub async fn resolve_detail_page(
         return Ok(None);
     };
     page.revoked_files_removed = filter_revoked_files(state, &mut page.detail)?;
+    rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     Ok(Some(page))
 }
 
@@ -481,6 +485,21 @@ pub(super) fn rewrite_urls(detail: &mut ProjectDetail, route: &str) {
     for file in &mut detail.files {
         if let Some(sha256) = file.hashes.get("sha256") {
             file.url = local_file_url(route, sha256, &file.filename);
+        }
+    }
+}
+
+fn rewrite_attestation_urls(detail: &mut ProjectDetail, route: &str, mode: RemoteMetadataMode) {
+    if mode == RemoteMetadataMode::Direct {
+        return;
+    }
+    for file in &mut detail.files {
+        let Some(sha256) = file.sha256().map(str::to_owned) else {
+            continue;
+        };
+        if file.provenance.secure_url().is_some() {
+            file.provenance =
+                crate::Provenance::Url(local_file_url(route, &sha256, &format!("{}.provenance", file.filename)));
         }
     }
 }

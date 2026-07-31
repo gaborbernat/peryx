@@ -60,6 +60,13 @@ fn persist_streamed(
             Some((registration.sha256.clone(), url.clone(), digest.clone()))
         })
         .collect();
+    let attestations: Vec<(String, String, String)> = registrations
+        .iter()
+        .filter_map(|registration| {
+            let url = registration.provenance.clone()?;
+            Some((registration.sha256.clone(), registration.filename.clone(), url))
+        })
+        .collect();
     let display = summary.name.as_deref().unwrap_or(project);
     state
         .meta
@@ -75,6 +82,7 @@ fn persist_streamed(
             summary.project_status_reason.as_deref(),
             &files,
             &metadata,
+            &attestations,
         )
         .map_err(CacheError::from)?;
     state.invalidate_project(project);
@@ -144,7 +152,6 @@ pub async fn stream_detail(
     let Some((cached_name, client, offline, context)) = streaming_parts(&state, index, &project)? else {
         return Ok(PageOutcome::Fallback);
     };
-
     let key = format!("{cached_name}/{project}");
     if offline {
         return offline_page(&state, &key, &hot_key, context);
@@ -218,11 +225,7 @@ pub async fn stream_detail(
             release_flight(&state, &key, guard);
             transform_whole(&state, &hot_key, &record, context)
         }
-        404 => {
-            state.remember_negative(project_negative_key(&key), NEGATIVE_TTL_SECS);
-            release_flight(&state, &key, guard);
-            Ok(missing_upstream_outcome(&context))
-        }
+        404 => retire_missing_project(&state, &key, &cached_name, &project, guard, &context),
         200 => {
             let record = buffer_html_page(&state, &key, &cached_name, &project, now, head).await?;
             release_flight(&state, &key, guard);
@@ -233,6 +236,23 @@ pub async fn stream_detail(
             Ok(PageOutcome::Fallback)
         }
     }
+}
+
+fn retire_missing_project(
+    state: &ServingState,
+    key: &str,
+    index: &str,
+    project: &str,
+    guard: peryx_index::serving::FlightGuard,
+    context: &crate::stream::PageContext,
+) -> Result<PageOutcome, CacheError> {
+    let retired = state.meta.retire_cached_project(key, index, project);
+    release_flight(state, key, guard);
+    retired.map_err(CacheError::from).map(|()| {
+        state.invalidate_project(project);
+        state.remember_negative(project_negative_key(key), NEGATIVE_TTL_SECS);
+        missing_upstream_outcome(context)
+    })
 }
 
 fn offline_page(

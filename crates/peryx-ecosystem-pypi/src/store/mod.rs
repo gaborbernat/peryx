@@ -8,6 +8,7 @@
 //!
 //! [`MetaStore`]: peryx_storage::meta::MetaStore
 
+mod attestations;
 mod files;
 mod index;
 mod journal;
@@ -36,8 +37,8 @@ pub use projects::{
     refresh_catalog_generation, scan_project_records,
 };
 pub use record::{
-    CachedIndex, CachedIndexPage, CachedIndexSummary, FreshnessOverlay, ProjectGeneration, ProjectMetaState,
-    ProjectStatusRecord,
+    AttestationAvailability, CachedIndex, CachedIndexPage, CachedIndexSummary, FreshnessOverlay, ProjectGeneration,
+    ProjectMetaState, ProjectStatusRecord, UpstreamAttestation,
 };
 pub use summary::summarize_indexes;
 pub(crate) use uploads::scan_upload_policy_snapshot;
@@ -59,6 +60,12 @@ const METADATA_PREFIX: &str = "pypi\u{0}d\u{0}";
 /// PEP 740 provenance objects, keyed by artifact digest so a `.provenance` request resolves by
 /// digest without scanning a project's uploads.
 const PROVENANCE_PREFIX: &str = "pypi\u{0}a\u{0}";
+/// Mutable provenance objects advertised by upstream indexes, keyed by source, artifact digest,
+/// filename, and owning project.
+const UPSTREAM_ATTESTATION_PREFIX: &str = "pypi\u{0}t\u{0}";
+/// Provenance registrations collected while a project generation is staging. Publication replaces
+/// the project's live registrations atomically; abort recovery discards these rows with the files.
+const PROJECT_ATTESTATION_PREFIX: &str = "pypi\u{0}v\u{0}";
 /// The former `projects` table: observed display names, keyed by `{index}/{normalized}`.
 const PROJECTS_PREFIX: &str = "pypi\u{0}p\u{0}";
 const CATALOG_PREFIX: &str = "pypi\u{0}c\u{0}";
@@ -93,6 +100,46 @@ fn metadata_key(sha256: &str) -> String {
 
 fn provenance_key(sha256: &str) -> String {
     format!("{PROVENANCE_PREFIX}{sha256}")
+}
+
+fn upstream_attestation_prefix(index: &str, sha256: &str, filename: &str) -> String {
+    format!("{UPSTREAM_ATTESTATION_PREFIX}{index}/{sha256}/{filename}/")
+}
+
+fn upstream_attestation_key(index: &str, sha256: &str, filename: &str, project: &str) -> String {
+    format!("{}{project}", upstream_attestation_prefix(index, sha256, filename))
+}
+
+fn project_attestation_prefix(index: &str, normalized: &str) -> String {
+    format!("{PROJECT_ATTESTATION_PREFIX}{index}/{normalized}/")
+}
+
+fn project_attestation_live_prefix(index: &str, normalized: &str) -> String {
+    format!("{}active/", project_attestation_prefix(index, normalized))
+}
+
+fn project_attestation_live_key(index: &str, normalized: &str, sha256: &str, filename: &str) -> String {
+    format!(
+        "{}{sha256}/{filename}",
+        project_attestation_live_prefix(index, normalized)
+    )
+}
+
+fn project_generation_attestation_prefix(index: &str, normalized: &str, generation: u64) -> String {
+    format!("{}{generation:020}/", project_attestation_prefix(index, normalized))
+}
+
+fn project_generation_attestation_key(
+    index: &str,
+    normalized: &str,
+    generation: u64,
+    sha256: &str,
+    filename: &str,
+) -> String {
+    format!(
+        "{}{sha256}/{filename}",
+        project_generation_attestation_prefix(index, normalized, generation)
+    )
 }
 
 fn project_key(index: &str, normalized: &str) -> String {
@@ -161,6 +208,17 @@ pub trait PypiStore {
     /// # Errors
     /// Returns a store error if the write fails.
     fn put_index(&self, key: &str, record: &CachedIndex) -> Result<(), peryx_storage::meta::MetaError>;
+
+    /// Retire a missing upstream project's cached page and provenance locators together.
+    ///
+    /// # Errors
+    /// Returns a store error if the transaction fails.
+    fn retire_cached_project(
+        &self,
+        key: &str,
+        index: &str,
+        project: &str,
+    ) -> Result<(), peryx_storage::meta::MetaError>;
 
     /// Advance a cached page's freshness after a `304 Not Modified`, writing only the small overlay
     /// row and leaving the page body untouched.
@@ -235,6 +293,7 @@ pub trait PypiStore {
         project_status_reason: Option<&str>,
         files: &[(String, String, Option<u64>)],
         metadata: &[(String, String, String)],
+        attestations: &[(String, String, String)],
     ) -> Result<(), peryx_storage::meta::MetaError>;
 
     /// Record the upstream URL a blob digest can be fetched from and its source index.
@@ -313,6 +372,54 @@ pub trait PypiStore {
     /// # Errors
     /// Returns a store error if the read fails.
     fn get_provenance(&self, artifact_sha256: &str) -> Result<Option<(String, u64)>, peryx_storage::meta::MetaError>;
+
+    /// Fetch every current mutable provenance object advertised for an upstream file entry.
+    ///
+    /// # Errors
+    /// Returns a store or decode error when the record cannot be read.
+    fn list_upstream_attestations(
+        &self,
+        index: &str,
+        artifact_sha256: &str,
+        filename: &str,
+    ) -> Result<Vec<UpstreamAttestation>, peryx_storage::meta::MetaError>;
+
+    /// Fetch one project's mutable provenance object advertised by an upstream file entry.
+    ///
+    /// # Errors
+    /// Returns a store or decode error when the record cannot be read.
+    fn get_upstream_attestation(
+        &self,
+        index: &str,
+        project: &str,
+        artifact_sha256: &str,
+        filename: &str,
+    ) -> Result<Option<UpstreamAttestation>, peryx_storage::meta::MetaError>;
+
+    /// Store a mutable provenance object advertised by an upstream file entry.
+    ///
+    /// # Errors
+    /// Returns a store or encode error when the record cannot be written.
+    fn put_upstream_attestation(
+        &self,
+        index: &str,
+        artifact_sha256: &str,
+        filename: &str,
+        record: &UpstreamAttestation,
+    ) -> Result<(), peryx_storage::meta::MetaError>;
+
+    /// Replace upstream provenance state only when it has not changed since it was read.
+    ///
+    /// # Errors
+    /// Returns a store, decode, or encode error when the record cannot be compared or written.
+    fn compare_exchange_upstream_attestation(
+        &self,
+        index: &str,
+        artifact_sha256: &str,
+        filename: &str,
+        expected: &UpstreamAttestation,
+        replacement: &UpstreamAttestation,
+    ) -> Result<bool, peryx_storage::meta::MetaError>;
 
     /// Visit raw provenance records, keyed by artifact digest.
     ///
@@ -516,6 +623,15 @@ impl PypiStore for peryx_storage::meta::MetaStore {
         index::put_index(self, key, record)
     }
 
+    fn retire_cached_project(
+        &self,
+        key: &str,
+        index: &str,
+        project: &str,
+    ) -> Result<(), peryx_storage::meta::MetaError> {
+        index::retire_cached_project(self, key, index, project)
+    }
+
     fn touch_index_freshness(
         &self,
         key: &str,
@@ -572,6 +688,7 @@ impl PypiStore for peryx_storage::meta::MetaStore {
         project_status_reason: Option<&str>,
         files: &[(String, String, Option<u64>)],
         metadata: &[(String, String, String)],
+        attestations: &[(String, String, String)],
     ) -> Result<(), peryx_storage::meta::MetaError> {
         index::put_cached_page(
             self,
@@ -586,6 +703,7 @@ impl PypiStore for peryx_storage::meta::MetaStore {
             project_status_reason,
             files,
             metadata,
+            attestations,
         )
     }
 
@@ -646,6 +764,91 @@ impl PypiStore for peryx_storage::meta::MetaStore {
 
     fn get_provenance(&self, artifact_sha256: &str) -> Result<Option<(String, u64)>, peryx_storage::meta::MetaError> {
         files::get_provenance(self, artifact_sha256)
+    }
+
+    fn list_upstream_attestations(
+        &self,
+        index: &str,
+        artifact_sha256: &str,
+        filename: &str,
+    ) -> Result<Vec<UpstreamAttestation>, peryx_storage::meta::MetaError> {
+        attestations::list_upstream_attestations(self, index, artifact_sha256, filename)
+    }
+
+    fn get_upstream_attestation(
+        &self,
+        index: &str,
+        project: &str,
+        artifact_sha256: &str,
+        filename: &str,
+    ) -> Result<Option<UpstreamAttestation>, peryx_storage::meta::MetaError> {
+        self.get_driver_value(&upstream_attestation_key(index, artifact_sha256, filename, project))
+            .and_then(|raw| {
+                raw.map(|raw| serde_json::from_slice(&raw).map_err(peryx_storage::meta::MetaError::from))
+                    .transpose()
+            })
+    }
+
+    fn put_upstream_attestation(
+        &self,
+        index: &str,
+        artifact_sha256: &str,
+        filename: &str,
+        record: &UpstreamAttestation,
+    ) -> Result<(), peryx_storage::meta::MetaError> {
+        let key = upstream_attestation_key(index, artifact_sha256, filename, &record.project);
+        let owner_key = project_attestation_live_key(index, &record.project, artifact_sha256, filename);
+        serde_json::to_vec(record)
+            .map_err(peryx_storage::meta::MetaError::from)
+            .and_then(|encoded| {
+                self.commit_driver_cache_txn(|txn| {
+                    txn.put_local(&key, &encoded).and_then(|()| {
+                        serde_json::to_vec(&key)
+                            .map_err(peryx_storage::meta::MetaError::from)
+                            .and_then(|encoded_key| txn.put_local(&owner_key, &encoded_key))
+                    })
+                })
+            })
+    }
+
+    fn compare_exchange_upstream_attestation(
+        &self,
+        index: &str,
+        artifact_sha256: &str,
+        filename: &str,
+        expected: &UpstreamAttestation,
+        replacement: &UpstreamAttestation,
+    ) -> Result<bool, peryx_storage::meta::MetaError> {
+        if (&expected.project, &expected.source, &expected.upstream, &expected.url)
+            != (
+                &replacement.project,
+                &replacement.source,
+                &replacement.upstream,
+                &replacement.url,
+            )
+        {
+            return Err(peryx_storage::meta::MetaError::DriverPrecondition(
+                "attestation cache replacement changed its source identity".to_owned(),
+            ));
+        }
+        let key = upstream_attestation_key(index, artifact_sha256, filename, &expected.project);
+        serde_json::to_vec(replacement)
+            .map_err(peryx_storage::meta::MetaError::from)
+            .and_then(|replacement| {
+                self.commit_driver_cache_txn(|txn| {
+                    txn.get(&key)
+                        .and_then(|raw| {
+                            raw.map(|raw| serde_json::from_slice(&raw).map_err(peryx_storage::meta::MetaError::from))
+                                .transpose()
+                        })
+                        .and_then(|current| {
+                            if current.as_ref() != Some(expected) {
+                                return Ok(false);
+                            }
+                            txn.put_local(&key, &replacement).map(|()| true)
+                        })
+                })
+            })
     }
 
     fn scan_provenance_records<E>(

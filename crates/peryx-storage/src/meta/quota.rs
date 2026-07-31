@@ -286,6 +286,7 @@ impl MetaStore {
         self.commit_driver_txn_at(
             None,
             None,
+            true,
             |txn, _| {
                 commit_reservation(txn, id)?
                     .then_some(())
@@ -313,6 +314,7 @@ impl MetaStore {
         self.commit_driver_txn_at(
             None,
             None,
+            true,
             |txn, value| {
                 let available = if commit(value) {
                     commit_reservation(txn, id)?

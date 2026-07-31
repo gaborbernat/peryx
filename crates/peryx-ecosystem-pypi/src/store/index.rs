@@ -4,14 +4,18 @@ use crate::simple::File;
 use crate::stream::metadata_sibling;
 use crate::{CoreMetadata, to_json};
 
+use super::attestations::{
+    publish_staged_upstream_attestations_in_txn, replace_project_upstream_attestations_in_txn,
+    stage_upstream_attestation_in_txn,
+};
 use super::record::{
     CachedIndex, CachedIndexPage, FreshnessOverlay, ProjectGeneration, ProjectMetaState, ProjectStatusRecord,
 };
 use super::{
-    INDEX_PREFIX, file_key, file_source_value, freshness_key, index_key, metadata_key, metadata_value, project_key,
-    project_status_key,
+    INDEX_PREFIX, UpstreamAttestation, file_key, file_source_value, freshness_key, index_key, metadata_key,
+    metadata_value, project_key, project_status_key,
 };
-use super::{project_file_key, project_generation_prefix, project_meta_key};
+use super::{project_file_key, project_generation_attestation_prefix, project_generation_prefix, project_meta_key};
 
 /// How many generation rows a purge deletes per transaction, bounding one commit for a project with
 /// a very large file list.
@@ -20,7 +24,7 @@ const PROJECT_FILE_DELETE_BATCH: usize = 10_000;
 /// Store everything a freshly fetched cached page produces in one transaction.
 ///
 /// The cached page record, the observed project name, every file's source URL, and every PEP 658
-/// sibling go in together. One commit means one fsync, where a write per file made large projects
+/// sibling go in together. One transaction avoids a write per file, which made large projects
 /// (numpy has thousands of files) take tens of seconds.
 ///
 /// The commit is non-durable: page EOF waits on it so downloads always find their registrations, and
@@ -46,34 +50,37 @@ pub fn put_cached_page(
     project_status_reason: Option<&str>,
     files: &[(String, String, Option<u64>)],
     metadata: &[(String, String, String)],
+    attestations: &[(String, String, String)],
 ) -> Result<(), MetaError> {
-    let mut batch = DriverBatch::new();
-    batch.put(index_key(key), record.encode());
-    batch.delete(freshness_key(key));
-    batch.put(project_key(index, normalized), display.as_bytes().to_vec());
-    match (project_status, project_status_reason) {
-        (None, None) => batch.delete(project_status_key(index, normalized)),
-        (status, reason) => {
-            let record = serde_json::to_vec(&ProjectStatusRecord {
-                status: status.map(str::to_owned),
-                reason: reason.map(str::to_owned),
-            })?;
-            batch.put(project_status_key(index, normalized), record);
-        }
-    }
-    for (sha256, url, size) in files {
-        batch.put(
-            file_key(sha256),
-            file_source_value(url, source, *size, upstream).into_bytes(),
-        );
-    }
-    for (wheel_sha256, url, metadata_sha256) in metadata {
-        batch.put(
-            metadata_key(wheel_sha256),
-            metadata_value(url, metadata_sha256, source).into_bytes(),
-        );
-    }
-    meta.commit_driver_batch(&batch, false)
+    meta.commit_driver_cache_txn(|txn| {
+        txn.put_local(&index_key(key), &record.encode())
+            .and_then(|()| txn.remove(&freshness_key(key)).map(|_| ()))
+            .and_then(|()| txn.put_local(&project_key(index, normalized), display.as_bytes()))
+            .and_then(|()| match (project_status, project_status_reason) {
+                (None, None) => txn.remove(&project_status_key(index, normalized)).map(|_| ()),
+                (status, reason) => serde_json::to_vec(&ProjectStatusRecord {
+                    status: status.map(str::to_owned),
+                    reason: reason.map(str::to_owned),
+                })
+                .map_err(MetaError::from)
+                .and_then(|record| txn.put_local(&project_status_key(index, normalized), &record)),
+            })
+            .and_then(|()| {
+                files.iter().try_for_each(|(sha256, url, size)| {
+                    let key = file_key(sha256);
+                    let value = file_source_value(url, source, *size, upstream);
+                    txn.put_local(&key, value.as_bytes())
+                })
+            })
+            .and_then(|()| {
+                metadata.iter().try_for_each(|(wheel_sha256, url, metadata_sha256)| {
+                    let key = metadata_key(wheel_sha256);
+                    let value = metadata_value(url, metadata_sha256, source);
+                    txn.put_local(&key, value.as_bytes())
+                })
+            })
+            .and_then(|()| replace_project_upstream_attestations_in_txn(txn, index, normalized, upstream, attestations))
+    })
 }
 
 /// Fetch one project's explicit status marker, if a cached upstream page provided one.
@@ -102,6 +109,20 @@ pub fn put_index(meta: &MetaStore, key: &str, record: &CachedIndex) -> Result<()
     batch.put(index_key(key), record.encode());
     batch.delete(freshness_key(key));
     meta.commit_driver_batch(&batch, true)
+}
+
+/// Retire an upstream project page and its provenance locators after an authoritative `404`.
+///
+/// # Errors
+/// Returns a store error if the transaction fails.
+pub fn retire_cached_project(meta: &MetaStore, key: &str, index: &str, project: &str) -> Result<(), MetaError> {
+    meta.commit_driver_txn(|txn| {
+        txn.remove(&index_key(key))
+            .map(|_| ())
+            .and_then(|()| txn.remove(&freshness_key(key)).map(|_| ()))
+            .and_then(|()| replace_project_upstream_attestations_in_txn(txn, index, project, None, &[]))
+            .map(|()| ((), Vec::new()))
+    })
 }
 
 /// Advance a cached page's freshness after a `304 Not Modified`: write the small overlay row alone,
@@ -262,19 +283,27 @@ fn store_project_meta_state(
 }
 
 fn delete_generation_rows(meta: &MetaStore, index: &str, normalized: &str, generation: u64) -> Result<(), MetaError> {
-    let prefix = project_generation_prefix(index, normalized, generation);
-    loop {
-        let keys = meta.driver_prefix_keys_limited(&prefix, PROJECT_FILE_DELETE_BATCH)?;
-        if keys.is_empty() {
-            break;
-        }
-        let mut batch = DriverBatch::new();
-        for key in keys {
-            batch.delete(key);
-        }
-        meta.commit_driver_batch(&batch, false)?;
-    }
-    Ok(())
+    [
+        project_generation_prefix(index, normalized, generation),
+        project_generation_attestation_prefix(index, normalized, generation),
+    ]
+    .into_iter()
+    .try_for_each(|prefix| delete_generation_prefix(meta, &prefix))
+}
+
+fn delete_generation_prefix(meta: &MetaStore, prefix: &str) -> Result<(), MetaError> {
+    meta.driver_prefix_keys_limited(prefix, PROJECT_FILE_DELETE_BATCH)
+        .and_then(|keys| {
+            if keys.is_empty() {
+                return Ok(());
+            }
+            let mut batch = DriverBatch::new();
+            for key in keys {
+                batch.delete(key);
+            }
+            meta.commit_driver_batch(&batch, false)
+                .and_then(|()| delete_generation_prefix(meta, prefix))
+        })
 }
 
 /// Remove generations left by an interrupted sync, clearing their state only after every row is gone.
@@ -337,29 +366,42 @@ pub fn put_project_files(
     files: &[File],
 ) -> Result<u64, MetaError> {
     meta.commit_driver_txn(|txn| {
-        let state = decode_project_meta_state(txn.get(&project_meta_key(index, normalized))?)?;
-        if state.staging != Some(generation) {
-            return Err(MetaError::DriverPrecondition(
-                "project generation is not staging".to_owned(),
-            ));
-        }
-        let mut inserted = 0;
-        for file in files {
-            let key = project_file_key(index, normalized, generation, &file.filename);
-            if txn.get(&key)?.is_some() {
-                continue;
-            }
-            txn.put_local(&key, to_json(file).as_bytes())?;
-            inserted += 1;
-            register_file_rows(txn, source, upstream, file)?;
-        }
-        Ok::<_, MetaError>((inserted, Vec::new()))
+        txn.get(&project_meta_key(index, normalized))
+            .and_then(decode_project_meta_state)
+            .and_then(|state| {
+                if state.staging == Some(generation) {
+                    Ok(())
+                } else {
+                    Err(MetaError::DriverPrecondition(
+                        "project generation is not staging".to_owned(),
+                    ))
+                }
+            })
+            .and_then(|()| {
+                files.iter().try_fold(0, |inserted, file| {
+                    let key = project_file_key(index, normalized, generation, &file.filename);
+                    txn.get(&key).and_then(|current| {
+                        if current.is_some() {
+                            return Ok(inserted);
+                        }
+                        txn.put_local(&key, to_json(file).as_bytes())
+                            .and_then(|()| {
+                                register_file_rows(txn, index, normalized, generation, source, upstream, file)
+                            })
+                            .map(|()| inserted + 1)
+                    })
+                })
+            })
+            .map(|inserted| (inserted, Vec::new()))
     })
 }
 
 /// Register the digest-keyed download source and metadata sibling a served file resolves through.
 fn register_file_rows(
     txn: &mut DriverTxn<'_>,
+    index: &str,
+    project: &str,
+    generation: u64,
     source: &str,
     upstream: Option<&str>,
     file: &File,
@@ -375,7 +417,10 @@ fn register_file_rows(
         let sibling = metadata_value(&metadata_sibling(&file.url), digest, source);
         txn.put_local(&metadata_key(sha256), sibling.as_bytes())?;
     }
-    Ok(())
+    file.provenance.secure_url().map_or(Ok(()), |url| {
+        let record = UpstreamAttestation::remote(url, index, project, upstream);
+        stage_upstream_attestation_in_txn(txn, index, generation, sha256, &file.filename, &record)
+    })
 }
 
 /// Publish a fully parsed generation, swapping the active pointer only if both the staging
@@ -399,11 +444,13 @@ pub fn publish_project_generation(
                 "project publication lost its reservation".to_owned(),
             ));
         }
+        let published = generation.generation;
         state.retired = state.active.as_ref().map(|active| active.generation);
         state.active = Some(generation);
         state.staging = None;
-        store_project_meta_state(txn, index, normalized, &state)?;
-        Ok::<_, MetaError>(((), Vec::new()))
+        publish_staged_upstream_attestations_in_txn(txn, index, normalized, published)
+            .and_then(|()| store_project_meta_state(txn, index, normalized, &state))
+            .map(|()| ((), Vec::new()))
     })
 }
 
@@ -614,6 +661,11 @@ mod tests {
                 "https://files.example/pkg-1.0.whl".to_owned(),
                 Some(42),
             )],
+            &[(
+                "feedface".to_owned(),
+                "https://files.example/pkg-1.0.whl.metadata".to_owned(),
+                "decafbad".to_owned(),
+            )],
             &[],
         )
         .unwrap();
@@ -621,6 +673,14 @@ mod tests {
         let source = meta.get_file_url("feedface").unwrap().unwrap();
         assert_eq!(source.size, Some(42), "the file's size line round-trips");
         assert_eq!(source.upstream.as_deref(), Some("mirror"));
+        assert_eq!(
+            meta.get_metadata("feedface").unwrap(),
+            Some((
+                "https://files.example/pkg-1.0.whl.metadata".to_owned(),
+                "decafbad".to_owned(),
+                "pypi".to_owned(),
+            ))
+        );
         assert_eq!(
             meta.get_project_status("pypi", "pkg")
                 .unwrap()
@@ -646,9 +706,101 @@ mod tests {
             None,
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert!(meta.get_project_status("pypi", "pkg").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_late_page_registration_preserves_or_resets_a_cached_attestation_by_url() {
+        let (_dir, meta) = store();
+        let filename = "pkg-1.0.whl";
+        let first_url = "https://example.test/pkg-1.0.whl.provenance";
+        let mut cached = crate::store::UpstreamAttestation::remote(first_url, "pypi", "pkg", Some("primary"));
+        cached.media_type = Some("application/json".to_owned());
+        cached.etag = Some("\"v1\"".to_owned());
+        cached.fetched_at_unix = Some(10);
+        cached.availability = crate::store::AttestationAvailability::Cached;
+        cached.body = Some("body".to_owned());
+        meta.put_upstream_attestation("pypi", "abc", filename, &cached).unwrap();
+
+        meta.put_cached_page(
+            "pypi/pkg",
+            &record(),
+            "pypi",
+            "pkg",
+            "Pkg",
+            "pypi",
+            Some("primary"),
+            None,
+            None,
+            &[],
+            &[],
+            &[("abc".to_owned(), filename.to_owned(), first_url.to_owned())],
+        )
+        .unwrap();
+
+        assert_eq!(
+            meta.get_upstream_attestation("pypi", "pkg", "abc", filename).unwrap(),
+            Some(cached)
+        );
+
+        let second_url = "https://example.test/pkg-1.0.whl.provenance?v=2";
+        meta.put_cached_page(
+            "pypi/pkg",
+            &record(),
+            "pypi",
+            "pkg",
+            "Pkg",
+            "pypi",
+            Some("primary"),
+            None,
+            None,
+            &[],
+            &[],
+            &[("abc".to_owned(), filename.to_owned(), second_url.to_owned())],
+        )
+        .unwrap();
+
+        assert_eq!(
+            meta.get_upstream_attestation("pypi", "pkg", "abc", filename).unwrap(),
+            Some(crate::store::UpstreamAttestation::remote(
+                second_url,
+                "pypi",
+                "pkg",
+                Some("primary"),
+            ))
+        );
+    }
+
+    #[test]
+    fn test_attestation_compare_exchange_rejects_a_source_identity_change() {
+        let (_dir, meta) = store();
+        let expected = crate::store::UpstreamAttestation::remote(
+            "https://example.test/pkg-1.0.whl.provenance",
+            "pypi",
+            "pkg",
+            Some("primary"),
+        );
+        meta.put_upstream_attestation("pypi", "abc", "pkg-1.0.whl", &expected)
+            .unwrap();
+        let mut replacement = expected.clone();
+        replacement.source = "other".to_owned();
+
+        let error = meta
+            .compare_exchange_upstream_attestation("pypi", "abc", "pkg-1.0.whl", &expected, &replacement)
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "driver precondition failed: attestation cache replacement changed its source identity"
+        );
+        assert_eq!(
+            meta.get_upstream_attestation("pypi", "pkg", "abc", "pkg-1.0.whl")
+                .unwrap(),
+            Some(expected)
+        );
     }
 
     #[test]
@@ -733,7 +885,7 @@ mod tests {
             recover_project_generations, refresh_project_generation,
         };
         use super::MetaStore;
-        use crate::simple::{CoreMetadata, File, Yanked};
+        use crate::simple::{CoreMetadata, File, Provenance, Yanked};
         use crate::store::{ProjectGeneration, PypiStore as _};
 
         fn store() -> (tempfile::TempDir, MetaStore) {
@@ -758,6 +910,12 @@ mod tests {
                 gpg_sig: None,
                 provenance: crate::simple::Provenance::Absent,
             }
+        }
+
+        fn attested_file(filename: &str, sha256: &str) -> File {
+            let mut file = file(filename, Some(sha256));
+            file.provenance = Provenance::Url(format!("https://files.example/{filename}.provenance"));
+            file
         }
 
         fn generation(id: u64, etag: Option<&str>, files: u64) -> ProjectGeneration {
@@ -948,6 +1106,65 @@ mod tests {
                 meta.driver_prefix_keys(&project_generation_prefix("pypi", "flask", staging))
                     .unwrap()
                     .is_empty()
+            );
+        }
+
+        #[test]
+        fn test_staged_attestation_is_invisible_and_abort_removes_it() {
+            let (_dir, meta) = store();
+            let digest = "b".repeat(64);
+            let filename = "flask-2.0.tar.gz";
+            let (staging, _) = begin_project_generation(&meta, "pypi", "flask").unwrap();
+            put_project_files(
+                &meta,
+                "pypi",
+                "flask",
+                staging,
+                "pypi",
+                None,
+                &[attested_file(filename, &digest)],
+            )
+            .unwrap();
+
+            assert!(
+                meta.list_upstream_attestations("pypi", &digest, filename)
+                    .unwrap()
+                    .is_empty()
+            );
+
+            abort_project_generation(&meta, "pypi", "flask", staging).unwrap();
+
+            assert!(
+                meta.list_upstream_attestations("pypi", &digest, filename)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn test_new_generation_retires_removed_attestation_locator() {
+            let (_dir, meta) = store();
+            let digest = "b".repeat(64);
+            let filename = "flask-1.0.tar.gz";
+            publish(&meta, "pypi", "flask", &[attested_file(filename, &digest)]);
+            assert_eq!(
+                meta.list_upstream_attestations("pypi", &digest, filename)
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            publish(&meta, "pypi", "flask", &[file(filename, Some(&digest))]);
+
+            assert!(
+                meta.list_upstream_attestations("pypi", &digest, filename)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                meta.get_upstream_attestation("pypi", "flask", &digest, filename)
+                    .unwrap()
+                    .is_none()
             );
         }
 

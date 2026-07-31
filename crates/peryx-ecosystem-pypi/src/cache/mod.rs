@@ -35,7 +35,7 @@ pub use mutate::{
 };
 pub(crate) use mutate::{store_upload, upload_exists};
 pub use page_stream::{PageOutcome, materialize_detail, stream_detail};
-pub use provenance::provenance_bytes;
+pub use provenance::{ProvenanceBody, provenance_bytes};
 pub use resolve::{DetailPage, list_serial, resolve_detail, resolve_detail_page, resolve_list};
 
 #[cfg(test)]
@@ -62,6 +62,8 @@ pub enum CacheError {
     Archive(#[from] crate::archive::ArchiveError),
     #[error("upstream unreachable and nothing cached")]
     Unavailable,
+    #[error("upstream provenance is not a PEP 740 attestation document")]
+    InvalidProvenance,
     #[error("offline mode has no cached {0}")]
     OfflineMissing(&'static str),
     #[error("index is not volatile; delete is disabled")]
@@ -133,6 +135,7 @@ impl CacheError {
             Self::Simple(err) => format!("unsupported simple API response: {err}"),
             Self::Archive(err) => err.to_string(),
             Self::Unavailable => "upstream is unavailable and no cached page exists".to_owned(),
+            Self::InvalidProvenance => "upstream provenance is not a PEP 740 attestation document".to_owned(),
             Self::OfflineMissing(target) => format!("offline mode has no cached {target}"),
             Self::NotVolatile => "index is not volatile; delete is disabled".to_owned(),
             Self::FileNotFound | Self::ArtifactRevoked => {
@@ -263,7 +266,9 @@ pub(crate) fn servable_stale(state: &ServingState, record: &CachedIndex) -> bool
 /// the fallback when no lifetime is granted and the ceiling when too much is: a shorter upstream
 /// lifetime is honoured, a longer one is not.
 pub(crate) const fn freshness_secs(ttl_secs: i64, fresh_secs: Option<i64>) -> i64 {
+    let ttl_secs = if ttl_secs < 0 { 0 } else { ttl_secs };
     match fresh_secs {
+        Some(granted) if granted < 0 => 0,
         Some(granted) if granted < ttl_secs => granted,
         _ => ttl_secs,
     }
@@ -286,6 +291,16 @@ fn project_negative_key(key: &str) -> String {
 async fn upstream_permit(state: &ServingState, name: &str) -> Result<UpstreamPermit, CacheError> {
     state
         .upstream_limits
+        .acquire(name)
+        .await
+        .map_err(|limited| CacheError::RateLimited {
+            retry_after: limited.retry_after,
+        })
+}
+
+async fn metadata_upstream_permit(state: &ServingState, name: &str) -> Result<UpstreamPermit, CacheError> {
+    state
+        .metadata_upstream_limits
         .acquire(name)
         .await
         .map_err(|limited| CacheError::RateLimited {

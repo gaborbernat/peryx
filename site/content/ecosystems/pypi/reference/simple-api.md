@@ -107,11 +107,11 @@ whichever surface a client asks for.
 
 ### What peryx does not serve for a file
 
-For a content-addressed file, peryx serves exactly two things under its file route: the artifact blob at
-`/{route}/files/{sha256}/{filename}`, and its core-metadata at `.../{filename}.metadata`. It does **not** serve an
-`.asc` at `.../{filename}.asc`; that route returns `404`. The detached signature only ever lived at the upstream URL,
-which peryx has replaced with its own for a content-addressed file, so dropping the marker keeps the page honest about
-what is reachable.
+For a content-addressed file, peryx serves the artifact blob at `/{route}/files/{sha256}/{filename}`, its core metadata
+at `.../{filename}.metadata`, and an advertised provenance object at `.../{filename}.provenance`. It does **not** serve
+an `.asc` at `.../{filename}.asc`; that route returns `404`. The detached signature lived at the upstream URL, which
+peryx has replaced with its own for a content-addressed file, so dropping the marker keeps the page honest about what is
+reachable.
 
 ## Provenance and attestations
 
@@ -123,13 +123,44 @@ without them advertises none. `{route}` below is the index's route.
 | PEP 691 JSON | `provenance`      | `/{route}/files/{sha256}/{filename}.provenance` | omitted |
 | PEP 503 HTML | `data-provenance` | the same URL, as an escaped attribute           | omitted |
 
-- **Route.** `GET /{route}/files/{sha256}/{filename}.provenance` returns the provenance object, resolved from the
-  artifact's SHA-256 by a single keyed lookup. Media type `application/vnd.pypi.integrity.v1+json`, cached immutable. A
-  digest with no stored provenance returns `404`.
-- **Body.** `{"version": 1, "attestation_bundles": [{"publisher": null, "attestations": [...]}]}`. The `publisher` is
-  `null` — peryx does not resolve a Trusted Publisher identity. The uploaded attestations are served verbatim.
-- **Upstream provenance.** A `provenance` URL a cached upstream advertises is preserved as-is, pointing at the upstream;
-  peryx only mints its own provenance URL for a distribution uploaded to a hosted index with attestations.
+#### Route
+
+`GET /{route}/files/{sha256}/{filename}.provenance` returns the provenance object. A digest and filename with no hosted
+or registered upstream provenance returns `404`.
+
+#### Body
+
+The response is `{"version": 1, "attestation_bundles": [{"publisher": null, "attestations": [...]}]}`. The `publisher`
+is `null` because peryx does not resolve a Trusted Publisher identity. The uploaded attestations are served verbatim.
+
+#### Upstream policy
+
+`upstream_attestations = "direct"` preserves the upstream URL and makes no provenance request. `"proxy"` publishes
+peryx's route and fetches the body for each request without retaining it. `"cache"` publishes the same route. It retains
+a structurally accepted, unverified body and revalidates stale bodies with `ETag` or `Last-Modified`. The default is
+`direct`.
+
+#### Source state
+
+A local response has `X-Peryx-Provenance-Source: hosted|<configured-source>` and
+`X-Peryx-Provenance-Availability: cached|remote-only`. Hosted bodies are immutable. Upstream bodies use `no-cache`
+because the provenance URL may keep pointing at a changed document.
+
+#### Validation and failure
+
+peryx accepts the PEP 740 media type or `application/json`. The document must use version 1 and contain a publisher with
+string `kind`, object `claims`, and one or more typed attestations. Its size cannot exceed 2 MiB. Fetches use the
+upstream client's redirect, timeout, retry, and credential controls. A separate per-source concurrency pool prevents
+attestation latency from consuming project-page slots. `no-cache` forces revalidation; `no-store` clears any retained
+body and validators. A transient refresh failure may serve the previous structurally accepted body within the
+repository's stale bound. peryx rejects an invalid replacement without overwriting the previous body or affecting the
+distribution.
+
+#### Security claim
+
+peryx does not verify upstream provenance. It reports the configured source without claiming a publisher identity. It
+does not verify signatures or certificates and does not consult transparency logs.
+
 - **Visibility.** The provenance is reachable only through the file's `provenance` URL, so it tracks the file: a yanked
   file keeps it, a trashed file drops it, a restore returns it. The upload rules cover the
   [validation and limits](@/ecosystems/pypi/reference/uploads.md#attestations).

@@ -41,6 +41,66 @@ pub struct ProjectStatusRecord {
     pub reason: Option<String>,
 }
 
+/// A mutable provenance object advertised by an upstream Simple API file entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamAttestation {
+    /// The normalized project whose current page or published generation advertises the URL.
+    pub project: String,
+    /// The secure URL advertised by the upstream Simple API record.
+    pub url: String,
+    /// The configured cached index whose client can fetch `url`.
+    pub source: String,
+    /// The routed upstream that advertised `url`, when the cached index has named sources.
+    pub upstream: Option<String>,
+    /// The normalized media type returned with the last structurally accepted body.
+    pub media_type: Option<String>,
+    /// The upstream validator used before `Last-Modified` when both are present.
+    pub etag: Option<String>,
+    /// The upstream validator used when no `ETag` is present.
+    pub last_modified: Option<String>,
+    /// The serving clock when the body was fetched or revalidated.
+    pub fetched_at_unix: Option<i64>,
+    /// The shared-cache freshness lifetime granted by the upstream.
+    pub fresh_secs: Option<i64>,
+    /// Whether a stale body requires successful validation before reuse.
+    #[serde(default)]
+    pub must_revalidate: bool,
+    /// Whether the structurally accepted, unverified body is retained locally.
+    pub availability: AttestationAvailability,
+    /// The exact structurally accepted, unverified JSON text, retained inline only in cache mode.
+    pub body: Option<String>,
+}
+
+/// Whether an upstream provenance object still lives only at its source or has a retained body.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationAvailability {
+    #[default]
+    RemoteOnly,
+    Cached,
+}
+
+impl UpstreamAttestation {
+    /// Create a remote-only record for an upstream Simple API provenance link.
+    #[must_use]
+    pub fn remote(url: &str, source: &str, project: &str, upstream: Option<&str>) -> Self {
+        Self {
+            project: project.to_owned(),
+            url: url.to_owned(),
+            source: source.to_owned(),
+            upstream: upstream.map(str::to_owned),
+            media_type: None,
+            etag: None,
+            last_modified: None,
+            fetched_at_unix: None,
+            fresh_secs: None,
+            must_revalidate: false,
+            availability: AttestationAvailability::RemoteOnly,
+            body: None,
+        }
+    }
+}
+
 /// One completely parsed remote project-detail generation: its provenance, its revalidation
 /// validators, and the counts that let a later sweep reason about it without reading the file rows.
 ///

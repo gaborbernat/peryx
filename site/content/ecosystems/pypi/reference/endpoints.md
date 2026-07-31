@@ -17,7 +17,8 @@ each endpoint down with copyable example requests and responses.
 - `GET /{route}/files/{sha256}/{filename}`: artifact download, cached content-addressed.
 - `GET /{route}/files/{sha256}/{filename}.metadata`: [PEP 658](https://peps.python.org/pep-0658/) core-metadata sibling.
 - `GET /{route}/files/{sha256}/{filename}.provenance`: [PEP 740](https://peps.python.org/pep-0740/) provenance object
-  (`application/vnd.pypi.integrity.v1+json`), served for a file uploaded with attestations.
+  (`application/vnd.pypi.integrity.v1+json` or the accepted upstream `application/json`) for a hosted file with
+  attestations or an upstream file whose policy proxies or retains its provenance.
 - `POST /{route}/`: upload ([legacy API](https://docs.pypi.org/api/upload/), used by
   [twine](https://twine.readthedocs.io/) and `uv publish`).
 - `GET /{route}/+api`: index discovery, absolute URLs, capabilities, and redacted client config.

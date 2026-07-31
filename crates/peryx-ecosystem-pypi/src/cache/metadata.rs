@@ -452,6 +452,7 @@ mod tests {
                     url: "https://example.invalid/broken.whl".to_owned(),
                     size: None,
                     metadata: None,
+                    provenance: None,
                 },
                 Registration {
                     filename: "pkg-1.0-py3-none-any.whl".to_owned(),
@@ -459,6 +460,7 @@ mod tests {
                     url: "https://example.invalid/pkg.whl".to_owned(),
                     size: None,
                     metadata: None,
+                    provenance: None,
                 },
             ],
         );

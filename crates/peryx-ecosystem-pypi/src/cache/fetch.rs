@@ -91,10 +91,15 @@ pub(super) async fn fetch_and_store(
             });
             Ok(Some(record))
         }
-        Ok(response) if response.status == 404 => {
-            state.remember_negative(project_negative_key(key), NEGATIVE_TTL_SECS);
-            Ok(None)
-        }
+        Ok(response) if response.status == 404 => state
+            .meta
+            .retire_cached_project(key, name, project)
+            .map_err(CacheError::from)
+            .map(|()| {
+                state.invalidate_project(project);
+                state.remember_negative(project_negative_key(key), NEGATIVE_TTL_SECS);
+                None
+            }),
         // Past `max_stale_secs` a stale page stops being an answer, so drop it and let the upstream
         // failure surface rather than papering over an outage with data of unbounded age.
         Ok(response) => cached
@@ -266,6 +271,7 @@ pub(super) fn canonical_json(body: &[u8], base: &Url) -> Result<Vec<u8>, CacheEr
     let mut parsed = parse_detail(body)?;
     for file in &mut parsed.files {
         absolutize(base, &mut file.url);
+        file.provenance.retain_secure_url();
     }
     let detail = ProjectDetail {
         meta: parsed.meta,
@@ -298,6 +304,7 @@ pub(super) fn persist_page_from(
     let parsed = parse_detail(&record.body)?;
     let mut files = Vec::new();
     let mut metadata = Vec::new();
+    let mut attestations = Vec::new();
     let policy = mirror_policy(state, name);
     for file in &parsed.files {
         if policy.check_file(PolicyAction::Cached, project, file).is_err() {
@@ -319,6 +326,9 @@ pub(super) fn persist_page_from(
                 digest.clone(),
             ));
         }
+        if let Some(url) = file.provenance.secure_url() {
+            attestations.push((sha256.clone(), file.filename.clone(), url.to_owned()));
+        }
     }
     let display = if parsed.name.is_empty() { project } else { &parsed.name };
     state
@@ -335,6 +345,7 @@ pub(super) fn persist_page_from(
             parsed.meta.project_status_reason.as_deref(),
             &files,
             &metadata,
+            &attestations,
         )
         .map_err(CacheError::from)?;
     state.invalidate_project(project);
@@ -440,7 +451,7 @@ async fn publish_project_response(
     policy: &Policy,
     project: &str,
     fallback_source: &str,
-    head: SimpleHead,
+    mut head: SimpleHead,
     fetched_at_unix: i64,
 ) -> Result<ProjectSyncOutcome, ProjectSyncError> {
     match head.status {
@@ -450,7 +461,7 @@ async fn publish_project_response(
         200 => {}
         status => return Err(ProjectSyncError::Status(status)),
     }
-    let source = head.source.clone().unwrap_or_else(|| redact_url(fallback_source));
+    let upstream = head.source.take();
     let base = head.url.clone();
     let final_url = redact_url(head.url.as_str());
     let format = if is_json(head.content_type.as_deref()) {
@@ -476,7 +487,7 @@ async fn publish_project_response(
         policy,
         project,
         generation,
-        &source,
+        upstream.as_deref(),
         MAX_PROJECT_FILES,
     );
     let (files, detail) = match parsed {
@@ -486,6 +497,7 @@ async fn publish_project_response(
             return Err(err);
         }
     };
+    let source = upstream.unwrap_or_else(|| redact_url(fallback_source));
     let generation_record = ProjectGeneration {
         generation,
         source,
@@ -553,10 +565,10 @@ fn parse_project(
     policy: &Policy,
     project: &str,
     generation: u64,
-    source: &str,
+    upstream: Option<&str>,
     max_files: u64,
 ) -> Result<(u64, ParsedDetailHeader), ProjectSyncError> {
-    let mut batcher = FileBatcher::new(meta, index, project, policy, generation, source, max_files);
+    let mut batcher = FileBatcher::new(meta, index, project, policy, generation, upstream, max_files);
     let header = if format == "json" {
         let detail = stream_detail_json(reader, base, &mut batcher)?;
         ParsedDetailHeader {
@@ -588,7 +600,7 @@ struct FileBatcher<'a> {
     project: &'a str,
     policy: &'a Policy,
     generation: u64,
-    source: &'a str,
+    upstream: Option<&'a str>,
     max_files: u64,
     batch: Vec<File>,
     admitted: u64,
@@ -602,7 +614,7 @@ impl<'a> FileBatcher<'a> {
         project: &'a str,
         policy: &'a Policy,
         generation: u64,
-        source: &'a str,
+        upstream: Option<&'a str>,
         max_files: u64,
     ) -> Self {
         Self {
@@ -611,7 +623,7 @@ impl<'a> FileBatcher<'a> {
             project,
             policy,
             generation,
-            source,
+            upstream,
             max_files,
             batch: Vec::with_capacity(PROJECT_FILE_BATCH),
             admitted: 0,
@@ -625,8 +637,8 @@ impl<'a> FileBatcher<'a> {
             self.index,
             self.project,
             self.generation,
-            self.source,
-            None,
+            self.index,
+            self.upstream,
             &self.batch,
         );
         self.admitted += written?;
@@ -1053,6 +1065,44 @@ mod sync_tests {
     }
 
     #[tokio::test]
+    async fn test_sync_registers_upstream_provenance_with_the_cached_index() {
+        let server = MockServer::start().await;
+        let digest = "a".repeat(64);
+        let filename = "flask-1.0.tar.gz";
+        let provenance = format!("{}/integrity/{filename}.provenance", server.uri());
+        let body = format!(
+            r#"{{"meta":{{"api-version":"1.4"}},"name":"flask","files":[{{"filename":"{filename}","url":"{filename}","hashes":{{"sha256":"{digest}"}},"provenance":"{provenance}"}}]}}"#,
+        );
+        Mock::given(method("GET"))
+            .and(path("/simple/flask/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, JSON))
+            .mount(&server)
+            .await;
+        let client = client_for(&server);
+        let (_dir, meta) = store();
+
+        sync_project_files(
+            &client,
+            &Inflight::default(),
+            &meta,
+            "pypi",
+            &Policy::default(),
+            "flask",
+            client.base_url(),
+        )
+        .await
+        .unwrap();
+
+        let record = meta
+            .get_upstream_attestation("pypi", "flask", &digest, filename)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.url, provenance);
+        assert_eq!(record.source, "pypi");
+        assert_eq!(record.upstream, None);
+    }
+
+    #[tokio::test]
     async fn test_sync_returns_the_upstream_status() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1259,7 +1309,7 @@ mod sync_tests {
             &Policy::default(),
             "flask",
             id,
-            "pypi",
+            None,
             1,
         )
         .unwrap_err();
@@ -1286,7 +1336,7 @@ mod sync_tests {
             &Policy::default(),
             "flask",
             id,
-            "pypi",
+            None,
             super::MAX_PROJECT_FILES,
         )
         .unwrap();

@@ -5,6 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::StatusCode;
 use url::Url;
 
+use super::redact_url;
+
 pub const MAX_RETRIES: u32 = 2;
 const RETRY_BASE_MILLIS: u64 = 100;
 const RETRY_CAP_MILLIS: u64 = 2_000;
@@ -24,13 +26,20 @@ pub async fn sleep_before_retry(url: &Url, attempt: u32, err: &reqwest::Error) {
 
 pub(super) async fn sleep_before_retry_str(url: &str, attempt: u32, err: &reqwest::Error) {
     let delay = retry_delay(attempt);
-    tracing::debug!(url, error = ?err, delay_ms = delay.as_millis(), "upstream request failed, retrying");
+    let url = redact_url(url);
+    let error = err
+        .status()
+        .map_or_else(|| "request".to_owned(), |status| status.as_u16().to_string());
+    let delay_ms = delay.as_millis();
+    tracing::debug!(url, error, delay_ms, "upstream retry");
     tokio::time::sleep(delay).await;
 }
 
 pub(super) async fn sleep_before_retry_status(url: &Url, attempt: u32, status: StatusCode) {
     let delay = retry_delay(attempt);
-    tracing::debug!(%url, %status, delay_ms = delay.as_millis(), "upstream returned retryable status");
+    let url = redact_url(url.as_str());
+    let delay_ms = delay.as_millis();
+    tracing::debug!(url, %status, delay_ms, "upstream returned retryable status");
     tokio::time::sleep(delay).await;
 }
 

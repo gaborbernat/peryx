@@ -161,6 +161,30 @@ impl MetaStore {
         Ok(())
     }
 
+    /// Run a read-modify-write transaction for re-fetchable driver cache rows without waiting for
+    /// an fsync. Reads and writes remain atomic; a crash before a later durable commit may discard
+    /// them.
+    ///
+    /// # Errors
+    /// Returns the body's error, or a store error mapped into it, if the transaction fails to open,
+    /// read, write, or commit.
+    ///
+    /// # Panics
+    /// Never in practice: reducing durability is rejected only after savepoint use, and this
+    /// transaction takes none.
+    pub fn commit_driver_cache_txn<T, E: From<MetaError>>(
+        &self,
+        body: impl FnOnce(&mut DriverTxn) -> Result<T, E>,
+    ) -> Result<T, E> {
+        self.commit_driver_txn_at(
+            None,
+            None,
+            false,
+            |_, _| Ok(()),
+            |txn| body(txn).map(|value| (value, Vec::new())),
+        )
+    }
+
     /// Run a driver-owned read-modify-write over the neutral table in one write transaction.
     ///
     /// A check and the writes it gates commit together, so neither can interleave with another
@@ -180,7 +204,7 @@ impl MetaStore {
         &self,
         body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
     ) -> Result<T, E> {
-        self.commit_driver_txn_at(None, None, |_, _| Ok(()), body)
+        self.commit_driver_txn_at(None, None, true, |_, _| Ok(()), body)
     }
 
     /// Commit driver rows and publish the catalog generation that produced their policy inputs in
@@ -195,7 +219,7 @@ impl MetaStore {
         catalog_generation: u64,
         body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
     ) -> Result<T, E> {
-        self.commit_driver_txn_at(None, Some((repository, catalog_generation)), |_, _| Ok(()), body)
+        self.commit_driver_txn_at(None, Some((repository, catalog_generation)), true, |_, _| Ok(()), body)
     }
 
     /// Apply replicated driver rows and copied journal entries only when the local serial matches
@@ -212,17 +236,22 @@ impl MetaStore {
         expected_serial: u64,
         body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
     ) -> Result<T, E> {
-        self.commit_driver_txn_at(Some(expected_serial), None, |_, _| Ok(()), body)
+        self.commit_driver_txn_at(Some(expected_serial), None, true, |_, _| Ok(()), body)
     }
 
     pub(super) fn commit_driver_txn_at<T, E: From<MetaError>>(
         &self,
         expected_serial: Option<u64>,
         catalog_generation: Option<(&str, u64)>,
+        durable: bool,
         finalize: impl FnOnce(&redb::WriteTransaction, &T) -> Result<(), E>,
         body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
     ) -> Result<T, E> {
-        let txn = self.db.begin_write().map_err(MetaError::from)?;
+        let mut txn = self.db.begin_write().map_err(MetaError::from)?;
+        if !durable {
+            txn.set_durability(redb::Durability::None)
+                .expect("no savepoints in this transaction");
+        }
         if let Some(expected) = expected_serial {
             let serials = txn.open_table(SERIAL).map_err(MetaError::from)?;
             let actual = serials

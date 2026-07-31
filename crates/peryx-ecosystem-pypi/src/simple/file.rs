@@ -6,6 +6,7 @@ use std::fmt;
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use url::{Host, Url};
 
 /// Whether a file is yanked (PEP 592): not yanked, yanked, or yanked with a reason.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -106,6 +107,32 @@ pub enum Provenance {
     Absent,
     None,
     Url(String),
+}
+
+impl Provenance {
+    /// The advertised URL when it is an absolute secure origin without embedded credentials.
+    #[must_use]
+    pub fn secure_url(&self) -> Option<&str> {
+        let Self::Url(value) = self else {
+            return None;
+        };
+        let url = Url::parse(value).ok()?;
+        let secure = url.scheme() == "https"
+            || (url.scheme() == "http"
+                && url.host().is_some_and(|host| match host {
+                    Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+                    Host::Ipv4(address) => address.is_loopback(),
+                    Host::Ipv6(address) => address.is_loopback(),
+                }));
+        (secure && url.host().is_some() && url.username().is_empty() && url.password().is_none()).then_some(value)
+    }
+
+    /// Drop a provenance marker that cannot name the secure absolute URL required by the Simple API.
+    pub fn retain_secure_url(&mut self) {
+        if matches!(self, Self::Url(_)) && self.secure_url().is_none() {
+            *self = Self::Absent;
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Provenance {

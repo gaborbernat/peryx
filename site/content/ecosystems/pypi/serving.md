@@ -22,8 +22,8 @@ re-served from an upstream that promised neither field. It now derives the versi
 
 The Simple API is versioned so a client can tell what a page is allowed to contain. PEP 700 raised the minimum to `1.1`
 and made two fields mandatory: `versions`, the list of every release of the project, and `size`, the byte count on every
-file. From `1.1` on, a client may treat both as always present. That is the whole point of the version bump: it lets a
-resolver read `size` to plan a download, or read `versions` to enumerate releases, without a guard around each access.
+file. PEP 700 guarantees both fields from `1.1`. A resolver can read `size` to plan a download or `versions` to
+enumerate releases without guarding each access.
 
 ### What over-advertising breaks
 
@@ -116,6 +116,14 @@ version. The response is the provenance object — `{"version": 1, "attestation_
 `application/vnd.pypi.integrity.v1+json` media type PEP 740 assigns it, and cached as immutable, because a digest names
 exactly one set of bytes.
 
+An upstream provenance URL is mutable even though the distribution digest is not. Repository policy can leave that URL
+direct or replace it with a local route. The local route can proxy each request or retain and revalidate the body.
+Retained records keep the upstream source, media type, validators, and freshness state. A record stores at most 2 MiB of
+structurally accepted, unverified JSON. A fresh retained body needs no upstream request. peryx revalidates stale bodies
+and can use the previous structurally accepted body within the stale bound after a transient failure. Responses expose
+source and availability as described in the
+[Simple API reference](@/ecosystems/pypi/reference/simple-api.md#provenance-and-attestations).
+
 ### What the bundle holds
 
 peryx wraps the attestations a publisher uploaded into one provenance object. The `publisher` field is `null`: peryx
@@ -124,6 +132,11 @@ case. The attestations themselves — envelope, signature, certificate, transpar
 verbatim, so a verifier sees precisely what was signed. peryx stores the bundle in its blob store, content-addressed,
 with a small digest-keyed pointer row, the way it stores a PEP 658 metadata sibling; the metadata store never buffers
 the whole bundle.
+
+For upstream provenance, peryx checks the media type, size, and version-1 document structure. It does not verify
+signatures or certificates. It neither resolves publisher identities nor consults transparency entries, and it does not
+label an upstream identity as verified. `no-cache` forces revalidation, while `no-store` clears any retained body and
+validators.
 
 ### Visibility tracks the distribution
 

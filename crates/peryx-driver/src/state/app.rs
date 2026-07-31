@@ -72,6 +72,8 @@ pub struct ServingState {
     pub rate_limits: RateLimiter,
     /// Per-cached-index upstream fetch gates, keyed by configured index name.
     pub upstream_limits: UpstreamLimits,
+    /// Independent gates for mutable artifact metadata, so its latency cannot consume page-fetch slots.
+    pub metadata_upstream_limits: UpstreamLimits,
     /// Multi-source routes keyed by cached index name. Legacy cached indexes are absent.
     pub upstream_routes: HashMap<String, UpstreamRouter>,
     /// Signed webhook delivery runtime.

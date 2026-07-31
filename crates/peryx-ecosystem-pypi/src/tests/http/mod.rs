@@ -21,5 +21,8 @@ mod routing;
 mod security;
 mod status;
 mod upload;
+mod upstream_attestation_cache;
+mod upstream_attestation_validation;
+mod upstream_attestations;
 
 pub use support::*;

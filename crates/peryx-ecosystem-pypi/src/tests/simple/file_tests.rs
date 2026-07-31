@@ -77,3 +77,29 @@ fn test_provenance_deserialize_variants() {
     );
     assert!(serde_json::from_str::<Provenance>("123").is_err());
 }
+
+#[rstest::rstest]
+#[case("https://example.test/pkg.provenance", true)]
+#[case("http://localhost/pkg.provenance", true)]
+#[case("http://127.0.0.1/pkg.provenance", true)]
+#[case("http://[::1]/pkg.provenance", true)]
+#[case("http://example.test/pkg.provenance", false)]
+#[case("https://user@example.test/pkg.provenance", false)]
+#[case("/pkg.provenance", false)]
+fn test_provenance_secure_url(#[case] value: &str, #[case] accepted: bool) {
+    let provenance = Provenance::Url(value.to_owned());
+
+    assert_eq!(provenance.secure_url(), accepted.then_some(value));
+}
+
+#[test]
+fn test_provenance_retain_secure_url_drops_only_an_insecure_url() {
+    let mut insecure = Provenance::Url("http://example.test/pkg.provenance".to_owned());
+    let mut absent = Provenance::Absent;
+
+    insecure.retain_secure_url();
+    absent.retain_secure_url();
+
+    assert_eq!(insecure, Provenance::Absent);
+    assert_eq!(absent, Provenance::Absent);
+}

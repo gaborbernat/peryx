@@ -43,6 +43,8 @@ pub struct Registration {
     pub size: Option<u64>,
     /// `(sibling url, metadata sha256)` when the file advertises PEP 658 metadata.
     pub metadata: Option<(String, String)>,
+    /// The secure upstream PEP 740 provenance URL, when the file advertises one.
+    pub provenance: Option<String>,
 }
 
 /// Everything the transformer learned about the page, enough to persist it without a re-parse.

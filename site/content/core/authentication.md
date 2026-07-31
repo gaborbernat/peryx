@@ -60,11 +60,12 @@ scope. Separate role and resource checks follow the action-and-scope model used 
 | Repository reader    | yes               |                    |                     |                 |                  |                       |
 | Operator             |                   |                    |                     | yes             | yes              |                       |
 
-| Field classification | Public caller | Operator caller | Administrator caller |
-| -------------------- | ------------- | --------------- | -------------------- |
-| Public               | yes           | yes             | yes                  |
-| Operator             |               | yes             | yes                  |
-| Administrator        |               |                 | yes                  |
+| Field classification | Public caller | Repository caller | Operator caller | Administrator caller |
+| -------------------- | ------------- | ----------------- | --------------- | -------------------- |
+| Public               | yes           | yes               | yes             | yes                  |
+| Repository           |               | yes               |                 | yes                  |
+| Operator             |               |                   | yes             | yes                  |
+| Administrator        |               |                   |                 | yes                  |
 
 `operator:read` covers runtime health, queues, and configuration state. `analytics:read` covers retained usage
 aggregates. The two scopes remain distinct, so each handler states which data family it reads. `administration:read`
@@ -72,15 +73,14 @@ covers server users, grants, credential state, and other data whose disclosure c
 [Prometheus security model](https://prometheus.io/docs/operating/security/) treats operational and debug endpoints as
 trusted-user data.
 
-API and UI handlers classify each field as public, operator, or administrator data, then filter a bounded model before
-serialization. Public callers receive public fields; a caller authorized for operator data also receives operator
-fields; an administrator receives all three classes. A nested object inherits the highest classification of its contents
-unless the handler filters that object first.
+API and UI handlers classify each field as public, repository, operator, or administrator data, then filter a bounded
+model before serialization. Repository and operator data remain separate; an administrator receives all four classes. A
+nested object inherits the highest classification of its contents unless the handler filters that object first.
 
 Role and field primitives do not authorize a route by themselves. Migrate a route in this order:
 
-1. Resolve the server user and call `authorize_scoped` with the route's exact scope against `Resource::Operator` before
-   reading protected data.
+1. Resolve the server user and call `authorize_scoped` with the route's exact scope and resource before reading
+   protected data.
 1. Build a bounded response without holding metadata or request-path locks, and assign every field a classification.
 1. Pass the scoped authorization result and classified fields to the shared response filter. The checked scope sets the
    caller's maximum field class; handlers cannot promote an operator decision to administrator access. Return the

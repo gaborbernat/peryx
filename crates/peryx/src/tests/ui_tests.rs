@@ -664,6 +664,7 @@ async fn test_ui_header_marks_outbound_links_external(ui_router: (tempfile::Temp
         );
     }
     assert!(body.contains("<a href=\"/admin/status\">"), "{body}");
+    assert!(body.contains("<a href=\"/admin/policy-decisions\">"), "{body}");
 }
 
 #[tokio::test]
@@ -701,6 +702,21 @@ async fn test_ui_admin_status_renders_read_only_state_without_secrets(ui_router:
     assert!(!body.contains("s3cret"));
     assert!(!body.contains("type=\"password\""));
     assert!(!body.contains("delete whole project"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_ui_policy_decisions_renders_inert_credential_form(ui_router: (tempfile::TempDir, axum::Router)) {
+    let (_dir, router) = ui_router;
+    let (status, body) = get(&router, "/admin/policy-decisions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Policy decisions"));
+    assert!(body.contains("read-only"));
+    assert!(body.contains("type=\"password\""));
+    assert!(body.contains("id=\"policy-password\" type=\"password\" autocomplete=\"off\""));
+    assert!(body.contains("Enter credentials and search to load decisions."));
+    assert!(!body.contains("id=\"policy-user\" value="));
+    assert!(!body.contains("id=\"policy-password\" value="));
 }
 
 #[tokio::test]

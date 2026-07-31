@@ -33,6 +33,22 @@ The admin status document scans metadata keys once to count observed projects an
 capped recent-upload list per index. It does not fetch upstreams, read package detail pages, read artifacts, or expose
 upload tokens, upstream passwords, bearer tokens, URL user info, URL queries, or URL fragments.
 
+## Policy decisions
+
+`/admin/policy-decisions` queries the bounded [policy decision history](@/core/policy-decisions.md). Administrators can
+inspect all repositories; repository readers and publishers select a repository covered by their grant. The server
+operator role does not grant repository access. A repository upload token remains valid for that repository.
+
+Filters cover repository, outcome, rule, routed source, UTC evaluation range, and page size. Submitting changed filters
+starts from the newest row; Previous and Next retain the cursor chain for the active filter set. The page holds the
+username and password in memory, disables password autocomplete, and sends them in the Basic authorization header. It
+does not write them to the URL or browser storage or include them in the server-rendered document or visible error text.
+
+The results use a native table with a caption and separate columns for repository, package, version, file, source,
+action, rule, reason, evaluation time, and next eligible time. Every outcome has a text label, including stale
+decisions, and narrow screens scroll the table inside its page rather than widening the document. The policy-decision
+guide lists [error remedies and credential requirements](@/core/policy-decisions.md#troubleshooting).
+
 ## Browsing packages
 
 The header search box starts suggesting matches after two characters, across every ecosystem's indexes. Suggestions and

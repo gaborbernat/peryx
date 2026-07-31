@@ -2,7 +2,7 @@
   "components": {
     "securitySchemes": {
       "administratorPassword": {
-        "description": "A local server user's display name and password. Digest revocation operations require the administrator role.",
+        "description": "A local server user's display name and password. Each operation checks the user's role against its protected resource.",
         "scheme": "basic",
         "type": "http"
       },
@@ -211,14 +211,14 @@
     },
     "/+policy/decisions": {
       "get": {
-        "description": "Bounded policy decision history for one repository. The repository's administering token is required; records contain package subjects and matched rule IDs without credentials or request headers. `fresh` is false after repository data, catalog, or policy inputs change.",
+        "description": "Bounded policy decision history. Administrators may inspect all repositories or select one. Repository readers and publishers may inspect a selected repository they can read; the server operator role carries no repository access. A repository's legacy upload token retains access to that repository when presented with the `__token__` username. Records contain package subjects and matched rule IDs without credentials or request headers. `fresh` is false after repository data, catalog, or policy inputs change.",
         "parameters": [
           {
-            "description": "Repository route to inspect",
+            "description": "Repository route to inspect, at most 512 bytes",
             "example": "private",
             "in": "query",
             "name": "repository",
-            "required": true
+            "required": false
           },
           {
             "description": "Filter by `allow`, `deny`, or `wait`",
@@ -228,14 +228,14 @@
             "required": false
           },
           {
-            "description": "Filter by matched rule ID",
+            "description": "Filter by matched rule ID, at most 512 bytes",
             "example": "blocked-project",
             "in": "query",
             "name": "rule",
             "required": false
           },
           {
-            "description": "Filter by routed source",
+            "description": "Filter by routed source, at most 512 bytes",
             "example": "pypi",
             "in": "query",
             "name": "source",
@@ -311,16 +311,16 @@
                 }
               }
             },
-            "description": "The limit or cursor is invalid"
+            "description": "The limit, cursor, or text filter is invalid"
           },
           "401": {
-            "description": "No credential the repository accepts was presented"
+            "description": "No valid local user credential or repository token was presented"
           },
           "403": {
-            "description": "The credential does not administer this repository"
+            "description": "The repository token cannot inspect policy decisions"
           },
           "404": {
-            "description": "No repository has this route"
+            "description": "The repository does not exist or is not available to the local user"
           },
           "500": {
             "content": {
@@ -331,11 +331,24 @@
               }
             },
             "description": "The decision store could not complete the query"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "policy decision service unavailable"
+                }
+              }
+            },
+            "description": "Authentication or authorization storage is unavailable"
           }
         },
         "security": [
           {
             "uploadToken": []
+          },
+          {
+            "administratorPassword": []
           }
         ],
         "summary": "Repository policy decisions",

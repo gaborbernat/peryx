@@ -22,6 +22,25 @@ async function openUpload(page, route, token, file) {
   await page.locator("#upload-file").setInputFiles(file);
 }
 
+function policyDecision(state, fresh, project = "blocked-package") {
+  return {
+    id: `decision-${state}`,
+    repository: "internal",
+    project,
+    version: "1.0",
+    filename: `${project}-1.0.whl`,
+    source: "pypi",
+    action: "serve",
+    state,
+    rule: "blocked-project",
+    reason: "project is blocked",
+    evaluated_at_unix: 0,
+    input_generation: { repository: 0, catalog: 0, policy: 0 },
+    next_eligible_at_unix: null,
+    fresh,
+  };
+}
+
 test("dashboard shows identity, counters, and the topology", async ({ page }) => {
   await goto(page, "/");
   // Metrics are split into a global group and a per-ecosystem group, so a reader can tell the
@@ -259,6 +278,228 @@ test("admin status is read-only and tolerates failed stats fetches", async ({ pa
   await expect(page.locator(".dim", { hasText: "No usage recorded yet." })).toBeVisible();
   await expect(page.locator(".token")).toHaveCount(0);
   await expect(page.locator(".admin-table")).toHaveCount(0);
+});
+
+test("policy decision filters keep credentials out of navigation and render every field", async ({ page }) => {
+  await page.route("**/+policy/decisions?**", async (route) => {
+    expect(route.request().headers().authorization).toBe(
+      `Basic ${Buffer.from("administrator:browser-admin-secret").toString("base64")}`,
+    );
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("repository")).toBe("internal");
+    expect(url.searchParams.get("state")).toBe("deny");
+    expect(url.search).not.toContain("browser-admin-secret");
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        decisions: [
+          policyDecision("deny", false),
+          {
+            ...policyDecision("allow", true, "unversioned-package"),
+            version: null,
+            filename: null,
+            source: null,
+            rule: null,
+            reason: null,
+          },
+        ],
+        next_cursor: null,
+      }),
+    });
+  });
+  await goto(page, "/admin/policy-decisions");
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-password").fill("browser-admin-secret");
+  await page.locator("#policy-repository").fill("internal");
+  await page.locator("#policy-state").selectOption("deny");
+  await page.locator(".policy-filters button[type='submit']").click();
+
+  const table = page.locator(".policy-decisions-table");
+  await expect(table).toContainText("Stale Denied");
+  await expect(table).toContainText("blocked-package");
+  await expect(table).toContainText("1970-01-01T00:00:00Z");
+  await expect(table.getByRole("columnheader")).toHaveText([
+    "Outcome",
+    "Repository",
+    "Package",
+    "Version",
+    "File",
+    "Source",
+    "Action",
+    "Rule",
+    "Reason",
+    "Evaluated (UTC)",
+    "Next eligible (UTC)",
+  ]);
+  await expect(table.locator("tbody tr", { hasText: "unversioned-package" }).locator("td")).toHaveText([
+    "Allowed",
+    "internal",
+    "unversioned-package",
+    "—",
+    "—",
+    "—",
+    "serve",
+    "—",
+    "—",
+    "1970-01-01T00:00:00Z",
+    "—",
+  ]);
+  await expect(page).toHaveURL(/\/admin\/policy-decisions$/);
+  await expect(page.locator("#policy-password")).toHaveAttribute("autocomplete", "off");
+  expect(
+    await page.evaluate(() =>
+      [localStorage, sessionStorage].flatMap((storage) =>
+        Array.from({ length: storage.length }, (_, index) => storage.getItem(storage.key(index))),
+      ),
+    ),
+  ).not.toContain("browser-admin-secret");
+});
+
+test("policy decision view enforces live administrator and repository-token boundaries", async ({ page }) => {
+  await goto(page, "/admin/policy-decisions");
+
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-password").fill("browser-admin-secret");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.locator(".policy-results")).not.toContainText("Enter credentials and search");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  await page.locator("#policy-user").fill("__token__");
+  await page.locator("#policy-password").fill(TOKEN);
+  await page.locator("#policy-repository").fill("internal");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("status")).toContainText(/policy decisions/i);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  await page.locator("#policy-password").fill("playwright-reader");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("alert")).toHaveText("This repository token cannot inspect policy decisions.");
+
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-password").fill("wrong password");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("alert")).toHaveText("The username or password was not accepted.");
+});
+
+test("policy decision rule text is rendered without markup execution", async ({ page }) => {
+  const decision = policyDecision("deny", true);
+  decision.rule = '<img src="missing" onerror="window.policyRuleExecuted=true">';
+  decision.reason = "<script>window.policyReasonExecuted=true</script>";
+  await page.route("**/+policy/decisions?**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ decisions: [decision], next_cursor: null }),
+    }),
+  );
+  await goto(page, "/admin/policy-decisions");
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-password").fill("browser-admin-secret");
+  await page.locator(".policy-filters button[type='submit']").click();
+
+  const row = page.locator(".policy-decisions-table tbody tr");
+  await expect(row.locator("td").nth(7)).toHaveText(decision.rule);
+  await expect(row.locator("td").nth(8)).toHaveText(decision.reason);
+  await expect(row.locator("img, script")).toHaveCount(0);
+  expect(await page.evaluate(() => [window.policyRuleExecuted, window.policyReasonExecuted])).toEqual([
+    undefined,
+    undefined,
+  ]);
+});
+
+test("policy decision pagination keeps filters and works from the keyboard", async ({ page }) => {
+  let requests = 0;
+  await page.route("**/+policy/decisions?**", async (route) => {
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("repository")).toBe("internal");
+    expect(url.searchParams.get("state")).toBe("deny");
+    expect(url.searchParams.get("rule")).toBe("blocked-project");
+    const cursor = url.searchParams.get("cursor");
+    requests += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        decisions: [policyDecision(cursor === null ? "deny" : "wait", true)],
+        next_cursor: cursor === null ? "page-2" : null,
+      }),
+    });
+  });
+  await goto(page, "/admin/policy-decisions");
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-user").focus();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#policy-password")).toBeFocused();
+  await page.locator("#policy-password").fill("browser-admin-secret");
+  await page.locator("#policy-repository").fill("internal");
+  await page.locator("#policy-state").selectOption("deny");
+  await page.locator("#policy-rule").fill("blocked-project");
+  await page.locator(".policy-filters button[type='submit']").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".policy-decisions-table")).toContainText("Denied");
+
+  await page.getByRole("button", { name: "Next" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".policy-decisions-table")).toContainText("Waiting");
+  await page.getByRole("button", { name: "Previous" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".policy-decisions-table")).toContainText("Denied");
+  expect(requests).toBe(3);
+});
+
+test("policy decision view distinguishes an empty result", async ({ page }) => {
+  await page.route("**/+policy/decisions?**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ decisions: [], next_cursor: null }),
+    });
+  });
+  await goto(page, "/admin/policy-decisions");
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-password").fill("browser-admin-secret");
+  await page.locator("#policy-repository").fill("internal");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("status")).toHaveText("No policy decisions matched these filters.");
+});
+
+for (const [name, status, message] of [
+  ["invalid filter", 400, "One or more policy decision filters are invalid."],
+  ["invalid local credential", 401, "The username or password was not accepted."],
+  ["repository token boundary", 403, "This repository token cannot inspect policy decisions."],
+  ["repository boundary", 404, "The repository was not found or is not available to this user."],
+  ["service failure", 503, "The policy decision service is unavailable."],
+]) {
+  test(`policy decision view reports ${name} without response text`, async ({ page }) => {
+    await page.route("**/+policy/decisions?**", (route) =>
+      route.fulfill({ status, body: "secret-package must stay hidden" }),
+    );
+    await goto(page, "/admin/policy-decisions");
+    await page.locator("#policy-user").fill("administrator");
+    await page.locator("#policy-password").fill("browser-admin-secret");
+    await page.locator(".policy-filters button[type='submit']").click();
+
+    await expect(page.getByRole("alert")).toHaveText(message);
+    await expect(page.getByRole("alert")).not.toContainText("secret-package");
+  });
+}
+
+test("policy decision view reports malformed success data", async ({ page }) => {
+  await page.route("**/+policy/decisions?**", (route) => route.fulfill({ status: 200, body: "secret-package" }));
+  await goto(page, "/admin/policy-decisions");
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-password").fill("browser-admin-secret");
+  await page.locator(".policy-filters button[type='submit']").click();
+
+  await expect(page.getByRole("alert")).toHaveText("The policy decision service returned invalid data.");
+  await expect(page.getByRole("alert")).not.toContainText("secret-package");
+});
+
+test("policy decision view reports a network failure", async ({ page }) => {
+  await page.route("**/+policy/decisions?**", (route) => route.abort("connectionfailed"));
+  await goto(page, "/admin/policy-decisions");
+  await page.locator("#policy-user").fill("administrator");
+  await page.locator("#policy-password").fill("browser-admin-secret");
+  await page.locator(".policy-filters button[type='submit']").click();
+
+  await expect(page.getByRole("alert")).toHaveText("The policy decision service could not be reached.");
 });
 
 test("every page sets the differentiated app favicon", async ({ page }) => {

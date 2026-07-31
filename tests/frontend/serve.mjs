@@ -1,6 +1,6 @@
 // Start a peryx configured with an upload token, then upload the fixture wheel so the UI has a
 // metadata-rich package to show. Playwright polls /+status for readiness.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createServer } from "node:http";
@@ -108,6 +108,11 @@ upload_token = "playwright-secret"
 name = "internal"
 upload_token = "playwright-secret"
 
+[[index.access_token]]
+name = "reader"
+secret = "playwright-reader"
+actions = ["read"]
+
 [[index]]
 name = "limited"
 upload_token = "playwright-secret"
@@ -130,6 +135,16 @@ ecosystem = "oci"
 upload_token = "playwright-secret"
 `,
 );
+
+const bootstrap = spawnSync(
+  binary,
+  ["bootstrap-administrator", "administrator", "--password-stdin", "--data-dir", data, "--config", config],
+  { cwd: repo, encoding: "utf8", input: "browser-admin-secret\n" },
+);
+if (bootstrap.status !== 0) {
+  console.error(bootstrap.stderr);
+  process.exit(1);
+}
 
 const peryx = spawn(binary, ["serve", "--port", port.toString(), "--data-dir", data, "--config", config], {
   cwd: repo, // the /pkg asset route serves ui/pkg relative to the working directory

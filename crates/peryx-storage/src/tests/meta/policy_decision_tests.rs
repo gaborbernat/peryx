@@ -197,16 +197,16 @@ fn test_policy_decision_query_filters_and_paginates() {
             ..PolicyDecisionQuery::default()
         })
         .unwrap();
-    let second = meta
-        .query_policy_decisions(&PolicyDecisionQuery {
-            state: Some(PolicyDecisionState::Deny),
-            source: Some("pypi".to_owned()),
-            evaluated_from_unix: Some(15),
-            cursor: first.next_cursor.clone(),
-            limit: 1,
-            ..PolicyDecisionQuery::default()
-        })
-        .unwrap();
+    let second_query = PolicyDecisionQuery {
+        state: Some(PolicyDecisionState::Deny),
+        source: Some("pypi".to_owned()),
+        evaluated_from_unix: Some(15),
+        cursor: first.next_cursor.clone(),
+        limit: 1,
+        ..PolicyDecisionQuery::default()
+    };
+    second_query.validate().unwrap();
+    let second = meta.query_policy_decisions(&second_query).unwrap();
 
     assert_eq!(
         (
@@ -230,27 +230,100 @@ fn test_policy_decision_query_filters_and_paginates() {
 #[test]
 fn test_policy_decision_rejects_zero_limit() {
     let (_dir, meta) = store();
+    let query = PolicyDecisionQuery {
+        limit: 0,
+        ..PolicyDecisionQuery::default()
+    };
 
     assert!(matches!(
-        meta.query_policy_decisions(&PolicyDecisionQuery {
-            limit: 0,
-            ..PolicyDecisionQuery::default()
-        }),
-        Err(PolicyDecisionQueryError::InvalidLimit)
+        (query.validate(), meta.query_policy_decisions(&query)),
+        (
+            Err(PolicyDecisionQueryError::InvalidLimit),
+            Err(PolicyDecisionQueryError::InvalidLimit)
+        )
     ));
 }
 
 #[test]
 fn test_policy_decision_rejects_invalid_cursor() {
     let (_dir, meta) = store();
+    let query = PolicyDecisionQuery {
+        cursor: Some("bad".to_owned()),
+        ..PolicyDecisionQuery::default()
+    };
 
     assert!(matches!(
-        meta.query_policy_decisions(&PolicyDecisionQuery {
-            cursor: Some("bad".to_owned()),
-            ..PolicyDecisionQuery::default()
-        }),
-        Err(PolicyDecisionQueryError::InvalidCursor)
+        (query.validate(), meta.query_policy_decisions(&query)),
+        (
+            Err(PolicyDecisionQueryError::InvalidCursor),
+            Err(PolicyDecisionQueryError::InvalidCursor)
+        )
     ));
+}
+
+#[test]
+fn test_policy_decision_query_bounds_text_filters() {
+    let (_dir, meta) = store();
+    let bounded = "x".repeat(512);
+    let oversized = "x".repeat(513);
+    let mut candidate = decision("bounded", PolicyDecisionState::Allow, 10);
+    candidate.repository = &bounded;
+    candidate.rule = Some(&bounded);
+    candidate.source = Some(&bounded);
+    let expected = meta.record_policy_decision(candidate).unwrap();
+
+    for query in [
+        PolicyDecisionQuery {
+            repository: Some(bounded.clone()),
+            ..PolicyDecisionQuery::default()
+        },
+        PolicyDecisionQuery {
+            rule: Some(bounded.clone()),
+            ..PolicyDecisionQuery::default()
+        },
+        PolicyDecisionQuery {
+            source: Some(bounded),
+            ..PolicyDecisionQuery::default()
+        },
+    ] {
+        query.validate().unwrap();
+        assert_eq!(
+            meta.query_policy_decisions(&query).unwrap().decisions[0].record,
+            expected
+        );
+    }
+
+    for (field, query) in [
+        (
+            "repository",
+            PolicyDecisionQuery {
+                repository: Some(oversized.clone()),
+                ..PolicyDecisionQuery::default()
+            },
+        ),
+        (
+            "rule",
+            PolicyDecisionQuery {
+                rule: Some(oversized.clone()),
+                ..PolicyDecisionQuery::default()
+            },
+        ),
+        (
+            "source",
+            PolicyDecisionQuery {
+                source: Some(oversized),
+                ..PolicyDecisionQuery::default()
+            },
+        ),
+    ] {
+        assert!(matches!(
+            (query.validate(), meta.query_policy_decisions(&query)),
+            (
+                Err(PolicyDecisionQueryError::FilterTooLong { field: actual, max: 512 }),
+                Err(PolicyDecisionQueryError::FilterTooLong { .. })
+            ) if actual == field
+        ));
+    }
 }
 
 #[test]

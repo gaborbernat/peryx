@@ -361,11 +361,14 @@ fn policy_decisions() -> OperationBuilder {
         .tag("operations")
         .summary(Some("Repository policy decisions"))
         .description(Some(
-            "Bounded policy decision history for one repository. The repository's administering token is required; \
-             records contain package subjects and matched rule IDs without credentials or request headers. `fresh` is \
-             false after repository data, catalog, or policy inputs change.",
+            "Bounded policy decision history. Administrators may inspect all repositories or select one. Repository \
+             readers and publishers may inspect a selected repository they can read; the server operator role carries \
+             no repository access. A repository's legacy upload token retains access to that repository when presented \
+             with the `__token__` username. Records contain package subjects and matched rule IDs without credentials \
+             or request headers. `fresh` is false after repository data, catalog, or policy inputs change.",
         ))
         .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
         .response(
             "200",
             api_json_response(
@@ -394,21 +397,21 @@ fn policy_decisions() -> OperationBuilder {
         .response(
             "400",
             api_json_response(
-                "The limit or cursor is invalid",
+                "The limit, cursor, or text filter is invalid",
                 json!({"error": "limit must be between 1 and 100"}),
             ),
         )
         .response(
             "401",
-            ResponseBuilder::new().description("No credential the repository accepts was presented"),
+            ResponseBuilder::new().description("No valid local user credential or repository token was presented"),
         )
         .response(
             "403",
-            ResponseBuilder::new().description("The credential does not administer this repository"),
+            ResponseBuilder::new().description("The repository token cannot inspect policy decisions"),
         )
         .response(
             "404",
-            ResponseBuilder::new().description("No repository has this route"),
+            ResponseBuilder::new().description("The repository does not exist or is not available to the local user"),
         )
         .response(
             "500",
@@ -416,12 +419,27 @@ fn policy_decisions() -> OperationBuilder {
                 "The decision store could not complete the query",
                 json!({"error": "policy decision query failed"}),
             ),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication or authorization storage is unavailable",
+                json!({"error": "policy decision service unavailable"}),
+            ),
         );
     for (name, description, example) in [
-        ("repository", "Repository route to inspect", json!("private")),
+        (
+            "repository",
+            "Repository route to inspect, at most 512 bytes",
+            json!("private"),
+        ),
         ("state", "Filter by `allow`, `deny`, or `wait`", json!("deny")),
-        ("rule", "Filter by matched rule ID", json!("blocked-project")),
-        ("source", "Filter by routed source", json!("pypi")),
+        (
+            "rule",
+            "Filter by matched rule ID, at most 512 bytes",
+            json!("blocked-project"),
+        ),
+        ("source", "Filter by routed source, at most 512 bytes", json!("pypi")),
         ("from", "Minimum evaluation Unix timestamp", json!(1_700_000_000)),
         ("to", "Maximum evaluation Unix timestamp", json!(1_800_000_000)),
         (
@@ -431,14 +449,11 @@ fn policy_decisions() -> OperationBuilder {
         ),
         ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
     ] {
-        let mut parameter = ParameterBuilder::new()
+        let parameter = ParameterBuilder::new()
             .name(name)
             .parameter_in(ParameterIn::Query)
             .description(Some(description))
             .example(Some(example));
-        if name == "repository" {
-            parameter = parameter.required(Required::True);
-        }
         operation = operation.parameter(parameter);
     }
     operation

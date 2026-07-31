@@ -1,7 +1,101 @@
 use rstest::rstest;
 
 use crate::markdown::external_link_rel;
-use crate::model::{UiSearchPage, UiSnapshot, members_from_listing, projects_from_list};
+use crate::model::{
+    PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage, UiSearchPage, UiSnapshot, members_from_listing,
+    projects_from_list,
+};
+
+fn policy_decision(state: &str, fresh: bool) -> UiPolicyDecision {
+    UiPolicyDecision {
+        id: "decision-1".to_owned(),
+        repository: "private".to_owned(),
+        project: "example".to_owned(),
+        version: Some("1.0".to_owned()),
+        filename: Some("example-1.0.whl".to_owned()),
+        source: Some("pypi".to_owned()),
+        action: "serve".to_owned(),
+        state: state.to_owned(),
+        rule: Some("blocked-project".to_owned()),
+        reason: Some("project is blocked".to_owned()),
+        evaluated_at_unix: 0,
+        next_eligible_at_unix: None,
+        fresh,
+    }
+}
+
+#[rstest]
+#[case::allow("allow", true, "Allowed")]
+#[case::deny("deny", true, "Denied")]
+#[case::wait("wait", true, "Waiting")]
+#[case::stale("allow", false, "Stale Allowed")]
+#[case::unknown("future", true, "Unknown")]
+fn test_policy_decision_status(#[case] state: &str, #[case] fresh: bool, #[case] expected: &str) {
+    assert_eq!(policy_decision(state, fresh).status(), expected);
+}
+
+#[test]
+fn test_policy_decision_formats_times() {
+    let mut decision = policy_decision("wait", true);
+    decision.next_eligible_at_unix = Some(60);
+    assert_eq!(decision.evaluated_at(), "1970-01-01T00:00:00Z");
+    assert_eq!(decision.next_eligible_at(), "1970-01-01T00:01:00Z");
+    decision.next_eligible_at_unix = None;
+    assert_eq!(decision.next_eligible_at(), "—");
+    decision.evaluated_at_unix = i64::MAX;
+    assert_eq!(decision.evaluated_at(), i64::MAX.to_string());
+    decision.evaluated_at_unix = -62_198_841_600;
+    assert_eq!(decision.evaluated_at(), "-62198841600");
+}
+
+#[test]
+fn test_policy_decision_filters_build_encoded_url() {
+    let filters = PolicyDecisionFilters {
+        repository: "team/private".to_owned(),
+        state: "deny".to_owned(),
+        rule: "blocked project".to_owned(),
+        source: "pypi".to_owned(),
+        from: "1970-01-01T00:01".to_owned(),
+        to: "1970-01-01T00:02".to_owned(),
+        limit: "50".to_owned(),
+    };
+    assert_eq!(
+        filters.url(Some("next page")).unwrap(),
+        "/+policy/decisions?repository=team%2Fprivate&state=deny&rule=blocked+project&source=pypi&from=60&to=120&limit=50&cursor=next+page"
+    );
+}
+
+#[test]
+fn test_policy_decision_filters_reject_invalid_datetime() {
+    assert_eq!(
+        PolicyDecisionFilters::default().url(None).unwrap(),
+        "/+policy/decisions?limit=25"
+    );
+    let filters = PolicyDecisionFilters {
+        from: "not-a-date".to_owned(),
+        ..PolicyDecisionFilters::default()
+    };
+    assert_eq!(
+        filters.url(None),
+        Err("Invalid UTC date and time: not-a-date".to_owned())
+    );
+}
+
+#[test]
+fn test_policy_decision_page_deserializes_api_response() {
+    let page: UiPolicyDecisionPage = serde_json::from_value(serde_json::json!({
+        "decisions": [{
+            "id": "decision-1", "repository": "private", "project": "example", "version": null,
+            "filename": null, "source": null, "action": "serve", "state": "allow", "rule": null,
+            "reason": null, "evaluated_at_unix": 0, "input_generation": {"repository": 0},
+            "next_eligible_at_unix": null, "fresh": true
+        }],
+        "next_cursor": "next"
+    }))
+    .unwrap();
+    assert_eq!(page.decisions[0].status(), "Allowed");
+    assert_eq!(page.next_cursor.as_deref(), Some("next"));
+}
 
 #[test]
 fn test_snapshot_from_status_roundtrip() {

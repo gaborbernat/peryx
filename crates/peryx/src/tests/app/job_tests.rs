@@ -67,6 +67,7 @@ fn start_job(meta: &MetaStore, scope: &str, started_at_unix: i64) -> String {
     meta.start_job_run(NewJobRun {
         kind: JobKind::CacheRefresh,
         scope,
+        repository: None,
         started_at_unix,
     })
     .unwrap()
@@ -77,42 +78,29 @@ fn test_job_list_prints_newest_first_with_every_state() {
     let (_dir, meta, config) = store_and_config();
     let running = start_job(&meta, "", 10);
     let succeeded = start_job(&meta, "root/pypi", 20);
-    meta.finish_job_run(
-        &succeeded,
-        JobOutcome {
-            state: JobState::Succeeded,
-            finished_at_unix: 21,
-            items_processed: 12,
-            items_changed: 3,
-            error: None,
-        },
-    )
-    .unwrap();
+    meta.finish_job_run(&succeeded, JobOutcome::succeeded(21, 12, 3))
+        .unwrap();
     let failed = start_job(&meta, "pypi", 30);
-    meta.finish_job_run(
-        &failed,
-        JobOutcome {
-            state: JobState::Failed,
-            finished_at_unix: 31,
-            items_processed: 4,
-            items_changed: 1,
-            error: Some("upstream unavailable"),
-        },
-    )
-    .unwrap();
+    meta.finish_job_run(&failed, JobOutcome::failed(31, 4, 1, "upstream unavailable"))
+        .unwrap();
     drop(meta);
 
     let mut out = Vec::new();
     app::job(&config, &list_command(), &mut out).unwrap();
+    let page: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(
-        String::from_utf8(out).unwrap(),
-        format!(
-            "id\tkind\tscope\tstate\tstarted_at_unix\tfinished_at_unix\tprocessed\tchanged\terror\n\
-             {failed}\tcache_refresh\tpypi\tfailed\t30\t31\t4\t1\tupstream unavailable\n\
-             {succeeded}\tcache_refresh\troot/pypi\tsucceeded\t20\t21\t12\t3\t-\n\
-             {running}\tcache_refresh\t-\trunning\t10\t-\t0\t0\t-\n"
-        )
+        page["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|attempt| attempt["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [&failed, &succeeded, &running]
     );
+    assert_eq!(page["attempts"][0]["error"], "upstream unavailable");
+    assert_eq!(page["attempts"][1]["items_changed"], 3);
+    assert_eq!(page["attempts"][2]["state"], "running");
+    assert!(page["next_cursor"].is_null());
 }
 
 #[test]
@@ -122,8 +110,8 @@ fn test_job_list_empty_prints_header() {
     let mut out = Vec::new();
     app::job(&config, &list_command(), &mut out).unwrap();
     assert_eq!(
-        String::from_utf8(out).unwrap(),
-        "id\tkind\tscope\tstate\tstarted_at_unix\tfinished_at_unix\tprocessed\tchanged\terror\n"
+        serde_json::from_slice::<serde_json::Value>(&out).unwrap(),
+        serde_json::json!({"attempts": [], "next_cursor": null})
     );
 }
 
@@ -131,28 +119,21 @@ fn test_job_list_empty_prints_header() {
 fn test_job_show_prints_detail() {
     let (_dir, meta, config) = store_and_config();
     let id = start_job(&meta, "root/pypi", 40);
-    meta.finish_job_run(
-        &id,
-        JobOutcome {
-            state: JobState::Failed,
-            finished_at_unix: 42,
-            items_processed: 8,
-            items_changed: 2,
-            error: Some("timed out"),
-        },
-    )
-    .unwrap();
+    meta.finish_job_run(&id, JobOutcome::failed(42, 8, 2, "timed out"))
+        .unwrap();
     drop(meta);
 
     let mut out = Vec::new();
     app::job(&config, &show_command(&id), &mut out).unwrap();
-    assert_eq!(
-        String::from_utf8(out).unwrap(),
-        format!(
-            "id\t{id}\nkind\tcache_refresh\nscope\troot/pypi\nstate\tfailed\nstarted_at_unix\t40\n\
-             finished_at_unix\t42\nprocessed\t8\nchanged\t2\nerror\ttimed out\n"
-        )
-    );
+    let attempt: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(attempt["id"], id);
+    assert_eq!(attempt["kind"], "cache_refresh");
+    assert_eq!(attempt["scope"], "root/pypi");
+    assert_eq!(attempt["state"], "failed");
+    assert_eq!(attempt["finished_at_unix"], 42);
+    assert_eq!(attempt["items_processed"], 8);
+    assert_eq!(attempt["items_changed"], 2);
+    assert_eq!(attempt["error"], "timed out");
 }
 
 #[test]
@@ -239,11 +220,10 @@ fn test_job_run_executes_the_registered_catalog_job_and_prints_progress() {
     assert_eq!(runs[0].state, JobState::Succeeded);
     let mut history = Vec::new();
     app::job(&config, &list_command(), &mut history).unwrap();
-    assert!(
-        String::from_utf8(history)
-            .unwrap()
-            .contains("\tcatalog_sync\tpypi\tsucceeded\t")
-    );
+    let history: serde_json::Value = serde_json::from_slice(&history).unwrap();
+    assert_eq!(history["attempts"][0]["kind"], "catalog_sync");
+    assert_eq!(history["attempts"][0]["scope"], "pypi");
+    assert_eq!(history["attempts"][0]["state"], "succeeded");
 }
 
 #[rstest]

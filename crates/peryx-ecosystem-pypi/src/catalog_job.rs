@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::{StreamExt as _, stream};
-use peryx_driver::jobs::{CatalogSyncParameters, JobContext, JobReport, NodeJob, ScheduledJob};
+use peryx_driver::jobs::{CatalogSyncParameters, JobContext, JobFailure, JobReport, NodeJob, ScheduledJob};
 use peryx_events::metrics::{CatalogSyncOutcome as MetricOutcome, Event};
 use peryx_index::IndexKind;
 use peryx_storage::meta::{JobKind, MetaError};
@@ -39,27 +39,42 @@ impl NodeJob for CatalogSyncJob {
         &self.parameters.repository
     }
 
+    fn repository(&self) -> Option<&str> {
+        Some(&self.parameters.repository)
+    }
+
     fn persist_as(&self) -> Option<JobKind> {
         Some(JobKind::CatalogSync)
     }
 
-    async fn run(&self, ctx: &JobContext) -> Result<JobReport, String> {
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
         let state = ctx.state();
         if state.read_only {
-            return Err("catalog sync is unavailable on a read-only node".to_owned());
+            return Err(JobFailure::new(
+                "read_only",
+                "catalog sync is unavailable on a read-only node",
+            ));
         }
         let index = state
             .indexes
             .iter()
             .find(|index| index.name == self.parameters.repository)
-            .ok_or_else(|| format!("unknown repository {:?}", self.parameters.repository))?;
+            .ok_or_else(|| {
+                JobFailure::new(
+                    "unknown_repository",
+                    format!("unknown repository {:?}", self.parameters.repository),
+                )
+            })?;
         if index.ecosystem != peryx_core::Ecosystem::Pypi {
-            return Err(format!("repository {:?} is not a PyPI repository", index.name));
+            return Err(JobFailure::new(
+                "unsupported_repository",
+                format!("repository {:?} is not a PyPI repository", index.name),
+            ));
         }
         let IndexKind::Cached { client, offline: false } = &index.kind else {
-            return Err(format!(
-                "repository {:?} is not an online cached repository",
-                index.name
+            return Err(JobFailure::new(
+                "unsupported_repository",
+                format!("repository {:?} is not an online cached repository", index.name),
             ));
         };
         let policy = index.policy.clone();
@@ -67,13 +82,18 @@ impl NodeJob for CatalogSyncJob {
         let timeout = self.parameters.timeout;
         let result = match &self.parameters.source {
             Some(source) => {
-                let router = state
-                    .upstream_routes
-                    .get(&repository)
-                    .ok_or_else(|| format!("repository {repository:?} has no named upstream sources"))?;
-                let source = router
-                    .source(source)
-                    .ok_or_else(|| format!("unknown upstream source {source:?} for repository {repository:?}"))?;
+                let router = state.upstream_routes.get(&repository).ok_or_else(|| {
+                    JobFailure::new(
+                        "unknown_source",
+                        format!("repository {repository:?} has no named upstream sources"),
+                    )
+                })?;
+                let source = router.source(source).ok_or_else(|| {
+                    JobFailure::new(
+                        "unknown_source",
+                        format!("unknown upstream source {source:?} for repository {repository:?}"),
+                    )
+                })?;
                 tokio::time::timeout(
                     timeout,
                     sync_projects(
@@ -104,7 +124,7 @@ impl NodeJob for CatalogSyncJob {
                 }
             },
         };
-        result.map_err(|_| format!("retryable_timeout: catalog sync exceeded {timeout:?}"))?
+        result.map_err(|_| JobFailure::new("retryable_timeout", format!("catalog sync exceeded {timeout:?}")))?
     }
 }
 
@@ -115,7 +135,7 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
     policy: &peryx_policy::Policy,
     parameters: &CatalogSyncParameters,
     fallback_source: &str,
-) -> Result<JobReport, String> {
+) -> Result<JobReport, JobFailure> {
     let state = ctx.state();
     let meta = &state.meta;
     let inflight = &state.cache.inflight;
@@ -167,7 +187,13 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
         match outcome {
             Ok(ProjectSyncOutcome::Published { .. }) => report.changed += 1,
             Ok(ProjectSyncOutcome::NotModified { .. } | ProjectSyncOutcome::Missing) => {}
-            Err(error) => return Err(format!("project {project:?}: {}", project_error(&error))),
+            Err(error) => {
+                let error = project_error(&error);
+                return Err(JobFailure::new(
+                    error.code(),
+                    format!("project {project:?}: {}", error.message()),
+                ));
+            }
         }
         if report.processed.is_multiple_of(progress_interval as u64) || report.processed == total as u64 {
             tracing::info!(repository, processed = report.processed, total, "catalog sync progress");
@@ -175,23 +201,23 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
     }
 }
 
-fn catalog_error(error: &CatalogSyncError) -> String {
+fn catalog_error(error: &CatalogSyncError) -> JobFailure {
     match error {
         CatalogSyncError::Upstream(error) => upstream_error(error),
         CatalogSyncError::Status(status) => status_error(*status),
-        _ => format!("catalog_sync: {error}"),
+        _ => JobFailure::new("catalog_sync", error.to_string()),
     }
 }
 
-fn project_error(error: &ProjectSyncError) -> String {
+fn project_error(error: &ProjectSyncError) -> JobFailure {
     match error {
         ProjectSyncError::Upstream(error) => upstream_error(error),
         ProjectSyncError::Status(status) => status_error(*status),
-        _ => format!("project_sync: {error}"),
+        _ => JobFailure::new("project_sync", error.to_string()),
     }
 }
 
-fn upstream_error(error: &UpstreamError) -> String {
+fn upstream_error(error: &UpstreamError) -> JobFailure {
     let category = if matches!(error.status(), Some(429 | 500..=u16::MAX))
         || matches!(error, UpstreamError::Http(error) if error.is_timeout() || error.is_connect())
     {
@@ -199,22 +225,22 @@ fn upstream_error(error: &UpstreamError) -> String {
     } else {
         "upstream"
     };
-    format!("{category}: {}", error.user_message())
+    JobFailure::new(category, error.user_message())
 }
 
-fn status_error(status: u16) -> String {
+fn status_error(status: u16) -> JobFailure {
     let category = if status == 429 || status >= 500 {
         "retryable_upstream"
     } else {
         "upstream"
     };
-    format!("{category}: upstream returned HTTP {status}")
+    JobFailure::new(category, format!("upstream returned HTTP {status}"))
 }
 
-fn catalog_projects_or_error(projects: Result<Vec<String>, MetaError>) -> Result<Vec<String>, String> {
+fn catalog_projects_or_error(projects: Result<Vec<String>, MetaError>) -> Result<Vec<String>, JobFailure> {
     match projects {
         Ok(projects) => Ok(projects),
-        Err(error) => Err(format!("storage: {error}")),
+        Err(error) => Err(JobFailure::new("storage", error.to_string())),
     }
 }
 
@@ -344,8 +370,10 @@ mod tests {
     #[test]
     fn test_storage_errors_have_a_stable_category() {
         assert_eq!(
-            catalog_projects_or_error(Err(MetaError::DriverPrecondition("catalog scan failed".to_owned()))),
-            Err("storage: driver precondition failed: catalog scan failed".to_owned())
+            catalog_projects_or_error(Err(MetaError::DriverPrecondition("catalog scan failed".to_owned())))
+                .unwrap_err()
+                .to_string(),
+            "storage: driver precondition failed: catalog scan failed"
         );
     }
 

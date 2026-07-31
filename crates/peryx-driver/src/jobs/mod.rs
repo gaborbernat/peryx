@@ -12,6 +12,7 @@
 //! driver, so independent ecosystems sweep concurrently while a single ecosystem never sweeps itself
 //! twice at once.
 
+mod attempts;
 mod metrics;
 mod scheduler;
 mod timer;
@@ -29,6 +30,7 @@ use peryx_storage::meta::JobKind;
 use crate::serving::EcosystemDriver;
 use crate::state::{AppState, ServingState};
 
+pub use attempts::{CancelJobRun, JobAttemptControl};
 pub use metrics::JobMetrics;
 pub use scheduler::{JobLimits, JobScheduler, Submit};
 pub use timer::{Schedule, ScheduledJob, run_schedules};
@@ -82,6 +84,42 @@ pub struct JobReport {
     pub changed: u64,
 }
 
+/// A bounded public failure category and message safe for durable history and operator responses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobFailure {
+    code: &'static str,
+    message: String,
+}
+
+impl JobFailure {
+    /// Build a failure from a stable category and caller-sanitized message.
+    #[must_use]
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for JobFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for JobFailure {}
+
 /// What a running job sees: the serving state to work over, and a cooperative cancellation signal.
 pub struct JobContext {
     state: Arc<ServingState>,
@@ -117,6 +155,11 @@ pub trait NodeJob: Send + Sync {
     /// never overlap; different scopes run concurrently. Empty names a node-wide task.
     fn scope(&self) -> &str;
 
+    /// The configured repository authorizing this attempt, when the scope names one repository.
+    fn repository(&self) -> Option<&str> {
+        None
+    }
+
     /// The durable job kind to record a run under, or `None` to run without a persisted history entry.
     fn persist_as(&self) -> Option<JobKind> {
         None
@@ -126,7 +169,7 @@ pub trait NodeJob: Send + Sync {
     ///
     /// # Errors
     /// Returns a user-visible message when the work fails.
-    async fn run(&self, ctx: &JobContext) -> Result<JobReport, String>;
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure>;
 }
 
 /// The server's maintenance pass for one ecosystem: reclaim expired process-local resources, then
@@ -152,7 +195,7 @@ impl NodeJob for MaintenanceJob {
         Some(JobKind::CacheRefresh)
     }
 
-    async fn run(&self, ctx: &JobContext) -> Result<JobReport, String> {
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
         let ecosystem = self.driver.ecosystem();
         let reclaimed = self.driver.reclaim_idle(ctx.state().clone()).await;
         if reclaimed > 0 {
@@ -161,7 +204,11 @@ impl NodeJob for MaintenanceJob {
         if ctx.is_cancelled() {
             return Ok(JobReport::default());
         }
-        let sweep = self.driver.refresh_stale(ctx.state().clone()).await?;
+        let sweep = self
+            .driver
+            .refresh_stale(ctx.state().clone())
+            .await
+            .map_err(|message| JobFailure::new("cache_refresh", message))?;
         if sweep.checked > 0 {
             tracing::info!(ecosystem = %ecosystem, ?sweep, "background refresh sweep");
         }
@@ -169,6 +216,48 @@ impl NodeJob for MaintenanceJob {
             processed: sweep.checked as u64,
             changed: sweep.changed as u64,
         })
+    }
+}
+
+#[cfg(not(test))]
+const MAX_JOB_RUNS: usize = 10_000;
+#[cfg(test)]
+const MAX_JOB_RUNS: usize = 16;
+
+pub(super) struct JobHistoryCleanup;
+
+#[async_trait]
+impl NodeJob for JobHistoryCleanup {
+    fn kind(&self) -> &'static str {
+        "job_history_cleanup"
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        let mut removed = 0_u64;
+        loop {
+            if ctx.is_cancelled() {
+                return Ok(JobReport {
+                    processed: removed,
+                    changed: removed,
+                });
+            }
+            let batch = ctx
+                .state()
+                .meta
+                .prune_job_runs_batch(MAX_JOB_RUNS)
+                .map_err(|error| JobFailure::new("storage", error.to_string()))?;
+            removed += u64::try_from(batch).expect("bounded batch fits in u64");
+            if batch == 0 {
+                return Ok(JobReport {
+                    processed: removed,
+                    changed: removed,
+                });
+            }
+        }
     }
 }
 

@@ -13,7 +13,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{CACHE_MAINTENANCE, CatalogSyncParameters, JobScheduler, scheduled_job, submit_maintenance};
+use super::{
+    CACHE_MAINTENANCE, CatalogSyncParameters, JobHistoryCleanup, JobScheduler, MAINTENANCE_INTERVAL, scheduled_job,
+    submit_maintenance,
+};
 use crate::state::AppState;
 
 /// A registered node-local job kind a schedule can name.
@@ -45,7 +48,10 @@ impl ScheduledJob {
                 Ok(job) => {
                     scheduler.submit(job);
                 }
-                Err(error) => tracing::error!(job = self.as_str(), %error, "scheduled job rejected"),
+                Err(error) => {
+                    let job = self.as_str();
+                    tracing::error!(job, %error, "scheduled job rejected");
+                }
             },
         }
     }
@@ -60,12 +66,12 @@ pub struct Schedule {
 
 /// Run each schedule on its interval until `cancel` fires, submitting due jobs through `scheduler`.
 ///
-/// Returns at once when no schedule is configured. Each fire submits the schedule's jobs and
-/// reschedules it one interval on. A fire that wakes past its due instant, from a slow tick or a
-/// clock advanced across several intervals, reschedules from the wake instant, so missed occurrences
-/// collapse into the next run rather than replaying as a backlog. When the scheduler refuses a
-/// submission because the same job is still running, the timer counts that skipped tick in the
-/// scheduler's metrics and moves on to the next fire.
+/// An internal history cleanup runs immediately and once per maintenance interval even with no
+/// configured schedule. Each fire reschedules one interval on. A fire that wakes past its due instant,
+/// from a slow tick or a clock advanced across several intervals, reschedules from the wake instant,
+/// so missed occurrences collapse into the next run rather than replaying as a backlog. When the
+/// scheduler refuses a submission because the same job is still running, the timer counts that
+/// skipped tick in the scheduler's metrics and moves on to the next fire.
 pub async fn run_schedules(
     app: Arc<AppState>,
     scheduler: Arc<JobScheduler>,
@@ -73,21 +79,29 @@ pub async fn run_schedules(
     cancel: CancellationToken,
 ) {
     let start = Instant::now();
+    let cleanup = plan.len();
     let mut due: BinaryHeap<Reverse<(Instant, usize)>> = plan
         .iter()
         .enumerate()
         .map(|(index, schedule)| Reverse((start + schedule.interval, index)))
+        .chain(std::iter::once(Reverse((start, cleanup))))
         .collect();
     while let Some(Reverse((at, index))) = due.pop() {
         tokio::select! {
             () = cancel.cancelled() => return,
             () = tokio::time::sleep_until(at) => {}
         }
-        let schedule = &plan[index];
-        tracing::debug!(job = schedule.job.as_str(), "schedule fired");
-        schedule.job.submit(&app, &scheduler);
-        let next = reschedule(at, Instant::now(), schedule.interval);
-        due.push(Reverse((next, index)));
+        let interval = if index == cleanup {
+            scheduler.submit(Arc::new(JobHistoryCleanup));
+            MAINTENANCE_INTERVAL
+        } else {
+            let schedule = &plan[index];
+            let job = schedule.job.as_str();
+            tracing::debug!(job, "schedule fired");
+            schedule.job.submit(&app, &scheduler);
+            schedule.interval
+        };
+        due.push(Reverse((reschedule(at, Instant::now(), interval), index)));
     }
 }
 

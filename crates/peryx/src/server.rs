@@ -159,6 +159,18 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     Ok(state)
 }
 
+/// Close attempts interrupted by a prior process before this writer serves management traffic.
+///
+/// # Errors
+/// Returns a metadata error when interrupted attempts cannot be read or updated.
+pub fn recover_job_attempts(state: &AppState) -> Result<usize, peryx_storage::meta::MetaError> {
+    if state.read_only {
+        Ok(0)
+    } else {
+        state.job_attempts.recover_interrupted((state.clock)())
+    }
+}
+
 fn ldap_logins(configs: &[LdapProviderConfig], meta: &MetaStore) -> anyhow::Result<Vec<LdapLoginService<MetaStore>>> {
     configs
         .iter()

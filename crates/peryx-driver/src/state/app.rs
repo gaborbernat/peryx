@@ -13,6 +13,7 @@ use peryx_index::{Index, RouteResolver};
 
 use super::describe::{IndexDescription, describe_indexes, describe_upstream_route};
 use crate::authz::AuthorizationService;
+use crate::jobs::JobAttemptControl;
 use crate::rate_limit::{RateLimiter, UpstreamLimits};
 use crate::revocations::RevocationService;
 use crate::users::UserService;
@@ -45,6 +46,8 @@ pub struct ServingState {
     pub authorization: AuthorizationService,
     /// Digest revocation lifecycle and serving decisions.
     pub revocations: RevocationService,
+    /// Durable attempt state shared by the scheduler and management handlers.
+    pub job_attempts: JobAttemptControl,
     pub blobs: BlobStorage,
     /// Fallback freshness for cached simple pages, in seconds: applies only when upstream's
     /// `Cache-Control` granted no usable lifetime.

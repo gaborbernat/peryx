@@ -8,18 +8,21 @@
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use futures_util::FutureExt as _;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use peryx_storage::meta::{JobOutcome, JobState, MetaError, NewJobRun};
+use peryx_storage::meta::{JobOutcome, MetaError, NewJobRun};
 
+use super::attempts::{CancelJobRun, JobAttemptError};
 use super::metrics::{JobMetrics, Outcome, Reject};
-use super::{JobContext, JobReport, NodeJob};
+use super::{JobContext, JobFailure, JobReport, NodeJob};
 use crate::state::ServingState;
 
 /// The bounds a [`JobScheduler`] runs under.
@@ -177,6 +180,14 @@ impl JobScheduler {
         }
     }
 
+    /// Signal one running durable attempt without affecting other work.
+    ///
+    /// # Errors
+    /// Returns a store error if the ID is not active and its durable record cannot be inspected.
+    pub fn cancel_job_run(&self, id: &str) -> Result<CancelJobRun, MetaError> {
+        self.shared.state.job_attempts.cancel(id)
+    }
+
     fn admit(&self, job: Arc<dyn NodeJob>, completion: Option<oneshot::Sender<Result<JobReport, String>>>) -> Submit {
         let kind = job.kind();
         if self.shared.cancel.is_cancelled() {
@@ -224,7 +235,7 @@ async fn run_admitted(
         .expect("worker semaphore stays open");
     let _kind = shared.per_kind.acquire(job.kind()).await;
     let _repository = shared.per_repository.acquire(job.scope()).await;
-    let result = execute(job.as_ref(), &shared.state, &shared.cancel, &shared.metrics).await;
+    let result = execute(job.as_ref(), &shared, &shared.cancel.child_token()).await;
     shared.lock_inflight().remove(&key);
     if let Some(completion) = completion {
         let _ = completion.send(result.map_err(|error| error.to_string()));
@@ -235,88 +246,97 @@ fn conflict_key(kind: &str, scope: &str) -> String {
     format!("{kind}\u{0}{scope}")
 }
 
-async fn execute(
-    job: &dyn NodeJob,
-    state: &Arc<ServingState>,
-    cancel: &CancellationToken,
-    metrics: &JobMetrics,
-) -> Result<JobReport, JobError> {
+async fn execute(job: &dyn NodeJob, shared: &Shared, cancel: &CancellationToken) -> Result<JobReport, JobError> {
     let kind = job.kind();
-    metrics.started(kind);
+    shared.metrics.started(kind);
     let (outcome, result) = if cancel.is_cancelled() {
         (
             Outcome::Cancelled,
-            Err(JobError::Job("node-local job cancelled before it started".to_owned())),
+            Err(JobError::Job(JobFailure::new(
+                "cancelled",
+                "node-local job cancelled before it started",
+            ))),
         )
     } else {
-        let result = run_persisted(job, state, cancel).await;
-        let outcome = match &result {
-            Ok(_) if cancel.is_cancelled() => Outcome::Cancelled,
-            Ok(report) => {
-                tracing::info!(kind, scope = job.scope(), ?report, "node-local job finished");
-                Outcome::Succeeded
+        let (result, outcome) = run_persisted(job, shared, cancel).await;
+        if outcome != Outcome::Cancelled {
+            let scope = job.scope();
+            match &result {
+                Ok(report) => tracing::info!(kind, scope, ?report, "node-local job finished"),
+                Err(error) => tracing::error!(kind, scope, %error, "node-local job failed"),
             }
-            Err(error) => {
-                tracing::error!(kind, scope = job.scope(), %error, "node-local job failed");
-                Outcome::Failed
-            }
-        };
+        }
         (outcome, result)
     };
-    metrics.finished(kind, outcome);
+    shared.metrics.finished(kind, outcome);
     result
 }
 
 async fn run_persisted(
     job: &dyn NodeJob,
-    state: &Arc<ServingState>,
+    shared: &Shared,
     cancel: &CancellationToken,
-) -> Result<JobReport, JobError> {
+) -> (Result<JobReport, JobError>, Outcome) {
     let run = match job.persist_as() {
-        Some(kind) => Some(state.meta.start_job_run(NewJobRun {
-            kind,
-            scope: job.scope(),
-            started_at_unix: (state.clock)(),
-        })?),
+        Some(kind) => match shared.state.job_attempts.start(
+            NewJobRun {
+                kind,
+                scope: job.scope(),
+                repository: job.repository(),
+                started_at_unix: (shared.state.clock)(),
+            },
+            cancel.clone(),
+        ) {
+            Ok(id) => Some(id),
+            Err(error) => return (Err(error.into()), Outcome::Failed),
+        },
         None => None,
     };
     let context = JobContext {
-        state: state.clone(),
+        state: shared.state.clone(),
         cancel: cancel.clone(),
     };
-    let result = job.run(&context).await;
+    let (result, panicked) = AssertUnwindSafe(job.run(&context)).catch_unwind().await.map_or_else(
+        |_| (Err(JobFailure::new("job_panic", "node-local job panicked")), true),
+        |result| (result, false),
+    );
+    let cancelled = cancel.is_cancelled() && !panicked;
+    let outcome = if panicked {
+        Outcome::Failed
+    } else if cancelled {
+        Outcome::Cancelled
+    } else if result.is_ok() {
+        Outcome::Succeeded
+    } else {
+        Outcome::Failed
+    };
     if let Some(id) = run {
-        let outcome = match &result {
-            Ok(report) => JobOutcome {
-                state: JobState::Succeeded,
-                finished_at_unix: (state.clock)(),
-                items_processed: report.processed,
-                items_changed: report.changed,
-                error: None,
-            },
-            Err(message) => JobOutcome {
-                state: JobState::Failed,
-                finished_at_unix: (state.clock)(),
-                items_processed: 0,
-                items_changed: 0,
-                error: Some(message.as_str()),
-            },
+        let finished_at_unix = (shared.state.clock)();
+        let error = result.as_ref().err().map(ToString::to_string);
+        let persisted = if outcome == Outcome::Cancelled {
+            let report = result.as_ref().ok().copied().unwrap_or_default();
+            JobOutcome::cancelled(finished_at_unix, report.processed, report.changed)
+        } else if let Ok(report) = &result {
+            JobOutcome::succeeded(finished_at_unix, report.processed, report.changed)
+        } else {
+            JobOutcome::failed(
+                finished_at_unix,
+                0,
+                0,
+                error.as_deref().expect("failed job carries an error"),
+            )
         };
-        state.meta.finish_job_run(&id, outcome)?;
+        if let Err(error) = shared.state.job_attempts.finish(&id, persisted) {
+            return (Err(error.into()), Outcome::Failed);
+        }
     }
-    Ok(result?)
+    (result.map_err(JobError::from), outcome)
 }
 
 #[derive(Debug, thiserror::Error)]
 enum JobError {
     #[error("{0}")]
-    Job(String),
+    Job(#[from] JobFailure),
     #[error(transparent)]
-    Store(#[from] MetaError),
-}
-
-impl From<String> for JobError {
-    fn from(message: String) -> Self {
-        Self::Job(message)
-    }
+    Attempt(#[from] JobAttemptError),
 }

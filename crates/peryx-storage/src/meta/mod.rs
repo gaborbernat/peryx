@@ -29,7 +29,10 @@ pub use bootstrap::AdministratorBootstrapError;
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use external_identity::ExternalIdentityStoreError;
 pub use index::DriverTxn;
-pub use job::{JobKind, JobOutcome, JobRunRecord, JobState, NewJobRun};
+pub use job::{
+    FinishJobRun, JobKind, JobOutcome, JobRunPage, JobRunQuery, JobRunQueryError, JobRunRecord, JobRunStoreError,
+    JobState, NewJobRun,
+};
 pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSnapshot};
 pub use policy_decision::{
     NewPolicyDecision, PolicyDecisionItem, PolicyDecisionPage, PolicyDecisionQuery, PolicyDecisionQueryError,

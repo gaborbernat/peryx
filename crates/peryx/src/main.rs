@@ -109,6 +109,7 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
                 }
             }
         }
+        peryx::server::recover_job_attempts(&state)?;
         if !state.read_only && config.jobs.mode == config::JobsMode::Local {
             let scheduler = std::sync::Arc::new(peryx_driver::jobs::JobScheduler::new(
                 state.serving.clone(),

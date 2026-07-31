@@ -77,15 +77,14 @@ async fn test_blob_read_stream_rejects_reversed_range() {
 }
 
 #[tokio::test]
-async fn test_body_completion_reports_bytes_at_clean_eof() {
-    // A body shorter than its declared length still completes at EOF, reporting what it sent.
+async fn test_body_completion_ignores_clean_eof_before_the_declared_length() {
     let completed = Arc::new(AtomicU64::new(u64::MAX));
     let recorded = completed.clone();
     let body = on_body_complete(Body::from("hello"), 10, move |bytes| {
         recorded.store(bytes, Ordering::Relaxed);
     });
     assert_eq!(collect(body).await, b"hello");
-    assert_eq!(completed.load(Ordering::Relaxed), 5);
+    assert_eq!(completed.load(Ordering::Relaxed), u64::MAX);
 }
 
 #[tokio::test]
@@ -107,6 +106,17 @@ async fn test_body_completion_reports_bytes_before_a_terminal_poll() {
 }
 
 #[tokio::test]
+async fn test_body_completion_reports_an_empty_declared_body_at_eof() {
+    let completed = Arc::new(AtomicU64::new(u64::MAX));
+    let recorded = completed.clone();
+    let body = on_body_complete(Body::empty(), 0, move |bytes| {
+        recorded.store(bytes, Ordering::Relaxed);
+    });
+    assert!(collect(body).await.is_empty());
+    assert_eq!(completed.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn test_body_completion_ignores_failed_streams() {
     let completed = Arc::new(AtomicU64::new(u64::MAX));
     let recorded = completed.clone();
@@ -115,6 +125,23 @@ async fn test_body_completion_ignores_failed_streams() {
         recorded.store(bytes, Ordering::Relaxed);
     });
     assert!(to_bytes(body, usize::MAX).await.is_err());
+    assert_eq!(completed.load(Ordering::Relaxed), u64::MAX);
+}
+
+#[tokio::test]
+async fn test_body_completion_ignores_a_dropped_partial_consumer() {
+    let completed = Arc::new(AtomicU64::new(u64::MAX));
+    let recorded = completed.clone();
+    let body = Body::from_stream(stream::iter([
+        Ok::<_, std::io::Error>(Bytes::from_static(b"he")),
+        Ok(Bytes::from_static(b"llo")),
+    ]));
+    let mut stream = on_body_complete(body, 5, move |bytes| {
+        recorded.store(bytes, Ordering::Relaxed);
+    })
+    .into_data_stream();
+    assert_eq!(stream.next().await.unwrap().unwrap(), b"he"[..]);
+    drop(stream);
     assert_eq!(completed.load(Ordering::Relaxed), u64::MAX);
 }
 

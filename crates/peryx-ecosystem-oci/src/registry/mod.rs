@@ -287,6 +287,18 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> EcosystemDriver for OciRe
         Ok(crate::referenced_blob_digests(meta).map_err(ServeError::from)?)
     }
 
+    fn trash_records(
+        &self,
+        meta: &peryx_storage::meta::MetaStore,
+        index_names: &[String],
+    ) -> Result<Vec<peryx_core::TrashRecord>, String> {
+        let mut records = Vec::new();
+        for index in index_names {
+            records.extend(crate::store::trash_records(meta, index).map_err(ServeError::from)?);
+        }
+        Ok(records)
+    }
+
     fn client_endpoint(&self, route: &str) -> String {
         let mut url = "/v2/".to_owned();
         peryx_core::url_encoding::push_path(&mut url, route);

@@ -374,6 +374,18 @@ impl EcosystemDriver for PypiServing {
         crate::store::summarize_indexes(meta, index_names, recent_limit).map_err(crate::error_message)
     }
 
+    fn trash_records(
+        &self,
+        meta: &peryx_storage::meta::MetaStore,
+        index_names: &[String],
+    ) -> Result<Vec<peryx_core::TrashRecord>, String> {
+        let mut records = Vec::new();
+        for index in index_names {
+            records.extend(crate::trash::trash_records(meta, index)?);
+        }
+        Ok(records)
+    }
+
     fn cache_pages(
         &self,
         meta: &peryx_storage::meta::MetaStore,

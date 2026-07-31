@@ -8,6 +8,7 @@ mod project;
 mod search;
 mod snapshot;
 mod stats;
+mod trash;
 
 pub use policy_decision::{PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage};
 pub use project::{
@@ -17,6 +18,7 @@ pub use project::{
 pub use search::{UiSearchPage, UiSearchResult, source_label};
 pub use snapshot::{UiEcosystemSummary, UiHosted, UiIndex, UiMetricFamily, UiRecentUpload, UiSnapshot, UiUpstream};
 pub use stats::{UiCounters, UiStats, stats_index, stats_project, stats_routes};
+pub use trash::{TrashFilters, UiTrashPage, UiTrashRecord};
 
 fn string_at(value: &serde_json::Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_owned()

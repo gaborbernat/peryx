@@ -58,6 +58,8 @@ pub mod stream;
 #[cfg(feature = "serving")]
 mod sync_lock;
 #[cfg(feature = "serving")]
+pub mod trash;
+#[cfg(feature = "serving")]
 pub mod upload;
 mod version;
 

@@ -8,6 +8,7 @@ mod prefetch;
 mod replication_tests;
 mod server_tests;
 mod tls_support;
+mod trash_tests;
 mod ui_tests;
 mod upstream_tls_error_tests;
 mod upstream_tls_tests;

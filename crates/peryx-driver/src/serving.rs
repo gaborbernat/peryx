@@ -269,6 +269,22 @@ pub trait EcosystemDriver: Send + Sync {
         Ok(std::collections::HashMap::new())
     }
 
+    /// This ecosystem's soft-deleted artifacts across `index_names`, as neutral trash records for the
+    /// operator inspection view. Each driver reads its own trash keyspace and tags each record with its
+    /// [`ecosystem`](Self::ecosystem); the neutral query merges, filters, and paginates them without
+    /// naming a format. Reads only indexed trash entries, never an unbounded catalog scan. Default:
+    /// none, so an ecosystem with no soft-delete contributes nothing.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when the store cannot be read.
+    fn trash_records(
+        &self,
+        _meta: &peryx_storage::meta::MetaStore,
+        _index_names: &[String],
+    ) -> Result<Vec<peryx_core::TrashRecord>, String> {
+        Ok(Vec::new())
+    }
+
     /// This ecosystem's cached index pages for the `cache list`/`cache size` command, each split into
     /// `(index, project)` in its own key terms. `index_names` are the configured index names, longest
     /// first, so the driver can split a slash-bearing key against them. Default: none.

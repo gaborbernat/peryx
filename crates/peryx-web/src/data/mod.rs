@@ -15,6 +15,8 @@ mod search;
 mod simple;
 mod stats;
 mod status;
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+mod trash;
 
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 pub use admin::admin_request;
@@ -26,6 +28,8 @@ pub use search::load_search;
 pub use simple::{load_project_view, load_projects};
 pub use stats::load_stats;
 pub use status::{load_admin_snapshot, load_snapshot};
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+pub use trash::load_trash;
 
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 async fn fetch_json(url: &str) -> Option<serde_json::Value> {

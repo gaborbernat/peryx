@@ -19,7 +19,7 @@ pub mod view;
 
 pub use ecosystem::{Ecosystem, UnknownEcosystem};
 pub use lexicon::{Lexicon, LexiconRegistry};
-pub use lifecycle::TrashInfo;
+pub use lifecycle::{TRASH_GRACE_SECS, TrashInfo, TrashRecord, TrashState, UnknownTrashState};
 pub use role::Role;
 pub use view::{
     RenderedDescription, UiArtifactRef, UiAvailability, UiBlock, UiFile, UiManifest, UiMember, UiMemberChunk, UiMeta,

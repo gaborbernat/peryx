@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use peryx_identity::{GrantScope, Role, RoleGrant, UserId};
-use redb::{ReadableDatabase as _, ReadableTable as _, WriteTransaction};
+use redb::{ReadableTable as _, WriteTransaction};
 
 use super::{EXTERNAL_ROLE_GRANT, MetaError, MetaStore, ROLE_GRANT, USER};
 

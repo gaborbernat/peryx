@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead as _, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
 use peryx_storage::blob::Digest;
@@ -34,7 +34,10 @@ pub(super) fn check_backup(path: &Path, manifest: &BackupManifest, out: &mut dyn
     let mut problems = 0;
     verify_manifest_file(path, &manifest.config, "config", out, &mut problems)?;
     let mut blobs = BTreeMap::new();
-    if verify_manifest_file(path, &manifest.blob_index.file, "blob-index", out, &mut problems)?.is_some() {
+    if matches!(
+        verify_manifest_file(path, &manifest.blob_index.file, "blob-index", out, &mut problems)?,
+        ManifestFileCheck::Match | ManifestFileCheck::Mismatch
+    ) {
         blobs = read_blob_index(path.join(&manifest.blob_index.file.path).as_path(), out, &mut problems)?;
         let indexed_bytes = blobs.values().map(|entry| entry.size_bytes).sum::<u64>();
         if blobs.len() as u64 != manifest.blob_index.count {
@@ -53,18 +56,14 @@ pub(super) fn check_backup(path: &Path, manifest: &BackupManifest, out: &mut dyn
             verify_blob(path, digest, entry, out, &mut problems)?;
         }
     }
-    let metadata_path = path.join(&manifest.metadata.path);
-    if metadata_path.is_file() {
-        match MetaStore::open_existing(path.join(&manifest.metadata.path)) {
+    if verify_metadata_file(path, &manifest.metadata, out, &mut problems)? == ManifestFileCheck::Match {
+        match MetaStore::open_existing_read_only(path.join(&manifest.metadata.path)) {
             Ok(meta) => check_metadata_references(&blobs, &meta, out, &mut problems)?,
             Err(err) => {
                 problems += 1;
                 writeln!(out, "problem\tmetadata\t{}\t{err}", manifest.metadata.path)?;
             }
         }
-    } else {
-        problems += 1;
-        writeln!(out, "problem\tmetadata\t{}\tmissing", manifest.metadata.path)?;
     }
     Ok(BackupCheck { problems, blobs })
 }
@@ -75,29 +74,86 @@ fn verify_manifest_file(
     kind: &str,
     out: &mut dyn Write,
     problems: &mut u64,
-) -> anyhow::Result<Option<HashedFile>> {
+) -> anyhow::Result<ManifestFileCheck> {
+    let Some(path) = existing_manifest_file(root, expected, kind, out, problems)? else {
+        return Ok(ManifestFileCheck::Unscannable);
+    };
+    let actual = hash_existing_file(&path)?;
+    compare_manifest_file(expected, &actual, kind, out, problems)
+}
+
+fn verify_metadata_file(
+    root: &Path,
+    expected: &ManifestFile,
+    out: &mut dyn Write,
+    problems: &mut u64,
+) -> anyhow::Result<ManifestFileCheck> {
+    let Some(path) = existing_manifest_file(root, expected, "metadata", out, problems)? else {
+        return Ok(ManifestFileCheck::Unscannable);
+    };
+    let actual = match hash_existing_file(&path) {
+        Ok(actual) => actual,
+        Err(err) => {
+            *problems += 1;
+            writeln!(out, "problem\tmetadata\t{}\tI/O error: {err}", expected.path)?;
+            return Ok(ManifestFileCheck::Unscannable);
+        }
+    };
+    compare_manifest_file(expected, &actual, "metadata", out, problems)
+}
+
+fn existing_manifest_file(
+    root: &Path,
+    expected: &ManifestFile,
+    kind: &str,
+    out: &mut dyn Write,
+    problems: &mut u64,
+) -> anyhow::Result<Option<PathBuf>> {
     let path = root.join(&expected.path);
-    if !path.is_file() {
+    if path.is_file() {
+        Ok(Some(path))
+    } else {
         *problems += 1;
         writeln!(out, "problem\t{kind}\t{}\tmissing", expected.path)?;
-        return Ok(None);
+        Ok(None)
     }
-    let actual = hash_existing_file(&path)?;
-    if actual.sha256 != expected.sha256 {
+}
+
+fn compare_manifest_file(
+    expected: &ManifestFile,
+    actual: &HashedFile,
+    kind: &str,
+    out: &mut dyn Write,
+    problems: &mut u64,
+) -> anyhow::Result<ManifestFileCheck> {
+    let sha_matches = actual.sha256 == expected.sha256;
+    if !sha_matches {
         *problems += 1;
         let path = &expected.path;
         let expected = &expected.sha256;
         let found = &actual.sha256;
         out.write_all(format!("problem\t{kind}\t{path}\tsha256 expected {expected}, found {found}\n").as_bytes())?;
     }
-    if actual.size_bytes != expected.size_bytes {
+    let size_matches = actual.size_bytes == expected.size_bytes;
+    if !size_matches {
         *problems += 1;
         let path = &expected.path;
         let expected = expected.size_bytes;
         let found = actual.size_bytes;
         writeln!(out, "problem\t{kind}\t{path}\tsize expected {expected}, found {found}")?;
     }
-    Ok(Some(actual))
+    Ok(if sha_matches && size_matches {
+        ManifestFileCheck::Match
+    } else {
+        ManifestFileCheck::Mismatch
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestFileCheck {
+    Unscannable,
+    Mismatch,
+    Match,
 }
 
 fn check_metadata_references(

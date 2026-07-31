@@ -1,7 +1,7 @@
 use std::ops::Bound::{Excluded, Unbounded};
 
 use peryx_identity::{ArtifactDigest, RevocationReason, UserId};
-use redb::{ReadableDatabase as _, ReadableTable as _};
+use redb::ReadableTable as _;
 use serde::{Deserialize, Serialize};
 
 use super::{DIGEST_REVOCATION, DIGEST_REVOCATION_STATE, MetaError, MetaStore};

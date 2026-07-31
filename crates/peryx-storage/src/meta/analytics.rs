@@ -1,9 +1,7 @@
 use std::sync::Weak;
 
-use redb::{Database, ReadableDatabase as _};
-
 use super::error::MetaError;
-use super::{ANALYTICS, ANALYTICS_DAILY_KEY, ANALYTICS_KEY, MetaStore};
+use super::{ANALYTICS, ANALYTICS_DAILY_KEY, ANALYTICS_KEY, MetaDatabase, MetaStore};
 
 /// A shared, `Clone`-cheap handle onto the metadata store's analytics table.
 ///
@@ -13,7 +11,7 @@ use super::{ANALYTICS, ANALYTICS_DAILY_KEY, ANALYTICS_KEY, MetaStore};
 /// no-ops instead of keeping the database open.
 #[derive(Debug, Clone)]
 pub struct AnalyticsHandle {
-    db: Weak<Database>,
+    db: Weak<MetaDatabase>,
 }
 
 impl MetaStore {
@@ -65,14 +63,18 @@ impl AnalyticsHandle {
     }
 
     fn read(&self, key: &str) -> Result<Option<Vec<u8>>, MetaError> {
-        let Some(db) = self.db.upgrade() else { return Ok(None) };
+        let Some(db) = self.db.upgrade() else {
+            return Ok(None);
+        };
         let txn = db.begin_read()?;
         let table = txn.open_table(ANALYTICS)?;
         Ok(table.get(key)?.map(|value| value.value().to_vec()))
     }
 
     fn write(&self, key: &str, snapshot: &[u8]) -> Result<(), MetaError> {
-        let Some(db) = self.db.upgrade() else { return Ok(()) };
+        let Some(db) = self.db.upgrade() else {
+            return Ok(());
+        };
         let txn = db.begin_write()?;
         {
             let mut table = txn.open_table(ANALYTICS)?;

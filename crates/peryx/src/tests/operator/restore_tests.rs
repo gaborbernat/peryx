@@ -1,33 +1,31 @@
+use std::path::Path;
+
+use rstest::rstest;
+
 use crate::operator;
 
 use super::{blob_relpath, valid_backup};
 
-#[test]
-fn test_restore_refuses_non_empty_target_without_force() {
+#[rstest]
+#[case::non_empty_directory(create_non_empty_directory, "not empty")]
+#[case::file(create_file, "exists and is not a directory")]
+fn test_restore_retries_occupied_target_with_force(#[case] create: fn(&Path), #[case] expected: &str) {
     let (_source, root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
     let restored = root.path().join("restored");
-    std::fs::create_dir_all(&restored).unwrap();
-    std::fs::write(restored.join("blocker"), b"x").unwrap();
+    create(&restored);
 
     let err = operator::restore(&backup, &restored, false, &mut Vec::new()).unwrap_err();
-    assert!(err.to_string().contains("not empty"));
+    assert!(err.to_string().contains(expected));
 
     operator::restore(&backup, &restored, true, &mut Vec::new()).unwrap();
-    assert!(restored.join("peryx.redb").is_file());
-    assert!(!restored.join("blocker").exists());
-}
-
-#[test]
-fn test_restore_refuses_file_target_without_force() {
-    let (_source, root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
-    let restored = root.path().join("restored");
-    std::fs::write(&restored, b"x").unwrap();
-
-    let err = operator::restore(&backup, &restored, false, &mut Vec::new()).unwrap_err();
-    assert!(err.to_string().contains("exists and is not a directory"));
-
-    operator::restore(&backup, &restored, true, &mut Vec::new()).unwrap();
-    assert!(restored.join("peryx.redb").is_file());
+    assert_eq!(
+        (
+            restored.is_dir(),
+            restored.join("peryx.redb").is_file(),
+            restored.join("blocker").exists()
+        ),
+        (true, true, false)
+    );
 }
 
 #[test]
@@ -61,4 +59,13 @@ fn test_restore_skips_config_warning_when_data_dir_matches() {
 
     assert!(err.to_string().contains("not empty"));
     assert!(!String::from_utf8(out).unwrap().contains("warning\tconfig\tdata_dir"));
+}
+
+fn create_non_empty_directory(path: &Path) {
+    std::fs::create_dir_all(path).unwrap();
+    std::fs::write(path.join("blocker"), b"x").unwrap();
+}
+
+fn create_file(path: &Path) {
+    std::fs::write(path, b"x").unwrap();
 }

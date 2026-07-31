@@ -1,6 +1,6 @@
 use std::ops::Bound::{Excluded, Unbounded};
 
-use redb::{ReadableDatabase as _, ReadableTable as _};
+use redb::ReadableTable as _;
 use serde::{Deserialize, Serialize};
 
 use super::error::MetaError;

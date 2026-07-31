@@ -1,4 +1,4 @@
-use redb::{ReadableDatabase as _, ReadableTable as _};
+use redb::ReadableTable as _;
 
 use super::error::{MetaError, MetaScanError};
 use super::{

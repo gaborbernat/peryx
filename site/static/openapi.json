@@ -112,13 +112,41 @@
         ]
       }
     },
-    "/+analytics/top-packages": {
+    "/+analytics/sources": {
       "get": {
-        "description": "Durable download counts and bytes grouped by repository and project. Results are ordered by downloads, bytes, repository, then project.",
+        "description": "Downloads and bytes grouped by the routed upstream a cache miss fetched from; a null source is the local store. The source dimension is operator-scoped, so a repository-only credential cannot inspect this view.",
         "parameters": [
           {
-            "description": "Number of projects to return, from 1 through 100; defaults to 25",
-            "example": 10,
+            "description": "Index route to scope the query to; omit for an operator-wide query, at most 512 bytes",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Minimum Unix timestamp, floored to its UTC day",
+            "example": 1703980800,
+            "in": "query",
+            "name": "from",
+            "required": false
+          },
+          {
+            "description": "Maximum Unix timestamp, floored to its UTC day",
+            "example": 1706659200,
+            "in": "query",
+            "name": "to",
+            "required": false
+          },
+          {
+            "description": "Opaque cursor from the prior page's next_cursor",
+            "example": "MjU",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
             "in": "query",
             "name": "limit",
             "required": false
@@ -128,17 +156,29 @@
           "200": {
             "content": {
               "application/json": {
-                "example": [
-                  {
-                    "bytes": 64733247,
-                    "downloads": 42,
-                    "project": "pandas",
-                    "repository": "pypi"
-                  }
-                ]
+                "example": {
+                  "interval": {
+                    "from_day": 19722,
+                    "from_unix": 1703980800,
+                    "retained_from_day": 19387,
+                    "to_day": 19752,
+                    "to_unix": 1706659200,
+                    "window_clamped_to_retention": false
+                  },
+                  "next_cursor": null,
+                  "sources": [
+                    {
+                      "bytes": 60000000,
+                      "downloads": 40,
+                      "project": "pandas",
+                      "repository": "root/pypi",
+                      "source": "pypi"
+                    }
+                  ]
+                }
               }
             },
-            "description": "The highest-usage projects"
+            "description": "The highest-usage sources"
           },
           "400": {
             "content": {
@@ -148,10 +188,482 @@
                 }
               }
             },
-            "description": "The limit is outside the accepted range"
+            "description": "The limit, cursor, time range, or repository filter is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The credential cannot inspect this view or repository"
+          },
+          "404": {
+            "description": "The repository does not exist or is not visible to the caller"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "analytics service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or analytics storage is unavailable"
           }
         },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Per-source usage",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+analytics/timeline": {
+      "get": {
+        "description": "Downloads and bytes bucketed by UTC day, ascending, each carrying explicit half-open `[start_unix, end_unix)` bounds for the day it aggregates.",
+        "parameters": [
+          {
+            "description": "Index route to scope the query to; omit for an operator-wide query, at most 512 bytes",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Minimum Unix timestamp, floored to its UTC day",
+            "example": 1703980800,
+            "in": "query",
+            "name": "from",
+            "required": false
+          },
+          {
+            "description": "Maximum Unix timestamp, floored to its UTC day",
+            "example": 1706659200,
+            "in": "query",
+            "name": "to",
+            "required": false
+          },
+          {
+            "description": "Opaque cursor from the prior page's next_cursor",
+            "example": "MjU",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "buckets": [
+                    {
+                      "bytes": 9000000,
+                      "day": 19752,
+                      "downloads": 12,
+                      "end_unix": 1706659200,
+                      "start_unix": 1706572800
+                    }
+                  ],
+                  "interval": {
+                    "from_day": 19722,
+                    "from_unix": 1703980800,
+                    "retained_from_day": 19387,
+                    "to_day": 19752,
+                    "to_unix": 1706659200,
+                    "window_clamped_to_retention": false
+                  },
+                  "next_cursor": null
+                }
+              }
+            },
+            "description": "The daily usage series"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit, cursor, time range, or repository filter is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The credential cannot inspect this view or repository"
+          },
+          "404": {
+            "description": "The repository does not exist or is not visible to the caller"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "analytics service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or analytics storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Usage over time",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+analytics/top-packages": {
+      "get": {
+        "description": "Downloads and bytes grouped by repository and project over the resolved window, ordered by downloads, bytes, repository, then project.",
+        "parameters": [
+          {
+            "description": "Index route to scope the query to; omit for an operator-wide query, at most 512 bytes",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Minimum Unix timestamp, floored to its UTC day",
+            "example": 1703980800,
+            "in": "query",
+            "name": "from",
+            "required": false
+          },
+          {
+            "description": "Maximum Unix timestamp, floored to its UTC day",
+            "example": 1706659200,
+            "in": "query",
+            "name": "to",
+            "required": false
+          },
+          {
+            "description": "Opaque cursor from the prior page's next_cursor",
+            "example": "MjU",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "interval": {
+                    "from_day": 19722,
+                    "from_unix": 1703980800,
+                    "retained_from_day": 19387,
+                    "to_day": 19752,
+                    "to_unix": 1706659200,
+                    "window_clamped_to_retention": false
+                  },
+                  "next_cursor": null,
+                  "packages": [
+                    {
+                      "bytes": 64733247,
+                      "downloads": 42,
+                      "project": "pandas",
+                      "repository": "root/pypi"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The highest-usage projects, newest window first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit, cursor, time range, or repository filter is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The credential cannot inspect this view or repository"
+          },
+          "404": {
+            "description": "The repository does not exist or is not visible to the caller"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "analytics service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or analytics storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
         "summary": "Most-downloaded packages",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+analytics/unused": {
+      "get": {
+        "description": "Projects with durable lifetime downloads but none inside the window, ordered by lifetime downloads, repository, then project. A `window_clamped_to_retention` interval marks results assessed only over retained data.",
+        "parameters": [
+          {
+            "description": "Index route to scope the query to; omit for an operator-wide query, at most 512 bytes",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Minimum Unix timestamp, floored to its UTC day",
+            "example": 1703980800,
+            "in": "query",
+            "name": "from",
+            "required": false
+          },
+          {
+            "description": "Maximum Unix timestamp, floored to its UTC day",
+            "example": 1706659200,
+            "in": "query",
+            "name": "to",
+            "required": false
+          },
+          {
+            "description": "Opaque cursor from the prior page's next_cursor",
+            "example": "MjU",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "interval": {
+                    "from_day": 19722,
+                    "from_unix": 1703980800,
+                    "retained_from_day": 19387,
+                    "to_day": 19752,
+                    "to_unix": 1706659200,
+                    "window_clamped_to_retention": false
+                  },
+                  "next_cursor": null,
+                  "unused": [
+                    {
+                      "lifetime_downloads": 7,
+                      "project": "legacy-tool",
+                      "repository": "root/pypi"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Projects idle across the window"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit, cursor, time range, or repository filter is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The credential cannot inspect this view or repository"
+          },
+          "404": {
+            "description": "The repository does not exist or is not visible to the caller"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "analytics service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or analytics storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Unused packages",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+analytics/versions": {
+      "get": {
+        "description": "Downloads and bytes grouped by repository, project, and version over the window. A null version is a distribution the ecosystem reported no version for.",
+        "parameters": [
+          {
+            "description": "Index route to scope the query to; omit for an operator-wide query, at most 512 bytes",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Minimum Unix timestamp, floored to its UTC day",
+            "example": 1703980800,
+            "in": "query",
+            "name": "from",
+            "required": false
+          },
+          {
+            "description": "Maximum Unix timestamp, floored to its UTC day",
+            "example": 1706659200,
+            "in": "query",
+            "name": "to",
+            "required": false
+          },
+          {
+            "description": "Opaque cursor from the prior page's next_cursor",
+            "example": "MjU",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "interval": {
+                    "from_day": 19722,
+                    "from_unix": 1703980800,
+                    "retained_from_day": 19387,
+                    "to_day": 19752,
+                    "to_unix": 1706659200,
+                    "window_clamped_to_retention": false
+                  },
+                  "next_cursor": null,
+                  "versions": [
+                    {
+                      "bytes": 48000000,
+                      "downloads": 30,
+                      "project": "pandas",
+                      "repository": "root/pypi",
+                      "version": "2.2.0"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The highest-usage versions"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit, cursor, time range, or repository filter is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The credential cannot inspect this view or repository"
+          },
+          "404": {
+            "description": "The repository does not exist or is not visible to the caller"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "analytics service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or analytics storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Per-version usage",
         "tags": [
           "operations"
         ]

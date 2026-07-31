@@ -8,8 +8,43 @@ use utoipa::openapi::{PathsBuilder, Required, ResponseBuilder, SecurityRequireme
 
 use peryx_driver::openapi::{api_json_response, package_search, text_response};
 
-pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
+/// Register the `/+analytics/*` usage query family, kept apart so the service path list stays short.
+fn analytics_paths(paths: PathsBuilder) -> PathsBuilder {
     paths
+        .path(
+            "/+analytics/top-packages",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, analytics_top())
+                .build(),
+        )
+        .path(
+            "/+analytics/unused",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, analytics_unused())
+                .build(),
+        )
+        .path(
+            "/+analytics/versions",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, analytics_versions())
+                .build(),
+        )
+        .path(
+            "/+analytics/sources",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, analytics_sources())
+                .build(),
+        )
+        .path(
+            "/+analytics/timeline",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, analytics_timeline())
+                .build(),
+        )
+}
+
+pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
+    analytics_paths(paths)
         .path(
             "/+status",
             PathItemBuilder::new().operation(HttpMethod::Get, status()).build(),
@@ -39,12 +74,6 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/+stats",
             PathItemBuilder::new().operation(HttpMethod::Get, stats()).build(),
-        )
-        .path(
-            "/+analytics/top-packages",
-            PathItemBuilder::new()
-                .operation(HttpMethod::Get, top_packages())
-                .build(),
         )
         .path(
             "/+policy/decisions",
@@ -323,37 +352,201 @@ fn stats() -> OperationBuilder {
         )
 }
 
-fn top_packages() -> OperationBuilder {
-    OperationBuilder::new()
+/// The example resolved window every analytics response echoes back.
+fn analytics_interval() -> serde_json::Value {
+    json!({
+        "from_day": 19_722,
+        "to_day": 19_752,
+        "from_unix": 1_703_980_800_i64,
+        "to_unix": 1_706_659_200_i64,
+        "retained_from_day": 19_387,
+        "window_clamped_to_retention": false,
+    })
+}
+
+/// The query parameters, security, and failure responses shared by every `/+analytics/*` view. An
+/// operator query omits `repository`; a repository query names an index route the caller can read.
+fn analytics_query(operation: OperationBuilder) -> OperationBuilder {
+    let mut operation = operation
         .tag("operations")
-        .summary(Some("Most-downloaded packages"))
-        .description(Some(
-            "Durable download counts and bytes grouped by repository and project. Results are ordered by \
-             downloads, bytes, repository, then project.",
-        ))
-        .parameter(
-            ParameterBuilder::new()
-                .name("limit")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("Number of projects to return, from 1 through 100; defaults to 25"))
-                .example(Some(json!(10))),
-        )
-        .response(
-            "200",
-            api_json_response(
-                "The highest-usage projects",
-                json!([
-                    {"repository": "pypi", "project": "pandas", "downloads": 42, "bytes": 64_733_247}
-                ]),
-            ),
-        )
+        .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
         .response(
             "400",
             api_json_response(
-                "The limit is outside the accepted range",
+                "The limit, cursor, time range, or repository filter is invalid",
                 json!({"error": "limit must be between 1 and 100"}),
             ),
         )
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local user credential or repository token was presented"),
+        )
+        .response(
+            "403",
+            ResponseBuilder::new().description("The credential cannot inspect this view or repository"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The repository does not exist or is not visible to the caller"),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication, authorization, or analytics storage is unavailable",
+                json!({"error": "analytics service unavailable"}),
+            ),
+        );
+    for (name, description, example) in [
+        (
+            "repository",
+            "Index route to scope the query to; omit for an operator-wide query, at most 512 bytes",
+            json!("root/pypi"),
+        ),
+        (
+            "from",
+            "Minimum Unix timestamp, floored to its UTC day",
+            json!(1_703_980_800_i64),
+        ),
+        (
+            "to",
+            "Maximum Unix timestamp, floored to its UTC day",
+            json!(1_706_659_200_i64),
+        ),
+        (
+            "cursor",
+            "Opaque cursor from the prior page's next_cursor",
+            json!("MjU"),
+        ),
+        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
+    ] {
+        operation = operation.parameter(
+            ParameterBuilder::new()
+                .name(name)
+                .parameter_in(ParameterIn::Query)
+                .description(Some(description))
+                .example(Some(example)),
+        );
+    }
+    operation
+}
+
+fn analytics_top() -> OperationBuilder {
+    analytics_query(
+        OperationBuilder::new()
+            .summary(Some("Most-downloaded packages"))
+            .description(Some(
+                "Downloads and bytes grouped by repository and project over the resolved window, ordered by \
+                 downloads, bytes, repository, then project.",
+            )),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "The highest-usage projects, newest window first",
+            json!({
+                "packages": [{"repository": "root/pypi", "project": "pandas", "downloads": 42, "bytes": 64_733_247}],
+                "interval": analytics_interval(),
+                "next_cursor": null,
+            }),
+        ),
+    )
+}
+
+fn analytics_unused() -> OperationBuilder {
+    analytics_query(
+        OperationBuilder::new()
+            .summary(Some("Unused packages"))
+            .description(Some(
+                "Projects with durable lifetime downloads but none inside the window, ordered by lifetime \
+                 downloads, repository, then project. A `window_clamped_to_retention` interval marks results \
+                 assessed only over retained data.",
+            )),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "Projects idle across the window",
+            json!({
+                "unused": [{"repository": "root/pypi", "project": "legacy-tool", "lifetime_downloads": 7}],
+                "interval": analytics_interval(),
+                "next_cursor": null,
+            }),
+        ),
+    )
+}
+
+fn analytics_versions() -> OperationBuilder {
+    analytics_query(
+        OperationBuilder::new()
+            .summary(Some("Per-version usage"))
+            .description(Some(
+                "Downloads and bytes grouped by repository, project, and version over the window. A null \
+                 version is a distribution the ecosystem reported no version for.",
+            )),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "The highest-usage versions",
+            json!({
+                "versions": [
+                    {"repository": "root/pypi", "project": "pandas", "version": "2.2.0", "downloads": 30, "bytes": 48_000_000}
+                ],
+                "interval": analytics_interval(),
+                "next_cursor": null,
+            }),
+        ),
+    )
+}
+
+fn analytics_sources() -> OperationBuilder {
+    analytics_query(
+        OperationBuilder::new()
+            .summary(Some("Per-source usage"))
+            .description(Some(
+                "Downloads and bytes grouped by the routed upstream a cache miss fetched from; a null source is \
+                 the local store. The source dimension is operator-scoped, so a repository-only credential \
+                 cannot inspect this view.",
+            )),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "The highest-usage sources",
+            json!({
+                "sources": [
+                    {"repository": "root/pypi", "project": "pandas", "source": "pypi", "downloads": 40, "bytes": 60_000_000}
+                ],
+                "interval": analytics_interval(),
+                "next_cursor": null,
+            }),
+        ),
+    )
+}
+
+fn analytics_timeline() -> OperationBuilder {
+    analytics_query(
+        OperationBuilder::new()
+            .summary(Some("Usage over time"))
+            .description(Some(
+                "Downloads and bytes bucketed by UTC day, ascending, each carrying explicit half-open \
+                 `[start_unix, end_unix)` bounds for the day it aggregates.",
+            )),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "The daily usage series",
+            json!({
+                "buckets": [
+                    {"day": 19_752, "start_unix": 1_706_572_800_i64, "end_unix": 1_706_659_200_i64, "downloads": 12, "bytes": 9_000_000}
+                ],
+                "interval": analytics_interval(),
+                "next_cursor": null,
+            }),
+        ),
+    )
 }
 
 fn policy_decisions() -> OperationBuilder {

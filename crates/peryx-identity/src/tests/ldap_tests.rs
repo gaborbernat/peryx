@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
 use rstest::rstest;
 #[cfg(target_os = "linux")]
-use testcontainers::core::{CmdWaitFor, ExecCommand, ImageExt as _, IntoContainerPort as _, WaitFor};
+use testcontainers::core::{CmdWaitFor, ExecCommand, Healthcheck, ImageExt as _, IntoContainerPort as _, WaitFor};
 #[cfg(target_os = "linux")]
 use testcontainers::runners::AsyncRunner as _;
 #[cfg(target_os = "linux")]
@@ -344,12 +344,38 @@ async fn start_openldap() -> (ContainerAsync<GenericImage>, u16, Vec<u8>) {
         "dn: cn=Philip J. Fry,ou=people,dc=localhost\nchangetype: modify\nreplace: title\ntitle: {}\n-\nreplace: description\n{descriptions}",
         "x".repeat(1_025)
     );
+    let healthcheck = Healthcheck::cmd([
+        "env",
+        "LDAPTLS_CACERT=/etc/ldap/ssl/ca.crt",
+        "ldapsearch",
+        "-x",
+        "-ZZ",
+        "-H",
+        "ldap://localhost:10389",
+        "-D",
+        "cn=admin,dc=localhost",
+        "-w",
+        "GoodNewsEveryone",
+        "-b",
+        "dc=localhost",
+        "-s",
+        "base",
+        "(objectClass=*)",
+        "1.1",
+    ])
+    .with_interval(Duration::from_millis(100))
+    .with_timeout(Duration::from_secs(1))
+    .with_start_period(Duration::from_secs(30))
+    .with_start_interval(Duration::from_millis(100));
     let container = GenericImage::new("ghcr.io/rroemhild/docker-test-openldap", "v2.5.0")
         .with_exposed_port(10_389.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("slapd starting"))
+        .with_wait_for(WaitFor::healthcheck())
+        .with_hostname("localhost")
+        .with_health_check(healthcheck)
         .with_env_var("LDAP_DOMAIN", "localhost")
         .with_env_var("LDAP_BASEDN", "dc=localhost")
         .with_env_var("LDAP_BINDDN", "cn=admin,dc=localhost")
+        .with_copy_to("/etc/ldap/ssl/ca.crt", ca.clone())
         .with_copy_to("/etc/ldap/ssl/ldap.crt", certificate)
         .with_copy_to("/etc/ldap/ssl/ldap.key", key)
         .with_copy_to("/tmp/invalid-attributes.ldif", invalid_attributes.into_bytes())

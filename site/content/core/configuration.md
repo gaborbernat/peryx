@@ -826,26 +826,32 @@ upload_concurrency = 4
 | `timeout_secs`              | Per-request timeout, in seconds                                   | `30`         |
 | `max_retries`               | Retries for a transient transport or 5xx/429 response             | `3`          |
 | `multipart_threshold_bytes` | Objects at or below this size upload in one `PUT`                 | `16777216`   |
-| `part_size_bytes`           | Multipart part size above the threshold                           | `16777216`   |
+| `part_size_bytes`           | Multipart part size, from 5 MiB through 5 GiB                     | `16777216`   |
 | `upload_concurrency`        | Parts uploaded at once during a multipart upload                  | `4`          |
 
-Blobs are immutable and keyed by their sha256, so a write stages to `data_dir/blob-staging`, hashes as it streams, then
-uploads under `<prefix>/sha256/<digest>` — one `PUT` below `multipart_threshold_bytes`, bounded concurrent parts above
-it. Reads stream ranged `GET`s, and every fetch is verified against its digest.
+Endpoint base paths are preserved. User information, queries, and fragments are rejected because credentials belong in
+the AWS provider chain rather than the endpoint URL.
+
+Blobs are immutable and keyed by their sha256. A write stages to `data_dir/blob-staging`, hashes as it streams, then
+uses a conditional create for `<prefix>/sha256/<digest>`: one `PUT` below `multipart_threshold_bytes`, bounded
+concurrent parts above it. Peryx journals multipart upload IDs under the staging directory so a commit interrupted after
+creation can resume. Reads stream ranged `GET`s. An explicit blob verification downloads and hashes the complete object;
+normal reads do not add a second digest pass.
 
 ### Credentials
 
-The `[blob]` table never holds a secret. S3 credentials resolve at startup from the standard environment variables
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and the optional `AWS_SESSION_TOKEN`. Startup fails fast if the S3 backend
-is selected and no access key or secret is present. The bucket policy must allow `s3:GetObject`, `s3:PutObject`, and
-`s3:DeleteObject` on `<prefix>/*`, plus `s3:ListBucket` for the startup health check.
+The `[blob]` table does not hold secrets. The first S3 request resolves credentials through the AWS SDK default provider
+chain: environment variables, shared config and credentials files, web identity, ECS task credentials, or EC2 instance
+metadata. These providers cache and refresh temporary credentials. The bucket policy must allow `s3:GetObject`,
+`s3:PutObject`, `s3:DeleteObject`, and `s3:AbortMultipartUpload` on `<prefix>/*`, plus `s3:GetBucketLocation` on the
+bucket for health checks.
 
 ### Backup and failure recovery
 
-Because the object write commits the blob before its metadata row is written, a crash between the two leaves an orphan
-object — harmless and overwritten byte-for-byte by any later write of the same content. `peryx backup` snapshots the
-`[blob]` selection (never the credentials) so a restore points at the same bucket; the objects themselves are not copied
-into the archive. Bucket-level versioning or replication, if you need it, is configured on the object store, not here.
+Because the object write commits the blob before its metadata row, a crash between the two leaves an orphan object. A
+later write of the same content observes the existing digest key. `peryx backup` snapshots the `[blob]` selection
+without credentials so a restore points at the same bucket; the archive omits object contents. Configure bucket-level
+versioning or replication on the object store.
 
 ## `[availability]`
 

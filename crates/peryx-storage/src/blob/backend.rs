@@ -509,7 +509,7 @@ impl BlobStaged {
                 .await
                 .expect("blob commit task never panics")
             }
-            BlobStagedBackend::S3(staged) => staged.commit().await,
+            BlobStagedBackend::S3(staged) => Box::pin(staged.commit()).await,
         }
     }
 
@@ -888,8 +888,8 @@ where
 mod s3_staged_tests {
     use bytes::Bytes;
 
-    use super::super::s3::{S3Backend, S3Config, S3Credentials, S3Settings};
-    use super::super::{BlobBackend, BlobErrorKind, BlobStaged};
+    use super::super::s3::{S3Backend, S3Config, S3Settings};
+    use super::super::{BlobBackend, BlobErrorKind, BlobStaged, Digest};
 
     fn backend(staging: &std::path::Path) -> S3Backend {
         let settings = S3Settings {
@@ -900,19 +900,11 @@ mod s3_staged_tests {
             path_style: true,
             request_timeout: std::time::Duration::from_secs(5),
             max_retries: 0,
-            multipart_threshold: 8,
-            part_size: 8,
+            multipart_threshold: 16 << 20,
+            part_size: 8 << 20,
             upload_concurrency: 1,
         };
-        S3Backend::new(
-            S3Config::new(settings).unwrap(),
-            S3Credentials {
-                access_key_id: "a".to_owned(),
-                secret_access_key: "b".to_owned(),
-                session_token: None,
-            },
-            staging.to_path_buf(),
-        )
+        S3Backend::new(S3Config::new(settings).unwrap(), staging.to_path_buf())
     }
 
     async fn staged(backend: &S3Backend) -> BlobStaged {
@@ -935,5 +927,18 @@ mod s3_staged_tests {
         let dir = tempfile::tempdir().unwrap();
         let backend = backend(dir.path());
         staged(&backend).await.abort_blocking().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_s3_staged_rejects_a_digest_mismatch_without_uploading() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = backend(dir.path());
+        let staged = staged(&backend).await;
+        let path = staged.with_materialized(std::path::Path::to_owned);
+        let error = staged.commit_as(&Digest::of(b"other")).await.unwrap_err();
+
+        assert_eq!(error.kind(), BlobErrorKind::DigestMismatch);
+        assert_eq!(error.context().unwrap().backend, "s3");
+        assert!(!path.exists());
     }
 }

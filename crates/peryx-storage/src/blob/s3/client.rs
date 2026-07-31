@@ -1,106 +1,74 @@
-//! A minimal S3 REST client: the object and multipart calls the blob backend needs, signed with
-//! `SigV4` and retried within a bound.
-//!
-//! Request bodies are in-memory `Bytes` so a payload hash is always available for signing and memory
-//! stays bounded by the part size; a `GET` body streams straight through instead. Idempotent,
-//! digest-keyed objects make every call safe to retry, so transient transport failures and 5xx/429
-//! responses back off and try again up to the configured limit.
+//! S3 operations backed by the official AWS SDK.
 
-use std::fmt::Write as _;
 use std::ops::Range;
-use std::time::Duration;
+use std::path::Path;
+use std::sync::Arc;
 
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::Client;
+use aws_sdk_s3::config::{Builder, Config, Region, RequestChecksumCalculation, ResponseChecksumValidation};
+use aws_sdk_s3::error::ProvideErrorMetadata as _;
+use aws_sdk_s3::primitives::{ByteStream, Length};
+use aws_sdk_s3::types::{ChecksumAlgorithm, CompletedMultipartUpload, CompletedPart};
 use bytes::Bytes;
+use futures_util::StreamExt as _;
 use futures_util::stream::BoxStream;
-use futures_util::{StreamExt as _, TryStreamExt as _};
-use reqwest::{Method, StatusCode, Url};
-use time::OffsetDateTime;
+use tokio::sync::OnceCell;
 
-use super::config::{S3Addressing, S3Config, S3Credentials};
-use super::sign::{self, CanonicalRequest, EMPTY_PAYLOAD_HASH};
+use super::config::S3Config;
 
 /// An S3 request that did not succeed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum S3Error {
-    /// The object or bucket is absent (404).
+    #[error("object not found")]
     NotFound,
-    /// A response outside the success range. `code` is the S3 error code when the body carried one.
-    Unexpected {
-        status: u16,
-        code: Option<String>,
-        message: String,
-    },
-    /// The request never produced a response within the retry budget.
-    Transport(String),
+    #[error("object already exists")]
+    AlreadyExists,
+    #[error("conditional write conflicted with another request")]
+    Conflict,
+    #[error("multipart upload no longer exists")]
+    NoSuchUpload,
+    #[error("s3 request failed: {0}")]
+    Request(String),
+    #[error("s3 returned an invalid {0}")]
+    InvalidResponse(&'static str),
 }
 
-impl From<reqwest::Error> for S3Error {
-    fn from(error: reqwest::Error) -> Self {
-        Self::Transport(error.to_string())
-    }
-}
-
-impl std::fmt::Display for S3Error {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotFound => formatter.write_str("object not found"),
-            Self::Unexpected { status, code, message } => match code {
-                Some(code) => write!(formatter, "s3 responded {status} ({code}): {message}"),
-                None => write!(formatter, "s3 responded {status}: {message}"),
-            },
-            Self::Transport(message) => write!(formatter, "s3 request failed: {message}"),
-        }
-    }
-}
-
-/// Object metadata a `HEAD` returns.
+/// Object metadata returned by `HEAD`.
 #[derive(Debug, Clone, Copy)]
 pub struct S3Head {
     pub bytes: u64,
 }
 
-/// A streaming `GET` response: the object's full size plus the ranged body.
+/// A streaming `GET` response.
 pub struct S3Get {
     pub total_bytes: u64,
     pub body: BoxStream<'static, Result<Bytes, S3Error>>,
 }
 
-/// One finished multipart part, echoed back to `CompleteMultipartUpload`.
+/// One completed multipart part.
 #[derive(Debug, Clone)]
 pub struct S3Part {
-    pub number: u32,
+    pub number: i32,
     pub etag: String,
+    pub checksum: String,
 }
 
-/// A signed, retrying S3 REST client bound to one bucket.
+/// An S3 client bound to one bucket.
 #[derive(Debug, Clone)]
 pub struct S3Client {
-    http: reqwest::Client,
     config: S3Config,
-    credentials: S3Credentials,
+    client: Arc<OnceCell<Client>>,
 }
 
 impl S3Client {
-    /// Build a client for `config` using `credentials`.
-    ///
-    /// # Panics
-    /// Panics if the HTTP client cannot be built, which requires the TLS backend to fail to
-    /// initialize; the installed ring provider rules that out.
+    /// Build a client that defers initialization to the first request and uses the AWS default
+    /// credential provider chain.
     #[must_use]
-    pub fn new(config: S3Config, credentials: S3Credentials) -> Self {
-        // reqwest is built with `rustls-no-provider`, so a process-wide crypto provider must be
-        // installed before the first client is built. Installing is idempotent across clients. The
-        // build only fails when the TLS backend cannot initialize, which the installed provider rules
-        // out.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let http = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
-            .expect("reqwest client builds with the installed ring TLS provider");
+    pub fn new(config: S3Config) -> Self {
         Self {
-            http,
             config,
-            credentials,
+            client: Arc::new(OnceCell::new()),
         }
     }
 
@@ -109,455 +77,372 @@ impl S3Client {
         &self.config
     }
 
-    fn object_url(&self, key: &str) -> (Url, String, String) {
-        let mut url = self.config.endpoint.clone();
-        let host = self.config.endpoint.host_str().unwrap_or_default();
-        let (authority, path) = match self.config.addressing {
-            S3Addressing::Path => {
-                let host = self
-                    .config
-                    .endpoint
-                    .port()
-                    .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
-                (host, format!("/{}/{key}", self.config.bucket))
-            }
-            S3Addressing::VirtualHost => {
-                let host = format!("{}.{host}", self.config.bucket);
-                let authority = self
-                    .config
-                    .endpoint
-                    .port()
-                    .map_or_else(|| host.clone(), |port| format!("{host}:{port}"));
-                url.set_host(Some(&host)).ok();
-                (authority, format!("/{key}"))
-            }
-        };
-        url.set_path(&path);
-        (url, authority, path)
-    }
-
-    fn bucket_url(&self) -> (Url, String, String) {
-        let (mut url, host, _) = self.object_url("");
-        let path = match self.config.addressing {
-            S3Addressing::Path => format!("/{}", self.config.bucket),
-            S3Addressing::VirtualHost => "/".to_owned(),
-        };
-        url.set_path(&path);
-        (url, host, path)
-    }
-
-    /// Confirm the bucket is reachable with the configured credentials.
-    ///
-    /// # Errors
-    /// Returns [`S3Error`] on a failed or unauthorized listing.
-    pub async fn health(&self) -> Result<(), S3Error> {
-        let (mut url, host, path) = self.bucket_url();
-        url.set_query(Some("list-type=2&max-keys=0"));
-        let query = vec![
-            ("list-type".to_owned(), "2".to_owned()),
-            ("max-keys".to_owned(), "0".to_owned()),
-        ];
-        self.send(Method::GET, url, &host, &path, &query, &[], None, EMPTY_PAYLOAD_HASH)
+    async fn client(&self) -> &Client {
+        self.client
+            .get_or_init(|| async {
+                let shared = aws_config::defaults(BehaviorVersion::latest())
+                    .region(Region::new(self.config.region.clone()))
+                    .retry_config(
+                        aws_config::retry::RetryConfig::standard()
+                            .with_max_attempts(self.config.max_retries.saturating_add(1)),
+                    )
+                    .timeout_config(
+                        aws_config::timeout::TimeoutConfig::builder()
+                            .operation_timeout(self.config.request_timeout)
+                            .operation_attempt_timeout(self.config.request_timeout)
+                            .build(),
+                    )
+                    .load()
+                    .await;
+                Client::from_conf(Self::service_config(&self.config, Builder::from(&shared)))
+            })
             .await
-            .map(drop)
     }
 
-    /// `HEAD` an object, returning `None` when it is absent.
+    fn service_config(config: &S3Config, builder: Builder) -> Config {
+        builder
+            .endpoint_url(config.endpoint.as_str())
+            .force_path_style(config.force_path_style())
+            .request_checksum_calculation(RequestChecksumCalculation::WhenSupported)
+            .response_checksum_validation(ResponseChecksumValidation::WhenSupported)
+            .build()
+    }
+
+    /// Confirm the bucket is reachable.
     ///
     /// # Errors
-    /// Returns [`S3Error`] on a non-404 failure.
+    /// Returns [`S3Error`] when the bucket cannot be read.
+    pub async fn health(&self) -> Result<(), S3Error> {
+        self.client()
+            .await
+            .get_bucket_location()
+            .bucket(&self.config.bucket)
+            .send()
+            .await
+            .map_err(aws_sdk_s3::Error::from)
+            .map(drop)
+            .map_err(|error| map_sdk_error(&error))
+    }
+
+    /// Return object metadata, or `None` when the object is absent.
+    ///
+    /// # Errors
+    /// Returns [`S3Error`] when metadata cannot be read.
     pub async fn head(&self, key: &str) -> Result<Option<S3Head>, S3Error> {
-        let (url, host, path) = self.object_url(key);
         match self
-            .send(Method::HEAD, url, &host, &path, &[], &[], None, EMPTY_PAYLOAD_HASH)
+            .client()
+            .await
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
             .await
         {
-            // S3 always answers a successful HEAD with Content-Length.
-            Ok(response) => Ok(Some(S3Head {
-                bytes: content_length_header(&response).unwrap_or_default(),
+            Ok(output) => Ok(Some(S3Head {
+                bytes: object_length(output.content_length())?,
             })),
-            Err(S3Error::NotFound) => Ok(None),
-            Err(error) => Err(error),
+            Err(error) => match map_sdk_error(&error.into()) {
+                S3Error::NotFound => Ok(None),
+                error => Err(error),
+            },
         }
     }
 
-    /// `GET` an object, optionally an end-exclusive byte range.
+    /// Stream an object or end-exclusive byte range.
     ///
     /// # Errors
-    /// Returns [`S3Error::NotFound`] when absent, or [`S3Error`] on another failure.
+    /// Returns [`S3Error`] when the request or body stream fails.
     pub async fn get(&self, key: &str, range: Option<Range<u64>>) -> Result<S3Get, S3Error> {
-        let (url, host, path) = self.object_url(key);
-        let header = range.as_ref().map(|range| {
-            // HTTP ranges are inclusive; the caller's is end-exclusive.
-            (
-                "range",
-                format!("bytes={}-{}", range.start, range.end.saturating_sub(1)),
-            )
-        });
-        let headers = header.as_slice();
-        let response = self
-            .send(Method::GET, url, &host, &path, &[], headers, None, EMPTY_PAYLOAD_HASH)
-            .await?;
-        let total_bytes = total_bytes(&response);
-        let body = response.bytes_stream().map_err(S3Error::from).boxed();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.config.request_timeout)
+            .ok_or_else(|| S3Error::Request("request timeout exceeds the supported duration".to_owned()))?;
+        let mut request = self.client().await.get_object().bucket(&self.config.bucket).key(key);
+        if let Some(range) = range {
+            request = request.range(format!("bytes={}-{}", range.start, range.end.saturating_sub(1)));
+        }
+        let output = tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|error| S3Error::Request(error.to_string()))?
+            .map_err(aws_sdk_s3::Error::from)
+            .map_err(|error| map_sdk_error(&error))?;
+        let total_bytes = output
+            .content_range()
+            .and_then(|value| value.rsplit('/').next())
+            .and_then(|value| value.parse().ok())
+            .map_or_else(|| object_length(output.content_length()), Ok)?;
+        let body = futures_util::stream::try_unfold((output.body, deadline), next_body_chunk).boxed();
         Ok(S3Get { total_bytes, body })
     }
 
-    /// `PUT` a whole object in one request.
+    /// Create an object from a retryable file body when it does not already exist.
     ///
     /// # Errors
-    /// Returns [`S3Error`] on a failed write.
-    pub async fn put(&self, key: &str, body: Bytes, payload_hash: &str, checksum: &str) -> Result<(), S3Error> {
-        let (url, host, path) = self.object_url(key);
-        let headers = [("x-amz-checksum-sha256", checksum.to_owned())];
-        self.send(Method::PUT, url, &host, &path, &[], &headers, Some(body), payload_hash)
+    /// Returns [`S3Error::AlreadyExists`] when the key exists, or [`S3Error`] for another failure.
+    pub async fn put_file(&self, key: &str, path: &Path, checksum: &str) -> Result<(), S3Error> {
+        let body = ByteStream::from_path(path)
             .await
+            .map_err(|error| S3Error::Request(error.to_string()))?;
+        self.client()
+            .await
+            .put_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .body(body)
+            .checksum_sha256(checksum)
+            .if_none_match("*")
+            .send()
+            .await
+            .map_err(aws_sdk_s3::Error::from)
             .map(drop)
+            .map_err(|error| map_sdk_error(&error))
     }
 
-    /// Delete an object. S3 delete is idempotent, so absence is not an error here.
+    /// Delete an object. Absence is successful.
     ///
     /// # Errors
-    /// Returns [`S3Error`] on a failed delete.
+    /// Returns [`S3Error`] when deletion fails.
     pub async fn delete(&self, key: &str) -> Result<(), S3Error> {
-        let (url, host, path) = self.object_url(key);
         match self
-            .send(Method::DELETE, url, &host, &path, &[], &[], None, EMPTY_PAYLOAD_HASH)
+            .client()
+            .await
+            .delete_object()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .send()
             .await
         {
-            Ok(_) | Err(S3Error::NotFound) => Ok(()),
-            Err(error) => Err(error),
+            Ok(_) => Ok(()),
+            Err(error) => match map_sdk_error(&error.into()) {
+                S3Error::NotFound => Ok(()),
+                error => Err(error),
+            },
         }
     }
 
-    /// Start a multipart upload, returning its id.
+    /// Start a checksum-protected multipart upload.
     ///
     /// # Errors
-    /// Returns [`S3Error`] on failure or a response without an upload id.
+    /// Returns [`S3Error`] when creation fails or no upload id is returned.
     pub async fn create_multipart(&self, key: &str) -> Result<String, S3Error> {
-        let (mut url, host, path) = self.object_url(key);
-        url.set_query(Some("uploads="));
-        let query = vec![("uploads".to_owned(), String::new())];
-        let response = self
-            .send(Method::POST, url, &host, &path, &query, &[], None, EMPTY_PAYLOAD_HASH)
-            .await?;
-        let body = read_body(response).await?;
-        extract_tag(&body, "UploadId").ok_or_else(|| S3Error::Unexpected {
-            status: 200,
-            code: None,
-            message: "multipart response carried no UploadId".to_owned(),
-        })
+        self.client()
+            .await
+            .create_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .checksum_algorithm(ChecksumAlgorithm::Sha256)
+            .send()
+            .await
+            .map_err(aws_sdk_s3::Error::from)
+            .map_err(|error| map_sdk_error(&error))?
+            .upload_id
+            .ok_or(S3Error::InvalidResponse("multipart upload id"))
     }
 
-    /// Upload one part, returning its `ETag`.
+    /// Upload one checksum-protected part.
     ///
     /// # Errors
-    /// Returns [`S3Error`] on failure or a response without an `ETag`.
+    /// Returns [`S3Error`] when the part cannot be uploaded or its response is incomplete.
     pub async fn upload_part(
         &self,
         key: &str,
         upload_id: &str,
-        number: u32,
-        body: Bytes,
-        payload_hash: &str,
+        number: i32,
+        path: &Path,
+        offset: u64,
+        bytes: u64,
     ) -> Result<S3Part, S3Error> {
-        let (mut url, host, path) = self.object_url(key);
-        let query = vec![
-            ("partNumber".to_owned(), number.to_string()),
-            ("uploadId".to_owned(), upload_id.to_owned()),
-        ];
-        url.set_query(Some(&format!("partNumber={number}&uploadId={upload_id}")));
-        let response = self
-            .send(Method::PUT, url, &host, &path, &query, &[], Some(body), payload_hash)
-            .await?;
-        let etag = response
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-            .ok_or_else(|| S3Error::Unexpected {
-                status: response.status().as_u16(),
-                code: None,
-                message: "upload part response carried no ETag".to_owned(),
-            })?;
-        Ok(S3Part { number, etag })
+        let body = ByteStream::read_from()
+            .path(path)
+            .offset(offset)
+            .length(Length::Exact(bytes))
+            .build()
+            .await
+            .map_err(|error| S3Error::Request(error.to_string()))?;
+        let output = self
+            .client()
+            .await
+            .upload_part()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .part_number(number)
+            .body(body)
+            .checksum_algorithm(ChecksumAlgorithm::Sha256)
+            .send()
+            .await
+            .map_err(aws_sdk_s3::Error::from)
+            .map_err(|error| map_sdk_error(&error))?;
+        Ok(S3Part {
+            number,
+            etag: output.e_tag.ok_or(S3Error::InvalidResponse("part ETag"))?,
+            checksum: output
+                .checksum_sha256
+                .ok_or(S3Error::InvalidResponse("part checksum"))?,
+        })
     }
 
-    /// Complete a multipart upload from its finished parts.
+    /// Complete a multipart upload only when the key is absent.
     ///
     /// # Errors
-    /// Returns [`S3Error`] on a failed completion.
-    pub async fn complete_multipart(&self, key: &str, upload_id: &str, parts: &[S3Part]) -> Result<(), S3Error> {
-        let (mut url, host, path) = self.object_url(key);
-        let query = vec![("uploadId".to_owned(), upload_id.to_owned())];
-        url.set_query(Some(&format!("uploadId={upload_id}")));
-        let mut xml = String::from("<CompleteMultipartUpload>");
-        for part in parts {
-            let _ = write!(
-                xml,
-                "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
-                part.number,
-                escape_xml(&part.etag)
-            );
-        }
-        xml.push_str("</CompleteMultipartUpload>");
-        let body = Bytes::from(xml);
-        let payload_hash = sign::sha256_hex(&body);
-        let response = self
-            .send(Method::POST, url, &host, &path, &query, &[], Some(body), &payload_hash)
-            .await?;
-        // S3 can report a completion failure inside a 200 body; treat an Error element as a failure.
-        let body = read_body(response).await?;
-        if let Some(code) = extract_tag(&body, "Code") {
-            return Err(S3Error::Unexpected {
-                status: 200,
-                code: Some(code),
-                message: extract_tag(&body, "Message").unwrap_or_default(),
-            });
-        }
-        Ok(())
+    /// Returns [`S3Error::AlreadyExists`] when the key exists, [`S3Error::Conflict`] when another
+    /// conditional write races this one, or [`S3Error`] for another failure.
+    pub async fn complete_multipart(&self, key: &str, upload_id: &str, parts: Vec<S3Part>) -> Result<(), S3Error> {
+        let parts = parts
+            .into_iter()
+            .map(|part| {
+                CompletedPart::builder()
+                    .part_number(part.number)
+                    .e_tag(part.etag)
+                    .checksum_sha256(part.checksum)
+                    .build()
+            })
+            .collect();
+        self.client()
+            .await
+            .complete_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(parts)).build())
+            .if_none_match("*")
+            .send()
+            .await
+            .map_err(aws_sdk_s3::Error::from)
+            .map(drop)
+            .map_err(|error| map_sdk_error(&error))
     }
 
-    /// Abort a multipart upload so its uploaded parts stop consuming storage.
+    /// Abort a multipart upload. An absent upload is successful.
     ///
     /// # Errors
-    /// Returns [`S3Error`] on a failed abort.
+    /// Returns [`S3Error`] when the abort fails.
     pub async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<(), S3Error> {
-        let (mut url, host, path) = self.object_url(key);
-        let query = vec![("uploadId".to_owned(), upload_id.to_owned())];
-        url.set_query(Some(&format!("uploadId={upload_id}")));
         match self
-            .send(Method::DELETE, url, &host, &path, &query, &[], None, EMPTY_PAYLOAD_HASH)
+            .client()
+            .await
+            .abort_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
             .await
         {
-            Ok(_) | Err(S3Error::NotFound) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one private request builder keeps signing in one place"
-    )]
-    async fn send(
-        &self,
-        method: Method,
-        url: Url,
-        host: &str,
-        path: &str,
-        query: &[(String, String)],
-        extra_headers: &[(&str, String)],
-        body: Option<Bytes>,
-        payload_hash: &str,
-    ) -> Result<reqwest::Response, S3Error> {
-        let mut backoff = Duration::from_millis(50);
-        let mut attempt = 0;
-        loop {
-            let signed = sign::sign(
-                &CanonicalRequest {
-                    method: method.as_str(),
-                    host,
-                    path,
-                    query,
-                    extra_headers,
-                    payload_hash,
-                },
-                &self.credentials,
-                &self.config.region,
-                OffsetDateTime::now_utc(),
-            );
-            let mut request = self
-                .http
-                .request(method.clone(), url.clone())
-                .header(reqwest::header::HOST, host)
-                .header("x-amz-date", &signed.amz_date)
-                .header("x-amz-content-sha256", &signed.content_sha256)
-                .header(reqwest::header::AUTHORIZATION, &signed.authorization);
-            if let Some(token) = &signed.security_token {
-                request = request.header("x-amz-security-token", token);
-            }
-            for (name, value) in extra_headers {
-                request = request.header(*name, value);
-            }
-            if let Some(body) = &body {
-                request = request.body(body.clone());
-            }
-            let outcome = match request.send().await {
-                Ok(response) => classify(response).await,
-                Err(error) => Err(S3Error::from(error)),
-            };
-            match outcome {
-                Ok(response) => return Ok(response),
-                Err(error) if attempt < self.config.max_retries && is_retryable(&error) => {
-                    attempt += 1;
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(5));
-                }
-                Err(error) => return Err(error),
-            }
+            Ok(_) => Ok(()),
+            Err(error) => match map_sdk_error(&error.into()) {
+                S3Error::NoSuchUpload => Ok(()),
+                error => Err(error),
+            },
         }
     }
 }
 
-fn total_bytes(response: &reqwest::Response) -> u64 {
-    response
-        .headers()
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit('/').next())
-        .and_then(|total| total.trim().parse().ok())
-        .or_else(|| response.content_length())
-        .unwrap_or_default()
-}
-
-fn content_length_header(response: &reqwest::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)?
-        .to_str()
-        .ok()?
-        .parse()
-        .ok()
-}
-
-async fn classify(response: reqwest::Response) -> Result<reqwest::Response, S3Error> {
-    let status = response.status();
-    if status.is_success() {
-        return Ok(response);
-    }
-    if status == StatusCode::NOT_FOUND {
-        return Err(S3Error::NotFound);
-    }
-    let status = status.as_u16();
-    let body = read_body(response).await.unwrap_or_default();
-    Err(S3Error::Unexpected {
-        status,
-        code: extract_tag(&body, "Code"),
-        message: extract_tag(&body, "Message").unwrap_or_default(),
-    })
-}
-
-async fn read_body(response: reqwest::Response) -> Result<String, S3Error> {
-    response.text().await.map_err(S3Error::from)
-}
-
-const fn is_retryable(error: &S3Error) -> bool {
-    match error {
-        S3Error::Transport(_) => true,
-        S3Error::Unexpected { status, .. } => *status == 429 || *status >= 500,
-        S3Error::NotFound => false,
+async fn next_body_chunk(
+    (mut body, deadline): (ByteStream, tokio::time::Instant),
+) -> Result<Option<(Bytes, (ByteStream, tokio::time::Instant))>, S3Error> {
+    match tokio::time::timeout_at(deadline, body.try_next()).await {
+        Ok(Ok(Some(bytes))) => Ok(Some((bytes, (body, deadline)))),
+        Ok(Ok(None)) => Ok(None),
+        Ok(Err(error)) => Err(S3Error::Request(error.to_string())),
+        Err(error) => Err(S3Error::Request(error.to_string())),
     }
 }
 
-fn extract_tag(xml: &str, tag: &str) -> Option<String> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open)? + open.len();
-    let end = xml[start..].find(&close)? + start;
-    Some(unescape_xml(&xml[start..end]))
+fn object_length(length: Option<i64>) -> Result<u64, S3Error> {
+    length
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(S3Error::InvalidResponse("content length"))
 }
 
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn unescape_xml(value: &str) -> String {
-    value
-        .replace("&quot;", "\"")
-        .replace("&gt;", ">")
-        .replace("&lt;", "<")
-        .replace("&amp;", "&")
+fn map_sdk_error(error: &aws_sdk_s3::Error) -> S3Error {
+    match error.code() {
+        Some("NoSuchBucket" | "NoSuchKey" | "NotFound") => S3Error::NotFound,
+        Some("PreconditionFailed") => S3Error::AlreadyExists,
+        Some("ConditionalRequestConflict") => S3Error::Conflict,
+        Some("NoSuchUpload") => S3Error::NoSuchUpload,
+        _ => S3Error::Request(error.to_string()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{S3Client, S3Error, extract_tag};
-    use crate::blob::{S3Config, S3Credentials, S3Settings};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use aws_sdk_s3::config::Credentials;
+    use aws_smithy_http_client::test_util::capture_request;
+    use tokio::sync::OnceCell;
+    use url::Url;
+
+    use super::super::config::S3Settings;
+    use super::{BehaviorVersion, Builder, Client, Region, S3Client, S3Config, S3Error};
 
     #[test]
-    fn test_s3_error_display_covers_every_variant() {
+    fn test_error_messages_cover_every_variant() {
         assert_eq!(S3Error::NotFound.to_string(), "object not found");
+        assert_eq!(S3Error::AlreadyExists.to_string(), "object already exists");
         assert_eq!(
-            S3Error::Unexpected {
-                status: 403,
-                code: Some("AccessDenied".to_owned()),
-                message: "no".to_owned(),
-            }
-            .to_string(),
-            "s3 responded 403 (AccessDenied): no"
+            S3Error::Conflict.to_string(),
+            "conditional write conflicted with another request"
         );
+        assert_eq!(S3Error::NoSuchUpload.to_string(), "multipart upload no longer exists");
         assert_eq!(
-            S3Error::Unexpected {
-                status: 500,
-                code: None,
-                message: "boom".to_owned(),
-            }
-            .to_string(),
-            "s3 responded 500: boom"
-        );
-        assert_eq!(
-            S3Error::Transport("reset".to_owned()).to_string(),
+            S3Error::Request("reset".to_owned()).to_string(),
             "s3 request failed: reset"
         );
+        assert_eq!(
+            S3Error::InvalidResponse("content length").to_string(),
+            "s3 returned an invalid content length"
+        );
     }
 
-    fn client(endpoint: &str, path_style: bool) -> S3Client {
-        let settings = S3Settings {
-            endpoint: endpoint.to_owned(),
-            bucket: "bucket".to_owned(),
-            prefix: String::new(),
+    #[tokio::test]
+    async fn test_virtual_host_addressing_preserves_the_endpoint_base_path() {
+        let config = S3Config::new(S3Settings {
+            endpoint: "http://localhost:1/api".to_owned(),
+            bucket: "peryx-tests".to_owned(),
+            prefix: "cache".to_owned(),
             region: "us-east-1".to_owned(),
-            path_style,
-            request_timeout: std::time::Duration::from_secs(5),
+            path_style: false,
+            request_timeout: Duration::from_secs(5),
             max_retries: 0,
-            multipart_threshold: 8,
-            part_size: 8,
+            multipart_threshold: 16 << 20,
+            part_size: 8 << 20,
             upload_concurrency: 1,
+        })
+        .unwrap();
+        let (http_client, request) = capture_request(None);
+        let service = S3Client::service_config(
+            &config,
+            Builder::new()
+                .behavior_version(BehaviorVersion::latest())
+                .credentials_provider(Credentials::new("id", "secret", None, None, "test"))
+                .region(Region::new("us-east-1"))
+                .http_client(http_client),
+        );
+        let client = S3Client {
+            config,
+            client: Arc::new(OnceCell::from(Client::from_conf(service))),
         };
-        S3Client::new(
-            S3Config::new(settings).unwrap(),
-            S3Credentials {
-                access_key_id: "a".to_owned(),
-                secret_access_key: "b".to_owned(),
-                session_token: None,
-            },
-        )
-    }
+        let stage = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(stage.path(), b"package").unwrap();
 
-    #[test]
-    fn test_path_style_addresses_the_bucket_in_the_path() {
-        let client = client("https://s3.example.com", true);
-        let (url, host, path) = client.object_url("sha256/key");
-        assert_eq!(host, "s3.example.com");
-        assert_eq!(path, "/bucket/sha256/key");
-        assert_eq!(url.as_str(), "https://s3.example.com/bucket/sha256/key");
-        assert_eq!(client.bucket_url().2, "/bucket");
-    }
+        client
+            .put_file(
+                "cache/sha256/digest",
+                stage.path(),
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            )
+            .await
+            .unwrap();
 
-    #[test]
-    fn test_virtual_host_moves_the_bucket_into_the_host() {
-        let client = client("https://s3.example.com", false);
-        let (url, host, path) = client.object_url("sha256/key");
-        assert_eq!(host, "bucket.s3.example.com");
-        assert_eq!(path, "/sha256/key");
-        assert_eq!(url.host_str().unwrap(), "bucket.s3.example.com");
-        assert_eq!(client.bucket_url().2, "/");
-    }
-
-    #[test]
-    fn test_virtual_host_keeps_a_custom_port() {
-        let client = client("https://s3.example.com:9000", false);
-        assert_eq!(client.object_url("sha256/key").1, "bucket.s3.example.com:9000");
-    }
-
-    #[test]
-    fn test_extract_tag_reads_the_first_match() {
-        assert_eq!(extract_tag("<A>one</A><A>two</A>", "A").as_deref(), Some("one"));
-        assert!(extract_tag("<A>x", "A").is_none());
-        assert!(extract_tag("no tags", "A").is_none());
+        let request = request.expect_request();
+        assert_eq!(request.method(), "PUT");
+        let uri = Url::parse(request.uri()).unwrap();
+        assert_eq!(
+            uri.as_str(),
+            "http://peryx-tests.localhost:1/api/cache/sha256/digest?x-id=PutObject"
+        );
+        assert_eq!(uri.host_str(), Some("peryx-tests.localhost"));
+        assert_eq!(uri.port(), Some(1));
     }
 }

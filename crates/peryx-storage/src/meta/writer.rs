@@ -3,7 +3,7 @@
 //! Claims have no timeout. Failover replaces one known identity atomically, which prevents a delayed
 //! former writer from reclaiming the store without an explicit operator promotion.
 
-use redb::{ReadableDatabase as _, ReadableTable as _};
+use redb::ReadableTable as _;
 
 use super::{MetaError, MetaStore, WRITER, WRITER_KEY, WriterIdentityError};
 

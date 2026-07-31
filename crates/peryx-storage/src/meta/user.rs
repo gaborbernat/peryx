@@ -1,7 +1,7 @@
 use peryx_identity::{
     PasswordVerifier, ServerUser, UserId, UserLifecycleChange, UserLifecycleEvent, UserName, UserNameError, UserState,
 };
-use redb::{ReadableDatabase as _, ReadableTable as _, WriteTransaction};
+use redb::{ReadableTable as _, WriteTransaction};
 
 use super::{MetaError, MetaStore, USER, USER_EVENT, USER_NAME, USER_VERIFIER};
 

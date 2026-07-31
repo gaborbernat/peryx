@@ -4,7 +4,7 @@ use peryx_identity::{
     ExternalIdentity, ExternalIdentityResolution, ExternalIdentityStore, ExternalLinkRequest, GrantScope,
     ManagedRoleGrant, RoleGrant, ServerUser, UserId, UserLifecycleChange, UserLifecycleEvent, UserName, UserState,
 };
-use redb::{ReadableDatabase as _, ReadableTable as _, WriteTransaction};
+use redb::{ReadableTable as _, WriteTransaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 

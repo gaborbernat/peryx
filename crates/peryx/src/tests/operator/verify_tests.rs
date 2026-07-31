@@ -1,3 +1,10 @@
+use std::path::Path;
+
+use peryx_ecosystem_pypi::store::PypiStore as _;
+use peryx_storage::blob::Digest;
+use peryx_storage::meta::MetaStore;
+use rstest::rstest;
+
 use crate::operator;
 
 use super::{blob_relpath, valid_backup};
@@ -5,11 +12,15 @@ use super::{blob_relpath, valid_backup};
 #[test]
 fn test_backup_verify_reports_ok_for_valid_backup() {
     let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    let metadata = backup.join("metadata/peryx.redb");
+    let before = std::fs::read(&metadata).unwrap();
 
     let mut out = Vec::new();
     operator::backup_verify(&backup, &mut out).unwrap();
+    operator::backup_verify(&backup, &mut out).unwrap();
 
-    assert!(String::from_utf8(out).unwrap().contains("ok\n"));
+    assert_eq!(out, b"ok\nok\n");
+    assert_eq!(std::fs::read(metadata).unwrap(), before);
 }
 
 #[test]
@@ -85,6 +96,7 @@ fn test_backup_verify_reports_missing_manifest_files() {
 fn test_backup_verify_reports_corrupt_metadata_store() {
     let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
     std::fs::write(backup.join("metadata/peryx.redb"), b"not a redb database").unwrap();
+    resign_metadata(&backup);
 
     let mut out = Vec::new();
     let err = operator::backup_verify(&backup, &mut out).unwrap_err();
@@ -94,6 +106,121 @@ fn test_backup_verify_reports_corrupt_metadata_store() {
         String::from_utf8(out)
             .unwrap()
             .contains("problem\tmetadata\tmetadata/peryx.redb")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_backup_verify_reports_unreadable_metadata_store() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    let path = backup.join("metadata/peryx.redb");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut out = Vec::new();
+    let result = operator::backup_verify(&backup, &mut out);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let err = result.unwrap_err();
+    let text = String::from_utf8(out).unwrap();
+
+    assert!(err.to_string().contains("backup verification failed"));
+    assert!(text.starts_with("problem\tmetadata\tmetadata/peryx.redb\tI/O error: Permission denied"));
+    assert!(text.ends_with("\nproblems\t1\n"));
+    assert_eq!(text.lines().count(), 2);
+}
+
+#[cfg(unix)]
+#[rstest]
+#[case::config("config.toml")]
+#[case::blob_index("blobs.tsv")]
+fn test_backup_verify_propagates_unreadable_manifest_file(#[case] relative: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    let path = backup.join(relative);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut out = Vec::new();
+    let result = operator::backup_verify(&backup, &mut out);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let err = result.unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::PermissionDenied)
+    );
+    assert!(out.is_empty());
+}
+
+#[test]
+fn test_backup_verify_reports_non_regular_metadata_store() {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    let path = backup.join("metadata/peryx.redb");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let mut out = Vec::new();
+    let err = operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(err.to_string().contains("backup verification failed"));
+    assert_eq!(out, b"problem\tmetadata\tmetadata/peryx.redb\tmissing\nproblems\t1\n");
+}
+
+#[rstest]
+#[case::valid_but_modified(modify_metadata_store, "sha256 expected")]
+#[case::size_mismatch(modify_metadata_size, "size expected 0")]
+fn test_backup_verify_reports_metadata_mismatch(#[case] modify: fn(&Path), #[case] expected: &str) {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    modify(&backup);
+
+    let mut out = Vec::new();
+    let err = operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(err.to_string().contains("backup verification failed"));
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains(&format!("problem\tmetadata\tmetadata/peryx.redb\t{expected}"))
+    );
+}
+
+#[rstest]
+#[case::missing_config(remove_config)]
+#[case::missing_blob_index(remove_blob_index)]
+#[case::missing_metadata(remove_metadata)]
+#[case::sha_mismatch(modify_metadata_store)]
+#[case::size_mismatch(modify_metadata_size)]
+fn test_backup_verify_propagates_report_error(#[case] modify: fn(&Path)) {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    modify(&backup);
+
+    let mut out: &mut [u8] = &mut [];
+    let err = operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::WriteZero)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_backup_verify_propagates_unreadable_metadata_report_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    let path = backup.join("metadata/peryx.redb");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut out: &mut [u8] = &mut [];
+    let result = operator::backup_verify(&backup, &mut out);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let err = result.unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::WriteZero)
     );
 }
 
@@ -166,7 +293,40 @@ fn test_backup_verify_reports_blob_size_mismatch() {
     assert!(String::from_utf8(out).unwrap().contains("size expected 999"));
 }
 
-fn mutate_manifest(backup: &std::path::Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+fn modify_metadata_store(backup: &Path) {
+    MetaStore::open_existing(backup.join("metadata/peryx.redb"))
+        .unwrap()
+        .put_upload("hosted", "broken", "broken.whl", b"invalid")
+        .unwrap();
+}
+
+fn remove_config(backup: &Path) {
+    std::fs::remove_file(backup.join("config.toml")).unwrap();
+}
+
+fn remove_blob_index(backup: &Path) {
+    std::fs::remove_file(backup.join("blobs.tsv")).unwrap();
+}
+
+fn remove_metadata(backup: &Path) {
+    std::fs::remove_file(backup.join("metadata/peryx.redb")).unwrap();
+}
+
+fn modify_metadata_size(backup: &Path) {
+    mutate_manifest(backup, |manifest| {
+        manifest["metadata"]["size_bytes"] = serde_json::json!(0);
+    });
+}
+
+fn resign_metadata(backup: &Path) {
+    let bytes = std::fs::read(backup.join("metadata/peryx.redb")).unwrap();
+    mutate_manifest(backup, |manifest| {
+        manifest["metadata"]["sha256"] = serde_json::json!(Digest::of(&bytes).as_str());
+        manifest["metadata"]["size_bytes"] = serde_json::json!(bytes.len());
+    });
+}
+
+fn mutate_manifest(backup: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
     let path = backup.join("manifest.json");
     let mut manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     mutate(&mut manifest);

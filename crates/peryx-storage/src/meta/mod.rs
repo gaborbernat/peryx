@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadOnlyDatabase, ReadableDatabase as _, TableDefinition};
 
 mod analytics;
 mod bootstrap;
@@ -120,7 +120,41 @@ impl DriverBatch {
 /// The metadata store.
 #[derive(Debug, Clone)]
 pub struct MetaStore {
-    db: Arc<Database>,
+    db: Arc<MetaDatabase>,
+}
+
+enum MetaDatabase {
+    ReadWrite(Database),
+    ReadOnly(ReadOnlyDatabase),
+}
+
+impl std::fmt::Debug for MetaDatabase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ReadWrite(_) => "ReadWrite",
+            Self::ReadOnly(_) => "ReadOnly",
+        })
+    }
+}
+
+impl MetaDatabase {
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        match self {
+            Self::ReadWrite(db) => db.begin_read(),
+            Self::ReadOnly(db) => db.begin_read(),
+        }
+    }
+
+    fn begin_write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
+        match self {
+            Self::ReadWrite(db) => db.begin_write(),
+            Self::ReadOnly(_) => Err(redb::StorageError::from(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "metadata store is read-only",
+            ))
+            .into()),
+        }
+    }
 }
 
 impl MetaStore {
@@ -164,7 +198,9 @@ impl MetaStore {
             txn.open_table(DIGEST_REVOCATION_STATE)?;
         }
         txn.commit()?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(MetaDatabase::ReadWrite(db)),
+        })
     }
 
     /// Open an existing database without creating files or tables.
@@ -173,7 +209,17 @@ impl MetaStore {
     /// Returns a store error if the database cannot be opened.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, MetaError> {
         Ok(Self {
-            db: Arc::new(Database::open(path)?),
+            db: Arc::new(MetaDatabase::ReadWrite(Database::open(path)?)),
+        })
+    }
+
+    /// Open an existing database without permitting writes or modifying its file.
+    ///
+    /// # Errors
+    /// Returns a store error if the database cannot be opened read-only.
+    pub fn open_existing_read_only(path: impl AsRef<Path>) -> Result<Self, MetaError> {
+        Ok(Self {
+            db: Arc::new(MetaDatabase::ReadOnly(ReadOnlyDatabase::open(path)?)),
         })
     }
 }

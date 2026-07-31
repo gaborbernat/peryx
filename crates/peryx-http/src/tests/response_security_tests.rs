@@ -13,6 +13,10 @@ use crate::response_security::{
     None,
     serde_json::json!({"version": "0.0.1"})
 )]
+#[case::repository_reader(
+    Some((Role::RepositoryReader, Scope::RepositoryRead)),
+    serde_json::json!({"project": "private-package", "version": "0.0.1"})
+)]
 #[case::operator(
     Some((Role::Operator, Scope::OperatorRead)),
     serde_json::json!({"queue_depth": 4, "version": "0.0.1"})
@@ -24,6 +28,7 @@ use crate::response_security::{
 #[case::administrator(
     Some((Role::Administrator, Scope::AdministrationRead)),
     serde_json::json!({
+        "project": "private-package",
         "queue_depth": 4,
         "signing_key_state": {"configured": true},
         "version": "0.0.1",
@@ -32,6 +37,7 @@ use crate::response_security::{
 #[case::administrator_write(
     Some((Role::Administrator, Scope::AdministrationWrite)),
     serde_json::json!({
+        "project": "private-package",
         "queue_depth": 4,
         "signing_key_state": {"configured": true},
         "version": "0.0.1",
@@ -55,8 +61,11 @@ fn test_filter_fields_denies_a_role_without_the_checked_scope() {
 }
 
 #[test]
-fn test_filter_fields_denies_a_repository_scope() {
-    assert_response_denied(authorized(Role::Administrator, Scope::RepositoryRead));
+fn test_filter_fields_accepts_an_authorized_repository_token() {
+    assert_eq!(
+        filter_fields(ResponseAuthorization::Repository, fixture()).unwrap(),
+        serde_json::from_value(serde_json::json!({"project": "private-package", "version": "0.0.1"})).unwrap()
+    );
 }
 
 #[test]
@@ -141,6 +150,11 @@ fn authorized_on(role: Role, scope: Scope, resource: &Resource) -> ScopedDecisio
 fn fixture() -> Vec<ClassifiedField> {
     vec![
         ClassifiedField::new("version", FieldClassification::Public, serde_json::json!("0.0.1")),
+        ClassifiedField::new(
+            "project",
+            FieldClassification::Repository,
+            serde_json::json!("private-package"),
+        ),
         ClassifiedField::new("queue_depth", FieldClassification::Operator, serde_json::json!(4)),
         ClassifiedField::new(
             "signing_key_state",

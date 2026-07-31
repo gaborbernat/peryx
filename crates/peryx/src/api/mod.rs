@@ -75,7 +75,7 @@ pub fn openapi() -> OpenApi {
                         HttpBuilder::new()
                             .scheme(HttpAuthScheme::Basic)
                             .description(Some(
-                                "A local server user's display name and password. Digest revocation operations require the administrator role.",
+                                "A local server user's display name and password. Each operation checks the user's role against its protected resource.",
                             ))
                             .build(),
                     ),

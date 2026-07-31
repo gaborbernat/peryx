@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldClassification {
     Public,
+    Repository,
     Operator,
     Administrator,
 }
@@ -19,23 +20,28 @@ impl FieldClassification {
         matches!(
             (self, audience),
             (Self::Public, _)
+                | (Self::Repository, Self::Repository | Self::Administrator)
                 | (Self::Operator, Self::Operator | Self::Administrator)
                 | (Self::Administrator, Self::Administrator)
         )
     }
 }
 
-/// Public access or a decision bound to the server-data scope that produced it.
+/// Public access, an allowed repository token, or a role decision bound to the checked scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseAuthorization {
     Public,
+    /// The caller passed a repository's token ACL before response construction.
+    Repository,
     Scoped(ScopedDecision),
 }
 
 impl ResponseAuthorization {
     const fn classification(self) -> Result<FieldClassification, ResponseDenied> {
-        let Self::Scoped(authorization) = self else {
-            return Ok(FieldClassification::Public);
+        let authorization = match self {
+            Self::Public => return Ok(FieldClassification::Public),
+            Self::Repository => return Ok(FieldClassification::Repository),
+            Self::Scoped(authorization) => authorization,
         };
         if !authorization.decision().is_allowed() {
             return Err(ResponseDenied);
@@ -49,7 +55,7 @@ impl ResponseAuthorization {
             }
             peryx_identity::Scope::RepositoryRead
             | peryx_identity::Scope::RepositoryWrite
-            | peryx_identity::Scope::RepositoryDelete => Err(ResponseDenied),
+            | peryx_identity::Scope::RepositoryDelete => Ok(FieldClassification::Repository),
         }
     }
 }

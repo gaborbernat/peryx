@@ -3,11 +3,13 @@
 //! The server builds them from `AppState`; the browser rebuilds them from peryx's own JSON API
 //! (`/+status` and the PEP 691 simple endpoints), so both sides render identical pages.
 
+mod policy_decision;
 mod project;
 mod search;
 mod snapshot;
 mod stats;
 
+pub use policy_decision::{PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage};
 pub use project::{
     UiArtifactRef, UiFile, UiManifest, UiMember, UiMemberChunk, UiProject, UiProjectStatus, UiProjectView, UiRelease,
     members_from_listing, projects_from_list,

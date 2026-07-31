@@ -91,6 +91,36 @@ impl Default for PolicyDecisionQuery {
     }
 }
 
+impl PolicyDecisionQuery {
+    /// Validate pagination and bounded text filters without reading storage.
+    ///
+    /// # Errors
+    /// Returns the first invalid limit, cursor, or text filter.
+    pub fn validate(&self) -> Result<(), PolicyDecisionQueryError> {
+        if !(1..=MAX_QUERY_LIMIT).contains(&self.limit) {
+            return Err(PolicyDecisionQueryError::InvalidLimit);
+        }
+        if let Some(cursor) = &self.cursor
+            && !valid_cursor(cursor)
+        {
+            return Err(PolicyDecisionQueryError::InvalidCursor);
+        }
+        for (field, value) in [
+            ("repository", self.repository.as_deref()),
+            ("rule", self.rule.as_deref()),
+            ("source", self.source.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.len() > MAX_SUBJECT_BYTES) {
+                return Err(PolicyDecisionQueryError::FilterTooLong {
+                    field,
+                    max: MAX_SUBJECT_BYTES,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PolicyDecisionPage {
     pub decisions: Vec<PolicyDecisionItem>,
@@ -123,6 +153,8 @@ pub enum PolicyDecisionQueryError {
     InvalidLimit,
     #[error("invalid policy decision cursor")]
     InvalidCursor,
+    #[error("{field} filter exceeds {max} bytes")]
+    FilterTooLong { field: &'static str, max: usize },
 }
 
 impl MetaStore {
@@ -293,20 +325,13 @@ impl MetaStore {
     /// Query bounded decision history newest first with an exclusive stable cursor.
     ///
     /// # Errors
-    /// Returns a validation error for an invalid limit or cursor, or a store error if a record cannot
-    /// be read or decoded.
+    /// Returns a validation error for an invalid limit, cursor, or oversized text filter, or a store
+    /// error if a record cannot be read or decoded.
     pub fn query_policy_decisions(
         &self,
         query: &PolicyDecisionQuery,
     ) -> Result<PolicyDecisionPage, PolicyDecisionQueryError> {
-        if !(1..=MAX_QUERY_LIMIT).contains(&query.limit) {
-            return Err(PolicyDecisionQueryError::InvalidLimit);
-        }
-        if let Some(cursor) = &query.cursor
-            && !valid_cursor(cursor)
-        {
-            return Err(PolicyDecisionQueryError::InvalidCursor);
-        }
+        query.validate()?;
         let txn = self.db.begin_read().map_err(MetaError::from)?;
         let history = txn.open_table(POLICY_DECISION).map_err(MetaError::from)?;
         let generations = txn.open_table(POLICY_INPUT_GENERATION).map_err(MetaError::from)?;

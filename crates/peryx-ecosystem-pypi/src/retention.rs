@@ -25,10 +25,13 @@ use crate::{Yanked, error_message};
 /// Evaluate one index's hosted uploads against `policy`.
 ///
 /// Each artifact's decision passes to `emit` in deterministic order (newest version first). Returns the
-/// plan's identity: the policy version and the metadata frontier the scan read.
+/// plan's identity: the policy version and the metadata frontier the scan read. `emit` returns a
+/// message to stop early (a disconnected export client or a filled page), and the scan aborts without
+/// reading further; the whole path only reads metadata, so an interrupted plan writes nothing.
 ///
 /// # Errors
-/// Returns a message when the store cannot be read or an upload record does not decode.
+/// Returns a message when the store cannot be read, an upload record does not decode, or `emit` stops
+/// the scan.
 pub fn evaluate_retention<F>(
     meta: &MetaStore,
     index: &str,
@@ -37,7 +40,7 @@ pub fn evaluate_retention<F>(
     mut emit: F,
 ) -> Result<RetentionSummary, String>
 where
-    F: FnMut(RetentionDecision),
+    F: FnMut(RetentionDecision) -> Result<(), String>,
 {
     let mut current: Option<String> = None;
     let mut group: Vec<Uploaded> = Vec::new();
@@ -47,7 +50,7 @@ where
         };
         if current.as_deref() != Some(project) {
             if let Some(name) = current.take() {
-                plan_group(&name, &group, policy, now, &mut emit);
+                plan_group(&name, &group, policy, now, &mut emit)?;
             }
             current = Some(project.to_owned());
             group.clear();
@@ -59,7 +62,7 @@ where
     })
     .map_err(error_message)?;
     if let Some(name) = current {
-        plan_group(&name, &group, policy, now, &mut emit);
+        plan_group(&name, &group, policy, now, &mut emit).map_err(error_message)?;
     }
     Ok(RetentionSummary {
         policy_version: policy.version(),
@@ -71,13 +74,20 @@ where
     })
 }
 
-fn plan_group<F>(project: &str, group: &[Uploaded], policy: &RetentionPolicy, now: Option<i64>, emit: &mut F)
+fn plan_group<F>(
+    project: &str,
+    group: &[Uploaded],
+    policy: &RetentionPolicy,
+    now: Option<i64>,
+    emit: &mut F,
+) -> Result<(), String>
 where
-    F: FnMut(RetentionDecision),
+    F: FnMut(RetentionDecision) -> Result<(), String>,
 {
     for decision in policy.plan_project(now, candidates(project, group)) {
-        emit(decision);
+        emit(decision)?;
     }
+    Ok(())
 }
 
 fn candidates(project: &str, group: &[Uploaded]) -> Vec<RetentionCandidate> {
@@ -189,7 +199,11 @@ mod tests {
 
     fn plan(meta: &MetaStore, index: &str, policy: &RetentionPolicy) -> (Vec<RetentionDecision>, RetentionFrontier) {
         let mut decisions = Vec::new();
-        let summary = evaluate_retention(meta, index, policy, None, |decision| decisions.push(decision)).unwrap();
+        let summary = evaluate_retention(meta, index, policy, None, |decision| {
+            decisions.push(decision);
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(summary.policy_version, policy.version());
         (decisions, summary.frontier)
     }
@@ -326,11 +340,35 @@ mod tests {
     #[test]
     fn test_evaluate_retention_rejects_a_corrupt_upload_record() {
         let (_dir, meta) = store();
+        // An earlier, valid project flushes through `emit` before the corrupt record aborts the scan,
+        // so the emit path runs and the failure still surfaces.
+        seed(&meta, "pypi", "aaa", "1.0", Yanked::No, None);
         meta.put_upload("pypi", "demo", "demo-1.0.whl", b"not json").unwrap();
 
-        let result = evaluate_retention(&meta, "pypi", &expire_all_but_latest(1), None, |_| ());
+        let mut seen = 0_u32;
+        let result = evaluate_retention(&meta, "pypi", &expire_all_but_latest(1), None, |_| {
+            seen += 1;
+            Ok(())
+        });
 
+        assert_eq!(seen, 1);
         assert!(result.unwrap_err().contains("corrupt upload record"));
+    }
+
+    #[test]
+    fn test_evaluate_retention_stops_the_scan_when_emit_returns_an_error() {
+        let (_dir, meta) = store();
+        seed(&meta, "pypi", "demo", "2.0", Yanked::No, None);
+        seed(&meta, "pypi", "demo", "1.0", Yanked::No, None);
+
+        let mut seen = 0_u32;
+        let result = evaluate_retention(&meta, "pypi", &expire_all_but_latest(1), None, |_| {
+            seen += 1;
+            Err("client hung up".to_owned())
+        });
+
+        assert_eq!(seen, 1);
+        assert!(result.unwrap_err().contains("client hung up"));
     }
 
     #[test]

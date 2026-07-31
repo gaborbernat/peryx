@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Parser as _;
 
 use super::parse;
-use crate::cli::{Cli, Command, RuntimeArgs};
+use crate::cli::{Cli, Command, RetentionCommand, RuntimeArgs};
 use crate::config::{LogFormat, LogSink};
 
 fn runtime(cli: Cli) -> RuntimeArgs {
@@ -19,6 +19,7 @@ fn runtime(cli: Cli) -> RuntimeArgs {
         Command::Restore(_) => panic!("restore takes explicit data-dir args"),
         Command::ImportDir(_) => panic!("import-dir carries nested runtime args"),
         Command::Policy(_) => panic!("policy commands carry nested runtime args"),
+        Command::Retention(_) => panic!("retention commands carry nested runtime args"),
         Command::Writer(_) => panic!("writer commands carry nested runtime args"),
         Command::Prefetch(_) => panic!("prefetch commands carry nested runtime args"),
         other @ Command::Openapi => panic!("no runtime args on {other:?}"),
@@ -103,6 +104,46 @@ fn test_verbose_maps_to_levels() {
 fn test_explicit_log_level_beats_verbose() {
     let cli = parse(&["peryx", "serve", "--log-level", "warn", "-vv"]);
     assert_eq!(runtime(cli).overlay().log.level.as_deref(), Some("warn"));
+}
+
+#[test]
+fn test_parse_retention_dry_run_and_export_carry_runtime_args() {
+    let dry_run = parse(&[
+        "peryx",
+        "retention",
+        "dry-run",
+        "--index",
+        "hosted",
+        "--rules",
+        "r.toml",
+        "--limit",
+        "5",
+        "--cursor",
+        "c",
+        "--data-dir",
+        "/d",
+    ]);
+    let Command::Retention(command @ RetentionCommand::DryRun(_)) = dry_run.command else {
+        panic!("expected a dry-run command");
+    };
+    assert_eq!(
+        command.runtime_args().data_dir.as_deref(),
+        Some(PathBuf::from("/d").as_path())
+    );
+    if let RetentionCommand::DryRun(args) = &command {
+        assert_eq!(args.index, "hosted");
+        assert_eq!(args.limit, Some(5));
+        assert_eq!(args.cursor.as_deref(), Some("c"));
+    }
+
+    let export = parse(&["peryx", "retention", "export", "--index", "hosted", "--data-dir", "/e"]);
+    let Command::Retention(command @ RetentionCommand::Export(_)) = export.command else {
+        panic!("expected an export command");
+    };
+    assert_eq!(
+        command.runtime_args().data_dir.as_deref(),
+        Some(PathBuf::from("/e").as_path())
+    );
 }
 
 #[test]

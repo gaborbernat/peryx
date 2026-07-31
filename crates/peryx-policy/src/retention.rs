@@ -245,18 +245,22 @@ pub struct RetentionDecision {
     pub retained_alternatives: Vec<String>,
 }
 
-/// The metadata snapshot a plan evaluated, so stale input is rejectable later. It mirrors the storage
-/// policy-input generation an adapter reads.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+/// The metadata snapshot a plan evaluated, so stale input is rejectable later.
+///
+/// It mirrors the storage policy-input generation an adapter reads, and round-trips through a plan
+/// cursor, so a resumed export carries the frontier it must still match.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionFrontier {
     pub repository: u64,
     pub catalog: u64,
     pub policy: u64,
 }
 
-/// A plan's identity header: the policy that produced it and the metadata snapshot it read. An adapter
-/// emits it once alongside the streamed decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// A plan's identity header: the policy that produced it and the metadata snapshot it read.
+///
+/// An adapter emits it once alongside the streamed decisions, and a resumed export presents it back to
+/// prove its inputs have not shifted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetentionSummary {
     pub policy_version: u64,
     pub frontier: RetentionFrontier,

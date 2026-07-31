@@ -21,6 +21,7 @@ peryx <COMMAND>
 | `restore`        | Restore an offline backup into a data directory                                       |
 | `import-dir`     | Import local wheels and sdists into a hosted index                                    |
 | `policy`         | Preview index policy decisions against cached records                                 |
+| `retention`      | Preview and export a repository's [retention plan](@/core/retention.md)               |
 | `writer`         | Promote a replacement writer during manual failover                                   |
 | `mirror`         | Plan, populate, and verify mirror cache contents                                      |
 | `openapi`        | Print the [OpenAPI](https://www.openapis.org/) description of the HTTP API as JSON    |
@@ -231,6 +232,29 @@ serve   pypi   flask             project-block-list  project  project "flask" is
 
 It does not fetch upstreams and does not change the served index. Use it after editing `[index.policy]` and before
 running `serve` with the same config.
+
+## `retention`
+
+Retention commands read the same config and `--data-dir` flags as `serve`, load rules from a `--rules` TOML file in the
+[retention configuration form](@/core/retention.md#rules), and change no metadata.
+
+```shell
+peryx retention dry-run --index root/pypi --rules retention.toml --limit 100
+peryx retention export --index root/pypi --rules retention.toml > plan.jsonl
+```
+
+`retention dry-run` prints one page of tab-separated candidates, then a `summary` row and, when the page fills, a
+`next-cursor` row to resume from:
+
+```text
+action  project  version  artifact                        digest      class   visibility  bytes  rule
+remove  example  1.0      example-1.0-py3-none-any.whl     sha256:012  hosted  active      20480  age
+summary policy_version=42  repository=7  catalog=3  policy=2
+```
+
+`retention export` streams the whole plan as JSON Lines, the identity first, matching the HTTP export. See
+[Retention plans](@/core/retention.md#preview-and-export-from-the-cli) for pagination, resumable export, and the
+side-effect-free contract.
 
 ## `writer`
 

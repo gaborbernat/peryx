@@ -12,6 +12,7 @@ mod dispatch;
 mod oidc;
 mod policy_decisions;
 mod query;
+mod retention;
 mod revocations;
 mod status;
 mod ui;
@@ -28,6 +29,7 @@ pub use dispatch::{dispatch_delete, dispatch_get, dispatch_post, dispatch_put, n
 pub use oidc::{oidc_audience, oidc_mint_token};
 pub use policy_decisions::{PolicyDecisionsQuery, policy_decision_error_response, policy_decisions};
 pub use query::{search, search_error_response, search_response, search_response_offloaded};
+pub use retention::{retention_export, retention_plan};
 pub use revocations::{DigestRevocationsQuery, inspect_revocation, lift_revocation, list_revocations, put_revocation};
 pub use status::{ReadinessQuery, StatusQuery, health, readiness, status};
 pub use ui::{ui_manifest, ui_member, ui_members, ui_project, ui_projects};

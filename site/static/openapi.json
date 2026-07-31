@@ -909,6 +909,258 @@
         ]
       }
     },
+    "/+retention/export": {
+      "post": {
+        "description": "Streams the whole plan as JSON Lines: a first line carrying the `summary` identity, then one candidate per line. The `ETag` is the plan identity, and the export is resumable from its documented boundary by presenting a prior page's `cursor`, which is refused when the repository has changed. The stream is unique to one snapshot, so byte ranges do not apply. Requires a local administrator.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "cursor": null,
+                "expire": [
+                  {
+                    "older_than_seconds": 7776000,
+                    "selector": "age"
+                  }
+                ],
+                "keep": [
+                  {
+                    "count": 3,
+                    "selector": "keep-latest"
+                  }
+                ],
+                "limit": 100,
+                "repository": "root/pypi"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "example": "{\"summary\":{\"policy_version\":42,\"frontier\":{\"repository\":7,\"catalog\":3,\"policy\":2}}}\n{\"project\":\"example\",\"version\":\"1.0\",\"artifact\":\"example-1.0-py3-none-any.whl\",\"digest\":\"sha256:0123\",\"class\":\"hosted\",\"visibility\":\"active\",\"bytes\":20480,\"outcome\":\"remove\",\"rule\":\"age\"}\n"
+              }
+            },
+            "description": "The plan as JSON Lines, the identity first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid retention plan cursor"
+                }
+              }
+            },
+            "description": "The cursor is invalid"
+          },
+          "401": {
+            "description": "No valid local administrator credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot inspect the repository, or it plans no retention"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "the plan cursor is stale: the repository changed"
+                }
+              }
+            },
+            "description": "The cursor is stale: the repository changed since it was issued"
+          },
+          "413": {
+            "description": "The request exceeds the fixed body limit"
+          },
+          "415": {
+            "description": "The request is not JSON"
+          },
+          "422": {
+            "description": "The JSON request body is invalid"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "too many concurrent retention plans for this repository"
+                }
+              }
+            },
+            "description": "Too many concurrent plans for this repository"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "retention plan failed"
+                }
+              }
+            },
+            "description": "The plan could not be read"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "retention service unavailable"
+                }
+              }
+            },
+            "description": "Authentication storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Export a repository retention plan",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+retention/plan": {
+      "post": {
+        "description": "Evaluates the supplied keep/expire rules against one repository and returns a bounded, ordered page of removal candidates without changing any metadata or blob. `summary` carries the policy version and metadata frontier the page read; `next_cursor` resumes the next page and, presented back, rejects a plan whose repository has since changed. Requires a local administrator.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "cursor": null,
+                "expire": [
+                  {
+                    "older_than_seconds": 7776000,
+                    "selector": "age"
+                  }
+                ],
+                "keep": [
+                  {
+                    "count": 3,
+                    "selector": "keep-latest"
+                  }
+                ],
+                "limit": 100,
+                "repository": "root/pypi"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "candidates": [
+                    {
+                      "artifact": "example-1.0-py3-none-any.whl",
+                      "bytes": 20480,
+                      "class": "hosted",
+                      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      "outcome": "remove",
+                      "project": "example",
+                      "retained_alternatives": [
+                        "2.0"
+                      ],
+                      "rule": "age",
+                      "version": "1.0",
+                      "visibility": "active"
+                    }
+                  ],
+                  "next_cursor": null,
+                  "summary": {
+                    "frontier": {
+                      "catalog": 3,
+                      "policy": 2,
+                      "repository": 7
+                    },
+                    "policy_version": 42
+                  }
+                }
+              }
+            },
+            "description": "One ordered page of candidates"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 1000"
+                }
+              }
+            },
+            "description": "The cursor or limit is invalid"
+          },
+          "401": {
+            "description": "No valid local administrator credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot inspect the repository, or it plans no retention"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "the plan cursor is stale: the repository changed"
+                }
+              }
+            },
+            "description": "The cursor is stale: the repository changed since it was issued"
+          },
+          "413": {
+            "description": "The request exceeds the fixed body limit"
+          },
+          "415": {
+            "description": "The request is not JSON"
+          },
+          "422": {
+            "description": "The JSON request body is invalid"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "too many concurrent retention plans for this repository"
+                }
+              }
+            },
+            "description": "Too many concurrent plans for this repository"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "retention plan failed"
+                }
+              }
+            },
+            "description": "The plan could not be read"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "retention service unavailable"
+                }
+              }
+            },
+            "description": "Authentication storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Preview a repository retention plan",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+revocations": {
       "get": {
         "description": "Returns a bounded page of current records in canonical digest order. Lifted records remain visible to administrators.",

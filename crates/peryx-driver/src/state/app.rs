@@ -92,6 +92,9 @@ pub struct ServingState {
     pub trusted_publishing: Option<Arc<dyn peryx_identity::IdentityExchange>>,
     /// Named LDAP login services. Authentication routes can select one without knowing its bind mode.
     pub(super) ldap_logins: HashMap<String, Arc<peryx_identity::LdapLoginService<MetaStore>>>,
+    /// Per-repository concurrency bound on retention-plan previews, so one repository's full-scan
+    /// previews cannot starve the rest.
+    pub retention_gates: crate::retention::RetentionGates,
 }
 
 /// The whole process state: the serving data every handler needs, plus the driver registry only the

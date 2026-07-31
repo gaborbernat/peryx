@@ -312,6 +312,10 @@ fn main() -> anyhow::Result<()> {
             let config = resolve_config(command.runtime_args())?;
             app::policy(&config, &command, &mut std::io::stdout())
         }
+        peryx::cli::Command::Retention(command) => {
+            let config = resolve_config(command.runtime_args())?;
+            app::retention(&config, &command, &mut std::io::stdout())
+        }
         peryx::cli::Command::Writer(command) => {
             let config = resolve_config(command.runtime_args())?;
             match command {

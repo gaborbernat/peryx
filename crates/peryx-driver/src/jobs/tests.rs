@@ -8,14 +8,16 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use peryx_core::Ecosystem;
 use peryx_storage::blob::BlobStore;
-use peryx_storage::meta::{JobKind, JobState, MetaStore};
+use peryx_storage::meta::{FinishJobRun, JobKind, JobOutcome, JobRunQuery, JobState, MetaStore, NewJobRun};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber as _;
 
+use super::attempts::{JobAttemptControl, JobAttemptError};
 use super::scheduler::{JobLimits, Submit};
 use super::{
-    CACHE_MAINTENANCE, CatalogSyncParameters, JobContext, JobReport, JobScheduler, MaintenanceJob, NodeJob, Schedule,
-    ScheduledJob, run_schedules, scheduled_job, submit_maintenance,
+    CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, JobContext, JobFailure, JobHistoryCleanup, JobReport,
+    JobScheduler, MaintenanceJob, NodeJob, Schedule, ScheduledJob, run_schedules, scheduled_job, submit_maintenance,
 };
 use crate::serving::{EcosystemDriver, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
@@ -40,18 +42,31 @@ fn limits(workers: usize, queue: usize, per_kind: usize, per_repository: usize) 
     }
 }
 
+fn job_runs(meta: &MetaStore) -> Vec<peryx_storage::meta::JobRunRecord> {
+    meta.query_job_runs(&JobRunQuery {
+        cursor: None,
+        limit: 100,
+    })
+    .unwrap()
+    .runs
+}
+
 /// The behaviour a [`TestJob`] carries out once it starts running.
 enum Action {
     Return(Result<JobReport, String>),
     Block(Arc<Notify>),
     UntilCancelled,
+    FailWhenCancelled,
     SleepIgnoringCancel(Duration),
+    FinishExternally,
+    Panic,
 }
 
 /// A job with observable start and run count, for driving the scheduler through its states.
 struct TestJob {
     kind: &'static str,
     scope: String,
+    repository: Option<String>,
     persist: Option<JobKind>,
     action: Action,
     started: Arc<Notify>,
@@ -63,6 +78,7 @@ impl TestJob {
         Arc::new(Self {
             kind,
             scope: scope.to_owned(),
+            repository: None,
             persist: None,
             action,
             started: Arc::new(Notify::new()),
@@ -74,7 +90,20 @@ impl TestJob {
         Arc::new(Self {
             kind,
             scope: scope.to_owned(),
+            repository: None,
             persist: Some(JobKind::CacheRefresh),
+            action,
+            started: Arc::new(Notify::new()),
+            ran: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn persisting_repository(kind: &'static str, scope: &str, repository: &str, action: Action) -> Arc<Self> {
+        Arc::new(Self {
+            kind,
+            scope: scope.to_owned(),
+            repository: Some(repository.to_owned()),
+            persist: Some(JobKind::CatalogSync),
             action,
             started: Arc::new(Notify::new()),
             ran: Arc::new(AtomicUsize::new(0)),
@@ -92,15 +121,19 @@ impl NodeJob for TestJob {
         &self.scope
     }
 
+    fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
+    }
+
     fn persist_as(&self) -> Option<JobKind> {
         self.persist
     }
 
-    async fn run(&self, ctx: &JobContext) -> Result<JobReport, String> {
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
         self.ran.fetch_add(1, Ordering::SeqCst);
         self.started.notify_one();
         match &self.action {
-            Action::Return(result) => result.clone(),
+            Action::Return(result) => result.clone().map_err(|message| JobFailure::new("test", message)),
             Action::Block(release) => {
                 release.notified().await;
                 Ok(JobReport::default())
@@ -109,10 +142,27 @@ impl NodeJob for TestJob {
                 ctx.cancelled().await;
                 Ok(JobReport::default())
             }
+            Action::FailWhenCancelled => {
+                ctx.cancelled().await;
+                Err(JobFailure::new("test", "cancelled at boundary"))
+            }
             Action::SleepIgnoringCancel(duration) => {
                 tokio::time::sleep(*duration).await;
                 Ok(JobReport::default())
             }
+            Action::FinishExternally => {
+                let id = job_runs(&ctx.state().meta)
+                    .into_iter()
+                    .find(|run| run.state == JobState::Running)
+                    .unwrap()
+                    .id;
+                ctx.state()
+                    .meta
+                    .finish_job_run(&id, JobOutcome::succeeded(1_000, 0, 0))
+                    .unwrap();
+                Ok(JobReport::default())
+            }
+            Action::Panic => panic!("test panic"),
         }
     }
 }
@@ -122,6 +172,7 @@ struct StubDriver {
     ecosystem: Ecosystem,
     reclaim: usize,
     refresh: Result<RefreshSweep, String>,
+    scheduled: Option<Arc<dyn NodeJob>>,
     reclaim_calls: Arc<AtomicUsize>,
     refresh_calls: Arc<AtomicUsize>,
     refresh_started: Arc<Notify>,
@@ -136,6 +187,7 @@ impl StubDriver {
             ecosystem: Ecosystem::Pypi,
             reclaim,
             refresh,
+            scheduled: None,
             reclaim_calls: Arc::new(AtomicUsize::new(0)),
             refresh_calls: Arc::new(AtomicUsize::new(0)),
             refresh_started: Arc::new(Notify::new()),
@@ -149,12 +201,21 @@ impl StubDriver {
             ..Self::new(reclaim, refresh)
         }
     }
+
+    fn with_scheduled(mut self, job: Arc<dyn NodeJob>) -> Self {
+        self.scheduled = Some(job);
+        self
+    }
 }
 
 #[async_trait]
 impl EcosystemDriver for StubDriver {
     fn ecosystem(&self) -> Ecosystem {
         self.ecosystem
+    }
+
+    fn node_job(&self, _job: &ScheduledJob) -> Option<Result<Arc<dyn NodeJob>, String>> {
+        self.scheduled.clone().map(Ok)
     }
 
     fn classify_route(&self, _path: &str) -> crate::rate_limit::RouteClass {
@@ -198,6 +259,13 @@ async fn await_metric(scheduler: &JobScheduler, needle: &str) {
     }
 }
 
+fn test_subscriber() -> impl tracing::Subscriber + Send + Sync {
+    tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::TRACE)
+        .finish()
+}
+
 #[tokio::test]
 async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
     let (_dir, state) = serving();
@@ -217,7 +285,7 @@ async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
     )
     .await;
     assert_eq!(job.ran.load(Ordering::SeqCst), 1);
-    assert!(state.meta.list_job_runs().unwrap().is_empty());
+    assert!(job_runs(&state.meta).is_empty());
     scheduler.shutdown().await;
 }
 
@@ -233,6 +301,7 @@ async fn test_run_waits_for_and_returns_a_jobs_report() {
     assert_eq!(
         scheduler
             .run(TestJob::new("probe", "a", Action::Return(Ok(report))))
+            .with_subscriber(test_subscriber())
             .await
             .unwrap(),
         report
@@ -240,9 +309,10 @@ async fn test_run_waits_for_and_returns_a_jobs_report() {
     assert_eq!(
         scheduler
             .run(TestJob::new("probe", "b", Action::Return(Err("boom".to_owned()))))
+            .with_subscriber(test_subscriber())
             .await
             .unwrap_err(),
-        "boom"
+        "test: boom"
     );
     scheduler.shutdown().await;
 }
@@ -381,6 +451,334 @@ async fn test_submitting_after_shutdown_is_refused() {
 }
 
 #[tokio::test]
+async fn test_cancel_job_run_signals_only_the_selected_attempt() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+    let selected = TestJob::persisting("probe", "selected", Action::UntilCancelled);
+    let other = TestJob::persisting("probe", "other", Action::UntilCancelled);
+    scheduler.submit(selected.clone());
+    scheduler.submit(other.clone());
+    selected.started.notified().await;
+    other.started.notified().await;
+    let selected_id = job_runs(&state.meta)
+        .into_iter()
+        .find(|run| run.scope == "selected")
+        .unwrap()
+        .id;
+
+    assert_eq!(scheduler.cancel_job_run(&selected_id).unwrap(), CancelJobRun::Requested);
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"probe\",outcome=\"cancelled\"} 1",
+    )
+    .await;
+    assert_eq!(
+        state.meta.get_job_run(&selected_id).unwrap().unwrap().state,
+        JobState::Cancelled
+    );
+    assert_eq!(
+        job_runs(&state.meta)
+            .into_iter()
+            .find(|run| run.scope == "other")
+            .unwrap()
+            .state,
+        JobState::Running
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_cancel_job_run_records_cancelled_when_the_job_returns_an_error() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
+    let job = TestJob::persisting("probe", "failing", Action::FailWhenCancelled);
+    scheduler.submit(job.clone());
+    job.started.notified().await;
+    let id = job_runs(&state.meta)[0].id.clone();
+
+    assert_eq!(scheduler.cancel_job_run(&id).unwrap(), CancelJobRun::Requested);
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"probe\",outcome=\"cancelled\"} 1",
+    )
+    .await;
+    assert_eq!(
+        state.meta.get_job_run(&id).unwrap().unwrap(),
+        peryx_storage::meta::JobRunRecord {
+            id,
+            kind: JobKind::CacheRefresh,
+            scope: "failing".to_owned(),
+            repository: None,
+            state: JobState::Cancelled,
+            started_at_unix: 1_000,
+            finished_at_unix: Some(1_000),
+            items_processed: 0,
+            items_changed: 0,
+            error: None,
+        }
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_cancel_job_run_distinguishes_finished_and_missing_attempts() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
+    scheduler
+        .run(TestJob::persisting(
+            "probe",
+            "finished",
+            Action::Return(Ok(JobReport::default())),
+        ))
+        .await
+        .unwrap();
+    let id = job_runs(&state.meta)[0].id.clone();
+
+    assert_eq!(
+        (
+            scheduler.cancel_job_run(&id).unwrap(),
+            scheduler.cancel_job_run("jr_000000000000ffff").unwrap(),
+        ),
+        (CancelJobRun::Finished, CancelJobRun::Missing)
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_cancel_job_run_reports_an_orphaned_running_attempt_as_unavailable() {
+    let (_dir, state) = serving();
+    let id = state
+        .meta
+        .start_job_run(NewJobRun {
+            kind: JobKind::CacheRefresh,
+            scope: "orphaned",
+            repository: None,
+            started_at_unix: 900,
+        })
+        .unwrap();
+    let scheduler = JobScheduler::new(state, limits(1, 2, 1, 1));
+
+    assert_eq!(scheduler.cancel_job_run(&id).unwrap(), CancelJobRun::Unavailable);
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_persisted_job_records_repository_ownership() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
+
+    scheduler
+        .run(TestJob::persisting_repository(
+            "catalog_sync",
+            "mirror",
+            "hosted",
+            Action::Return(Ok(JobReport::default())),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(job_runs(&state.meta)[0].repository.as_deref(), Some("hosted"));
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_persisted_job_panic_closes_the_attempt_as_failed() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
+
+    assert_eq!(
+        scheduler
+            .run(TestJob::persisting("probe", "panic", Action::Panic))
+            .await
+            .unwrap_err(),
+        "job_panic: node-local job panicked"
+    );
+
+    let run = &job_runs(&state.meta)[0];
+    assert_eq!(run.state, JobState::Failed);
+    assert_eq!(run.error.as_deref(), Some("job_panic: node-local job panicked"));
+    assert!(!state.job_attempts.is_active(&run.id));
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_persisted_job_rejects_an_external_terminal_transition() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
+
+    assert_eq!(
+        scheduler
+            .run(TestJob::persisting("probe", "external", Action::FinishExternally,))
+            .await
+            .unwrap_err(),
+        "durable job attempt finished outside its active runner"
+    );
+
+    let run = &job_runs(&state.meta)[0];
+    assert_eq!(run.state, JobState::Succeeded);
+    assert!(!state.job_attempts.is_active(&run.id));
+    scheduler.shutdown().await;
+}
+
+#[test]
+fn test_attempt_control_start_and_finish_owns_the_active_token() {
+    let (_dir, state) = serving();
+    let cancel = CancellationToken::new();
+    let id = state
+        .job_attempts
+        .start(
+            NewJobRun {
+                kind: JobKind::CacheRefresh,
+                scope: "pypi",
+                repository: None,
+                started_at_unix: 100,
+            },
+            cancel,
+        )
+        .unwrap();
+
+    assert!(state.job_attempts.is_active(&id));
+    let record = state
+        .job_attempts
+        .finish(&id, JobOutcome::succeeded(110, 2, 1))
+        .unwrap();
+    assert_eq!(record.state, JobState::Succeeded);
+    assert!(!state.job_attempts.is_active(&id));
+}
+
+#[test]
+fn test_attempt_control_rejects_an_external_finish_and_releases_the_token() {
+    let (_dir, state) = serving();
+    let id = state
+        .job_attempts
+        .start(
+            NewJobRun {
+                kind: JobKind::CacheRefresh,
+                scope: "pypi",
+                repository: None,
+                started_at_unix: 100,
+            },
+            CancellationToken::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        state
+            .meta
+            .finish_job_run(&id, JobOutcome::succeeded(105, 0, 0))
+            .unwrap(),
+        FinishJobRun::Finished(_)
+    ));
+
+    assert!(matches!(
+        state.job_attempts.finish(&id, JobOutcome::failed(110, 0, 0, "late")),
+        Err(JobAttemptError::AlreadyFinished)
+    ));
+    assert!(!state.job_attempts.is_active(&id));
+}
+
+#[test]
+fn test_attempt_control_retains_a_missing_active_attempt() {
+    let (_dir, state) = serving();
+    let id = "jr_000000000000ffff";
+    state.job_attempts.activate(id.to_owned(), CancellationToken::new());
+
+    assert!(matches!(
+        state.job_attempts.finish(id, JobOutcome::failed(110, 0, 0, "missing")),
+        Err(JobAttemptError::Missing)
+    ));
+    assert!(state.job_attempts.is_active(id));
+}
+
+#[test]
+fn test_attempt_control_retains_the_token_when_the_store_rejects_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let store = MetaStore::open(&path).unwrap();
+    let id = start_corruptible_attempt(&store);
+    drop(store);
+    let database = redb::Database::open(&path).unwrap();
+    let write = database.begin_write().unwrap();
+    {
+        let mut table = write
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new("job_run"))
+            .unwrap();
+        table.insert(id.as_str(), b"not json".as_slice()).unwrap();
+    }
+    write.commit().unwrap();
+    drop(database);
+    let control = JobAttemptControl::new(MetaStore::open_existing(path).unwrap());
+    assert!(control.cancel(&id).is_err());
+    control.activate(id.clone(), CancellationToken::new());
+
+    assert!(matches!(
+        control.finish(&id, JobOutcome::failed(110, 0, 0, "failure")),
+        Err(JobAttemptError::Store(_))
+    ));
+    assert!(control.is_active(&id));
+}
+
+fn start_corruptible_attempt(store: &MetaStore) -> String {
+    store
+        .start_job_run(NewJobRun {
+            kind: JobKind::CacheRefresh,
+            scope: "pypi",
+            repository: None,
+            started_at_unix: 100,
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_run_rejects_an_oversized_persisted_scope_before_running_the_job() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(1, 2, 1, 1));
+    let job = TestJob::persisting("probe", &"x".repeat(513), Action::Return(Ok(JobReport::default())));
+
+    assert_eq!(
+        (
+            scheduler.run(job.clone()).await.unwrap_err(),
+            job.ran.load(Ordering::SeqCst)
+        ),
+        ("scope exceeds 512 bytes".to_owned(), 0)
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_recovering_scheduler_fails_an_interrupted_attempt_before_accepting_work() {
+    let (_dir, state) = serving();
+    let id = state
+        .meta
+        .start_job_run(NewJobRun {
+            kind: JobKind::CacheRefresh,
+            scope: "pypi",
+            repository: None,
+            started_at_unix: 900,
+        })
+        .unwrap();
+
+    state.job_attempts.recover_interrupted((state.clock)()).unwrap();
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
+
+    assert_eq!(
+        state.meta.get_job_run(&id).unwrap().unwrap(),
+        peryx_storage::meta::JobRunRecord {
+            id,
+            kind: JobKind::CacheRefresh,
+            scope: "pypi".to_owned(),
+            repository: None,
+            state: JobState::Failed,
+            started_at_unix: 900,
+            finished_at_unix: Some(1_000),
+            items_processed: 0,
+            items_changed: 0,
+            error: Some("node restarted before the job finished".to_owned()),
+        }
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_shutdown_returns_after_the_grace_period_when_a_job_ignores_cancellation() {
     let (_dir, state) = serving();
     let mut limits = limits(2, 4, 2, 2);
@@ -405,10 +803,10 @@ async fn test_a_failing_persisted_job_records_a_failed_run() {
     scheduler.submit(job.clone());
     job.started.notified().await;
     scheduler.shutdown().await;
-    let runs = state.meta.list_job_runs().unwrap();
+    let runs = job_runs(&state.meta);
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].state, JobState::Failed);
-    assert_eq!(runs[0].error.as_deref(), Some("boom"));
+    assert_eq!(runs[0].error.as_deref(), Some("test: boom"));
 }
 
 #[tokio::test]
@@ -473,8 +871,11 @@ async fn test_maintenance_propagates_a_refresh_failure() {
         driver: Arc::new(StubDriver::new(0, Err("upstream down".to_owned()))),
     };
     assert_eq!(
-        job.run(&context(state, CancellationToken::new())).await.unwrap_err(),
-        "upstream down"
+        job.run(&context(state, CancellationToken::new()))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "cache_refresh: upstream down"
     );
 }
 
@@ -509,7 +910,7 @@ async fn test_submit_maintenance_runs_one_job_per_driver_and_records_it() {
     submit_maintenance(&state, &scheduler);
     refresh_started.notified().await;
     scheduler.shutdown().await;
-    let runs = state.serving.meta.list_job_runs().unwrap();
+    let runs = job_runs(&state.serving.meta);
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].kind, JobKind::CacheRefresh);
     assert_eq!(runs[0].scope, "pypi");
@@ -533,14 +934,138 @@ impl NodeJob for BareJob {
         &self.scope
     }
 
-    async fn run(&self, _ctx: &JobContext) -> Result<JobReport, String> {
+    async fn run(&self, _ctx: &JobContext) -> Result<JobReport, JobFailure> {
         Ok(JobReport::default())
     }
 }
 
 #[test]
 fn test_a_job_defaults_to_running_without_a_persisted_record() {
-    assert_eq!(BareJob { scope: String::new() }.persist_as(), None);
+    let job = BareJob { scope: String::new() };
+    assert_eq!((job.repository(), job.persist_as()), (None, None));
+}
+
+struct NoScheduledJobsDriver;
+
+#[async_trait]
+impl EcosystemDriver for NoScheduledJobsDriver {
+    fn ecosystem(&self) -> Ecosystem {
+        Ecosystem::Pypi
+    }
+
+    fn classify_route(&self, _path: &str) -> crate::rate_limit::RouteClass {
+        crate::rate_limit::RouteClass::Listing
+    }
+
+    fn discover_index(
+        &self,
+        _index: crate::state::IndexDescription,
+        _base: Option<&crate::discovery::BaseUrl>,
+    ) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+}
+
+#[test]
+fn test_a_driver_without_scheduled_jobs_declines_by_default() {
+    assert!(
+        NoScheduledJobsDriver
+            .node_job(&ScheduledJob::CacheMaintenance)
+            .is_none()
+    );
+}
+
+#[test]
+fn test_job_failure_exposes_its_stable_category_and_safe_message() {
+    let failure = JobFailure::new("retryable_timeout", "catalog request timed out");
+
+    assert_eq!(failure.code(), "retryable_timeout");
+    assert_eq!(failure.message(), "catalog request timed out");
+    assert_eq!(failure.to_string(), "retryable_timeout: catalog request timed out");
+}
+
+#[tokio::test]
+async fn test_job_history_cleanup_removes_every_excess_terminal_attempt() {
+    let (_dir, state) = serving();
+    for started_at_unix in 0..24 {
+        let id = start_corruptible_attempt(&state.meta);
+        assert!(matches!(
+            state
+                .meta
+                .finish_job_run(&id, JobOutcome::succeeded(started_at_unix, 0, 0))
+                .unwrap(),
+            FinishJobRun::Finished(_)
+        ));
+    }
+
+    let report = JobHistoryCleanup
+        .run(&context(state.clone(), CancellationToken::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report,
+        JobReport {
+            processed: 8,
+            changed: 8
+        }
+    );
+    assert_eq!(job_runs(&state.meta).len(), 16);
+}
+
+#[tokio::test]
+async fn test_job_history_cleanup_honors_cancellation_before_writing() {
+    let (_dir, state) = serving();
+    for _ in 0..17 {
+        let id = start_corruptible_attempt(&state.meta);
+        state
+            .meta
+            .finish_job_run(&id, JobOutcome::succeeded(100, 0, 0))
+            .unwrap();
+    }
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let report = JobHistoryCleanup.run(&context(state.clone(), cancel)).await.unwrap();
+
+    assert_eq!(report, JobReport::default());
+    assert_eq!(job_runs(&state.meta).len(), 17);
+}
+
+#[tokio::test]
+async fn test_job_history_cleanup_categorizes_storage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let store = MetaStore::open(&path).unwrap();
+    let ids = (0..17).map(|_| start_corruptible_attempt(&store)).collect::<Vec<_>>();
+    for id in &ids {
+        store.finish_job_run(id, JobOutcome::succeeded(100, 0, 0)).unwrap();
+    }
+    drop(store);
+    let database = redb::Database::open(&path).unwrap();
+    let write = database.begin_write().unwrap();
+    {
+        let mut table = write
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new("job_run"))
+            .unwrap();
+        table.insert(ids[0].as_str(), b"not json".as_slice()).unwrap();
+    }
+    write.commit().unwrap();
+    drop(database);
+    let state = AppState::with_clock(
+        MetaStore::open_existing(path).unwrap(),
+        BlobStore::new(dir.path().join("blobs")),
+        60,
+        Vec::new(),
+        Arc::new(|| 1_000),
+    );
+
+    let error = JobHistoryCleanup
+        .run(&context(state.serving, CancellationToken::new()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "storage");
 }
 
 fn scheduled_app(driver: Arc<StubDriver>) -> (tempfile::TempDir, Arc<AppState>) {
@@ -588,7 +1113,9 @@ async fn test_an_unsupported_scheduled_job_is_rejected_without_submission() {
     assert_eq!(error, "no installed ecosystem supports catalog_sync");
     let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
     let cancel = CancellationToken::new();
-    let timer = tokio::spawn(run_schedules(app.clone(), scheduler.clone(), plan, cancel.clone()));
+    let timer = tokio::spawn(
+        run_schedules(app.clone(), scheduler.clone(), plan, cancel.clone()).with_subscriber(test_subscriber()),
+    );
     tokio::task::yield_now().await;
 
     tokio::time::advance(Duration::from_mins(1)).await;
@@ -599,7 +1126,35 @@ async fn test_an_unsupported_scheduled_job_is_rejected_without_submission() {
     cancel.cancel();
     timer.await.unwrap();
     scheduler.shutdown().await;
-    assert!(app.meta.list_job_runs().unwrap().is_empty());
+    assert!(job_runs(&app.meta).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_a_supported_scheduled_job_is_submitted() {
+    let job = TestJob::new("catalog_sync", "pypi", Action::Return(Ok(JobReport::default())));
+    let driver = StubDriver::new(0, Ok(RefreshSweep::default())).with_scheduled(job.clone());
+    let (_dir, app) = scheduled_app(Arc::new(driver));
+    let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
+    let cancel = CancellationToken::new();
+    let timer = tokio::spawn(run_schedules(
+        app.clone(),
+        scheduler.clone(),
+        catalog_schedule(60),
+        cancel.clone(),
+    ));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_mins(1)).await;
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"catalog_sync\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    cancel.cancel();
+    timer.await.unwrap();
+    scheduler.shutdown().await;
+    assert_eq!(job.ran.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -622,10 +1177,30 @@ fn test_reschedule_steps_from_the_wake_instant_when_it_woke_late() {
 }
 
 #[tokio::test]
-async fn test_no_schedules_returns_at_once() {
+async fn test_no_schedules_still_runs_history_cleanup() {
     let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
+    for _ in 0..17 {
+        let id = start_corruptible_attempt(&app.meta);
+        app.meta.finish_job_run(&id, JobOutcome::succeeded(100, 0, 0)).unwrap();
+    }
     let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
-    run_schedules(app, scheduler, Vec::new(), CancellationToken::new()).await;
+    let cancel = CancellationToken::new();
+    let timer = tokio::spawn(run_schedules(
+        app.clone(),
+        scheduler.clone(),
+        Vec::new(),
+        cancel.clone(),
+    ));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"job_history_cleanup\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    cancel.cancel();
+    timer.await.unwrap();
+    assert_eq!(job_runs(&app.meta).len(), 16);
+    scheduler.shutdown().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -636,12 +1211,9 @@ async fn test_a_schedule_fires_its_job_when_the_interval_elapses() {
     let (_dir, app) = scheduled_app(driver);
     let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
     let cancel = CancellationToken::new();
-    tokio::spawn(run_schedules(
-        app,
-        scheduler.clone(),
-        cache_schedule(60),
-        cancel.clone(),
-    ));
+    tokio::spawn(
+        run_schedules(app, scheduler.clone(), cache_schedule(60), cancel.clone()).with_subscriber(test_subscriber()),
+    );
 
     tokio::time::advance(Duration::from_mins(1)).await;
     refresh_started.notified().await;

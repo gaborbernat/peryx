@@ -2,6 +2,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -10,7 +11,7 @@ use futures_util::TryStreamExt as _;
 use http_body_util::BodyExt as _;
 use peryx_driver::IndexKind as RuntimeKind;
 use peryx_identity::ProviderId;
-use peryx_storage::meta::{MetaStore, PolicyDecisionQuery};
+use peryx_storage::meta::{JobKind, JobState, MetaStore, NewJobRun, PolicyDecisionQuery};
 use peryx_upstream::Auth;
 #[cfg(unix)]
 use peryx_upstream::{CredentialFailure, ExecCredentialConfig};
@@ -27,7 +28,8 @@ use crate::config::{
     TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
 };
 use crate::server::{
-    build_blob_storage, build_index_settings, build_indexes, build_router, build_state, upstream_auth,
+    build_blob_storage, build_index_settings, build_indexes, build_router, build_state, recover_job_attempts,
+    upstream_auth,
 };
 
 fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
@@ -342,6 +344,35 @@ fn test_build_state_opens_configured_data_dir() {
 
     assert_eq!(state.indexes.len(), config.indexes.len());
     assert!(dir.path().join("peryx.redb").exists());
+}
+
+#[rstest]
+#[case::writer(false, 1, JobState::Failed)]
+#[case::read_only(true, 0, JobState::Running)]
+fn test_recover_job_attempts_only_updates_writers(
+    #[case] read_only: bool,
+    #[case] expected_recovered: usize,
+    #[case] expected_state: JobState,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = build_state(&Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Config::default()
+    })
+    .unwrap();
+    Arc::get_mut(&mut state).unwrap().read_only = read_only;
+    let id = state
+        .meta
+        .start_job_run(NewJobRun {
+            kind: JobKind::CacheRefresh,
+            scope: "pypi",
+            repository: None,
+            started_at_unix: 1,
+        })
+        .unwrap();
+
+    assert_eq!(recover_job_attempts(&state).unwrap(), expected_recovered);
+    assert_eq!(state.meta.get_job_run(&id).unwrap().unwrap().state, expected_state);
 }
 
 #[test]

@@ -4822,6 +4822,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utoipa",
 ]
@@ -5097,6 +5098,7 @@ dependencies = [
  "fs4",
  "futures-util",
  "hex",
+ "mockall",
  "peryx-identity",
  "peryx-policy",
  "redb",

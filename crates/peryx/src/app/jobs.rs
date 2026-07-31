@@ -9,7 +9,7 @@ use peryx_driver::jobs::{
     CatalogSyncParameters, JobLimits, JobScheduler, MAX_CATALOG_CONCURRENCY, MAX_CATALOG_PROJECTS_PER_RUN,
     MAX_CATALOG_TIMEOUT, ScheduledJob, scheduled_job,
 };
-use peryx_storage::meta::{JobKind, JobRunRecord, JobState, MetaStore};
+use peryx_storage::meta::{JobRunQuery, MetaStore};
 
 use crate::cli::JobCommand;
 use crate::config::Config;
@@ -98,25 +98,8 @@ fn run_catalog_sync(
 }
 
 fn job_list(store: &MetaStore, out: &mut dyn Write) -> anyhow::Result<()> {
-    writeln!(
-        out,
-        "id\tkind\tscope\tstate\tstarted_at_unix\tfinished_at_unix\tprocessed\tchanged\terror"
-    )?;
-    for run in store.list_job_runs()? {
-        writeln!(
-            out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            run.id,
-            job_kind(run.kind),
-            optional_text(&run.scope),
-            job_state(run.state),
-            run.started_at_unix,
-            optional_number(run.finished_at_unix),
-            run.items_processed,
-            run.items_changed,
-            run.error.as_deref().map_or("-", optional_text),
-        )?;
-    }
+    serde_json::to_writer(&mut *out, &store.query_job_runs(&JobRunQuery::default())?)?;
+    writeln!(out)?;
     Ok(())
 }
 
@@ -124,41 +107,7 @@ fn job_show(store: &MetaStore, id: &str, out: &mut dyn Write) -> anyhow::Result<
     let run = store
         .get_job_run(id)?
         .with_context(|| format!("unknown job run {id:?}"))?;
-    write_job(&run, out)
-}
-
-fn write_job(run: &JobRunRecord, out: &mut dyn Write) -> anyhow::Result<()> {
-    writeln!(out, "id\t{}", run.id)?;
-    writeln!(out, "kind\t{}", job_kind(run.kind))?;
-    writeln!(out, "scope\t{}", optional_text(&run.scope))?;
-    writeln!(out, "state\t{}", job_state(run.state))?;
-    writeln!(out, "started_at_unix\t{}", run.started_at_unix)?;
-    writeln!(out, "finished_at_unix\t{}", optional_number(run.finished_at_unix))?;
-    writeln!(out, "processed\t{}", run.items_processed)?;
-    writeln!(out, "changed\t{}", run.items_changed)?;
-    writeln!(out, "error\t{}", run.error.as_deref().map_or("-", optional_text))?;
+    serde_json::to_writer(&mut *out, &run)?;
+    writeln!(out)?;
     Ok(())
-}
-
-const fn job_kind(kind: JobKind) -> &'static str {
-    match kind {
-        JobKind::CacheRefresh => "cache_refresh",
-        JobKind::CatalogSync => "catalog_sync",
-    }
-}
-
-const fn job_state(state: JobState) -> &'static str {
-    match state {
-        JobState::Running => "running",
-        JobState::Succeeded => "succeeded",
-        JobState::Failed => "failed",
-    }
-}
-
-const fn optional_text(value: &str) -> &str {
-    if value.is_empty() { "-" } else { value }
-}
-
-fn optional_number(value: Option<i64>) -> String {
-    value.map_or_else(|| "-".to_owned(), |value| value.to_string())
 }

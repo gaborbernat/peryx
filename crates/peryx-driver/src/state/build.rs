@@ -296,12 +296,14 @@ impl AppState {
         let users = crate::users::UserService::new(meta.clone());
         let authorization = crate::authz::AuthorizationService::new(meta.clone());
         let revocations = crate::revocations::RevocationService::new(meta.clone());
+        let job_attempts = crate::jobs::JobAttemptControl::new(meta.clone());
         Self {
             serving: std::sync::Arc::new(super::app::ServingState {
                 meta,
                 users,
                 authorization,
                 revocations,
+                job_attempts,
                 blobs,
                 ttl_secs,
                 max_stale_secs,

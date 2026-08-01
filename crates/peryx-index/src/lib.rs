@@ -7,9 +7,11 @@
 //! that hosts it.
 
 pub mod index;
+pub mod registry;
 pub mod resolve;
 pub mod serving;
 
 pub use index::{Index, IndexKind};
+pub use registry::{IndexRegistry, IndexSet};
 pub use resolve::{RouteResolver, remainder, shadow_order};
 pub use serving::ServingCache;

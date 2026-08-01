@@ -210,6 +210,28 @@ pub trait EcosystemDriver: Send + Sync {
         Ok(())
     }
 
+    /// Stream one index's retention decisions against `policy` in deterministic order, adapting this
+    /// ecosystem's own records into the neutral candidates the planner evaluates. `emit` returns a
+    /// message to stop early (a filled page or a disconnected export client), and the scan aborts
+    /// without reading further. Returns the plan's identity (policy version and metadata frontier), or
+    /// `None` when this ecosystem plans no retention, so the neutral caller reports an unsupported
+    /// index rather than an empty plan. The whole path only reads metadata, so an interrupted plan
+    /// writes nothing.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when the store cannot be read, a record does not decode, or
+    /// `emit` stopped the scan.
+    fn plan_retention(
+        &self,
+        _meta: &peryx_storage::meta::MetaStore,
+        _index: &str,
+        _policy: &peryx_policy::RetentionPolicy,
+        _now: Option<i64>,
+        _emit: &mut dyn FnMut(peryx_policy::RetentionDecision) -> Result<(), String>,
+    ) -> Result<Option<peryx_policy::RetentionSummary>, String> {
+        Ok(None)
+    }
+
     /// Purge one project's cached records from `index`, keeping any blob a still-cached project or a
     /// hosted upload also references. With `apply`, deletes and reports the removed counts; otherwise
     /// counts what a purge would remove. Returns the ecosystem-normalized project name alongside.

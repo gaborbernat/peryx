@@ -4,5 +4,6 @@ mod fallback_tests;
 mod oidc_tests;
 mod policy_decision_tests;
 mod response_security_tests;
+mod retention_tests;
 mod revocation_tests;
 mod ui_tests;

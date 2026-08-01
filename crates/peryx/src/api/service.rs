@@ -82,6 +82,18 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
                 .build(),
         )
         .path(
+            "/+retention/plan",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Post, retention_plan())
+                .build(),
+        )
+        .path(
+            "/+retention/export",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Post, retention_export())
+                .build(),
+        )
+        .path(
             "/+revocations",
             PathItemBuilder::new()
                 .operation(HttpMethod::Get, list_revocations())
@@ -841,6 +853,187 @@ fn lift_revocation() -> OperationBuilder {
                 api_json_response("The digest is not canonical SHA-256", json!({"error": "invalid digest"})),
             ),
     )
+}
+
+fn retention_request_body() -> utoipa::openapi::request_body::RequestBody {
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .content(
+            "application/json",
+            ContentBuilder::new()
+                .example(Some(json!({
+                    "repository": "root/pypi",
+                    "keep": [{"selector": "keep-latest", "count": 3}],
+                    "expire": [{"selector": "age", "older_than_seconds": 7_776_000}],
+                    "cursor": null,
+                    "limit": 100
+                })))
+                .build(),
+        )
+        .build()
+}
+
+fn retention_candidate_example() -> serde_json::Value {
+    json!({
+        "project": "example",
+        "version": "1.0",
+        "artifact": "example-1.0-py3-none-any.whl",
+        "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "class": "hosted",
+        "visibility": "active",
+        "bytes": 20_480,
+        "outcome": "remove",
+        "rule": "age",
+        "retained_alternatives": ["2.0"]
+    })
+}
+
+fn retention_plan() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Preview a repository retention plan"))
+        .description(Some(
+            "Evaluates the supplied keep/expire rules against one repository and returns a bounded, ordered page \
+             of removal candidates without changing any metadata or blob. `summary` carries the policy version and \
+             metadata frontier the page read; `next_cursor` resumes the next page and, presented back, rejects a \
+             plan whose repository has since changed. Requires a local administrator.",
+        ))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .request_body(Some(retention_request_body()))
+        .response(
+            "200",
+            api_json_response(
+                "One ordered page of candidates",
+                json!({
+                    "summary": {"policy_version": 42, "frontier": {"repository": 7, "catalog": 3, "policy": 2}},
+                    "candidates": [retention_candidate_example()],
+                    "next_cursor": null
+                }),
+            ),
+        )
+        .response(
+            "400",
+            api_json_response(
+                "The cursor or limit is invalid",
+                json!({"error": "limit must be between 1 and 1000"}),
+            ),
+        )
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local administrator credential was presented"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The caller cannot inspect the repository, or it plans no retention"),
+        )
+        .response(
+            "409",
+            api_json_response(
+                "The cursor is stale: the repository changed since it was issued",
+                json!({"error": "the plan cursor is stale: the repository changed"}),
+            ),
+        )
+        .response(
+            "413",
+            ResponseBuilder::new().description("The request exceeds the fixed body limit"),
+        )
+        .response("415", ResponseBuilder::new().description("The request is not JSON"))
+        .response(
+            "422",
+            ResponseBuilder::new().description("The JSON request body is invalid"),
+        )
+        .response(
+            "429",
+            api_json_response(
+                "Too many concurrent plans for this repository",
+                json!({"error": "too many concurrent retention plans for this repository"}),
+            ),
+        )
+        .response(
+            "500",
+            api_json_response("The plan could not be read", json!({"error": "retention plan failed"})),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication storage is unavailable",
+                json!({"error": "retention service unavailable"}),
+            ),
+        )
+}
+
+fn retention_export() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Export a repository retention plan"))
+        .description(Some(
+            "Streams the whole plan as JSON Lines: a first line carrying the `summary` identity, then one candidate \
+             per line. The `ETag` is the plan identity, and the export is resumable from its documented boundary by \
+             presenting a prior page's `cursor`, which is refused when the repository has changed. The stream is \
+             unique to one snapshot, so byte ranges do not apply. Requires a local administrator.",
+        ))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .request_body(Some(retention_request_body()))
+        .response(
+            "200",
+            text_response(
+                "The plan as JSON Lines, the identity first",
+                "application/x-ndjson",
+                "{\"summary\":{\"policy_version\":42,\"frontier\":{\"repository\":7,\"catalog\":3,\"policy\":2}}}\n\
+                 {\"project\":\"example\",\"version\":\"1.0\",\"artifact\":\"example-1.0-py3-none-any.whl\",\
+                 \"digest\":\"sha256:0123\",\"class\":\"hosted\",\"visibility\":\"active\",\"bytes\":20480,\
+                 \"outcome\":\"remove\",\"rule\":\"age\"}\n",
+            ),
+        )
+        .response(
+            "400",
+            api_json_response(
+                "The cursor is invalid",
+                json!({"error": "invalid retention plan cursor"}),
+            ),
+        )
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local administrator credential was presented"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The caller cannot inspect the repository, or it plans no retention"),
+        )
+        .response(
+            "409",
+            api_json_response(
+                "The cursor is stale: the repository changed since it was issued",
+                json!({"error": "the plan cursor is stale: the repository changed"}),
+            ),
+        )
+        .response(
+            "413",
+            ResponseBuilder::new().description("The request exceeds the fixed body limit"),
+        )
+        .response("415", ResponseBuilder::new().description("The request is not JSON"))
+        .response(
+            "422",
+            ResponseBuilder::new().description("The JSON request body is invalid"),
+        )
+        .response(
+            "429",
+            api_json_response(
+                "Too many concurrent plans for this repository",
+                json!({"error": "too many concurrent retention plans for this repository"}),
+            ),
+        )
+        .response(
+            "500",
+            api_json_response("The plan could not be read", json!({"error": "retention plan failed"})),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication storage is unavailable",
+                json!({"error": "retention service unavailable"}),
+            ),
+        )
 }
 
 fn metrics() -> OperationBuilder {

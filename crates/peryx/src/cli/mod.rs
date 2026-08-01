@@ -5,6 +5,7 @@ mod index;
 mod job;
 mod maintenance;
 mod mirror;
+mod retention;
 mod snippet;
 
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ pub use maintenance::{
     PutRevocationArgs, RestoreArgs, RevocationCommand, RevocationStatusArg, WriterCommand, WriterPromoteArgs,
 };
 pub use mirror::{PrefetchCommand, PrefetchOptions, PrefetchPlanArgs, PrefetchSyncArgs, PrefetchVerifyArgs};
+pub use retention::{RetentionCommand, RetentionDryRunArgs, RetentionExportArgs};
 pub use snippet::{ConfigSnippetArgs, SnippetFormat};
 
 use crate::config::{
@@ -92,6 +94,9 @@ pub enum Command {
     /// Preview index policy decisions against cached records.
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// Preview and export a repository's retention plan.
+    #[command(subcommand)]
+    Retention(RetentionCommand),
     /// Inspect and change the single-writer identity.
     #[command(subcommand)]
     Writer(WriterCommand),

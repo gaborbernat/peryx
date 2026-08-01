@@ -344,6 +344,17 @@ impl EcosystemDriver for PypiServing {
         crate::admin::policy_dry_run(meta, indexes, index_filter, project_filter, out)
     }
 
+    fn plan_retention(
+        &self,
+        meta: &peryx_storage::meta::MetaStore,
+        index: &str,
+        policy: &peryx_policy::RetentionPolicy,
+        now: Option<i64>,
+        emit: &mut dyn FnMut(peryx_policy::RetentionDecision) -> Result<(), String>,
+    ) -> Result<Option<peryx_policy::RetentionSummary>, String> {
+        crate::retention::evaluate_retention(meta, index, policy, now, emit).map(Some)
+    }
+
     fn purge_project(
         &self,
         meta: &peryx_storage::meta::MetaStore,

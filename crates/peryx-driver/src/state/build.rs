@@ -325,6 +325,7 @@ impl AppState {
                 token_ttl_secs: DEFAULT_TOKEN_TTL_SECS,
                 trusted_publishing: None,
                 ldap_logins: HashMap::new(),
+                retention_gates: crate::retention::RetentionGates::new(RETENTION_PLANS_PER_REPOSITORY),
             }),
             drivers: std::array::from_fn(|_| None),
             absolute_prefixes: Vec::new(),
@@ -340,6 +341,11 @@ fn system_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
+
+/// How many retention-plan previews one repository may compute at once. A preview is a full metadata
+/// scan, so a small bound keeps a burst on one repository from starving the others while still letting a
+/// dry-run and an export overlap.
+const RETENTION_PLANS_PER_REPOSITORY: usize = 2;
 
 /// The minimal `OpenAPI` document a state serves until the binary installs the assembled one. It names
 /// no ecosystem; the real per-ecosystem paths are merged in by the binary at startup.

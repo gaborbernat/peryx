@@ -10,6 +10,7 @@ use peryx_driver::rate_limit::UpstreamPermit;
 use peryx_driver::state::ServingState;
 use peryx_events::metrics::Event;
 use peryx_storage::blob::{BlobLease, BlobMetadata, BlobWrite, Digest};
+use peryx_storage::meta::{ArtifactSource, PlacementEvent};
 
 use super::{
     CacheError, ensure_digest_clear, flight_gate, release_flight, source_artifact_client, source_client,
@@ -238,6 +239,20 @@ async fn pump_download(
     let upstream = upstream.as_deref().unwrap_or("");
     #[rustfmt::skip]
     tracing::debug!(digest = digest.as_str(), upstream, bytes, elapsed_ms, "blob transfer ended");
+    // Reproject byte availability off the request path. A verified persist makes the proxied artifact
+    // local; a rejected one preserves whatever was verified before rather than fabricating a local
+    // state from a partial transfer. A store error here is left for the next repair pass to reconcile.
+    let _ = if outcome.is_ok() {
+        state
+            .meta
+            .record_artifact_placement(digest.as_str(), ArtifactSource::Proxy, true)
+            .map(drop)
+    } else {
+        state
+            .meta
+            .apply_placement_event(digest.as_str(), PlacementEvent::WriteFailed)
+            .map(drop)
+    };
     if outcome.is_err() {
         tracing::warn!(digest = digest.as_str(), "blob persist rejected");
         let project = project_of_filename(&filename);

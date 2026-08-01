@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 pub use peryx_core::TrashInfo;
 use peryx_core::{Ecosystem, TrashRecord};
-use peryx_storage::meta::{DriverTxn, MetaError, MetaStore};
+use peryx_storage::meta::{ArtifactOrigin, ArtifactSource, DriverTxn, MetaError, MetaStore};
 use serde::{Deserialize, Serialize};
 
 /// The driver-KV prefix every manifest is keyed under, its digest following.
@@ -54,6 +54,25 @@ pub enum RestoreManifestOutcome {
         restored: Vec<String>,
         conflicts: Vec<String>,
     },
+}
+
+/// Where an OCI content object came from, mapped once into the neutral [`ArtifactSource`] so no
+/// neutral code decides an OCI object's origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OciArtifactOrigin {
+    /// Pushed into a hosted registry on this instance.
+    Pushed,
+    /// Mirrored from an upstream registry through the pull-through cache.
+    Mirrored,
+}
+
+impl ArtifactOrigin for OciArtifactOrigin {
+    fn artifact_source(&self) -> ArtifactSource {
+        match self {
+            Self::Pushed => ArtifactSource::Hosted,
+            Self::Mirrored => ArtifactSource::Proxy,
+        }
+    }
 }
 
 /// A stored manifest: its media type and the exact bytes whose digest addresses it.
@@ -173,6 +192,21 @@ pub fn record_manifest_txn(
 /// presence is the authorization a by-digest read checks.
 fn membership_key(index: &str, repo: &str, digest: &str) -> String {
     format!("{MEMBERSHIP_PREFIX}{index}\u{0}{repo}\u{0}{digest}")
+}
+
+/// Record where an OCI content object came from and whether its verified bytes are local, so a later
+/// read resolves its neutral placement from the index without probing the content store.
+///
+/// # Errors
+/// Returns a store error if the write fails.
+pub fn record_content_placement(
+    meta: &MetaStore,
+    digest: &str,
+    origin: OciArtifactOrigin,
+    present: bool,
+) -> Result<(), MetaError> {
+    meta.record_artifact_placement(digest, origin.artifact_source(), present)?;
+    Ok(())
 }
 
 /// Fetch a manifest by digest.
@@ -752,6 +786,30 @@ mod tests {
         put_manifest(&meta, "sha256:abc", &manifest).unwrap();
         assert_eq!(get_manifest(&meta, "sha256:abc").unwrap(), Some(manifest));
         assert_eq!(get_manifest(&meta, "sha256:missing").unwrap(), None);
+    }
+
+    #[test]
+    fn test_origin_maps_to_the_neutral_source() {
+        assert_eq!(OciArtifactOrigin::Pushed.artifact_source(), ArtifactSource::Hosted);
+        assert_eq!(OciArtifactOrigin::Mirrored.artifact_source(), ArtifactSource::Proxy);
+    }
+
+    #[test]
+    fn test_content_placement_records_local_and_reprojects_on_eviction() {
+        use peryx_storage::meta::{ByteAvailability, PlacementEvent};
+
+        let (_dir, meta) = store();
+        record_content_placement(&meta, "sha256:abc", OciArtifactOrigin::Pushed, true).unwrap();
+        assert_eq!(
+            meta.get_artifact_placement("sha256:abc").unwrap().unwrap().availability,
+            ByteAvailability::Local
+        );
+        record_content_placement(&meta, "sha256:def", OciArtifactOrigin::Mirrored, true).unwrap();
+        let evicted = meta
+            .apply_placement_event("sha256:def", PlacementEvent::BytesRemoved)
+            .unwrap()
+            .unwrap();
+        assert_eq!(evicted.availability, ByteAvailability::RemoteOnly);
     }
 
     #[test]

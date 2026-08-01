@@ -1,11 +1,30 @@
 use std::collections::BTreeMap;
 
-use peryx_storage::meta::{MetaError, MetaScanError, MetaStore};
+use peryx_storage::meta::{ArtifactOrigin, ArtifactSource, MetaError, MetaScanError, MetaStore};
 
 use super::{
     FILE_PREFIX, METADATA_PREFIX, PROVENANCE_PREFIX, file_key, file_source_value, metadata_key, metadata_value,
     provenance_key, provenance_value,
 };
+
+/// Where a `PyPI` artifact's bytes came from, mapped once into the neutral [`ArtifactSource`] so no
+/// neutral code decides a `PyPI` file's origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PypiArtifactOrigin {
+    /// Uploaded into a hosted index on this instance.
+    Upload,
+    /// Cached from an upstream Simple index.
+    Cached,
+}
+
+impl ArtifactOrigin for PypiArtifactOrigin {
+    fn artifact_source(&self) -> ArtifactSource {
+        match self {
+            Self::Upload => ArtifactSource::Hosted,
+            Self::Cached => ArtifactSource::Proxy,
+        }
+    }
+}
 
 /// The upstream source for a cached artifact digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,14 +36,20 @@ pub struct FileSource {
     pub upstream: Option<String>,
 }
 
-/// Record the upstream URL a blob digest can be fetched from, and the name of the cached index it came
-/// from (so a fetch on a cache miss reuses that index's authentication).
+/// Record where a blob digest can be fetched from: its upstream URL and the cached index it came from.
+///
+/// The index name lets a fetch on a cache miss reuse that index's authentication. Recording the locator
+/// also registers the artifact's neutral placement — a proxied artifact whose bytes are not yet local —
+/// so a later package read resolves availability from the index without probing the content store. A
+/// re-discovery keeps a cached artifact's local state.
 ///
 /// # Errors
 /// Returns a store error if the write fails.
 pub fn put_file_url(meta: &MetaStore, sha256: &str, url: &str, source: &str) -> Result<(), MetaError> {
     let value = file_source_value(url, source, None, None);
-    meta.put_driver_value(&file_key(sha256), value.as_bytes())
+    meta.put_driver_value(&file_key(sha256), value.as_bytes())?;
+    meta.ensure_artifact_placement(sha256, PypiArtifactOrigin::Cached.artifact_source())?;
+    Ok(())
 }
 
 /// Look up the `(upstream url, index name)` for a blob digest.
@@ -194,7 +219,9 @@ fn split_file_source(value: &str) -> Option<FileSource> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{FileSource, MetaStore, metadata_key, split_file_source};
+    use peryx_storage::meta::{ArtifactOrigin as _, ArtifactSource, ByteAvailability};
+
+    use super::{FileSource, MetaStore, PypiArtifactOrigin, metadata_key, split_file_source};
     use crate::store::PypiStore as _;
 
     fn store() -> (tempfile::TempDir, MetaStore) {
@@ -217,6 +244,23 @@ mod tests {
                 size: None,
                 upstream: None,
             })
+        );
+    }
+
+    #[test]
+    fn test_origin_maps_to_the_neutral_source() {
+        assert_eq!(PypiArtifactOrigin::Upload.artifact_source(), ArtifactSource::Hosted);
+        assert_eq!(PypiArtifactOrigin::Cached.artifact_source(), ArtifactSource::Proxy);
+    }
+
+    #[test]
+    fn test_recording_a_cached_locator_projects_a_remote_only_placement() {
+        let (_dir, meta) = store();
+        meta.put_file_url("deadbeef", "https://files.example/pkg.whl", "pypi")
+            .unwrap();
+        assert_eq!(
+            meta.get_artifact_placement("deadbeef").unwrap().unwrap().availability,
+            ByteAvailability::RemoteOnly
         );
     }
 

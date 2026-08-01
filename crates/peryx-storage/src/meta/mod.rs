@@ -16,6 +16,7 @@ mod external_identity;
 mod index;
 mod job;
 mod journal;
+mod placement;
 mod policy_decision;
 mod quota;
 mod revocation;
@@ -34,6 +35,10 @@ pub use job::{
     JobState, NewJobRun,
 };
 pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSnapshot};
+pub use placement::{
+    ArtifactOrigin, ArtifactPlacement, ArtifactSource, ByteAvailability, MAX_REPAIR_BATCH, PlacementEvent,
+    PlacementRepairPage,
+};
 pub use policy_decision::{
     NewPolicyDecision, PolicyDecisionItem, PolicyDecisionPage, PolicyDecisionQuery, PolicyDecisionQueryError,
     PolicyDecisionRecord, PolicyDecisionStoreError, PolicyInputGeneration,
@@ -84,6 +89,9 @@ const EXTERNAL_IDENTITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("e
 const EXTERNAL_ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("external_role_grant");
 const DIGEST_REVOCATION: TableDefinition<&str, &[u8]> = TableDefinition::new("digest_revocation");
 const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new("digest_revocation_state");
+/// The neutral artifact-placement projection: source and byte availability keyed by content digest,
+/// so a package read resolves both dimensions with one indexed lookup and no content-store probe.
+const ARTIFACT_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("artifact_placement");
 const SERIAL_KEY: &str = "serial";
 const WEBHOOK_SERIAL_KEY: &str = "webhook_delivery";
 const JOB_SERIAL_KEY: &str = "job_run";
@@ -199,6 +207,7 @@ impl MetaStore {
             txn.open_table(EXTERNAL_ROLE_GRANT)?;
             txn.open_table(DIGEST_REVOCATION)?;
             txn.open_table(DIGEST_REVOCATION_STATE)?;
+            txn.open_table(ARTIFACT_PLACEMENT)?;
         }
         txn.commit()?;
         Ok(Self {

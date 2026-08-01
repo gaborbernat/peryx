@@ -253,6 +253,7 @@ impl Mirror<'_> {
             bytes: bytes.to_vec(),
         };
         store::record_manifest(&self.state.meta, self.index, repo, &digest, &manifest)?;
+        store::record_content_placement(&self.state.meta, &digest, store::OciArtifactOrigin::Mirrored, true)?;
         if let Some(tag) = tag {
             if store::put_tag(&self.state.meta, self.index, repo, tag, &digest)? {
                 self.state.bump_search_epoch();

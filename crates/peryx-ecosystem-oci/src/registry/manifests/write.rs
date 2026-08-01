@@ -99,6 +99,9 @@ pub(in crate::registry) async fn put_manifest(
     )? {
         state.bump_search_epoch();
     }
+    // A pushed manifest is hosted content whose verified bytes are now local, so a later read resolves
+    // its placement from the index without probing the content store.
+    store::record_content_placement(&state.meta, &canonical, store::OciArtifactOrigin::Pushed, true)?;
     let subject = record_referrer(state, &index.name, &repo, &canonical, &media_type, &bytes)?;
     let location = format!("/v2/{name}/manifests/{canonical}");
     // A pushed manifest is a published image, the OCI analogue of a distribution upload; blob pushes

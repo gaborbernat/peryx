@@ -18,8 +18,8 @@ mod summary;
 mod uploads;
 
 pub use files::{
-    FileSource, get_file_url, get_metadata, get_metadata_digests, get_provenance, put_file_url, put_metadata,
-    put_provenance, scan_file_urls, scan_metadata_records, scan_provenance_records,
+    FileSource, PypiArtifactOrigin, get_file_url, get_metadata, get_metadata_digests, get_provenance, put_file_url,
+    put_metadata, put_provenance, scan_file_urls, scan_metadata_records, scan_provenance_records,
 };
 pub use index::{
     abort_project_generation, active_project_generation, begin_project_generation, get_index, get_project_status,

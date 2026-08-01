@@ -827,6 +827,71 @@ async fn test_ui_project_page_renders_metadata(ui_router: (tempfile::TempDir, ax
     assert!(body.contains("badge meta-badge"));
     assert!(body.contains("Manage uploads"));
     assert!(body.contains("1.2 kB"));
+    // A hosted upload reads as hosted and locally served, with each placement chip labelled.
+    assert!(body.contains(r#"class="badge placement-source src-hosted""#), "{body}");
+    assert!(body.contains(r#"aria-label="source: hosted""#), "{body}");
+    assert!(body.contains(r#"aria-label="availability: local""#), "{body}");
+}
+
+#[tokio::test]
+async fn test_ui_project_page_shows_source_and_availability_chips() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = ui_config(&dir);
+    let IndexKind::Cached { offline, .. } = &mut config.indexes[0].kind else {
+        panic!("pypi test index must be cached");
+    };
+    *offline = true;
+    let state = build_state(&config).unwrap();
+    let cached = Digest::of(b"a cached wheel");
+    // A proxied artifact fetched and verified projects local; the second file has no placement row,
+    // so it stays the default proxied remote-only catalog entry.
+    state
+        .meta
+        .record_artifact_placement(cached.as_str(), peryx_storage::meta::ArtifactSource::Proxy, true)
+        .unwrap();
+    let remote = Digest::of(b"a wheel this proxy has never fetched");
+    let detail = serde_json::json!({
+        "meta": {"api-version": "1.1"},
+        "name": "veloxdemo",
+        "versions": ["1.0"],
+        "files": [
+            {
+                "filename": "veloxdemo-1.0-py3-none-any.whl",
+                "url": "https://files.example/veloxdemo-1.0-py3-none-any.whl",
+                "hashes": {"sha256": cached.as_str()},
+            },
+            {
+                "filename": "veloxdemo-1.0.tar.gz",
+                "url": "https://files.example/veloxdemo-1.0.tar.gz",
+                "hashes": {"sha256": remote.as_str()},
+            },
+        ],
+    });
+    state
+        .meta
+        .put_index(
+            "pypi/veloxdemo",
+            &CachedIndex {
+                etag: None,
+                last_serial: None,
+                fetched_at_unix: 0,
+                content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
+                fresh_secs: None,
+                body: serde_json::to_vec(&detail).unwrap(),
+            },
+        )
+        .unwrap();
+    let router = router_for(state);
+    let (status, body) = get(&router, "/browse?index=pypi&project=veloxdemo").await;
+    assert_eq!(status, StatusCode::OK);
+    // The cached file reads proxy + local; the never-fetched one reads proxy + remote-only.
+    assert!(body.contains(r#"class="badge placement-source src-proxy""#), "{body}");
+    assert!(body.contains(">local</span>"), "{body}");
+    assert!(
+        body.contains(r#"class="badge placement-avail avail-remote-only""#),
+        "{body}"
+    );
+    assert!(body.contains(r#"aria-label="availability: remote-only""#), "{body}");
 }
 
 #[tokio::test]

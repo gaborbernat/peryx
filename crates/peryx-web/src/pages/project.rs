@@ -19,7 +19,10 @@ use regex::Regex;
 use super::{ErrorMessage, copy_to_clipboard, human_size};
 use crate::data::load_project_view;
 use crate::markdown::{external_link_rel, is_safe_artifact_link, is_safe_link};
-use crate::model::{UiFile, UiProject, UiProjectStatus, UiProjectView, UiRelease};
+use crate::model::{
+    UiArtifactSource, UiByteAvailability, UiFile, UiProject, UiProjectStatus, UiProjectView, UiRelease,
+    byte_availability_label, file_source_label,
+};
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 use crate::url::browser_http_origin;
 use crate::url::{
@@ -570,6 +573,7 @@ fn file_row(route: &str, project: &str, file: &UiFile) -> impl IntoView {
             <td>{file.upload_time.clone().map_or_else(|| "—".to_owned(), |time| time.chars().take(10).collect())}</td>
             <td><code title=file.sha256.clone()>{short_hash}</code></td>
             <td>
+                {placement_badges(file.source, file.availability)}
                 {file.yanked.then(|| view! { <span class="badge yanked-badge">"yanked"</span> })}
                 {file.yanked_reason.clone().map(|reason| view! { <span class="yank-reason">{reason}</span> })}
                 {file.has_metadata.then(|| view! { <span class="badge meta-badge">"metadata"</span> })}
@@ -578,6 +582,26 @@ fn file_row(route: &str, project: &str, file: &UiFile) -> impl IntoView {
                 })}
             </td>
         </tr>
+    }
+}
+
+/// The two #441 placement chips a file carries: its source and its byte availability. Each names its
+/// dimension for assistive tech and states its value in words, so the pair stays legible without
+/// colour and composes with, rather than replaces, the yank, metadata, and upstream flags beside it.
+fn placement_badges(source: UiArtifactSource, availability: UiByteAvailability) -> impl IntoView {
+    let src = file_source_label(source);
+    let avail = byte_availability_label(availability);
+    view! {
+        <span
+            class=format!("badge placement-source src-{}", src.key)
+            title=src.hint
+            aria-label=format!("source: {}", src.text)
+        >{src.text}</span>
+        <span
+            class=format!("badge placement-avail avail-{}", avail.key)
+            title=avail.hint
+            aria-label=format!("availability: {}", avail.text)
+        >{avail.text}</span>
     }
 }
 
@@ -872,9 +896,9 @@ mod tests {
     use leptos::prelude::*;
     use rstest::rstest;
 
-    use peryx_core::{UiAvailability, UiFile};
+    use peryx_core::{UiArtifactSource, UiByteAvailability, UiFile};
 
-    use super::{UiProjectStatus, file_row, install_command, project_status_badge, shell_quote};
+    use super::{UiProjectStatus, file_row, install_command, placement_badges, project_status_badge, shell_quote};
 
     fn file(filename: &str) -> UiFile {
         UiFile {
@@ -889,7 +913,8 @@ mod tests {
             has_metadata: false,
             upstream: None,
             provenance: None,
-            availability: UiAvailability::Hosted,
+            source: UiArtifactSource::Hosted,
+            availability: UiByteAvailability::Local,
         }
     }
 
@@ -961,10 +986,65 @@ mod tests {
     fn test_file_row_names_the_routed_upstream() {
         let mut file = file("flask-1.0.whl");
         file.upstream = Some("corporate".to_owned());
-        file.availability = UiAvailability::RemoteOnly;
+        file.source = UiArtifactSource::Proxy;
+        file.availability = UiByteAvailability::RemoteOnly;
         let html = file_row("pypi", "flask", &file).to_html();
         assert!(html.contains(r#"title="Upstream source""#), "{html}");
         assert!(html.contains(">corporate</span>"), "{html}");
+    }
+
+    #[rstest]
+    #[case::hosted(
+        UiArtifactSource::Hosted,
+        UiByteAvailability::Local,
+        ">hosted</span>",
+        ">local</span>"
+    )]
+    #[case::cached(UiArtifactSource::Proxy, UiByteAvailability::Local, ">proxy</span>", ">local</span>")]
+    #[case::remote_only(
+        UiArtifactSource::Proxy,
+        UiByteAvailability::RemoteOnly,
+        ">proxy</span>",
+        ">remote-only</span>"
+    )]
+    #[case::unavailable(
+        UiArtifactSource::Hosted,
+        UiByteAvailability::Unavailable,
+        ">hosted</span>",
+        ">unavailable</span>"
+    )]
+    #[case::generated(
+        UiArtifactSource::Generated,
+        UiByteAvailability::Local,
+        ">generated</span>",
+        ">local</span>"
+    )]
+    fn test_placement_badges_render_distinct_labelled_text(
+        #[case] source: UiArtifactSource,
+        #[case] availability: UiByteAvailability,
+        #[case] source_text: &str,
+        #[case] availability_text: &str,
+    ) {
+        let html = placement_badges(source, availability).to_html();
+        assert!(html.contains(source_text), "{html}");
+        assert!(html.contains(availability_text), "{html}");
+        // Each chip names its dimension for a screen reader and carries no colour-only meaning.
+        assert!(html.contains(r#"aria-label="source:"#), "{html}");
+        assert!(html.contains(r#"aria-label="availability:"#), "{html}");
+    }
+
+    #[test]
+    fn test_file_row_keeps_both_yank_reason_and_availability() {
+        let mut file = file("flask-1.0.whl");
+        file.source = UiArtifactSource::Proxy;
+        file.availability = UiByteAvailability::RemoteOnly;
+        file.yanked = true;
+        file.yanked_reason = Some("broken build".to_owned());
+        let html = file_row("pypi", "flask", &file).to_html();
+        assert!(html.contains("yanked-badge"), "{html}");
+        assert!(html.contains(">broken build</span>"), "{html}");
+        assert!(html.contains(">remote-only</span>"), "{html}");
+        assert!(html.contains(r#"class="badge placement-source src-proxy""#), "{html}");
     }
 
     #[test]

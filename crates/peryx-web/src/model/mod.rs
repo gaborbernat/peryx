@@ -17,7 +17,8 @@ pub use analytics::{
 };
 pub use policy_decision::{PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage};
 pub use project::{
-    UiArtifactRef, UiFile, UiManifest, UiMember, UiMemberChunk, UiProject, UiProjectStatus, UiProjectView, UiRelease,
+    PlacementLabel, UiArtifactRef, UiArtifactSource, UiByteAvailability, UiFile, UiManifest, UiMember, UiMemberChunk,
+    UiProject, UiProjectStatus, UiProjectView, UiRelease, byte_availability_label, file_source_label,
     members_from_listing, projects_from_list,
 };
 pub use search::{UiSearchPage, UiSearchResult, source_label};

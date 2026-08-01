@@ -140,6 +140,57 @@ fn test_snapshot_from_status_roundtrip() {
     );
 }
 
+#[rstest]
+#[case::hosted(crate::model::UiArtifactSource::Hosted, "hosted", "hosted")]
+#[case::proxy(crate::model::UiArtifactSource::Proxy, "proxy", "proxy")]
+#[case::generated(crate::model::UiArtifactSource::Generated, "generated", "generated")]
+fn test_file_source_label_words_each_source(
+    #[case] source: crate::model::UiArtifactSource,
+    #[case] key: &str,
+    #[case] text: &str,
+) {
+    let label = crate::model::file_source_label(source);
+    assert_eq!(label.key, key);
+    assert_eq!(label.text, text);
+    assert!(!label.hint.is_empty());
+}
+
+#[rstest]
+#[case::local(crate::model::UiByteAvailability::Local, "local", "local")]
+#[case::remote_only(crate::model::UiByteAvailability::RemoteOnly, "remote-only", "remote-only")]
+#[case::unavailable(crate::model::UiByteAvailability::Unavailable, "unavailable", "unavailable")]
+fn test_byte_availability_label_words_each_state(
+    #[case] availability: crate::model::UiByteAvailability,
+    #[case] key: &str,
+    #[case] text: &str,
+) {
+    let label = crate::model::byte_availability_label(availability);
+    assert_eq!(label.key, key);
+    assert_eq!(label.text, text);
+    assert!(!label.hint.is_empty());
+}
+
+#[test]
+fn test_placement_labels_are_all_distinct_text() {
+    let mut texts = std::collections::BTreeSet::new();
+    for source in [
+        crate::model::UiArtifactSource::Hosted,
+        crate::model::UiArtifactSource::Proxy,
+        crate::model::UiArtifactSource::Generated,
+    ] {
+        texts.insert(crate::model::file_source_label(source).text);
+    }
+    for availability in [
+        crate::model::UiByteAvailability::Local,
+        crate::model::UiByteAvailability::RemoteOnly,
+        crate::model::UiByteAvailability::Unavailable,
+    ] {
+        texts.insert(crate::model::byte_availability_label(availability).text);
+    }
+    // Six placement dimensions, six distinct words: no state is told apart by colour alone.
+    assert_eq!(texts.len(), 6);
+}
+
 #[test]
 fn test_projects_and_members_from_json() {
     let list = serde_json::json!({"projects": [{"name": "a"}, {"name": "b"}]});

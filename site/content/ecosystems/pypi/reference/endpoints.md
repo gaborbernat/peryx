@@ -37,9 +37,11 @@ each endpoint down with copyable example requests and responses.
 - `GET /+health`: fixed, redacted process liveness for restart probes.
 - `GET /+ready`: redacted local-store readiness for load balancers; add `?writes=true` to require a writer. See
   [load-balancer probes](@/core/high-availability.md#load-balancer-probes) for response and deployment examples.
-- `GET /+status`: JSON health, version, counters, index descriptions.
-- `GET /+stats`: usage counters, drillable to project and file level.
-- `GET /metrics`: [Prometheus](https://prometheus.io/docs/instrumenting/exposition_formats/) text exposition.
+- `GET /+status`: JSON health, version, counters, index descriptions, filtered to the caller's class (public health and
+  basic index list, operator counters, administrator upstream and upload state).
+- `GET /+stats`: usage counters, drillable to project and file level; needs `operator:read`.
+- `GET /metrics`: [Prometheus](https://prometheus.io/docs/instrumenting/exposition_formats/) text exposition; aggregate
+  labels only, gate at the reverse proxy.
 - `GET /_/oidc/audience`: trusted-publishing audience discovery; `404` without a publisher.
 - `POST /_/oidc/mint-token`: exchange a verified CI identity for a short-lived upload token.
 
@@ -175,17 +177,27 @@ upstream concurrency totals. HTTP request counters stay at zero while the reques
 
 ## Status and usage
 
-`GET /+status` returns version, serial, request counters, configured index descriptions, cached index status, and
-redacted token metadata. It includes sanitized upstream URLs with user info, query strings, and fragments removed. It
-does not include upload-token values, upstream usernames, passwords, bearer tokens, URL query secrets, or URL fragments.
-Cached index entries also include `upstream.offline`, which is `true` when that cached index is serving only cached
-data.
+`GET /+status` filters its fields to the caller's class and answers `private, no-cache`, so a shared cache never keeps a
+credentialed document:
 
-Add `?details=admin` for the read-only admin status page. That shape also includes observed project counts, uploaded
-file counts, and capped recent uploads. The summary scans metadata keys once and does not fetch upstreams or read cached
-artifact bytes.
+- Public (any caller): `version`, `role`, coarse `health`, and the basic index list — each index's `name`, `route`,
+  `ecosystem`, `kind`, `endpoint`, `layers`, and upload target — so the browser can navigate and pick an upload route.
+- `operator:read`: `serial`, `requests`, `blob_storage`, the `by_ecosystem` rollup, and `metric_families`.
+- `administration:read`: each index's sanitized `upstream` (host, auth kind, cached status), `hosted` upload-token
+  state, observed project counts, uploaded file counts, and capped recent uploads.
 
-`GET /+stats` returns JSON counters aggregated off the request path, at three depths:
+An anonymous or repository-only caller therefore sees the configured routes but no upstream host, upload-token state, or
+upload metadata. Upstream URLs drop user info, query strings, and fragments; the document never carries upload-token
+values, upstream usernames, passwords, bearer tokens, URL query secrets, or URL fragments. The administrator `upstream`
+block includes `offline`, `true` when that cached index serves only cached data, and its summary scans metadata keys
+once without fetching upstreams or reading cached artifact bytes.
+
+Authenticate with a local user's Basic credential. The admin status page and dashboard render the same classes, so an
+unauthenticated page shows the routes but not the counters or the sensitive per-index fields.
+
+`GET /+stats` needs `operator:read` because its tree names repositories and projects; a repository token reads its own
+usage through `/+analytics/*` instead. It answers `no-store`, `401` without an operator credential, and `404` when the
+credential holds no operator grant. It returns JSON counters aggregated off the request path, at three depths:
 
 - No parameters: totals per index route.
 - `?index={route}`: one index's totals plus a counter set per project.

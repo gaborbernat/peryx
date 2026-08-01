@@ -235,18 +235,14 @@ fn status() -> OperationBuilder {
         .tag("operations")
         .summary(Some("Health and identity"))
         .description(Some(
-            "Version, counters, and the configured indexes. Add `?details=admin` for bounded metadata \
-             summaries used by the read-only admin status page.",
+            "Version, health, counters, and the configured indexes, each filtered to the caller's \
+             class. Version, role, coarse health, and the basic index list are public; the serial, \
+             request count, blob backend, per-ecosystem rollups, and metric families need operator \
+             authority; each index's upstream hosts, upload-token state, and recent uploads need \
+             administrator authority. The response is `private, no-cache`. The example shows the \
+             administrator view.",
         ))
-        .parameter(
-            ParameterBuilder::new()
-                .name("details")
-                .parameter_in(ParameterIn::Query)
-                .description(Some(
-                    "Use `admin` to include observed project counts, uploaded file counts, and recent uploads.",
-                ))
-                .example(Some(json!("admin"))),
-        )
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
         .response(
             "200",
             ResponseBuilder::new().description("The status document").content(
@@ -342,11 +338,29 @@ fn stats() -> OperationBuilder {
         .description(Some(
             "Counters aggregated off the request path, drillable: no parameters for per-index totals, \
              `?index={route}` for one index's projects, `&project={name}` for one project's files. \
-             Counters are grouped by the role that owns them: a neutral `base` group every index \
-             reports, a `cached` group only a caching index fills, a `hosted` group only an upload \
-             store fills, and an `ecosystem` map of the driver's own counters (PyPI's PEP 658 \
-             sibling under `metadata`).",
+             The tree names repositories and projects, so it needs operator authority and is never \
+             cached; a repository token reads its own usage through `/+analytics/*` instead. Counters \
+             are grouped by the role that owns them: a neutral `base` group every index reports, a \
+             `cached` group only a caching index fills, a `hosted` group only an upload store fills, \
+             and an `ecosystem` map of the driver's own counters (PyPI's PEP 658 sibling under \
+             `metadata`).",
         ))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid operator credential was presented"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The credential holds no operator grant"),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication or authorization is unavailable",
+                json!({"error": "stats service unavailable"}),
+            ),
+        )
         .parameter(
             ParameterBuilder::new()
                 .name("index")

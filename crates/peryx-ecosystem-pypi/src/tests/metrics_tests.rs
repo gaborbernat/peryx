@@ -194,8 +194,12 @@ async fn test_router_paths_feed_stats_and_prometheus_metrics() {
         })
     });
 
-    let (stats_status, _, stats_body) = get(&harness.state, "/+stats?index=pypi&project=flask", None).await;
-    let stats_json: serde_json::Value = serde_json::from_str(&stats_body).unwrap();
+    // `/+stats` and the `/+status` rollup are operator-class, so both reads authenticate.
+    let authorization = crate::tests::administrator_header(&harness.state).await;
+    let credentials = [(axum::http::header::AUTHORIZATION.as_str(), authorization.as_str())];
+    let (stats_status, _, stats_bytes) =
+        get_bytes_with_headers(&harness.state, "/+stats?index=pypi&project=flask", &credentials).await;
+    let stats_json: serde_json::Value = serde_json::from_slice(&stats_bytes).unwrap();
     assert_eq!(stats_status, StatusCode::OK);
     assert_eq!(
         stats_json,
@@ -236,9 +240,9 @@ async fn test_router_paths_feed_stats_and_prometheus_metrics() {
 
     // `/+status` rolls the same counters up per ecosystem and carries the driver's family labels, so
     // the dashboard can separate the global request count from the PyPI-scoped ones.
-    let (code, _, doc) = get(&harness.state, "/+status", None).await;
+    let (code, _, bytes) = get_bytes_with_headers(&harness.state, "/+status", &credentials).await;
     assert_eq!(code, StatusCode::OK);
-    let status: serde_json::Value = serde_json::from_str(&doc).unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let pypi = status["by_ecosystem"]
         .as_array()
         .unwrap()

@@ -8,11 +8,24 @@ const PROJECT_URL = "/browse?index=root%2Fpypi&project=veloxdemo";
 const TOKEN = "playwright-secret";
 const HOST = `127.0.0.1:${process.env.PERYX_FRONTEND_PORT ?? "4455"}`;
 const FIXTURE_WHEEL = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "veloxdemo-1.0.0-py3-none-any.whl");
+// The status, dashboard, and stats surfaces filter to the caller's class, so viewing the topology and
+// counters needs the bootstrapped administrator's credential on every request the page makes.
+const ADMIN_AUTH = `Basic ${Buffer.from("administrator:browser-admin-secret").toString("base64")}`;
 
 /// Navigate and wait for the wasm bundle to hydrate, so clicks hit live handlers.
 async function goto(page, url) {
   await page.goto(url);
   await page.waitForSelector("body[data-hydrated]");
+}
+
+/// A page whose every request carries the administrator credential, so the operator- and
+/// administrator-class status, dashboard, and stats fields render.
+async function opsPage(browser) {
+  const context = await browser.newContext({
+    baseURL: `http://${HOST}`,
+    extraHTTPHeaders: { authorization: ADMIN_AUTH },
+  });
+  return context.newPage();
 }
 
 async function openUpload(page, route, token, file) {
@@ -41,7 +54,8 @@ function policyDecision(state, fresh, project = "blocked-package") {
   };
 }
 
-test("dashboard shows identity, counters, and the topology", async ({ page }) => {
+test("dashboard shows identity, counters, and the topology", async ({ browser }) => {
+  const page = await opsPage(browser);
   await goto(page, "/");
   // Metrics are split into a global group and a per-ecosystem group, so a reader can tell the
   // instance-wide request count from PyPI-scoped counters like PEP 658 hits.
@@ -204,7 +218,8 @@ test("search form submission navigates with the query", async ({ page }) => {
   await expect(page.locator("table.search-results tbody tr", { hasText: "veloxdemo" }).first()).toBeVisible();
 });
 
-test("usage stats page lists indexes and drills into one", async ({ page }) => {
+test("usage stats page lists indexes and drills into one", async ({ browser }) => {
+  const page = await opsPage(browser);
   // Seed a page view so the counters have a row to show.
   await page.request.get("/root/pypi/simple/veloxdemo/", {
     headers: { accept: "application/vnd.pypi.simple.v1+json" },
@@ -250,7 +265,8 @@ test("unknown routes render the not-found fallback", async ({ page }) => {
   await expect(page.locator("body")).toContainText("not found");
 });
 
-test("admin table shows upstream and upload state per index", async ({ page }) => {
+test("admin table shows upstream and upload state per index", async ({ browser }) => {
+  const page = await opsPage(browser);
   await goto(page, "/admin/status");
   const table = page.locator(".ops-table").first();
   // The cached index reports a configured upstream; a hosted index shows an upload badge.
@@ -258,7 +274,8 @@ test("admin table shows upstream and upload state per index", async ({ page }) =
   await expect(table.locator("[class*='badge upload-']").first()).toBeVisible();
 });
 
-test("admin status is read-only and tolerates failed stats fetches", async ({ page }) => {
+test("admin status is read-only and tolerates failed stats fetches", async ({ browser }) => {
+  const page = await opsPage(browser);
   await page.route("**/+stats**", (route) => route.fulfill({ status: 503, body: "{}" }));
   await goto(page, "/");
   await page.locator(".nav-links a", { hasText: "Status" }).click();
@@ -514,7 +531,8 @@ test("every page sets the differentiated app favicon", async ({ page }) => {
   expect(svg).not.toContain("#4F9BE0");
 });
 
-test("admin topology table fits the page and uses current vocabulary", async ({ page }) => {
+test("admin topology table fits the page and uses current vocabulary", async ({ browser }) => {
+  const page = await opsPage(browser);
   await goto(page, "/admin/status");
   // Renamed heading and the merged role x ecosystem "Type" column.
   await expect(page.locator(".ops-page h2", { hasText: "Indexes" })).toBeVisible();
@@ -730,7 +748,8 @@ test("search surfaces provenance facets and the owning index", async ({ page }) 
   await expect(select.locator("option")).toContainText(["All", "Uploaded", "Cached", "Override"]);
 });
 
-test("usage stats drill from index to project to file", async ({ page }) => {
+test("usage stats drill from index to project to file", async ({ browser }) => {
+  const page = await opsPage(browser);
   // Generate traffic the counters can show: a page view and a file download.
   const detail = await page.request.get("/root/pypi/simple/veloxdemo/", {
     headers: { accept: "application/vnd.pypi.simple.v1+json" },

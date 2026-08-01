@@ -1,20 +1,26 @@
-//! `GET /+status`: health, identity, counters, and the configured indexes.
+//! `GET /+status`: health, identity, counters, and the configured indexes, each classified by the
+//! least authority it requires.
+//!
+//! Version, coarse health, and the basic index list stay public, so an unauthenticated probe learns
+//! liveness and the web upload and dashboard pages still resolve their routes. The operational
+//! counters need operator authority; the per-index upstream hosts, upload-token state, and recent
+//! uploads need administrator authority. A caller receives only the fields at or below its class, and
+//! the response is never shared-cached. `GET /+health` and `GET /+ready` stay public and unfiltered.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::extract::{Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use super::usage::{ecosystem_summaries, family_descriptors};
 use peryx_driver::state::AppState;
+use peryx_identity::{Resource, Scope, parse_basic};
 
-/// The `/+status` detail selector.
-#[derive(Debug, serde::Deserialize)]
-pub struct StatusQuery {
-    details: Option<String>,
-}
+use crate::response_security::{
+    ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
+};
 
 /// Select write readiness instead of the default read readiness.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -25,26 +31,115 @@ pub struct ReadinessQuery {
 
 const STATUS_RECENT_UPLOADS: usize = 5;
 
-/// `GET /+status`: health, identity, counters, and the configured indexes. The web UI's live
-/// dashboard refreshes from this document.
-pub async fn status(State(state): State<Arc<AppState>>, Query(query): Query<StatusQuery>) -> Response {
-    let serial = state.meta.current_serial();
-    let blobs = state.blobs.health().await.is_ok();
-    let indexes = index_documents(&state, query.details.as_deref() == Some("admin"));
-    axum::Json(serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "serial": serial.as_ref().copied().unwrap_or(0),
-        "role": if state.read_only { "replica" } else { "writer" },
-        "health": health_document(&state, serial.is_ok(), blobs),
-        "blob_storage": blob_storage_document(&state.blobs),
-        "requests": state.requests.load(Ordering::Relaxed),
-        "by_ecosystem": ecosystem_summaries(&state),
-        "metric_families": family_descriptors(&state),
-        "indexes": indexes,
-    }))
-    .into_response()
+/// `GET /+status`: health, identity, counters, and the configured indexes, filtered to the caller's
+/// class. The web UI's live dashboard refreshes from this document.
+pub async fn status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let authorization = status_authorization(&state, &headers).await;
+    let mut response =
+        axum::Json(serde_json::Value::Object(status_document(&state, authorization).await)).into_response();
+    ProtectedCachePolicy::Private.apply(response.headers_mut());
+    response
 }
 
+/// Build the status map already filtered to the caller's class. Every field is classified, and the
+/// caller is public or an allowed scope, so the filter cannot deny.
+async fn status_document(
+    state: &AppState,
+    authorization: ResponseAuthorization,
+) -> serde_json::Map<String, serde_json::Value> {
+    let administrator = matches!(
+        authorization,
+        ResponseAuthorization::Scoped(decision) if matches!(decision.scope(), Scope::AdministrationRead)
+    );
+    let serial = state.meta.current_serial();
+    let blobs = state.blobs.health().await.is_ok();
+    let fields = [
+        ClassifiedField::new(
+            "version",
+            FieldClassification::Public,
+            serde_json::json!(env!("CARGO_PKG_VERSION")),
+        ),
+        ClassifiedField::new(
+            "role",
+            FieldClassification::Public,
+            serde_json::json!(if state.read_only { "replica" } else { "writer" }),
+        ),
+        ClassifiedField::new(
+            "health",
+            FieldClassification::Public,
+            health_document(state, serial.is_ok(), blobs),
+        ),
+        ClassifiedField::new(
+            "serial",
+            FieldClassification::Operator,
+            serde_json::json!(serial.as_ref().copied().unwrap_or(0)),
+        ),
+        ClassifiedField::new(
+            "requests",
+            FieldClassification::Operator,
+            serde_json::json!(state.requests.load(Ordering::Relaxed)),
+        ),
+        ClassifiedField::new(
+            "blob_storage",
+            FieldClassification::Operator,
+            blob_storage_document(&state.blobs),
+        ),
+        ClassifiedField::new(
+            "by_ecosystem",
+            FieldClassification::Operator,
+            serde_json::json!(ecosystem_summaries(state)),
+        ),
+        ClassifiedField::new(
+            "metric_families",
+            FieldClassification::Operator,
+            serde_json::json!(family_descriptors(state)),
+        ),
+        // The index list carries the basic topology every caller needs to navigate and upload; its
+        // sensitive per-index fields (upstream hosts, upload-token state, and recent uploads) are
+        // included only for an administrator.
+        ClassifiedField::new(
+            "indexes",
+            FieldClassification::Public,
+            serde_json::Value::Array(index_documents(state, administrator)),
+        ),
+    ];
+    filter_fields(authorization, fields).expect("public and allowed scopes classify")
+}
+
+/// The caller's status class: public for an unauthenticated, unknown, or repository-only credential;
+/// operator or administrator for a local user the persisted grants raise to a server role.
+///
+/// The elevated checks emit their own bounded authorization events. Any authentication or grant fault
+/// resolves to [`ResponseAuthorization::Public`], so a storage fault can only ever narrow what a
+/// response reveals. The web renderer shares this resolver so a page reveals exactly the API's fields.
+pub async fn status_authorization(state: &AppState, headers: &HeaderMap) -> ResponseAuthorization {
+    let Some(credentials) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_basic)
+    else {
+        return ResponseAuthorization::Public;
+    };
+    let Ok(Some(actor)) = state.users.authenticate(&credentials.user, &credentials.password).await else {
+        return ResponseAuthorization::Public;
+    };
+    let administrator = state
+        .authorization
+        .authorize_scoped(&actor, Scope::AdministrationRead, &Resource::Operator);
+    if administrator.decision().is_allowed() {
+        return ResponseAuthorization::Scoped(administrator);
+    }
+    let operator = state
+        .authorization
+        .authorize_scoped(&actor, Scope::OperatorRead, &Resource::Operator);
+    if operator.decision().is_allowed() {
+        return ResponseAuthorization::Scoped(operator);
+    }
+    ResponseAuthorization::Public
+}
+
+/// Describe every index. Each carries its basic topology; `details` adds the administrator-class
+/// fields (upstream hosts and auth, hosted upload-token state, and bounded upload summaries).
 fn index_documents(state: &AppState, details: bool) -> Vec<serde_json::Value> {
     let summaries = details.then(|| state.index_summaries(STATUS_RECENT_UPLOADS));
     state
@@ -75,7 +170,9 @@ fn index_documents(state: &AppState, details: bool) -> Vec<serde_json::Value> {
                 ("uploads".to_owned(), serde_json::json!(index.uploads)),
                 ("volatile_deletes".to_owned(), serde_json::json!(index.volatile_deletes)),
                 ("upload_to".to_owned(), serde_json::json!(index.upload_to)),
-                (
+            ]);
+            if let Some(summaries) = &summaries {
+                object.insert(
                     "upstream".to_owned(),
                     serde_json::json!(index.upstream.map(|upstream| serde_json::json!({
                         "url": upstream.url,
@@ -94,8 +191,8 @@ fn index_documents(state: &AppState, details: bool) -> Vec<serde_json::Value> {
                             "status": source.status,
                         })).collect::<Vec<_>>(),
                     }))),
-                ),
-                (
+                );
+                object.insert(
                     "hosted".to_owned(),
                     serde_json::json!(index.hosted.map(|hosted| serde_json::json!({
                         "volatile": hosted.volatile,
@@ -104,9 +201,7 @@ fn index_documents(state: &AppState, details: bool) -> Vec<serde_json::Value> {
                             "redacted": hosted.upload_token.redacted,
                         },
                     }))),
-                ),
-            ]);
-            if let Some(summaries) = &summaries {
+                );
                 let summary = summaries.get(&index.name).cloned().unwrap_or_default();
                 object.insert("project_count".to_owned(), serde_json::json!(summary.project_count));
                 object.insert("upload_count".to_owned(), serde_json::json!(summary.upload_count));

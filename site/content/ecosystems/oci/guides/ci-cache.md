@@ -123,7 +123,7 @@ proxy index (point `cached` at `https://ghcr.io` and pull through that route) an
 Watch a couple of jobs, then check what the cache absorbed:
 
 ```shell
-curl -s 'http://peryx.internal:4433/+stats?index=dockerhub' | jq .totals
+curl -s -u operator:"$OPERATOR_PASSWORD" 'http://peryx.internal:4433/+stats?index=dockerhub' | jq .totals
 ```
 
 `downloads` and `bytes` count what peryx served; once the working set is warm, upstream traffic drops to manifest

@@ -109,7 +109,7 @@ upstream ones under one route, front both with a virtual index; see
 
 ## What to check
 
-- `curl http://<host>:4433/+status` lists the indexes and their counters.
-- `curl http://<host>:4433/+status | jq '.indexes[].upstream?.offline'` shows which cached indexes run offline.
+- `curl -u admin:"$ADMIN_PASSWORD" http://<host>:4433/+status | jq '.indexes[].upstream?.offline'` shows which cached
+  indexes run offline; the index topology needs an administrator credential.
 - A pull that errors from a cached route means a client asked for an image the offline store does not hold; add it to
   the pre-seed loop and repeat the carry.

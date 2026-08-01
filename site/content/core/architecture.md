@@ -249,11 +249,11 @@ through the real router and asserts on the HTML. The browser half cannot feed th
 [Playwright](https://playwright.dev/) suite drives the hydrated UI instead (search, package pages, the archive browser,
 and token-authenticated yank and delete), which is the stronger check for interactive behavior anyway.
 
-The UI reads peryx's own public API: `/+status` for the dashboard, `/+status?details=admin` for the admin status page,
-`/+stats` for usage, the PEP 691 simple endpoints for package data, and the `inspect` endpoints for archive contents.
-The admin status document summarizes metadata keys for observed project counts, uploaded file counts, and capped recent
-uploads; it does not fetch upstreams or read cached artifact bytes. Anything the UI shows, a script can fetch the same
-way.
+The UI reads peryx's own API: `/+status` for the dashboard and admin status page (each field filtered to the caller's
+class), `/+stats` for usage under `operator:read`, the PEP 691 simple endpoints for package data, and the `inspect`
+endpoints for archive contents. The admin status document summarizes metadata keys for observed project counts, uploaded
+file counts, and capped recent uploads; it does not fetch upstreams or read cached artifact bytes. Anything the UI
+shows, a script can fetch the same way.
 
 ## Tradeoffs
 

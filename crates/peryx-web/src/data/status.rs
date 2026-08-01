@@ -9,7 +9,7 @@ use crate::model::UiSnapshot;
 pub async fn load_snapshot() -> UiSnapshot {
     #[cfg(feature = "ssr")]
     {
-        crate::ssr::snapshot()
+        crate::ssr::snapshot().await
     }
     #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
     {
@@ -30,12 +30,12 @@ pub async fn load_snapshot() -> UiSnapshot {
 pub async fn load_admin_snapshot() -> UiSnapshot {
     #[cfg(feature = "ssr")]
     {
-        crate::ssr::admin_snapshot()
+        crate::ssr::admin_snapshot().await
     }
     #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
     {
         send_wrapper::SendWrapper::new(async {
-            super::fetch_json("/+status?details=admin")
+            super::fetch_json("/+status")
                 .await
                 .map_or_else(UiSnapshot::default, |value| UiSnapshot::from_status(&value))
         })

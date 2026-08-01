@@ -5,11 +5,20 @@ use peryx_driver::rate_limit::UpstreamLimits;
 use peryx_identity::IndexAcl;
 use peryx_upstream::{NamedUpstream, UpstreamRouter};
 
+/// A `/+status` request authenticated as a server administrator, decoded to a string body.
+async fn get_admin(state: &Arc<AppState>, uri: &str) -> (StatusCode, HeaderMap, String) {
+    let authorization = crate::tests::administrator_header(state).await;
+    let (status, headers, bytes) =
+        get_bytes_with_headers(state, uri, &[(header::AUTHORIZATION.as_str(), &authorization)]).await;
+    (status, headers, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[tokio::test]
-async fn test_status_lists_routes() {
+async fn test_status_lists_routes_for_an_administrator() {
     let h = harness().await;
-    let (status, headers, body) = get(&h.state, "/+status", None).await;
+    let (status, headers, body) = get_admin(&h.state, "/+status").await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "private, no-cache");
     assert!(
         headers
             .get(header::CONTENT_TYPE)
@@ -21,9 +30,23 @@ async fn test_status_lists_routes() {
     assert!(body.contains("root/pypi"));
     assert!(body.contains(env!("CARGO_PKG_VERSION")));
     assert!(body.contains(&h.server.uri()));
-    assert!(!body.contains("\"project_count\""));
-    assert!(!body.contains("\"upload_count\""));
-    assert!(!body.contains("\"recent_uploads\""));
+    assert!(!body.contains("s3cret"));
+}
+
+#[tokio::test]
+async fn test_status_withholds_sensitive_index_fields_from_anonymous() {
+    let h = harness().await;
+    let (status, headers, body) = get(&h.state, "/+status", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "private, no-cache");
+    assert!(body.contains(env!("CARGO_PKG_VERSION")));
+    // The basic route stays visible so the browser can navigate and upload.
+    assert!(body.contains("root/pypi"), "{body}");
+    // The upstream host, upload-token state, and per-repository counts are administrator-only.
+    assert!(!body.contains(&h.server.uri()), "{body}");
+    assert!(!body.contains("\"upstream\""), "{body}");
+    assert!(!body.contains("\"upload_token\""), "{body}");
+    assert!(!body.contains("\"project_count\""), "{body}");
     assert!(!body.contains("s3cret"));
 }
 
@@ -46,7 +69,7 @@ async fn test_status_admin_details_include_bounded_summaries() {
         upload_peryxpkg(&h.state, "/root/pypi/", &fixture_wheel()).await,
         StatusCode::OK
     );
-    let (status, _, body) = get(&h.state, "/+status?details=admin", None).await;
+    let (status, _, body) = get_admin(&h.state, "/+status").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("\"project_count\""));
     assert!(body.contains("\"upload_count\""));
@@ -84,7 +107,7 @@ async fn test_status_redacts_upstream_and_upload_secrets() {
         },
     ];
     let state = crate::tests::wired(AppState::new(meta, blobs, 60, indexes));
-    let (status, _, body) = get(&state, "/+status", None).await;
+    let (status, _, body) = get_admin(&state, "/+status").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("https://example.invalid/simple/"));
     assert!(body.contains("\"kind\":\"bearer\""));
@@ -134,7 +157,7 @@ async fn test_status_reports_routed_upstream_health() {
         .insert("pypi".to_owned(), UpstreamRouter::new(vec![primary, fallback]).unwrap());
     let state = crate::tests::wired(state);
 
-    let (status, _, body) = get(&state, "/+status", None).await;
+    let (status, _, body) = get_admin(&state, "/+status").await;
     assert_eq!(status, StatusCode::OK);
     let body: serde_json::Value = serde_json::from_str(&body).unwrap();
     let upstream = &body["indexes"][0]["upstream"];

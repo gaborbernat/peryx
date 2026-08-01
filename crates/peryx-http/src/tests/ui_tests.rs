@@ -9,9 +9,14 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use rstest::rstest;
 use tower::ServiceExt as _;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use peryx_core::{Ecosystem, UiBlock, UiManifest, UiMember, UiMemberChunk, UiMeta, UiProject, UiProjectView};
 use peryx_driver::state::{AppState, Index, IndexKind, ServingState};
-use peryx_identity::IndexAcl;
+use peryx_driver::users::UserService;
+use peryx_identity::{GrantScope, IndexAcl, PasswordPolicy, Role};
+use peryx_storage::blob::BlobStore;
+use peryx_storage::meta::MetaStore;
 
 /// A driver whose browse methods answer by their inputs, so one instance exercises every outcome the
 /// handlers branch on: a value, an absent item, and a read error.
@@ -173,6 +178,38 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Val
     (status, document)
 }
 
+const ADMIN_PASSWORD: &str = "admin password 1";
+
+/// Add a server administrator to a fixture and return the Basic header that authenticates as it, so a
+/// test can read the operator- and administrator-class status fields the anonymous document hides.
+async fn grant_administrator(state: &mut AppState, meta: MetaStore) -> String {
+    state.users = UserService::with_password_settings(meta, PasswordPolicy::new(8, 1, 1).unwrap(), 2);
+    let user = state.users.create("Admin").unwrap();
+    state.users.set_password(&user.id, ADMIN_PASSWORD).await.unwrap();
+    state
+        .authorization
+        .grant(&user.id, Role::Administrator, GrantScope::Server)
+        .unwrap();
+    format!("Basic {}", STANDARD.encode(format!("Admin:{ADMIN_PASSWORD}")))
+}
+
+async fn get_json_as(app: &axum::Router, uri: &str, authorization: &str) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::AUTHORIZATION, authorization)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+}
+
 async fn get_status(app: &axum::Router, uri: &str) -> StatusCode {
     app.clone()
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -200,6 +237,33 @@ fn read_only_app() -> (tempfile::TempDir, axum::Router) {
     let mut state = AppState::new(meta, blobs, 60, vec![index("replica", Ecosystem::Pypi)]);
     state.read_only = true;
     (dir, crate::router(Arc::new(state)))
+}
+
+/// The read-only fixture with a server administrator, returning the router and its Basic header.
+async fn read_only_app_admin() -> (tempfile::TempDir, axum::Router, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let mut state = AppState::new(meta.clone(), blobs, 60, vec![index("replica", Ecosystem::Pypi)]);
+    state.read_only = true;
+    let authorization = grant_administrator(&mut state, meta).await;
+    (dir, crate::router(Arc::new(state)), authorization)
+}
+
+/// The `ui_app` fixture with a server administrator, returning the router and its Basic header.
+async fn ui_app_admin() -> (tempfile::TempDir, axum::Router, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let indexes = vec![
+        index("good", Ecosystem::Pypi),
+        index("bad", Ecosystem::Pypi),
+        index("orphan", Ecosystem::Oci),
+    ];
+    let mut state = AppState::new(meta.clone(), blobs, 60, indexes);
+    state.register_ecosystem(Arc::new(UiStub), Arc::new(peryx_search::EmptyIndexer));
+    let authorization = grant_administrator(&mut state, meta).await;
+    (dir, crate::router(Arc::new(state)), authorization)
 }
 
 fn unavailable_app() -> (tempfile::TempDir, axum::Router) {
@@ -235,9 +299,9 @@ async fn test_replica_status_and_readiness_report_read_only_role() {
 
 #[tokio::test]
 async fn test_status_reports_blob_backend_capabilities() {
-    let (_dir, app) = read_only_app();
+    let (_dir, app, authorization) = read_only_app_admin().await;
 
-    let (status, document) = get_json(&app, "/+status").await;
+    let (status, document) = get_json_as(&app, "/+status", &authorization).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -313,8 +377,8 @@ async fn test_replica_rejects_mutating_methods(#[case] method: axum::http::Metho
 async fn test_status_reads_the_client_endpoint_from_a_registered_driver() {
     // `good`/`bad` have a driver, so their endpoint comes from `client_endpoint`; `orphan` has none,
     // so it falls back to the bare route. One request exercises both arms.
-    let (_dir, app) = ui_app();
-    let (status, document) = get_json(&app, "/+status").await;
+    let (_dir, app, authorization) = ui_app_admin().await;
+    let (status, document) = get_json_as(&app, "/+status", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     let endpoints: std::collections::HashMap<&str, &str> = document["indexes"]
         .as_array()
@@ -520,10 +584,11 @@ async fn test_status_reports_virtual_member_precedence_with_roles() {
             acl: IndexAcl::default(),
         },
     ];
-    let mut state = AppState::new(meta, blobs, 60, indexes);
+    let mut state = AppState::new(meta.clone(), blobs, 60, indexes);
     state.register_ecosystem(Arc::new(UiStub), Arc::new(peryx_search::EmptyIndexer));
+    let authorization = grant_administrator(&mut state, meta).await;
     let app = crate::router(Arc::new(state));
-    let (status, document) = get_json(&app, "/+status").await;
+    let (status, document) = get_json_as(&app, "/+status", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     let combo = document["indexes"]
         .as_array()

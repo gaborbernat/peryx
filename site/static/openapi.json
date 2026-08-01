@@ -1897,7 +1897,7 @@
     },
     "/+stats": {
       "get": {
-        "description": "Counters aggregated off the request path, drillable: no parameters for per-index totals, `?index={route}` for one index's projects, `&project={name}` for one project's files. Counters are grouped by the role that owns them: a neutral `base` group every index reports, a `cached` group only a caching index fills, a `hosted` group only an upload store fills, and an `ecosystem` map of the driver's own counters (PyPI's PEP 658 sibling under `metadata`).",
+        "description": "Counters aggregated off the request path, drillable: no parameters for per-index totals, `?index={route}` for one index's projects, `&project={name}` for one project's files. The tree names repositories and projects, so it needs operator authority and is never cached; a repository token reads its own usage through `/+analytics/*` instead. Counters are grouped by the role that owns them: a neutral `base` group every index reports, a `cached` group only a caching index fills, a `hosted` group only an upload store fills, and an `ecosystem` map of the driver's own counters (PyPI's PEP 658 sibling under `metadata`).",
         "parameters": [
           {
             "description": "Drill into one index's projects",
@@ -1943,8 +1943,29 @@
               }
             },
             "description": "The counters at the requested depth"
+          },
+          "401": {
+            "description": "No valid operator credential was presented"
+          },
+          "404": {
+            "description": "The credential holds no operator grant"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "stats service unavailable"
+                }
+              }
+            },
+            "description": "Authentication or authorization is unavailable"
           }
         },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
         "summary": "Usage statistics",
         "tags": [
           "operations"
@@ -1953,16 +1974,7 @@
     },
     "/+status": {
       "get": {
-        "description": "Version, counters, and the configured indexes. Add `?details=admin` for bounded metadata summaries used by the read-only admin status page.",
-        "parameters": [
-          {
-            "description": "Use `admin` to include observed project counts, uploaded file counts, and recent uploads.",
-            "example": "admin",
-            "in": "query",
-            "name": "details",
-            "required": false
-          }
-        ],
+        "description": "Version, health, counters, and the configured indexes, each filtered to the caller's class. Version, role, coarse health, and the basic index list are public; the serial, request count, blob backend, per-ecosystem rollups, and metric families need operator authority; each index's upstream hosts, upload-token state, and recent uploads need administrator authority. The response is `private, no-cache`. The example shows the administrator view.",
         "responses": {
           "200": {
             "content": {
@@ -2083,6 +2095,11 @@
             "description": "The status document"
           }
         },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
         "summary": "Health and identity",
         "tags": [
           "operations"

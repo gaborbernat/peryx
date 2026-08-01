@@ -400,12 +400,16 @@ async fn test_stats_endpoint_drills_by_index_and_project() {
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    let (status, _, body) = get(&h.state, "/+stats", None).await;
+    // `/+stats` names repositories, so the drill authenticates as an operator.
+    let authorization = crate::tests::administrator_header(&h.state).await;
+    let credentials = [(axum::http::header::AUTHORIZATION.as_str(), authorization.as_str())];
+    let (status, _, bytes) = crate::tests::http::get_bytes_with_headers(&h.state, "/+stats", &credentials).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("pypi"));
-    let (status, _, body) = get(&h.state, "/+stats?index=pypi&project=flask", None).await;
+    assert!(String::from_utf8_lossy(&bytes).contains("pypi"));
+    let (status, _, bytes) =
+        crate::tests::http::get_bytes_with_headers(&h.state, "/+stats?index=pypi&project=flask", &credentials).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("files"));
+    assert!(String::from_utf8_lossy(&bytes).contains("files"));
 }
 #[tokio::test]
 async fn test_upstream_file_error_is_bad_gateway() {

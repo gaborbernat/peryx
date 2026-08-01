@@ -24,6 +24,7 @@ pub mod retention;
 pub mod revocations;
 pub mod serving;
 pub mod state;
+pub mod trash;
 pub mod users;
 
 pub use driver_set::DriverSet;

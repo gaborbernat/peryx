@@ -9,6 +9,7 @@
 use std::collections::BTreeSet;
 
 pub use peryx_core::TrashInfo;
+use peryx_core::{Ecosystem, TrashRecord};
 use peryx_storage::meta::{DriverTxn, MetaError, MetaStore};
 use serde::{Deserialize, Serialize};
 
@@ -313,6 +314,65 @@ pub fn list_trashed_tags(meta: &MetaStore, index: &str, repo: &str) -> Result<Ve
         }
     }
     Ok(tags)
+}
+
+/// Every soft-deleted manifest and tag under `index`, as neutral trash records for the inspection
+/// view. A trashed tag is one record; a trashed untagged digest is another. A digest deletion that
+/// captured tags is represented by those tag records, so it is never listed twice. `retained` reports
+/// whether the manifest content a restore needs is still stored, read once per record without walking
+/// blob references.
+///
+/// # Errors
+/// Returns a store error if a scan or read fails.
+pub fn trash_records(meta: &MetaStore, index: &str) -> Result<Vec<TrashRecord>, MetaError> {
+    let mut records = Vec::new();
+    let tag_prefix = format!("{TAG_TRASH_PREFIX}{index}\u{0}");
+    for key in meta.driver_prefix_keys(&tag_prefix)? {
+        if let Some((repo, tag)) = key
+            .strip_prefix(tag_prefix.as_str())
+            .and_then(|rest| rest.split_once('\u{0}'))
+            && let Some(raw) = meta.get_driver_value(&key)?
+            && let Ok(trash) = serde_json::from_slice::<TagTrash>(&raw)
+        {
+            let reference = Some(tag.to_owned());
+            records.push(trash_record(meta, index, repo, reference, trash.digest, &trash.info)?);
+        }
+    }
+    let manifest_prefix = format!("{MANIFEST_TRASH_PREFIX}{index}\u{0}");
+    for key in meta.driver_prefix_keys(&manifest_prefix)? {
+        if let Some((repo, digest)) = key
+            .strip_prefix(manifest_prefix.as_str())
+            .and_then(|rest| rest.split_once('\u{0}'))
+            && let Some(raw) = meta.get_driver_value(&key)?
+            && let Ok(trash) = serde_json::from_slice::<ManifestTrash>(&raw)
+            && trash.tags.is_empty()
+        {
+            records.push(trash_record(meta, index, repo, None, digest.to_owned(), &trash.info)?);
+        }
+    }
+    Ok(records)
+}
+
+fn trash_record(
+    meta: &MetaStore,
+    index: &str,
+    repo: &str,
+    reference: Option<String>,
+    digest: String,
+    info: &TrashInfo,
+) -> Result<TrashRecord, MetaError> {
+    let retained = meta.get_driver_value(&manifest_key(&digest))?.is_some();
+    Ok(TrashRecord {
+        ecosystem: Ecosystem::Oci,
+        repository: index.to_owned(),
+        name: repo.to_owned(),
+        reference,
+        digest: Some(digest),
+        reason: info.reason.clone(),
+        actor: info.actor.clone(),
+        deleted_at_unix: info.deleted_at_unix,
+        retained,
+    })
 }
 
 /// List every repository that has a tag stored under `index`, distinct and sorted. The tag key is
@@ -867,6 +927,112 @@ mod tests {
                 blob_is_member(&meta, "store", "other", &config).unwrap(),
             ),
             (true, true, false)
+        );
+    }
+
+    fn image(bytes: &str) -> Manifest {
+        Manifest {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+            bytes: bytes.as_bytes().to_vec(),
+        }
+    }
+
+    fn info() -> TrashInfo {
+        TrashInfo {
+            deleted_at_unix: 100,
+            actor: Some("alice".to_owned()),
+            reason: Some("bad build".to_owned()),
+        }
+    }
+
+    #[test]
+    fn test_trash_records_lists_a_trashed_tag_with_provenance_and_retention() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "library/nginx", "sha256:a", &image("{}")).unwrap();
+        put_tag(&meta, "hub", "library/nginx", "latest", "sha256:a").unwrap();
+        trash_tag(&meta, "hub", "library/nginx", "latest", &info()).unwrap();
+
+        let records = trash_records(&meta, "hub").unwrap();
+
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.ecosystem, Ecosystem::Oci);
+        assert_eq!(record.repository, "hub");
+        assert_eq!(record.name, "library/nginx");
+        assert_eq!(record.reference.as_deref(), Some("latest"));
+        assert_eq!(record.digest.as_deref(), Some("sha256:a"));
+        assert_eq!(record.reason.as_deref(), Some("bad build"));
+        assert_eq!(record.actor.as_deref(), Some("alice"));
+        assert_eq!(record.deleted_at_unix, 100);
+        assert!(record.retained, "the manifest content is still stored");
+    }
+
+    #[test]
+    fn test_trash_records_reports_an_untagged_digest_deletion_once() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "library/nginx", "sha256:a", &image("{}")).unwrap();
+        trash_manifest(&meta, "hub", "library/nginx", "sha256:a", &info()).unwrap();
+
+        let records = trash_records(&meta, "hub").unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].reference, None, "an untagged digest carries no tag");
+        assert_eq!(records[0].digest.as_deref(), Some("sha256:a"));
+    }
+
+    #[test]
+    fn test_trash_records_does_not_double_count_a_tagged_manifest_deletion() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
+        put_tag(&meta, "hub", "app", "1.0", "sha256:a").unwrap();
+        put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
+        trash_manifest(&meta, "hub", "app", "sha256:a", &info()).unwrap();
+
+        let mut references: Vec<Option<String>> = trash_records(&meta, "hub")
+            .unwrap()
+            .into_iter()
+            .map(|record| record.reference)
+            .collect();
+        references.sort();
+
+        assert_eq!(
+            references,
+            vec![Some("1.0".to_owned()), Some("latest".to_owned())],
+            "the two captured tags are the only records, not a third digest row"
+        );
+    }
+
+    #[test]
+    fn test_trash_records_marks_purged_content_as_not_retained() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
+        put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
+        trash_tag(&meta, "hub", "app", "latest", &info()).unwrap();
+        delete_manifest(&meta, "sha256:a").unwrap();
+
+        let records = trash_records(&meta, "hub").unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].retained, "purged content is not restorable");
+    }
+
+    #[test]
+    fn test_trash_records_scope_to_one_index_and_skip_corrupt_rows() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
+        put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
+        trash_tag(&meta, "hub", "app", "latest", &info()).unwrap();
+        meta.put_driver_value(&tag_trash_key("hub", "app", "corrupt"), b"not json")
+            .unwrap();
+
+        assert_eq!(
+            trash_records(&meta, "hub").unwrap().len(),
+            1,
+            "the corrupt row is skipped"
+        );
+        assert!(
+            trash_records(&meta, "other").unwrap().is_empty(),
+            "records scope to the index"
         );
     }
 

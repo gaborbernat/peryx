@@ -49,6 +49,20 @@ action, rule, reason, evaluation time, and next eligible time. Every outcome has
 decisions, and narrow screens scroll the table inside its page rather than widening the document. The policy-decision
 guide lists [error remedies and credential requirements](@/core/policy-decisions.md#troubleshooting).
 
+## Trash inspection
+
+`/admin/trash` queries [soft-deleted artifacts](@/core/trash.md) across PyPI and OCI. Administrators can inspect every
+repository; repository readers and publishers select a repository covered by their grant. A repository upload token
+remains valid for that repository under the reserved `__token__` username.
+
+Filters cover repository, ecosystem, state, and page size. The results use a native table with a caption and columns for
+state, ecosystem, repository, artifact, reference, digest, reason, actor, deletion time, and recovery deadline. The
+actor column follows the same role filter as the API, so a repository-scoped caller sees a dash where an administrator
+sees the deleting identity. Every state has a text label, and narrow screens scroll the table inside its page rather
+than widening the document. The page holds the username and password in memory, disables password autocomplete, and
+sends them in the Basic authorization header without writing them to the URL, browser storage, or the server-rendered
+document. The trash guide lists [error remedies and credential requirements](@/core/trash.md#troubleshooting).
+
 ## Browsing packages
 
 The header search box starts suggesting matches after two characters, across every ecosystem's indexes. Suggestions and

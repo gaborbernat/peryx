@@ -21,6 +21,7 @@ mod policy_decisions;
 mod project;
 mod search;
 mod stats;
+mod trash;
 mod upload;
 
 pub use admin::AdminStatus;
@@ -29,6 +30,7 @@ pub use dashboard::Dashboard;
 pub use policy_decisions::PolicyDecisions;
 pub use search::Search;
 pub use stats::Stats;
+pub use trash::Trash;
 pub use upload::Upload;
 
 /// Refresh the dashboard counters every few seconds once hydrated. Effects never run during server

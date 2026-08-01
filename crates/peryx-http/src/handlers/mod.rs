@@ -15,6 +15,7 @@ mod query;
 mod retention;
 mod revocations;
 mod status;
+mod trash;
 mod ui;
 mod usage;
 
@@ -32,6 +33,7 @@ pub use query::{search, search_error_response, search_response, search_response_
 pub use retention::{retention_export, retention_plan};
 pub use revocations::{DigestRevocationsQuery, inspect_revocation, lift_revocation, list_revocations, put_revocation};
 pub use status::{ReadinessQuery, StatusQuery, health, readiness, status};
+pub use trash::{inspect_trash, list_trash, trash_error_response};
 pub use ui::{ui_manifest, ui_member, ui_members, ui_project, ui_projects};
 pub use usage::{StatsQuery, ecosystem_summaries, family_descriptors, metrics, stats};
 

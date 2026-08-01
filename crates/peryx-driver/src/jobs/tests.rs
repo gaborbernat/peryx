@@ -266,6 +266,16 @@ fn test_subscriber() -> impl tracing::Subscriber + Send + Sync {
         .finish()
 }
 
+// A driver that keeps the default trash source contributes no records, so an ecosystem without
+// soft-delete opts out of trash inspection for free.
+#[test]
+fn test_default_trash_records_are_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let driver = StubDriver::new(0, Ok(RefreshSweep::default()));
+    assert!(driver.trash_records(&meta, &["hosted".to_owned()]).unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
     let (_dir, state) = serving();

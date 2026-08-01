@@ -1777,6 +1777,230 @@
         ]
       }
     },
+    "/+trash": {
+      "get": {
+        "description": "Soft-deleted PyPI and OCI artifacts across repositories, newest deletion first. An administrator inspects every repository and sees the deleting actor; a repository reader inspects one repository they can read, with actor details redacted by the role filter. A repository's legacy upload token retains access to that repository under the `__token__` username. `restorable` and its `state` are derived from whether the content is still retained and the recovery window is open; a record leaves the window after its `deadline_unix`. Responses carry no credentials or request headers and never enter a shared cache.",
+        "parameters": [
+          {
+            "description": "Repository route to inspect, at most 512 bytes",
+            "example": "hosted",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Filter by `pypi` or `oci`",
+            "example": "pypi",
+            "in": "query",
+            "name": "ecosystem",
+            "required": false
+          },
+          {
+            "description": "Filter by `restorable` or `expired`",
+            "example": "restorable",
+            "in": "query",
+            "name": "state",
+            "required": false
+          },
+          {
+            "description": "Keep records whose recovery deadline is at or before this Unix time",
+            "example": 1802592000,
+            "in": "query",
+            "name": "deadline_before",
+            "required": false
+          },
+          {
+            "description": "Exclusive cursor from the prior page",
+            "example": "0009223372036800000\u001fpypi\u001fhosted\u001fexample\u001fexample-1.0-py3-none-any.whl\u001fsha256:0123",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "next_cursor": "0009223372036800000\u001fpypi\u001fhosted\u001fexample\u001fexample-1.0-py3-none-any.whl\u001fsha256:0123",
+                  "trash": [
+                    {
+                      "actor": "usr_550e8400e29b41d4a716446655440000",
+                      "deadline_unix": 1802592000,
+                      "deleted_at_unix": 1800000000,
+                      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      "ecosystem": "pypi",
+                      "name": "example",
+                      "reason": "compromised build",
+                      "reference": "example-1.0-py3-none-any.whl",
+                      "repository": "hosted",
+                      "restorable": true,
+                      "state": "restorable"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The matching trash records, newest first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit, cursor, or a filter is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The repository token cannot inspect trash"
+          },
+          "404": {
+            "description": "The repository does not exist or is not available to the local user"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "trash query failed"
+                }
+              }
+            },
+            "description": "An ecosystem trash scan could not complete"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "trash inspection service unavailable"
+                }
+              }
+            },
+            "description": "Authentication or authorization storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "List trashed artifacts",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+trash/record": {
+      "get": {
+        "description": "One soft-deleted artifact identified by its ecosystem, repository, and name, with the same role-filtered actor visibility as the list. Returns the current derived state without changing package yank, trash, retention, or policy state.",
+        "parameters": [
+          {
+            "description": "The artifact's ecosystem, `pypi` or `oci`",
+            "example": "pypi",
+            "in": "query",
+            "name": "ecosystem",
+            "required": true
+          },
+          {
+            "description": "The repository route the artifact was deleted from",
+            "example": "hosted",
+            "in": "query",
+            "name": "repository",
+            "required": true
+          },
+          {
+            "description": "The PyPI project or OCI repository path",
+            "example": "example",
+            "in": "query",
+            "name": "name",
+            "required": true
+          },
+          {
+            "description": "The distribution filename or OCI tag, if any",
+            "example": "example-1.0-py3-none-any.whl",
+            "in": "query",
+            "name": "reference",
+            "required": false
+          },
+          {
+            "description": "The content digest, if the ecosystem addresses the artifact by one",
+            "example": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "in": "query",
+            "name": "digest",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "record": {
+                    "actor": "usr_550e8400e29b41d4a716446655440000",
+                    "deadline_unix": 1802592000,
+                    "deleted_at_unix": 1800000000,
+                    "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "ecosystem": "pypi",
+                    "name": "example",
+                    "reason": "compromised build",
+                    "reference": "example-1.0-py3-none-any.whl",
+                    "repository": "hosted",
+                    "restorable": true,
+                    "state": "restorable"
+                  }
+                }
+              }
+            },
+            "description": "The matching trash record"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid trash query"
+                }
+              }
+            },
+            "description": "The ecosystem is unknown"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The repository token cannot inspect trash"
+          },
+          "404": {
+            "description": "No such repository or trashed record is available to the caller"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Inspect one trashed artifact",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/_/oidc/audience": {
       "get": {
         "description": "Peryx returns the audience a CI provider must put in its OIDC identity. Peryx adds this route after an operator configures a trusted publisher.",

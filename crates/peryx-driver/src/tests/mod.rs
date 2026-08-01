@@ -2,6 +2,7 @@ mod access_tests;
 mod authz_tests;
 mod body_tests;
 mod conditional_tests;
+mod quota_tests;
 mod range_tests;
 mod revocation_tests;
 mod state_tests;

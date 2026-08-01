@@ -5,6 +5,7 @@ mod index;
 mod job;
 mod maintenance;
 mod mirror;
+mod quota;
 mod retention;
 mod snippet;
 
@@ -27,6 +28,7 @@ pub use maintenance::{
     PutRevocationArgs, RestoreArgs, RevocationCommand, RevocationStatusArg, WriterCommand, WriterPromoteArgs,
 };
 pub use mirror::{PrefetchCommand, PrefetchOptions, PrefetchPlanArgs, PrefetchSyncArgs, PrefetchVerifyArgs};
+pub use quota::{QuotaCommand, QuotaInspectArgs, QuotaListArgs};
 pub use retention::{RetentionCommand, RetentionDryRunArgs, RetentionExportArgs};
 pub use snippet::{ConfigSnippetArgs, SnippetFormat};
 
@@ -94,6 +96,9 @@ pub enum Command {
     /// Preview index policy decisions against cached records.
     #[command(subcommand)]
     Policy(PolicyCommand),
+    /// Report configured limits and committed and reserved use per repository.
+    #[command(subcommand)]
+    Quota(QuotaCommand),
     /// Preview and export a repository's retention plan.
     #[command(subcommand)]
     Retention(RetentionCommand),

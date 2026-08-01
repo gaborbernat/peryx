@@ -36,6 +36,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/+analytics/sources", get(handlers::analytics_sources))
         .route("/+analytics/timeline", get(handlers::analytics_timeline))
         .route("/+policy/decisions", get(handlers::policy_decisions))
+        .route("/+quota", get(handlers::quota_summary))
+        .route("/+quota/repository", get(handlers::quota_repository))
         .route("/+retention/plan", post(handlers::retention_plan))
         .route("/+retention/export", post(handlers::retention_export))
         .route("/+revocations", get(handlers::list_revocations))

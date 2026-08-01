@@ -17,6 +17,7 @@ mod indexes_tests;
 mod job_tests;
 mod policy_tests;
 mod purge_tests;
+mod quota_tests;
 mod retention_tests;
 mod revocation_tests;
 

@@ -13,6 +13,7 @@ mod indexes;
 mod jobs;
 mod policy;
 mod purge;
+mod quota;
 mod retention;
 mod revocation;
 mod secret;
@@ -23,6 +24,7 @@ pub use indexes::{config_snippet, index, init, init_data_dir};
 pub use jobs::job;
 pub use policy::policy;
 pub(crate) use purge::referenced_blob_digests;
+pub use quota::quota;
 pub use retention::retention;
 pub use revocation::revocation;
 

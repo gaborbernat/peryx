@@ -1,66 +1,68 @@
+use std::collections::BTreeSet;
+
 use crate::api::{openapi, openapi_json};
 
+// Keep sorted: a new endpoint inserts one line at its ordered position, so independent
+// additions on separate PRs compose on merge instead of colliding on a shared path count.
 #[test]
 fn test_openapi_document_covers_every_endpoint() {
     let spec = serde_json::to_value(openapi()).unwrap();
-    let paths = spec["paths"].as_object().unwrap();
-    for path in [
-        "/{route}/simple/",
-        "/{route}/simple/{project}/",
-        "/{route}/{project}/json",
-        "/{route}/{project}/{version}/json",
-        "/{route}/files/{sha256}/{filename}",
-        "/{route}/files/{sha256}/{filename}.metadata",
-        "/{route}/",
-        "/{route}/+api",
-        "/{route}/+search",
-        "/{route}/inspect/{sha256}/{filename}",
-        "/{route}/inspect/{sha256}/{filename}/{member}",
-        "/{route}/{project}/{version}/yank",
-        "/{route}/{project}/{version}/restore",
-        "/{route}/{project}/{version}/promote",
-        "/{route}/{project}/{version}/",
-        "/{route}/{project}/",
+    let documented: BTreeSet<&str> = spec["paths"].as_object().unwrap().keys().map(String::as_str).collect();
+    let expected = BTreeSet::from([
         "/+acl",
-        "/+api",
-        "/+health",
-        "/+ready",
-        "/+search",
-        "/+status",
-        "/+stats",
+        "/+analytics/sources",
+        "/+analytics/timeline",
         "/+analytics/top-packages",
         "/+analytics/unused",
         "/+analytics/versions",
-        "/+analytics/sources",
-        "/+analytics/timeline",
+        "/+api",
+        "/+health",
         "/+policy/decisions",
         "/+quota",
         "/+quota/repository",
-        "/+shadow/candidates",
-        "/+retention/plan",
+        "/+ready",
         "/+retention/export",
-        "/+trash",
-        "/+trash/record",
+        "/+retention/plan",
         "/+revocations",
         "/+revocations/{digest}",
         "/+revocations/{digest}/lift",
-        "/metrics",
-        "/api-docs/openapi.json",
+        "/+search",
+        "/+shadow/candidates",
+        "/+stats",
+        "/+status",
+        "/+trash",
+        "/+trash/record",
         "/_/oidc/audience",
         "/_/oidc/mint-token",
+        "/api-docs/openapi.json",
+        "/metrics",
         "/v2/",
-        "/v2/{name}/manifests/{reference}",
-        "/v2/{name}/manifests/{reference}/restore",
-        "/v2/{name}/blobs/{digest}",
-        "/v2/{name}/blobs/{digest}/contents",
         "/v2/{name}/blobs/uploads/",
         "/v2/{name}/blobs/uploads/{session}",
-        "/v2/{name}/tags/list",
+        "/v2/{name}/blobs/{digest}",
+        "/v2/{name}/blobs/{digest}/contents",
+        "/v2/{name}/manifests/{reference}",
+        "/v2/{name}/manifests/{reference}/restore",
         "/v2/{name}/referrers/{digest}",
-    ] {
-        assert!(paths.contains_key(path), "missing path {path}");
-    }
-    assert_eq!(paths.len(), 52);
+        "/v2/{name}/tags/list",
+        "/{route}/",
+        "/{route}/+api",
+        "/{route}/+search",
+        "/{route}/files/{sha256}/{filename}",
+        "/{route}/files/{sha256}/{filename}.metadata",
+        "/{route}/inspect/{sha256}/{filename}",
+        "/{route}/inspect/{sha256}/{filename}/{member}",
+        "/{route}/simple/",
+        "/{route}/simple/{project}/",
+        "/{route}/{project}/",
+        "/{route}/{project}/json",
+        "/{route}/{project}/{version}/",
+        "/{route}/{project}/{version}/json",
+        "/{route}/{project}/{version}/promote",
+        "/{route}/{project}/{version}/restore",
+        "/{route}/{project}/{version}/yank",
+    ]);
+    assert_eq!(documented, expected);
     assert_eq!(spec["info"]["version"], env!("CARGO_PKG_VERSION"));
 }
 

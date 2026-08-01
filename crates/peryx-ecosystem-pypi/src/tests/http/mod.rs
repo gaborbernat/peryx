@@ -19,6 +19,7 @@ mod render_cache;
 mod revocations;
 mod routing;
 mod security;
+mod shadow;
 mod status;
 mod upload;
 mod upstream_attestation_cache;

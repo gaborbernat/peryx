@@ -386,6 +386,15 @@ impl EcosystemDriver for PypiServing {
         Ok(records)
     }
 
+    fn shadowed_candidates(
+        &self,
+        state: &ServingState,
+        position: usize,
+        project: &str,
+    ) -> Result<Vec<peryx_core::ShadowCandidate>, String> {
+        cache::shadowed_candidates(state, position, project)
+    }
+
     fn cache_pages(
         &self,
         meta: &peryx_storage::meta::MetaStore,

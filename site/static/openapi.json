@@ -1780,6 +1780,121 @@
         ]
       }
     },
+    "/+shadow/candidates": {
+      "get": {
+        "description": "Explains how a virtual repository resolves one project: the selected candidate for each distribution filename and every candidate a member shadowed, with its configured member, source class, digest, and the reason it lost — `precedence` when a higher-precedence member already supplied the filename, or `fallback` when the repository's fallback policy excluded a cached member. A caller who can read the repository may inspect it; the server operator role, which carries no repository access, cannot. A repository's legacy upload token retains access under the `__token__` username. The query reads stored records only and never changes member order, installer responses, or policy evaluation, so shadowed candidates stay absent from HTML and JSON installer selection.",
+        "parameters": [
+          {
+            "description": "The virtual repository route to inspect",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": true
+          },
+          {
+            "description": "The project to explain, normalized to the ecosystem's canonical form",
+            "example": "example",
+            "in": "query",
+            "name": "project",
+            "required": true
+          },
+          {
+            "description": "Exclusive cursor from the prior page",
+            "example": "example-1.0-py3-none-any.whl\u001f0\u001fhosted",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "candidates": [
+                    {
+                      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                      "filename": "example-1.0-py3-none-any.whl",
+                      "member": "hosted",
+                      "selected": true,
+                      "source": "hosted"
+                    },
+                    {
+                      "digest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+                      "filename": "example-1.0-py3-none-any.whl",
+                      "member": "pypi",
+                      "reason": "precedence",
+                      "selected": false,
+                      "source": "cached"
+                    }
+                  ],
+                  "next_cursor": null
+                }
+              }
+            },
+            "description": "The selected and shadowed candidates, filenames ascending and the selected candidate first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit, cursor, or project is invalid, or a required parameter is missing"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The repository token cannot inspect shadowed candidates"
+          },
+          "404": {
+            "description": "The repository does not exist or is not available to the local user"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "shadow query failed"
+                }
+              }
+            },
+            "description": "A member's resolution scan could not complete"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "shadow inspection service unavailable"
+                }
+              }
+            },
+            "description": "Authentication or authorization storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Virtual repository shadowed candidates",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+stats": {
       "get": {
         "description": "Counters aggregated off the request path, drillable: no parameters for per-index totals, `?index={route}` for one index's projects, `&project={name}` for one project's files. Counters are grouped by the role that owns them: a neutral `base` group every index reports, a `cached` group only a caching index fills, a `hosted` group only an upload store fills, and an `ecosystem` map of the driver's own counters (PyPI's PEP 658 sibling under `metadata`).",

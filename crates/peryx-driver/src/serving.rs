@@ -285,6 +285,24 @@ pub trait EcosystemDriver: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Explain how the virtual repository at `position` resolves `project`: the selected candidate for
+    /// each filename and every candidate a member shadowed, as neutral records. The driver replays its
+    /// own precedence and fallback rules over stored records only, never probing a member per row, so
+    /// the management query stays bounded. `position` is a resolved index the caller authorized; a
+    /// non-virtual index shadows nothing. Default: none, so an ecosystem with no virtual resolution
+    /// contributes nothing.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when a member's stored records cannot be read.
+    fn shadowed_candidates(
+        &self,
+        _state: &ServingState,
+        _position: usize,
+        _project: &str,
+    ) -> Result<Vec<peryx_core::ShadowCandidate>, String> {
+        Ok(Vec::new())
+    }
+
     /// This ecosystem's cached index pages for the `cache list`/`cache size` command, each split into
     /// `(index, project)` in its own key terms. `index_names` are the configured index names, longest
     /// first, so the driver can split a slash-bearing key against them. Default: none.

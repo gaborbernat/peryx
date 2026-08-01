@@ -127,7 +127,6 @@ struct Minio {
 struct Toxiproxy {
     container: ContainerAsync<GenericImage>,
     endpoint: String,
-    metrics: String,
 }
 
 fn settings(endpoint: String) -> S3Settings {
@@ -635,39 +634,8 @@ async fn toxiproxy(minio: &Minio) -> Toxiproxy {
             "http://127.0.0.1:{}",
             container.get_host_port_ipv4(8_666.tcp()).await.unwrap()
         ),
-        metrics: format!(
-            "http://127.0.0.1:{}/metrics",
-            container.get_host_port_ipv4(8_474.tcp()).await.unwrap()
-        ),
         container,
     }
-}
-
-async fn metric(toxiproxy: &Toxiproxy, direction: &str) -> u64 {
-    let metrics = reqwest::get(&toxiproxy.metrics).await.unwrap().text().await.unwrap();
-    metrics
-        .lines()
-        .find(|line| {
-            line.starts_with("toxiproxy_proxy_received_bytes_total{")
-                && line.contains(&format!("direction=\"{direction}\""))
-                && line.contains("proxy=\"s3\"")
-        })
-        .and_then(|line| line.split_whitespace().next_back())
-        .and_then(|value| value.parse().ok())
-        .unwrap_or_default()
-}
-
-async fn wait_for_metric_above(toxiproxy: &Toxiproxy, direction: &str, previous: u64) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if metric(toxiproxy, direction).await > previous {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
 }
 
 fn child_command(endpoint: &str, staging: &Path, scenario: &str, access_key: &str, secret_key: &str) -> Command {
@@ -1680,37 +1648,36 @@ async fn test_s3_surfaces_a_valid_readonly_principal() {
 
 #[tokio::test]
 async fn test_s3_retries_after_a_truncated_response() {
-    if !containers_enabled() {
-        return;
-    }
-    let minio = minio().await;
-    let toxiproxy = toxiproxy(&minio).await;
-    exec(
-        &toxiproxy.container,
-        [
-            "/toxiproxy-cli",
-            "toxic",
-            "add",
-            "-t",
-            "limit_data",
-            "-a",
-            "bytes=1",
-            "s3",
-        ],
-    )
-    .await;
+    let location = "<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></LocationConstraint>";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        // First attempt: promise a full body, close after a fragment so the SDK sees a truncation.
+        let (mut connection, _) = listener.accept().await.unwrap();
+        assert_ne!(connection.read(&mut [0; 4096]).await.unwrap(), 0);
+        connection
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 512\r\nConnection: close\r\n\r\n<LocationConstraint>")
+            .await
+            .unwrap();
+        drop(connection);
+        // Retry attempt: serve the complete response.
+        let (mut connection, _) = listener.accept().await.unwrap();
+        assert_ne!(connection.read(&mut [0; 4096]).await.unwrap(), 0);
+        connection
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{location}",
+                    location.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
     let staging = tempfile::tempdir().unwrap();
-    let endpoint = toxiproxy.endpoint.clone();
-    let staging_path = staging.path().to_owned();
-    let child =
-        tokio::spawn(async move { child(&endpoint, &staging_path, "health", ROOT_ACCESS_KEY, ROOT_SECRET_KEY).await });
-    wait_for_metric_above(&toxiproxy, "downstream", 0).await;
-    exec(
-        &toxiproxy.container,
-        ["/toxiproxy-cli", "toxic", "remove", "-n", "limit_data_downstream", "s3"],
-    )
-    .await;
-    assert_child_succeeded(&child.await.unwrap());
+
+    assert_child_succeeded(&child(&endpoint, staging.path(), "health", ROOT_ACCESS_KEY, ROOT_SECRET_KEY).await);
+    server.await.unwrap();
 }
 
 #[tokio::test]

@@ -11,6 +11,7 @@ mod journal_tests;
 mod policy_decision_tests;
 mod quota_tests;
 mod replica_tests;
+mod repository_tests;
 mod revocation_tests;
 mod role_grant_tests;
 mod user_tests;

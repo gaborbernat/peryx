@@ -59,7 +59,7 @@ pub use oidc_login::{
 };
 pub use password::{PasswordCheck, PasswordError, PasswordPolicy, PasswordVerifier};
 pub use revocation::{ArtifactDigest, ArtifactDigestError, DigestDecision, RevocationReason, RevocationReasonError};
-pub use roles::{GrantScope, Resource, Role, RoleGrant, Scope, grants_permit};
+pub use roles::{GrantScope, Resource, Role, RoleGrant, Scope, can_manage_grants, grants_permit};
 pub use token::{Signer, TokenError, VerifiedToken};
 pub use trusted_publisher::{PublishClaims, PublishDenial, TrustedPublisher, authorize_publish};
 pub use user::{ServerUser, UserId, UserLifecycleChange, UserLifecycleEvent, UserName, UserNameError, UserState};

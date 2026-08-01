@@ -1,8 +1,22 @@
 use peryx_identity::{GrantScope, Role, RoleGrant, ServerUser, UserId, UserName, UserState};
 use redb::TableDefinition;
+use rstest::rstest;
 
 use super::store;
-use crate::meta::{MetaError, MetaStore, RoleGrantStoreError};
+use crate::meta::{
+    DeleteGrantOutcome, MetaError, MetaStore, RoleGrantFilter, RoleGrantQuery, RoleGrantQueryError,
+    RoleGrantStoreError, StoredRoleGrant,
+};
+
+fn sample_id() -> String {
+    StoredRoleGrant {
+        grant: RoleGrant::new(UserId::random(), Role::Operator, GrantScope::Server),
+        version: 0,
+        granted_by: None,
+        granted_at_unix: None,
+    }
+    .id()
+}
 
 const RAW_USER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user");
 const RAW_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant");
@@ -155,4 +169,338 @@ fn test_grant_read_surfaces_an_incompatible_managed_table() {
     });
 
     assert!(matches!(store.user_role_grants(&alice), Err(MetaError::Table(_))));
+}
+
+fn all(limit: usize) -> RoleGrantQuery {
+    RoleGrantQuery {
+        filter: RoleGrantFilter::All,
+        cursor: None,
+        limit,
+    }
+}
+
+#[test]
+fn test_managed_grant_records_metadata_and_bumps_version_on_reassertion() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    let bob = store.create_user("Bob").unwrap().id;
+    let grant = RoleGrant::new(alice.clone(), Role::RepositoryReader, repository("team/api"));
+
+    let first = store.create_managed_grant(&grant, &bob, 1_000).unwrap();
+    assert!(first.created);
+    assert_eq!(first.record.version, 1);
+    assert_eq!(first.record.granted_by, Some(bob));
+    assert_eq!(first.record.granted_at_unix, Some(1_000));
+
+    let second = store.create_managed_grant(&grant, &alice, 2_000).unwrap();
+    assert!(!second.created);
+    assert_eq!(second.record.version, 2);
+    assert_eq!(second.record.granted_by, Some(alice));
+    assert_eq!(second.record.granted_at_unix, Some(2_000));
+    assert_eq!(store.user_role_grants(&grant.user).unwrap(), vec![grant]);
+}
+
+#[test]
+fn test_managed_grant_rejects_an_unknown_user() {
+    let (_dir, store) = store();
+    let missing = UserId::random();
+    let grant = RoleGrant::new(missing.clone(), Role::Operator, GrantScope::Server);
+
+    assert!(matches!(
+        store.create_managed_grant(&grant, &missing, 0),
+        Err(RoleGrantStoreError::UnknownUser { id }) if id == missing
+    ));
+}
+
+#[test]
+fn test_managed_grant_rejects_a_disabled_user() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    store.set_user_state(&alice, UserState::Disabled).unwrap();
+    let grant = RoleGrant::new(alice.clone(), Role::Operator, GrantScope::Server);
+
+    assert!(matches!(
+        store.create_managed_grant(&grant, &alice, 0),
+        Err(RoleGrantStoreError::DisabledUser { id }) if id == alice
+    ));
+}
+
+#[test]
+fn test_a_grant_reads_back_by_its_stable_id() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    let grant = RoleGrant::new(alice.clone(), Role::RepositoryPublisher, repository("team/api"));
+    let stored = store.create_managed_grant(&grant, &alice, 7).unwrap().record;
+
+    assert_eq!(store.managed_grant(&stored.id()).unwrap(), Some(stored));
+    assert_eq!(store.managed_grant("rg_00").unwrap(), None);
+}
+
+#[rstest]
+#[case::no_prefix("deadbeef")]
+#[case::odd_length("rg_0")]
+#[case::not_hex("rg_zz")]
+#[case::not_utf8("rg_ff")]
+fn test_a_malformed_id_reads_and_deletes_as_absent(#[case] id: &str) {
+    let (_dir, store) = store();
+    assert_eq!(store.managed_grant(id).unwrap(), None);
+    assert_eq!(store.delete_managed_grant(id, 0).unwrap(), DeleteGrantOutcome::NotFound);
+}
+
+fn id_for(key: &str) -> String {
+    use std::fmt::Write as _;
+    key.bytes().fold(String::from("rg_"), |mut id, byte| {
+        write!(id, "{byte:02x}").unwrap();
+        id
+    })
+}
+
+#[rstest]
+#[case::server("usr_x/operator/server", Some(GrantScope::Server))]
+#[case::repository("usr_x/repository_reader/repository/team/api", Some(GrantScope::Repository { name: "team/api".to_owned() }))]
+#[case::unknown_reach("usr_x/operator/elsewhere", None)]
+#[case::empty_repository_name("usr_x/operator/repository/", None)]
+#[case::missing_reach("usr_x/operator", None)]
+#[case::only_user("usr_x", None)]
+fn test_an_id_recovers_the_reach_it_addresses(#[case] key: &str, #[case] expected: Option<GrantScope>) {
+    assert_eq!(crate::meta::role_grant_reach(&id_for(key)), expected);
+}
+
+#[test]
+fn test_a_stored_grant_id_round_trips_to_its_reach() {
+    let stored = StoredRoleGrant {
+        grant: RoleGrant::new(UserId::random(), Role::RepositoryReader, repository("team/api")),
+        version: 0,
+        granted_by: None,
+        granted_at_unix: None,
+    };
+    assert_eq!(
+        crate::meta::role_grant_reach(&stored.id()),
+        Some(repository("team/api"))
+    );
+    assert_eq!(crate::meta::role_grant_reach("not-an-id"), None);
+}
+
+#[test]
+fn test_revocation_honors_the_version_precondition_and_frees_the_next_read() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    let grant = RoleGrant::new(alice.clone(), Role::RepositoryReader, repository("team/api"));
+    let stored = store.create_managed_grant(&grant, &alice, 0).unwrap().record;
+    let id = stored.id();
+
+    assert_eq!(
+        store.delete_managed_grant(&id, stored.version + 1).unwrap(),
+        DeleteGrantOutcome::PreconditionFailed {
+            current: stored.version
+        }
+    );
+    assert_eq!(store.user_role_grants(&alice).unwrap(), vec![grant]);
+
+    assert_eq!(
+        store.delete_managed_grant(&id, stored.version).unwrap(),
+        DeleteGrantOutcome::Removed(stored)
+    );
+    assert_eq!(store.user_role_grants(&alice).unwrap(), Vec::new());
+    assert_eq!(
+        store.delete_managed_grant(&id, 0).unwrap(),
+        DeleteGrantOutcome::NotFound
+    );
+}
+
+#[test]
+fn test_listing_paginates_every_managed_grant_in_key_order() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    for name in ["team/a", "team/b", "team/c"] {
+        store
+            .create_managed_grant(
+                &RoleGrant::new(alice.clone(), Role::RepositoryReader, repository(name)),
+                &alice,
+                0,
+            )
+            .unwrap();
+    }
+
+    let first = store.list_managed_grants(&all(2)).unwrap();
+    assert_eq!(first.grants.len(), 2);
+    let cursor = first.next_cursor.clone();
+    assert!(cursor.is_some());
+
+    let second = store
+        .list_managed_grants(&RoleGrantQuery {
+            filter: RoleGrantFilter::All,
+            cursor,
+            limit: 2,
+        })
+        .unwrap();
+    assert_eq!(second.grants.len(), 1);
+    assert_eq!(second.next_cursor, None);
+    assert_eq!(
+        first.grants[0].grant.scope,
+        GrantScope::Repository {
+            name: "team/a".to_owned()
+        }
+    );
+    assert_eq!(
+        second.grants[0].grant.scope,
+        GrantScope::Repository {
+            name: "team/c".to_owned()
+        }
+    );
+}
+
+#[test]
+fn test_a_user_filter_scans_only_that_users_grants() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    let bob = store.create_user("Bob").unwrap().id;
+    store
+        .create_managed_grant(
+            &RoleGrant::new(alice.clone(), Role::Operator, GrantScope::Server),
+            &alice,
+            0,
+        )
+        .unwrap();
+    store
+        .create_managed_grant(
+            &RoleGrant::new(bob.clone(), Role::Operator, GrantScope::Server),
+            &bob,
+            0,
+        )
+        .unwrap();
+
+    let page = store
+        .list_managed_grants(&RoleGrantQuery {
+            filter: RoleGrantFilter::User(alice.clone()),
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(page.grants.len(), 1);
+    assert_eq!(page.grants[0].grant.user, alice);
+}
+
+#[test]
+fn test_a_resource_filter_uses_the_scope_index_without_leaking_a_prefix_sibling() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    for name in ["team", "team/api"] {
+        store
+            .create_managed_grant(
+                &RoleGrant::new(alice.clone(), Role::RepositoryReader, repository(name)),
+                &alice,
+                0,
+            )
+            .unwrap();
+    }
+
+    let page = store
+        .list_managed_grants(&RoleGrantQuery {
+            filter: RoleGrantFilter::Resource(repository("team")),
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(page.grants.len(), 1);
+    assert_eq!(page.grants[0].grant.scope, repository("team"));
+}
+
+#[test]
+fn test_provisioned_and_revoked_grants_track_the_scope_index() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    store
+        .grant_role(&alice, Role::RepositoryPublisher, repository("team/api"))
+        .unwrap();
+
+    let query = RoleGrantQuery {
+        filter: RoleGrantFilter::Resource(repository("team/api")),
+        cursor: None,
+        limit: 10,
+    };
+    assert_eq!(store.list_managed_grants(&query).unwrap().grants.len(), 1);
+
+    store
+        .revoke_role(&alice, Role::RepositoryPublisher, &repository("team/api"))
+        .unwrap();
+    assert_eq!(store.list_managed_grants(&query).unwrap().grants, Vec::new());
+}
+
+#[test]
+fn test_the_bootstrap_administrator_appears_in_the_server_scope_index() {
+    let (_dir, store) = store();
+    let verifier = peryx_identity::PasswordPolicy::new(8, 1, 1)
+        .unwrap()
+        .hash("bootstrap password")
+        .unwrap();
+    let admin = store.bootstrap_administrator("Root", &verifier).unwrap();
+
+    let page = store
+        .list_managed_grants(&RoleGrantQuery {
+            filter: RoleGrantFilter::Resource(GrantScope::Server),
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(page.grants.len(), 1);
+    assert_eq!(page.grants[0].grant.user, admin.id);
+    assert_eq!(page.grants[0].grant.role, Role::Administrator);
+}
+
+#[rstest]
+#[case::zero(0)]
+#[case::above_cap(101)]
+fn test_listing_rejects_an_out_of_range_limit(#[case] limit: usize) {
+    let (_dir, store) = store();
+    assert!(matches!(
+        store.list_managed_grants(&all(limit)),
+        Err(RoleGrantQueryError::InvalidLimit)
+    ));
+}
+
+#[test]
+fn test_listing_reads_empty_before_any_grant_exists() {
+    let (_dir, store) = store();
+    let page = store.list_managed_grants(&all(10)).unwrap();
+    assert_eq!(page.grants, Vec::new());
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn test_reads_are_empty_before_the_grant_tables_exist() {
+    let (_dir, store) = raw_store(|txn| {
+        txn.open_table(RAW_USER).unwrap();
+    });
+
+    assert_eq!(store.managed_grant(&sample_id()).unwrap(), None);
+    assert_eq!(store.list_managed_grants(&all(10)).unwrap().grants, Vec::new());
+    assert_eq!(
+        store
+            .list_managed_grants(&RoleGrantQuery {
+                filter: RoleGrantFilter::Resource(GrantScope::Server),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+            .grants,
+        Vec::new()
+    );
+}
+
+#[test]
+fn test_reads_surface_an_incompatible_grant_table() {
+    let (_dir, store) = raw_store(|txn| {
+        txn.open_table(RAW_USER).unwrap();
+        txn.open_table(TableDefinition::<&str, u64>::new("role_grant"))
+            .unwrap()
+            .insert("x", 1)
+            .unwrap();
+    });
+
+    assert!(matches!(store.managed_grant(&sample_id()), Err(MetaError::Table(_))));
+    assert!(matches!(
+        store.list_managed_grants(&all(10)),
+        Err(RoleGrantQueryError::Store(MetaError::Table(_)))
+    ));
 }

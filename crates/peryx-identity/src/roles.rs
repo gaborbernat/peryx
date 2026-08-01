@@ -26,6 +26,26 @@ pub fn grants_permit(grants: &[RoleGrant], scope: Scope, resource: &Resource) ->
     grants.iter().any(|grant| grant.permits(scope, resource))
 }
 
+/// Whether a caller holding `caller` may administer grants over `reach`.
+///
+/// This is the delegation authority the grant API gates on: creating and removing other users' bindings
+/// there. It stops a caller from widening its own reach (privilege escalation, after [Kubernetes RBAC]).
+///
+/// Only an [`Administrator`](Role::Administrator) delegates, and only within its reach: a server
+/// administrator over any repository and over server data, a repository administrator over its own
+/// repository and nothing else. A publisher or reader holds no delegation authority however broad its
+/// data access, so managing who may act is never a side effect of being able to act. Because an
+/// administrator's authority already covers every role weaker than its own over that reach, a delegated
+/// binding can never exceed what the caller itself holds.
+///
+/// [Kubernetes RBAC]: https://kubernetes.io/docs/reference/access-authn-authz/rbac/#privilege-escalation-prevention-and-bootstrapping
+#[must_use]
+pub fn can_manage_grants(caller: &[RoleGrant], reach: &GrantScope) -> bool {
+    caller
+        .iter()
+        .any(|held| held.role == Role::Administrator && held.scope.covers_reach(reach))
+}
+
 /// A persisted binding of a user to a role over a reach.
 ///
 /// The stored authority a decision reads; [`Scope`] and [`Resource`] never persist, they are decision
@@ -48,6 +68,20 @@ impl RoleGrant {
     #[must_use]
     pub fn permits(&self, scope: Scope, resource: &Resource) -> bool {
         self.role.carries(scope) && scope.applies_to(resource) && self.scope.covers(resource)
+    }
+
+    /// Whether this binding confers any authority. A server reach always does; a repository reach does
+    /// only when the role carries a repository scope — so `Operator` over a repository, which reaches no
+    /// operator data, is inert and rejected before it is ever stored.
+    #[must_use]
+    pub fn is_effective(&self) -> bool {
+        match &self.scope {
+            GrantScope::Server => true,
+            GrantScope::Repository { name } => {
+                let resource = Resource::Repository(name.clone());
+                self.role.scopes().iter().any(|scope| scope.applies_to(&resource))
+            }
+        }
     }
 }
 
@@ -173,6 +207,16 @@ impl GrantScope {
             (Self::Server, _) => true,
             (Self::Repository { name }, Resource::Repository(target)) => name == target,
             (Self::Repository { .. }, Resource::Operator) => false,
+        }
+    }
+
+    /// Whether a grant over this reach also reaches everything `target` names: a server reach covers
+    /// every reach, a repository reach only its own repository.
+    fn covers_reach(&self, target: &Self) -> bool {
+        match (self, target) {
+            (Self::Server, _) => true,
+            (Self::Repository { name }, Self::Repository { name: target }) => name == target,
+            (Self::Repository { .. }, Self::Server) => false,
         }
     }
 }

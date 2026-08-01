@@ -57,7 +57,10 @@ pub use revocation::{
     DigestRevocation, DigestRevocationPage, DigestRevocationQuery, DigestRevocationQueryError, DigestRevocationState,
     DigestRevocationStatus, LiftRevocationOutcome, PutRevocationError, PutRevocationOutcome,
 };
-pub use role_grant::RoleGrantStoreError;
+pub use role_grant::{
+    CreateGrantOutcome, DeleteGrantOutcome, RoleGrantFilter, RoleGrantPage, RoleGrantQuery, RoleGrantQueryError,
+    RoleGrantStoreError, StoredRoleGrant, role_grant_reach,
+};
 pub use user::UserStoreError;
 pub use webhook::{NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus};
 
@@ -91,6 +94,7 @@ const USER_NAME: TableDefinition<&str, &str> = TableDefinition::new("server_user
 const USER_EVENT: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_event");
 const USER_VERIFIER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_verifier");
 const ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant");
+const ROLE_GRANT_BY_SCOPE: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant_by_scope");
 const EXTERNAL_IDENTITY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("external_identity");
 const EXTERNAL_ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("external_role_grant");
 const DIGEST_REVOCATION: TableDefinition<&str, &[u8]> = TableDefinition::new("digest_revocation");
@@ -211,6 +215,7 @@ impl MetaStore {
             txn.open_table(USER_EVENT)?;
             txn.open_table(USER_VERIFIER)?;
             txn.open_table(ROLE_GRANT)?;
+            txn.open_table(ROLE_GRANT_BY_SCOPE)?;
             txn.open_table(EXTERNAL_IDENTITY)?;
             txn.open_table(EXTERNAL_ROLE_GRANT)?;
             txn.open_table(DIGEST_REVOCATION)?;

@@ -1,9 +1,58 @@
 //! Structured security events for index actions and server-role decisions.
 
 use http::{HeaderMap, header};
-use peryx_identity::{Identity, Principal, Scope, UserId};
+use peryx_identity::{Identity, Principal, Role, Scope, UserId};
 
 const UNKNOWN: &str = "unknown";
+
+/// Whether a role-grant mutation added or removed a binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleGrantChange {
+    Grant,
+    Revoke,
+}
+
+impl RoleGrantChange {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Grant => "grant",
+            Self::Revoke => "revoke",
+        }
+    }
+}
+
+/// Record a role-grant mutation attempt with only bounded identifiers.
+///
+/// The event names the granting actor, the target user, the role, the reach, and the resolved outcome.
+/// It carries no request body and no secret, so an audit log keeps the who, what, and result of every
+/// delegation without disclosing more.
+pub fn role_grant_change(
+    actor: Option<&str>,
+    change: RoleGrantChange,
+    target: &UserId,
+    role: Role,
+    reach: &str,
+    result: &'static str,
+    reason: &'static str,
+) {
+    let actor = text(actor);
+    let action = change.as_str();
+    let target = target.as_str();
+    let role = role.as_str();
+    tracing::info!(
+        target: "peryx::security",
+        security_event = true,
+        event = "role_grant",
+        action,
+        actor,
+        target,
+        role,
+        reach,
+        result,
+        reason,
+        "role grant mutation"
+    );
+}
 
 /// A bounded reason for denying a role-based authorization decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +300,55 @@ mod tests {
     use peryx_identity::{Identity, Principal};
     use rstest::rstest;
 
-    use super::AuthorizationDenial;
+    use super::{AuthorizationDenial, RoleGrantChange};
+
+    #[rstest]
+    #[case::grant(RoleGrantChange::Grant, "grant")]
+    #[case::revoke(RoleGrantChange::Revoke, "revoke")]
+    fn test_role_grant_event_records_only_bounded_delegation_context(
+        #[case] change: RoleGrantChange,
+        #[case] expected_action: &str,
+    ) {
+        let mut capture = tempfile::tempfile().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(Mutex::new(capture.try_clone().unwrap()))
+            .finish();
+        let target = peryx_identity::UserId::random();
+
+        tracing::subscriber::with_default(subscriber, || {
+            super::role_grant_change(
+                Some("alice"),
+                change,
+                &target,
+                peryx_identity::Role::RepositoryReader,
+                "repository/team/api",
+                "allowed",
+                "created",
+            );
+        });
+
+        capture.rewind().unwrap();
+        let mut text = String::new();
+        capture.read_to_string(&mut text).unwrap();
+        let event: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(
+            event["fields"],
+            serde_json::json!({
+                "message": "role grant mutation",
+                "security_event": true,
+                "event": "role_grant",
+                "action": expected_action,
+                "actor": "alice",
+                "target": target.as_str(),
+                "role": "repository_reader",
+                "reach": "repository/team/api",
+                "result": "allowed",
+                "reason": "created",
+            })
+        );
+    }
 
     fn presenting(user: &str) -> Identity {
         Identity {

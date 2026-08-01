@@ -89,14 +89,7 @@ impl MetaStore {
             .insert(user.id.as_str(), verifier_bytes.as_slice())
             .map_err(MetaError::from)?;
         let grant = RoleGrant::new(user.id.clone(), Role::Administrator, GrantScope::Server);
-        let grant_bytes = serde_json::to_vec(&grant).map_err(MetaError::from)?;
-        txn.open_table(ROLE_GRANT)
-            .map_err(MetaError::from)?
-            .insert(
-                format!("{}/{}/server", user.id, Role::Administrator.as_str()).as_str(),
-                grant_bytes.as_slice(),
-            )
-            .map_err(MetaError::from)?;
+        super::role_grant::write_grant(&txn, &super::StoredRoleGrant::provisioned(grant))?;
         txn.commit().map_err(MetaError::from)?;
         Ok(user)
     }

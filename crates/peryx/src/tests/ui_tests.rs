@@ -11,7 +11,7 @@ use peryx_core::path::local_file_url;
 use peryx_ecosystem_pypi::store::{CachedIndex, PypiStore as _};
 use peryx_ecosystem_pypi::upload::Uploaded;
 use peryx_ecosystem_pypi::{CoreMetadata, File, Provenance, Yanked, to_json};
-use peryx_identity::{Action, Glob, Grant, Principal, Signer};
+use peryx_identity::{Action, Glob, Grant, GrantScope, Principal, Role, Signer};
 use peryx_storage::blob::Digest;
 use rstest::{fixture, rstest};
 use sha2::{Digest as _, Sha256};
@@ -498,6 +498,28 @@ async fn get(router: &axum::Router, uri: &str) -> (StatusCode, String) {
     get_authorized(router, uri, "").await
 }
 
+const ADMIN_PASSWORD: &str = "local password";
+
+/// Provision a server administrator on a built state and return the Basic header for it. Status and
+/// stats pages render at the caller's class, so a test seeing the topology must authenticate.
+async fn seed_administrator(state: &peryx_driver::AppState) -> String {
+    let user = state.users.create("Alice").unwrap();
+    state.users.set_password(&user.id, ADMIN_PASSWORD).await.unwrap();
+    state
+        .authorization
+        .grant(&user.id, Role::Administrator, GrantScope::Server)
+        .unwrap();
+    format!("Basic {}", STANDARD.encode(format!("Alice:{ADMIN_PASSWORD}")))
+}
+
+/// The `ui_router` fixture with a server administrator, returning the router and its Basic header.
+async fn ui_router_admin() -> (tempfile::TempDir, axum::Router, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(&ui_config(&dir)).unwrap();
+    let authorization = seed_administrator(&state).await;
+    (dir, router_for(state), authorization)
+}
+
 /// Leptos server rendering drives a per-thread reactive graph through process-global arenas, so two
 /// page renders at once in one process wedge on a lost wakeup. nextest runs each test in its own
 /// process and never hits this; `cargo test` runs a binary's tests as threads and would, so hold one
@@ -634,11 +656,10 @@ fn put_filter_files(state: &peryx_driver::AppState) {
     put_legacy_file(state, "veloxdemo-1.0.0.tar.gz", b"sdist");
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_ui_dashboard_renders_indexes_and_counters(ui_router: (tempfile::TempDir, axum::Router)) {
-    let (_dir, router) = ui_router;
-    let (status, body) = get(&router, "/").await;
+async fn test_ui_dashboard_renders_indexes_and_counters() {
+    let (_dir, router, authorization) = ui_router_admin().await;
+    let (status, body) = get_authorized(&router, "/", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("change serial"));
     assert!(body.contains("root/pypi"));
@@ -649,6 +670,19 @@ async fn test_ui_dashboard_renders_indexes_and_counters(ui_router: (tempfile::Te
     assert!(body.contains("uploads land here"));
     assert!(body.contains("resolves top to bottom"));
     assert!(body.contains("/pkg/peryx_web.js"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_ui_dashboard_withholds_counters_from_anonymous(ui_router: (tempfile::TempDir, axum::Router)) {
+    let (_dir, router) = ui_router;
+    let (status, body) = get(&router, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    // The basic index list stays public so the browser can navigate, but the operator-class
+    // per-ecosystem counters and metric families do not render.
+    assert!(body.contains("root/pypi"), "{body}");
+    assert!(!body.contains("PEP 658"), "{body}");
+    assert!(!body.contains("metadata hits"), "{body}");
 }
 
 #[rstest]
@@ -670,8 +704,10 @@ async fn test_ui_header_marks_outbound_links_external(ui_router: (tempfile::Temp
 #[tokio::test]
 async fn test_ui_dashboard_shows_the_oci_registry_endpoint_not_simple() {
     let dir = tempfile::tempdir().unwrap();
-    let router = build_router(&oci_ui_config(&dir)).unwrap();
-    let (status, body) = get(&router, "/").await;
+    let state = build_state(&oci_ui_config(&dir)).unwrap();
+    let authorization = seed_administrator(&state).await;
+    let router = router_for(state);
+    let (status, body) = get_authorized(&router, "/", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     // An OCI index card advertises the `/v2/` registry endpoint, never a PyPI `/simple/` URL.
     assert!(body.contains("/v2/images/"), "OCI endpoint missing: {body}");
@@ -681,11 +717,10 @@ async fn test_ui_dashboard_shows_the_oci_registry_endpoint_not_simple() {
     );
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_ui_admin_status_renders_read_only_state_without_secrets(ui_router: (tempfile::TempDir, axum::Router)) {
-    let (_dir, router) = ui_router;
-    let (status, body) = get(&router, "/admin/status").await;
+async fn test_ui_admin_status_renders_read_only_state_without_secrets() {
+    let (_dir, router, authorization) = ui_router_admin().await;
+    let (status, body) = get_authorized(&router, "/admin/status", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("Admin status"));
     assert!(body.contains("read-only"));
@@ -702,6 +737,20 @@ async fn test_ui_admin_status_renders_read_only_state_without_secrets(ui_router:
     assert!(!body.contains("s3cret"));
     assert!(!body.contains("type=\"password\""));
     assert!(!body.contains("delete whole project"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_ui_admin_status_withholds_sensitive_fields_from_anonymous(ui_router: (tempfile::TempDir, axum::Router)) {
+    let (_dir, router) = ui_router;
+    let (status, body) = get(&router, "/admin/status").await;
+    assert_eq!(status, StatusCode::OK);
+    // The basic topology renders, but the upstream host, upload-token state, and counters do not.
+    assert!(body.contains("Admin status"));
+    assert!(body.contains("root/pypi"), "{body}");
+    assert!(!body.contains("http://127.0.0.1:9/simple/"), "{body}");
+    assert!(!body.contains("token configured"), "{body}");
+    assert!(!body.contains("redacted"), "{body}");
 }
 
 #[rstest]
@@ -730,12 +779,11 @@ async fn test_ui_admin_status_empty_state() {
     assert!(body.contains("No uploads recorded yet."));
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_ui_admin_status_lists_counts_and_recent_uploads(ui_router: (tempfile::TempDir, axum::Router)) {
-    let (_dir, router) = ui_router;
+async fn test_ui_admin_status_lists_counts_and_recent_uploads() {
+    let (_dir, router, authorization) = ui_router_admin().await;
     upload_fixture(&router).await;
-    let (status, body) = get(&router, "/admin/status").await;
+    let (status, body) = get_authorized(&router, "/admin/status", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("uploads"));
     assert!(body.contains("veloxdemo"));
@@ -1432,15 +1480,15 @@ async fn test_ui_unknown_route_falls_back(ui_router: (tempfile::TempDir, axum::R
     assert!(body.contains("not found"));
 }
 
-#[rstest]
 #[tokio::test]
-async fn test_ui_stats_drills_from_index_to_files(ui_router: (tempfile::TempDir, axum::Router)) {
-    let (_dir, router) = ui_router;
+async fn test_ui_stats_drills_from_index_to_files() {
+    // The stats drill names repositories, so the page renders it only for an operator.
+    let (_dir, router, authorization) = ui_router_admin().await;
     upload_fixture(&router).await;
     // The aggregator applies the upload event on its own thread; poll the rendered page.
     let mut body = String::new();
     for _ in 0..500 {
-        let (status, page) = get(&router, "/stats?index=root%2Fpypi").await;
+        let (status, page) = get_authorized(&router, "/stats?index=root%2Fpypi", &authorization).await;
         assert_eq!(status, StatusCode::OK);
         if page.contains("veloxdemo") {
             body = page;
@@ -1452,11 +1500,21 @@ async fn test_ui_stats_drills_from_index_to_files(ui_router: (tempfile::TempDir,
     // Leptos escapes attribute ampersands in server output.
     assert!(body.contains("/stats?index=root%2Fpypi&amp;project=veloxdemo"));
 
-    let (status, top) = get(&router, "/stats").await;
+    let (status, top) = get_authorized(&router, "/stats", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     assert!(top.contains("/stats?index=root%2Fpypi"));
 
-    let (status, files) = get(&router, "/stats?index=root%2Fpypi&project=veloxdemo").await;
+    let (status, files) = get_authorized(&router, "/stats?index=root%2Fpypi&project=veloxdemo", &authorization).await;
     assert_eq!(status, StatusCode::OK);
     assert!(files.contains("rejected downloads"));
+}
+
+#[tokio::test]
+async fn test_ui_stats_withholds_usage_from_anonymous() {
+    let (_dir, router) = ui_router();
+    upload_fixture(&router).await;
+    // Even after an upload, an anonymous caller sees no repository usage on the stats page.
+    let (status, body) = get(&router, "/stats?index=root%2Fpypi").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!body.contains("veloxdemo"), "{body}");
 }

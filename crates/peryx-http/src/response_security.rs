@@ -37,6 +37,16 @@ pub enum ResponseAuthorization {
 }
 
 impl ResponseAuthorization {
+    /// The class a caller reads at, or `None` when authorization failed. A renderer that filters its
+    /// own view rather than a [`ClassifiedField`] set reads the audience directly.
+    #[must_use]
+    pub const fn field_class(self) -> Option<FieldClassification> {
+        match self.classification() {
+            Ok(class) => Some(class),
+            Err(ResponseDenied) => None,
+        }
+    }
+
     const fn classification(self) -> Result<FieldClassification, ResponseDenied> {
         let authorization = match self {
             Self::Public => return Ok(FieldClassification::Public),

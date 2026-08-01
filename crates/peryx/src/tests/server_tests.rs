@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use base64::Engine as _;
 use futures_util::TryStreamExt as _;
 use http_body_util::BodyExt as _;
 use peryx_driver::IndexKind as RuntimeKind;
-use peryx_identity::ProviderId;
+use peryx_identity::{GrantScope, ProviderId, Role};
 use peryx_storage::meta::{JobKind, JobState, MetaStore, NewJobRun, PolicyDecisionQuery};
 use peryx_upstream::Auth;
 #[cfg(unix)]
@@ -29,7 +30,7 @@ use crate::config::{
 };
 use crate::server::{
     build_blob_storage, build_index_settings, build_indexes, build_router, build_state, recover_job_attempts,
-    upstream_auth,
+    router_for, upstream_auth,
 };
 
 fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
@@ -242,9 +243,28 @@ async fn test_build_router_serves_status() {
         data_dir: dir.path().to_path_buf(),
         ..Config::default()
     };
-    let router = build_router(&config).unwrap();
+    let state = build_state(&config).unwrap();
+    let user = state.users.create("Alice").unwrap();
+    state.users.set_password(&user.id, "local password").await.unwrap();
+    state
+        .authorization
+        .grant(&user.id, Role::Administrator, GrantScope::Server)
+        .unwrap();
+    let authorization = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("Alice:local password")
+    );
+    let router = router_for(state);
     let response = tokio::task::LocalSet::new()
-        .run_until(router.oneshot(Request::builder().uri("/+status").body(Body::empty()).unwrap()))
+        .run_until(
+            router.oneshot(
+                Request::builder()
+                    .uri("/+status")
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

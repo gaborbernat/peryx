@@ -9,7 +9,7 @@ pub async fn load_stats(index: Option<String>, project: Option<String>) -> crate
     #[cfg(feature = "ssr")]
     {
         parse_stats(
-            &crate::ssr::stats(index.as_deref(), project.as_deref()),
+            &crate::ssr::stats(index.as_deref(), project.as_deref()).await,
             index.as_deref(),
             project.as_deref(),
         )

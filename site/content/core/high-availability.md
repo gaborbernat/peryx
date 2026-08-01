@@ -54,9 +54,10 @@ repositories, or contact an upstream. `GET /+ready?writes=true` also requires a 
 query while remaining ready for reads.
 
 Both public probes are anonymous, bypass the hosted request limiter, and send `Cache-Control: no-store`. Their fixed
-documents contain no repository, upstream, user, topology, or failure details. `GET /+status` remains the detailed
-operator surface. It reports the process role, local-store state, and last observed upstream reachability. Restrict
-`/+status` at the ingress when that topology is sensitive.
+documents contain no repository, upstream, user, topology, or failure details. `GET /+status` is the detailed operator
+surface: it stays reachable anonymously for coarse health, adds the process counters for `operator:read`, and reveals
+the index topology and upstream reachability only for `administration:read`. That per-class filtering already keeps the
+topology off an unauthenticated response, so an ingress rule is defense in depth rather than the primary control.
 
 For [Kubernetes probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/), let readiness remove a pod from
 service before liveness restarts it:

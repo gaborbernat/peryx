@@ -36,7 +36,7 @@ pub use quota::{quota_repository, quota_summary};
 pub use retention::{retention_export, retention_plan};
 pub use revocations::{DigestRevocationsQuery, inspect_revocation, lift_revocation, list_revocations, put_revocation};
 pub use shadow::{shadow_candidates, shadow_error_response};
-pub use status::{ReadinessQuery, StatusQuery, health, readiness, status};
+pub use status::{ReadinessQuery, health, readiness, status, status_authorization};
 pub use trash::{inspect_trash, list_trash, trash_error_response};
 pub use ui::{ui_manifest, ui_member, ui_members, ui_project, ui_projects};
 pub use usage::{StatsQuery, ecosystem_summaries, family_descriptors, metrics, stats};

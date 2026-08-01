@@ -4,12 +4,16 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use axum::extract::State;
-use axum::http::header;
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use peryx_core::Role;
+use peryx_driver::authz::{Decision, DenyReason};
 use peryx_driver::state::{AppState, IndexDescription, IndexKind};
+use peryx_identity::{Resource, Scope, parse_basic};
+
+use crate::response_security::ProtectedCachePolicy;
 
 /// Per-index totals joined to each index's ecosystem and role.
 ///
@@ -78,12 +82,74 @@ pub struct StatsQuery {
 
 /// `GET /+stats`: usage counters aggregated off-thread, drillable: no parameters for per-index
 /// totals, `?index={route}` for its projects, `&project={name}` for its files.
+///
+/// The tree names repositories and projects, so it needs operator authority; a repository token
+/// reads its own usage through `/+analytics/*` instead. The response is never cached.
 pub async fn stats(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(query): axum::extract::Query<StatsQuery>,
+    headers: HeaderMap,
+    Query(query): Query<StatsQuery>,
 ) -> Response {
-    let tree = state.metrics.drill(query.index.as_deref(), query.project.as_deref());
-    axum::Json(tree).into_response()
+    let mut response = match authorize_operator(&state, &headers).await {
+        Ok(()) => {
+            let tree = state.metrics.drill(query.index.as_deref(), query.project.as_deref());
+            axum::Json(tree).into_response()
+        }
+        Err(rejection) => rejection.response(),
+    };
+    ProtectedCachePolicy::NoStore.apply(response.headers_mut());
+    response
+}
+
+/// Why a `/+stats` request was refused. An authenticated caller without an operator grant receives the
+/// same `404` a missing route would, so a denial cannot confirm the endpoint to a probe.
+#[derive(Debug, Clone, Copy)]
+enum StatsRejection {
+    NotFound,
+    Unavailable,
+    Unauthorized,
+}
+
+impl StatsRejection {
+    fn response(self) -> Response {
+        match self {
+            Self::NotFound => StatusCode::NOT_FOUND.into_response(),
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"error": "stats service unavailable"})),
+            )
+                .into_response(),
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Basic realm=\"peryx-stats\"")],
+            )
+                .into_response(),
+        }
+    }
+}
+
+/// Authenticate a local user and require the server-wide operator read scope.
+async fn authorize_operator(state: &AppState, headers: &HeaderMap) -> Result<(), StatsRejection> {
+    let credentials = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_basic)
+        .ok_or(StatsRejection::Unauthorized)?;
+    let actor = state
+        .users
+        .authenticate(&credentials.user, &credentials.password)
+        .await
+        .map_err(|_| StatsRejection::Unavailable)?
+        .ok_or(StatsRejection::Unauthorized)?;
+    match state
+        .authorization
+        .authorize_scoped(&actor, Scope::OperatorRead, &Resource::Operator)
+        .decision()
+    {
+        Decision::Allow => Ok(()),
+        Decision::Deny(DenyReason::NoGrant) => Err(StatsRejection::NotFound),
+        Decision::Deny(DenyReason::StorageUnavailable) => Err(StatsRejection::Unavailable),
+    }
 }
 
 /// A neutral per-index counter family: name, help, the role it is scoped to (`None` = every role),

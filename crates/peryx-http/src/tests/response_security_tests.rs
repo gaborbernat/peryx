@@ -99,6 +99,31 @@ fn test_response_denial_excludes_request_data() {
 }
 
 #[rstest]
+#[case::public(None, Some(FieldClassification::Public))]
+#[case::repository_reader(Some((Role::RepositoryReader, Scope::RepositoryRead)), Some(FieldClassification::Repository))]
+#[case::operator(Some((Role::Operator, Scope::OperatorRead)), Some(FieldClassification::Operator))]
+#[case::administrator(Some((Role::Administrator, Scope::AdministrationRead)), Some(FieldClassification::Administrator))]
+#[case::denied(Some((Role::RepositoryReader, Scope::OperatorRead)), None)]
+fn test_field_class_reports_the_callers_audience(
+    #[case] role_scope: Option<(Role, Scope)>,
+    #[case] expected: Option<FieldClassification>,
+) {
+    let authorization = role_scope.map_or(ResponseAuthorization::Public, |(role, scope)| {
+        ResponseAuthorization::Scoped(authorized(role, scope))
+    });
+
+    assert_eq!(authorization.field_class(), expected);
+}
+
+#[test]
+fn test_field_class_of_a_repository_token_is_repository() {
+    assert_eq!(
+        ResponseAuthorization::Repository.field_class(),
+        Some(FieldClassification::Repository)
+    );
+}
+
+#[rstest]
 #[case::private(ProtectedCachePolicy::Private, "private, no-cache")]
 #[case::no_store(ProtectedCachePolicy::NoStore, "no-store")]
 fn test_protected_cache_policy_sets_cache_control(#[case] policy: ProtectedCachePolicy, #[case] expected: &str) {

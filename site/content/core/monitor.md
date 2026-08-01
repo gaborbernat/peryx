@@ -19,10 +19,12 @@ pages live at `/stats`, `/stats?index={route}`, and `/stats?index={route}&projec
 
 ## Query the counters
 
+`/+stats` names repositories and projects, so it needs an operator credential (`operator:read`):
+
 ```shell
-curl -s http://127.0.0.1:4433/+stats | jq
-curl -s 'http://127.0.0.1:4433/+stats?index=root/pypi' | jq '.projects | to_entries | sort_by(-.value.downloads)[:5]'
-curl -s 'http://127.0.0.1:4433/+stats?index=root/pypi&project=numpy' | jq .files
+curl -s -u operator:"$OPERATOR_PASSWORD" http://127.0.0.1:4433/+stats | jq
+curl -s -u operator:"$OPERATOR_PASSWORD" 'http://127.0.0.1:4433/+stats?index=root/pypi' | jq '.projects | to_entries | sort_by(-.value.downloads)[:5]'
+curl -s -u operator:"$OPERATOR_PASSWORD" 'http://127.0.0.1:4433/+stats?index=root/pypi&project=numpy' | jq .files
 ```
 
 These counters live in memory and reset on restart; for durable time series, scrape `/metrics`, and see
@@ -166,10 +168,11 @@ the hosted role with no repository or project label, keeping metric cardinality 
 
 ## Check operational status
 
-`/admin/status` combines `GET /+status?details=admin` with top-level `GET /+stats`. It shows the configured index
-topology next to the same cache-health counters listed below, plus observed project counts, upload counts, recent
-uploads, cached index URLs, and redacted token/authentication state. The page does not fetch upstreams or read artifacts
-while it renders.
+`/admin/status` combines `GET /+status` with top-level `GET /+stats`, filtered to the caller's class. The configured
+index list and routes stay public; an operator additionally sees the cache-health counters below; an administrator
+additionally sees the upstream hosts, upload-token state, observed project and upload counts, and recent uploads.
+Authenticate the request as a server user to reach the operator and administrator data. The page does not fetch
+upstreams or read artifacts while it renders.
 
 The top-level `blob_storage` object names the selected backend. Its fields report durability and a support level for
 each operation, including local staging. The backend implements `native` operations; peryx composes `emulated`

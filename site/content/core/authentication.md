@@ -40,11 +40,14 @@ OCI reads also run through the model. The registry challenges clients through it
 repository-scoped tokens, and checks manifest, blob, tag, and catalog access. Server-rendered project pages, hydrated UI
 requests, and search apply the same read ACLs, so they do not disclose inaccessible repositories.
 
-PyPI's Simple API, JSON, metadata, and artifact routes do not consult read ACLs yet. The neutral discovery, status,
-usage, and metrics endpoints also remain public. Setting `anonymous_read = false` does not protect those surfaces until
-their handlers gain access checks. LDAP resolves server users for login consumers but does not add an HTTP login or
-browser session in this release. PyPI publishing can use a configured CI provider's OIDC identity without making OIDC a
-general login source.
+PyPI's Simple API, JSON, metadata, and artifact routes do not consult read ACLs yet. `GET /+status` now classifies its
+fields: version, coarse health, and the basic index list stay public so the browser can still navigate and upload; the
+counters and per-ecosystem rollups need `operator:read`; and the per-index upstream hosts, upload-token state, and
+recent uploads need `administration:read`. `GET /+stats` needs `operator:read` because its drill names repositories and
+projects. The neutral discovery endpoints and the aggregate `GET /metrics` remain public; `/metrics` carries only
+ecosystem-and-role labels, so restrict it at the reverse proxy per the Prometheus security model. LDAP resolves server
+users for login consumers but does not add an HTTP login or browser session in this release. PyPI publishing can use a
+configured CI provider's OIDC identity without making OIDC a general login source.
 
 ## Server roles and protected responses
 

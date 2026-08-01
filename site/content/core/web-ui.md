@@ -23,10 +23,12 @@ table, and per-file download counts.
 
 ## Admin status
 
-`/admin/status` reads `GET /+status?details=admin` and top-level `GET /+stats`. It shows configured indexes, routes,
-virtual-index member order, upload targets by name, observed project counts, uploaded file counts, recent uploads,
-cached index URLs, redacted authentication state, and cache-health counters. It also links to the JSON status, JSON
-stats, [Prometheus](https://prometheus.io/) metrics,
+`/admin/status` reads `GET /+status` and top-level `GET /+stats`, and it renders each field at the caller's class: the
+index list, routes, and upload targets stay public, the cache-health counters need operator authority, and the upstream
+hosts, upload-token state, project and file counts, and recent uploads need administrator authority. A page loaded
+without a credential shows the routes but not the counters or those sensitive fields; authenticate the page request as a
+server administrator to see the full status. It links to the JSON status, JSON stats,
+[Prometheus](https://prometheus.io/) metrics,
 [Simple API](https://packaging.python.org/en/latest/specifications/simple-repository-api/), browse, and usage pages.
 
 The admin status document scans metadata keys once to count observed projects and uploaded files, then keeps only a

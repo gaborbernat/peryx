@@ -125,3 +125,25 @@ fn wired(mut state: peryx_driver::AppState) -> Arc<peryx_driver::AppState> {
     crate::install(&mut state);
     Arc::new(state)
 }
+
+/// Provision a server administrator on a wired state and return the Basic header authenticating as
+/// it, so a test can read the operator- and administrator-class `/+status` fields the anonymous
+/// document withholds.
+pub async fn administrator_header(state: &Arc<peryx_driver::AppState>) -> String {
+    use base64::Engine as _;
+
+    let user = state.users.create("Alice").unwrap();
+    state.users.set_password(&user.id, "local password").await.unwrap();
+    state
+        .authorization
+        .grant(
+            &user.id,
+            peryx_identity::Role::Administrator,
+            peryx_identity::GrantScope::Server,
+        )
+        .unwrap();
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("Alice:local password")
+    )
+}

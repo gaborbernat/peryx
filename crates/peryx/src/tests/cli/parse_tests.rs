@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::Parser as _;
 
 use super::parse;
-use crate::cli::{Cli, Command, RetentionCommand, RuntimeArgs};
+use crate::cli::{Cli, Command, QuotaCommand, RetentionCommand, RuntimeArgs};
 use crate::config::{LogFormat, LogSink};
 
 fn runtime(cli: Cli) -> RuntimeArgs {
@@ -19,6 +19,7 @@ fn runtime(cli: Cli) -> RuntimeArgs {
         Command::Restore(_) => panic!("restore takes explicit data-dir args"),
         Command::ImportDir(_) => panic!("import-dir carries nested runtime args"),
         Command::Policy(_) => panic!("policy commands carry nested runtime args"),
+        Command::Quota(_) => panic!("quota commands carry nested runtime args"),
         Command::Retention(_) => panic!("retention commands carry nested runtime args"),
         Command::Writer(_) => panic!("writer commands carry nested runtime args"),
         Command::Prefetch(_) => panic!("prefetch commands carry nested runtime args"),
@@ -144,6 +145,33 @@ fn test_parse_retention_dry_run_and_export_carry_runtime_args() {
         command.runtime_args().data_dir.as_deref(),
         Some(PathBuf::from("/e").as_path())
     );
+}
+
+#[test]
+fn test_parse_quota_list_and_inspect_carry_runtime_args() {
+    let list = parse(&["peryx", "quota", "list", "--data-dir", "/d"]);
+    let Command::Quota(command @ QuotaCommand::List(_)) = list.command else {
+        panic!("expected a list command");
+    };
+    assert_eq!(
+        command.runtime_args().data_dir.as_deref(),
+        Some(PathBuf::from("/d").as_path())
+    );
+
+    let inspect = parse(&["peryx", "quota", "inspect", "--index", "hosted", "--data-dir", "/e"]);
+    let Command::Quota(command @ QuotaCommand::Inspect(_)) = inspect.command else {
+        panic!("expected an inspect command");
+    };
+    assert_eq!(
+        command.runtime_args().data_dir.as_deref(),
+        Some(PathBuf::from("/e").as_path())
+    );
+    let QuotaCommand::Inspect(args) = command else {
+        unreachable!("matched an inspect command above");
+    };
+    assert_eq!(args.index, "hosted");
+
+    assert!(Cli::try_parse_from(["peryx", "quota", "inspect"]).is_err());
 }
 
 #[test]

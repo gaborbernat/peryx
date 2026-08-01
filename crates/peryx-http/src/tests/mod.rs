@@ -3,6 +3,7 @@ mod analytics_tests;
 mod fallback_tests;
 mod oidc_tests;
 mod policy_decision_tests;
+mod quota_tests;
 mod response_security_tests;
 mod retention_tests;
 mod revocation_tests;

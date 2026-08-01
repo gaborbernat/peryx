@@ -144,6 +144,26 @@ rather than quiet. Version and source rows report `null` for a distribution the 
 served from the local store. No response ever holds a client's identity, address, or credential; the dimensions stay as
 bounded as the aggregate they read.
 
+## Query repository quotas
+
+The `/+quota` endpoints read the durable [quota counters](@/core/quotas.md) back without naming an artifact.
+`GET /+quota` lists every repository's committed and reserved use against its configured limits, for a local
+administrator; `GET /+quota/repository?repository=<route>` returns one repository for a caller who can read it. Both
+report the `remaining` headroom, absent when a counter is unlimited, and mark the response private so a shared cache
+never holds one caller's view for another.
+
+```shell
+# Every repository's quota, first page
+curl -s -u admin:"$PERYX_ADMIN_PASSWORD" 'http://127.0.0.1:4433/+quota?limit=25' | jq
+
+# One repository a token can read
+curl -s -u __token__:"$UPLOAD_TOKEN" 'http://127.0.0.1:4433/+quota/repository?repository=root/pypi' | jq
+```
+
+Repository and project names stay out of the Prometheus metrics: the quota counters live in the durable store the
+`/+quota` reads expose, and the enforcement families (`peryx_pypi_quota_*`, `quota_admitted`, `quota_rejected`) carry
+the hosted role with no repository or project label, keeping metric cardinality bounded.
+
 ## Check operational status
 
 `/admin/status` combines `GET /+status?details=admin` with top-level `GET /+stats`. It shows the configured index

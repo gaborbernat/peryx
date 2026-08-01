@@ -34,6 +34,8 @@ fn test_openapi_document_covers_every_endpoint() {
         "/+analytics/sources",
         "/+analytics/timeline",
         "/+policy/decisions",
+        "/+quota",
+        "/+quota/repository",
         "/+retention/plan",
         "/+retention/export",
         "/+trash",

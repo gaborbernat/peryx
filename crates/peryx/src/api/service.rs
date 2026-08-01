@@ -43,8 +43,25 @@ fn analytics_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+/// Register the `/+quota` read family, kept apart so the service path list stays short.
+fn quota_paths(paths: PathsBuilder) -> PathsBuilder {
+    paths
+        .path(
+            "/+quota",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, quota_summary())
+                .build(),
+        )
+        .path(
+            "/+quota/repository",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, quota_repository())
+                .build(),
+        )
+}
+
 pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
-    analytics_paths(paths)
+    quota_paths(analytics_paths(paths))
         .path(
             "/+status",
             PathItemBuilder::new().operation(HttpMethod::Get, status()).build(),
@@ -853,6 +870,146 @@ fn lift_revocation() -> OperationBuilder {
                 api_json_response("The digest is not canonical SHA-256", json!({"error": "invalid digest"})),
             ),
     )
+}
+
+fn quota_meter_example(committed: u64, reserved: u64, limit: Option<u64>, remaining: Option<u64>) -> serde_json::Value {
+    json!({
+        "committed": committed,
+        "reserved": reserved,
+        "limit": limit,
+        "remaining": remaining,
+    })
+}
+
+fn quota_repository_example() -> serde_json::Value {
+    json!({
+        "repository": "root/pypi",
+        "ecosystem": "pypi",
+        "limits": {
+            "max_file_bytes": 104_857_600,
+            "max_project_bytes": null,
+            "max_accounted_bytes": 10_737_418_240_u64,
+            "max_projects": 500,
+            "max_versions_per_project": 100,
+            "audit": false
+        },
+        "file_bytes": quota_meter_example(4_294_967_296, 1_048_576, None, None),
+        "accounted_bytes": quota_meter_example(3_221_225_472, 1_048_576, Some(10_737_418_240), Some(7_515_144_192)),
+        "projects": quota_meter_example(128, 1, Some(500), Some(371))
+    })
+}
+
+fn quota_summary() -> OperationBuilder {
+    let mut operation = OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Repository quota summary"))
+        .description(Some(
+            "One bounded page of every repository's quota in configuration order, for a local administrator. Each \
+             row pairs the committed and reserved counters the store maintains with the limits the index \
+             configures, and reports the remaining headroom, or null when a counter is unlimited. The page omits \
+             per-project and per-artifact detail; name a repository through `/+quota/repository` for one \
+             repository. The cursor pages over the static index list, so it stays stable while a reservation \
+             changes a counter under it.",
+        ))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "200",
+            api_json_response(
+                "One page of repository quotas",
+                json!({"repositories": [quota_repository_example()], "next_cursor": null}),
+            ),
+        )
+        .response(
+            "400",
+            api_json_response(
+                "The limit or cursor is invalid",
+                json!({"error": "limit must be between 1 and 100"}),
+            ),
+        )
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local user credential was presented"),
+        )
+        .response(
+            "403",
+            ResponseBuilder::new().description("A repository token cannot enumerate repositories"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The caller lacks operator authority to enumerate repositories"),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication, authorization, or quota storage is unavailable",
+                json!({"error": "quota service unavailable"}),
+            ),
+        );
+    for (name, description, example) in [
+        ("cursor", "Opaque cursor from the prior page's next_cursor", json!("Mg")),
+        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
+    ] {
+        operation = operation.parameter(
+            ParameterBuilder::new()
+                .name(name)
+                .parameter_in(ParameterIn::Query)
+                .description(Some(description))
+                .example(Some(example)),
+        );
+    }
+    operation
+}
+
+fn quota_repository() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Repository quota detail"))
+        .description(Some(
+            "One repository's quota for a caller who can read it: a local user through the authorization service, \
+             or that repository's legacy upload token with the `__token__` username. It pairs the committed and \
+             reserved counters with the configured limits and reports the remaining headroom, null when a counter \
+             is unlimited. It names no individual artifact.",
+        ))
+        .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .parameter(
+            ParameterBuilder::new()
+                .name("repository")
+                .parameter_in(ParameterIn::Query)
+                .required(Required::True)
+                .description(Some("Index route to inspect, at most 512 bytes"))
+                .example(Some(json!("root/pypi"))),
+        )
+        .response(
+            "200",
+            api_json_response("The repository's quota", quota_repository_example()),
+        )
+        .response(
+            "400",
+            api_json_response(
+                "The repository selector is missing or invalid",
+                json!({"error": "repository is required"}),
+            ),
+        )
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local user credential or repository token was presented"),
+        )
+        .response(
+            "403",
+            ResponseBuilder::new().description("The credential cannot read this repository"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The repository does not exist or is not visible to the caller"),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication, authorization, or quota storage is unavailable",
+                json!({"error": "quota service unavailable"}),
+            ),
+        )
 }
 
 fn retention_request_body() -> utoipa::openapi::request_body::RequestBody {

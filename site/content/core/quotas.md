@@ -122,6 +122,39 @@ limit, releases at most that limit, and leaves committed allocations intact. Rep
 Peryx keeps a separate pending-reservation index, so retained committed history does not increase repair scan work. A
 repair pass uses memory proportional to its row limit and commits its counter changes once.
 
+## Reading quota status
+
+Two authorized reads expose the stored counters without naming an artifact. Both compute the remaining headroom a client
+would otherwise derive and leave it absent when a counter is unlimited, and both mark the response `private, no-cache`
+under [RFC 9111](https://www.rfc-editor.org/rfc/rfc9111) so a shared cache never holds one caller's view for another.
+
+`GET /+quota` returns one page of repository statuses in configuration order, for a local administrator.
+`GET /+quota/repository?repository=<route>` returns one repository for a caller who can read it: a local user through
+the authorization service, or that repository's legacy upload token with the `__token__` username. The server operator
+role, which carries no repository access, cannot read either. The summary pages over the static index list with an
+opaque `cursor`, so a page stays stable while a reservation changes a counter under it, and it omits per-project and
+per-artifact detail; name a repository for one repository's status.
+
+Each repository reports its configured `limits` and a meter for `file_bytes`, `accounted_bytes`, and `projects`. A meter
+carries `committed` use, `reserved` capacity held by in-flight writes, the `limit` (null when unlimited), and the
+`remaining` headroom once both counters are charged (null when unlimited). `file_bytes` is the logical footprint, which
+no repository-level limit bounds, so its `limit` and `remaining` are always null. The two counters a write admits
+against — `accounted_bytes` against `max_accounted_bytes`, and `projects` against `max_projects` — carry their
+configured caps.
+
+`peryx quota list` prints one tab-separated row per repository, and `peryx quota inspect --index <name>` prints one
+repository as JSON. Both read the local store and derive limits from each index's policy, so a plan reads the same
+whichever way it is requested:
+
+```console
+peryx quota list
+peryx quota inspect --index hosted
+```
+
+`limits.audit` reports whether the repository records a crossed limit instead of denying the write, so a reader sees
+when committed use may run past a configured cap. `reserved` capacity is the outstanding in-flight and pending-repair
+headroom: a persistent reserved figure with no active writer is the signal to run [restart repair](#restart-repair).
+
 ## Migration and observability
 
 `MetaStore::open` creates missing quota tables and the pending index in its metadata transaction. Peryx does not scan or

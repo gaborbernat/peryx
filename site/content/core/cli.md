@@ -21,6 +21,7 @@ peryx <COMMAND>
 | `restore`        | Restore an offline backup into a data directory                                       |
 | `import-dir`     | Import local wheels and sdists into a hosted index                                    |
 | `policy`         | Preview index policy decisions against cached records                                 |
+| `quota`          | Report configured limits and use per [repository quota](@/core/quotas.md)             |
 | `retention`      | Preview and export a repository's [retention plan](@/core/retention.md)               |
 | `writer`         | Promote a replacement writer during manual failover                                   |
 | `mirror`         | Plan, populate, and verify mirror cache contents                                      |
@@ -232,6 +233,26 @@ serve   pypi   flask             project-block-list  project  project "flask" is
 
 It does not fetch upstreams and does not change the served index. Use it after editing `[index.policy]` and before
 running `serve` with the same config.
+
+## `quota`
+
+Quota commands read the same config and `--data-dir` flags as `serve`, derive each repository's limits from its policy,
+and change no metadata. They report the same status as the
+[`/+quota` HTTP reads](@/core/quotas.md#reading-quota-status).
+
+```shell
+peryx quota list
+peryx quota inspect --index hosted
+```
+
+`quota list` prints one tab-separated row per repository; `quota inspect` prints one repository as JSON. A `-` byte or
+project limit marks an unlimited counter:
+
+```text
+repository  ecosystem  used_bytes  reserved_bytes  byte_limit  remaining_bytes  projects  project_limit  audit
+hosted      pypi       3000        500             10000       6500             1         5              false
+pypi        pypi       0           0               -           -                0         -              false
+```
 
 ## `retention`
 

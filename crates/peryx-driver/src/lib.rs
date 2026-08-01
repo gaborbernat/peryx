@@ -18,6 +18,7 @@ pub mod download;
 mod driver_set;
 pub mod jobs;
 pub mod openapi;
+pub mod quota;
 pub mod range;
 pub mod rate_limit;
 pub mod retention;

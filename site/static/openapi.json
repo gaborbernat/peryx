@@ -869,6 +869,203 @@
         ]
       }
     },
+    "/+quota": {
+      "get": {
+        "description": "One bounded page of every repository's quota in configuration order, for a local administrator. Each row pairs the committed and reserved counters the store maintains with the limits the index configures, and reports the remaining headroom, or null when a counter is unlimited. The page omits per-project and per-artifact detail; name a repository through `/+quota/repository` for one repository. The cursor pages over the static index list, so it stays stable while a reservation changes a counter under it.",
+        "parameters": [
+          {
+            "description": "Opaque cursor from the prior page's next_cursor",
+            "example": "Mg",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "next_cursor": null,
+                  "repositories": [
+                    {
+                      "accounted_bytes": {
+                        "committed": 3221225472,
+                        "limit": 10737418240,
+                        "remaining": 7515144192,
+                        "reserved": 1048576
+                      },
+                      "ecosystem": "pypi",
+                      "file_bytes": {
+                        "committed": 4294967296,
+                        "limit": null,
+                        "remaining": null,
+                        "reserved": 1048576
+                      },
+                      "limits": {
+                        "audit": false,
+                        "max_accounted_bytes": 10737418240,
+                        "max_file_bytes": 104857600,
+                        "max_project_bytes": null,
+                        "max_projects": 500,
+                        "max_versions_per_project": 100
+                      },
+                      "projects": {
+                        "committed": 128,
+                        "limit": 500,
+                        "remaining": 371,
+                        "reserved": 1
+                      },
+                      "repository": "root/pypi"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "One page of repository quotas"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit or cursor is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "403": {
+            "description": "A repository token cannot enumerate repositories"
+          },
+          "404": {
+            "description": "The caller lacks operator authority to enumerate repositories"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "quota service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or quota storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Repository quota summary",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+quota/repository": {
+      "get": {
+        "description": "One repository's quota for a caller who can read it: a local user through the authorization service, or that repository's legacy upload token with the `__token__` username. It pairs the committed and reserved counters with the configured limits and reports the remaining headroom, null when a counter is unlimited. It names no individual artifact.",
+        "parameters": [
+          {
+            "description": "Index route to inspect, at most 512 bytes",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "accounted_bytes": {
+                    "committed": 3221225472,
+                    "limit": 10737418240,
+                    "remaining": 7515144192,
+                    "reserved": 1048576
+                  },
+                  "ecosystem": "pypi",
+                  "file_bytes": {
+                    "committed": 4294967296,
+                    "limit": null,
+                    "remaining": null,
+                    "reserved": 1048576
+                  },
+                  "limits": {
+                    "audit": false,
+                    "max_accounted_bytes": 10737418240,
+                    "max_file_bytes": 104857600,
+                    "max_project_bytes": null,
+                    "max_projects": 500,
+                    "max_versions_per_project": 100
+                  },
+                  "projects": {
+                    "committed": 128,
+                    "limit": 500,
+                    "remaining": 371,
+                    "reserved": 1
+                  },
+                  "repository": "root/pypi"
+                }
+              }
+            },
+            "description": "The repository's quota"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "repository is required"
+                }
+              }
+            },
+            "description": "The repository selector is missing or invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The credential cannot read this repository"
+          },
+          "404": {
+            "description": "The repository does not exist or is not visible to the caller"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "quota service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or quota storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Repository quota detail",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+ready": {
       "get": {
         "description": "Checks the bounded local metadata and blob-store dependencies used to serve package requests. Set `writes=true` to require a writer. The probe does not enumerate repositories or contact upstreams.",

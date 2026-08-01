@@ -5,6 +5,7 @@ mod ldap_tests;
 mod password_tests;
 mod revocation_tests;
 mod roles_tests;
+mod scoped_token_tests;
 mod token_tests;
 mod trusted_publisher_tests;
 mod user_tests;

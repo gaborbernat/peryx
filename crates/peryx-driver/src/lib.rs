@@ -26,6 +26,7 @@ pub mod revocations;
 pub mod serving;
 pub mod shadow;
 pub mod state;
+pub mod tokens;
 pub mod trash;
 pub mod users;
 

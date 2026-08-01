@@ -23,6 +23,7 @@ mod quota;
 mod repository;
 mod revocation;
 mod role_grant;
+mod scoped_token;
 mod user;
 mod webhook;
 mod writer;
@@ -66,6 +67,10 @@ pub use revocation::{
 pub use role_grant::{
     CreateGrantOutcome, DeleteGrantOutcome, RoleGrantFilter, RoleGrantPage, RoleGrantQuery, RoleGrantQueryError,
     RoleGrantStoreError, StoredRoleGrant, role_grant_reach,
+};
+pub use scoped_token::{
+    NewScopedToken, RevokeScopedTokenOutcome, ScopedTokenPage, ScopedTokenQuery, ScopedTokenQueryError,
+    ScopedTokenRecord,
 };
 pub use user::UserStoreError;
 pub use webhook::{NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus};
@@ -111,6 +116,9 @@ const ARTIFACT_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("a
 const BLOB_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("blob_placement");
 const REPOSITORY: TableDefinition<&str, &[u8]> = TableDefinition::new("repository");
 const REPOSITORY_ROUTE: TableDefinition<&str, &str> = TableDefinition::new("repository_route");
+const SCOPED_TOKEN: TableDefinition<&str, &[u8]> = TableDefinition::new("scoped_token");
+const SCOPED_TOKEN_REACH: TableDefinition<&str, &str> = TableDefinition::new("scoped_token_reach");
+const SCOPED_TOKEN_VERIFIER: TableDefinition<&str, &str> = TableDefinition::new("scoped_token_verifier");
 const SERIAL_KEY: &str = "serial";
 const WEBHOOK_SERIAL_KEY: &str = "webhook_delivery";
 const JOB_SERIAL_KEY: &str = "job_run";
@@ -231,6 +239,9 @@ impl MetaStore {
             txn.open_table(BLOB_PLACEMENT)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;
+            txn.open_table(SCOPED_TOKEN)?;
+            txn.open_table(SCOPED_TOKEN_REACH)?;
+            txn.open_table(SCOPED_TOKEN_VERIFIER)?;
         }
         txn.commit()?;
         Ok(Self {

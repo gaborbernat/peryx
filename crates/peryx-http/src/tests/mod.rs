@@ -11,5 +11,6 @@ mod revocation_tests;
 mod shadow_tests;
 mod stats_tests;
 mod status_tests;
+mod tokens_tests;
 mod trash_tests;
 mod ui_tests;

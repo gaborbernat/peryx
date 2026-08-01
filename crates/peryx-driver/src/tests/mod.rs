@@ -6,4 +6,5 @@ mod quota_tests;
 mod range_tests;
 mod revocation_tests;
 mod state_tests;
+mod tokens_tests;
 mod user_tests;

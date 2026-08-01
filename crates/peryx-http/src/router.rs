@@ -38,6 +38,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/+policy/decisions", get(handlers::policy_decisions))
         .route("/+quota", get(handlers::quota_summary))
         .route("/+quota/repository", get(handlers::quota_repository))
+        .route("/+shadow/candidates", get(handlers::shadow_candidates))
         .route("/+retention/plan", post(handlers::retention_plan))
         .route("/+retention/export", post(handlers::retention_export))
         .route("/+trash", get(handlers::list_trash))

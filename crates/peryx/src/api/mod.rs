@@ -5,6 +5,7 @@
 //! `peryx openapi > site/static/openapi.json`.
 
 mod service;
+mod shadow;
 mod trash;
 
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -93,5 +94,5 @@ pub fn openapi() -> OpenApi {
 fn paths() -> PathsBuilder {
     let ecosystems =
         peryx_ecosystem_oci::openapi::openapi_paths(peryx_ecosystem_pypi::openapi::openapi_paths(PathsBuilder::new()));
-    trash::trash_paths(service::service_paths(ecosystems))
+    shadow::shadow_paths(trash::trash_paths(service::service_paths(ecosystems)))
 }

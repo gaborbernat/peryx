@@ -276,6 +276,15 @@ fn test_default_trash_records_are_empty() {
     assert!(driver.trash_records(&meta, &["hosted".to_owned()]).unwrap().is_empty());
 }
 
+// A driver that keeps the default resolution explanation shadows nothing, so an ecosystem without
+// virtual resolution opts out of the shadowed-candidate query for free.
+#[test]
+fn test_default_shadowed_candidates_are_empty() {
+    let (_dir, state) = serving();
+    let driver = StubDriver::new(0, Ok(RefreshSweep::default()));
+    assert!(driver.shadowed_candidates(&state, 0, "flask").unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
     let (_dir, state) = serving();

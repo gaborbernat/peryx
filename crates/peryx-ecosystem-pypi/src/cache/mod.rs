@@ -22,6 +22,7 @@ mod mutate;
 mod page_stream;
 mod provenance;
 mod resolve;
+mod shadow;
 
 pub(crate) use download::download_dimensions;
 pub use download::{FileOutcome, FileProbe, file_path, probe_file, stream_file};
@@ -37,6 +38,7 @@ pub(crate) use mutate::{store_upload, upload_exists};
 pub use page_stream::{PageOutcome, materialize_detail, stream_detail};
 pub use provenance::{ProvenanceBody, provenance_bytes};
 pub use resolve::{DetailPage, list_serial, resolve_detail, resolve_detail_page, resolve_list};
+pub use shadow::shadowed_candidates;
 
 #[cfg(test)]
 pub(crate) use download::tail_download;

@@ -7,6 +7,7 @@ mod operator;
 mod prefetch;
 mod replication_tests;
 mod server_tests;
+mod shadow_tests;
 mod tls_support;
 mod trash_tests;
 mod ui_tests;

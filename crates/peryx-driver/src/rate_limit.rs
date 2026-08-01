@@ -214,6 +214,15 @@ impl RateLimiter {
             retry_after: bucket.reset_at.saturating_duration_since(now).as_secs().max(1),
         })
     }
+
+    /// Charge one request in `class` to the client at `ip` and report whether it stays within the
+    /// limit. This is the synchronous decision [`enforce`] makes per request, exposed so callers can
+    /// exercise the limiter (in tests and benchmarks) without driving a full HTTP request through the
+    /// async router, where scheduling jitter would swamp the limiter's own cost.
+    #[must_use]
+    pub fn check_client(&self, class: RouteClass, ip: IpAddr) -> bool {
+        self.check(class, ActorKey::Ip(ip)).is_ok()
+    }
 }
 
 impl Default for RateLimiter {
@@ -587,9 +596,25 @@ fn limited_response(retry_after: u64) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use axum::http::Method;
 
-    use super::{RouteClass, service_route_class};
+    use super::{RateLimitConfig, RateLimiter, RouteClass, RouteLimit, service_route_class};
+
+    #[test]
+    fn test_check_client_allows_within_limit_then_denies_per_client() {
+        let limiter = RateLimiter::new(RateLimitConfig {
+            listing: RouteLimit::new(2, 60),
+            ..RateLimitConfig::enabled_defaults()
+        });
+        let client = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        assert!(limiter.check_client(RouteClass::Listing, client));
+        assert!(limiter.check_client(RouteClass::Listing, client));
+        assert!(!limiter.check_client(RouteClass::Listing, client));
+        // A separate client keeps its own budget rather than inheriting the exhausted one.
+        assert!(limiter.check_client(RouteClass::Listing, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))));
+    }
 
     #[test]
     fn test_service_route_class_handles_writes_and_service_routes() {

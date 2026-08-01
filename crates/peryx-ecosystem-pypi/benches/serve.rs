@@ -6,16 +6,16 @@
 #[path = "support/detail.rs"]
 mod detail;
 
-use std::net::SocketAddr;
+use std::hint::black_box;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::ConnectInfo;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use http::Request;
 use http_body_util::BodyExt as _;
 use peryx_driver::AppState;
-use peryx_driver::rate_limit::{RateLimitConfig, RouteLimit};
+use peryx_driver::rate_limit::{RateLimitConfig, RateLimiter, RouteClass, RouteLimit};
 use peryx_ecosystem_pypi::ProjectDetail;
 use peryx_ecosystem_pypi::store::CachedIndex;
 use peryx_ecosystem_pypi::store::PypiStore as _;
@@ -36,57 +36,53 @@ const LARGE: usize = 400;
 const JSON: &str = "application/vnd.pypi.simple.v1+json";
 const HTML: &str = "text/html";
 
+/// Serving cost with rate limiting off. The limiter's per-request cost is measured on its own by
+/// [`bench_rate_limit`]: driving it through this async router instead let scheduling jitter under the
+/// instrumented runtime dominate the reading, so the `enabled` variant swung by double digits between
+/// otherwise identical runs.
+///
 /// Rebuilding the production-style router per iteration would hide serving cost.
 fn bench_serve(criterion: &mut Criterion) {
     let runtime = runtime();
     let mut group = criterion.benchmark_group("serve");
     let detail = project_detail("flask", LARGE);
-    for (name, rate_limit) in [("disabled", RateLimitConfig::default()), ("enabled", enabled_limits())] {
-        let (_dir, state) = cached(rate_limit, &detail);
-        let app = router(state);
-        runtime.block_on(serve(app.clone(), "/pypi/simple/flask/", JSON, None));
-        group.bench_with_input(BenchmarkId::new("simple_json", name), &app, |bencher, app| {
-            bencher
-                .to_async(&runtime)
-                .iter(|| serve(app.clone(), "/pypi/simple/flask/", JSON, None));
-        });
-        group.bench_with_input(BenchmarkId::new("simple_html", name), &app, |bencher, app| {
-            bencher
-                .to_async(&runtime)
-                .iter(|| serve(app.clone(), "/pypi/simple/flask/", HTML, None));
-        });
-        group.bench_with_input(BenchmarkId::new("legacy_json", name), &app, |bencher, app| {
-            bencher
-                .to_async(&runtime)
-                .iter(|| serve(app.clone(), "/pypi/flask/json", JSON, None));
-        });
-    }
-    let (_dir, state) = cached(enabled_limits(), &detail);
+    let (_dir, state) = cached(RateLimitConfig::default(), &detail);
     let app = router(state);
-    let authorization = Some("Basic cGlwOnNlY3JldA==");
-    runtime.block_on(serve(app.clone(), "/pypi/simple/flask/", JSON, authorization));
-    group.bench_with_input(
-        BenchmarkId::new("simple_json", "enabled_authenticated"),
-        &app,
-        |bencher, app| {
-            bencher
-                .to_async(&runtime)
-                .iter(|| serve(app.clone(), "/pypi/simple/flask/", JSON, authorization));
-        },
-    );
-    let (_dir, state) = cached(trusted_proxy_limits(), &detail);
-    let app = router(state);
-    runtime.block_on(serve_from_proxy(app.clone(), "/pypi/simple/flask/", JSON));
-    group.bench_with_input(
-        BenchmarkId::new("simple_json", "enabled_trusted_proxy"),
-        &app,
-        |bencher, app| {
-            bencher
-                .to_async(&runtime)
-                .iter(|| serve_from_proxy(app.clone(), "/pypi/simple/flask/", JSON));
-        },
-    );
+    runtime.block_on(serve(app.clone(), "/pypi/simple/flask/", JSON));
+    group.bench_with_input(BenchmarkId::new("simple_json", "disabled"), &app, |bencher, app| {
+        bencher
+            .to_async(&runtime)
+            .iter(|| serve(app.clone(), "/pypi/simple/flask/", JSON));
+    });
+    group.bench_with_input(BenchmarkId::new("simple_html", "disabled"), &app, |bencher, app| {
+        bencher
+            .to_async(&runtime)
+            .iter(|| serve(app.clone(), "/pypi/simple/flask/", HTML));
+    });
+    group.bench_with_input(BenchmarkId::new("legacy_json", "disabled"), &app, |bencher, app| {
+        bencher
+            .to_async(&runtime)
+            .iter(|| serve(app.clone(), "/pypi/flask/json", JSON));
+    });
     group.finish();
+}
+
+/// Charged on every served request, so the limiter's steady-state decision is what it adds to the hot
+/// path. Measured synchronously on a warm bucket, the instruction count is deterministic; a batch
+/// amortizes moka's periodic housekeeping so a stray maintenance pass stays in the noise.
+fn bench_rate_limit(criterion: &mut Criterion) {
+    const BATCH: usize = 1024;
+    let limiter = RateLimiter::new(enabled_limits());
+    let client = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    // Warm the bucket so every measured decision is a cache hit, not the one-time insert.
+    let _ = limiter.check_client(RouteClass::Listing, client);
+    criterion.bench_function("rate_limit_decision", |bencher| {
+        bencher.iter(|| {
+            for _ in 0..BATCH {
+                black_box(limiter.check_client(black_box(RouteClass::Listing), black_box(client)));
+            }
+        });
+    });
 }
 
 fn runtime() -> Runtime {
@@ -143,35 +139,12 @@ fn enabled_limits() -> RateLimitConfig {
     }
 }
 
-fn trusted_proxy_limits() -> RateLimitConfig {
-    RateLimitConfig {
-        trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
-        ..enabled_limits()
-    }
-}
-
-async fn serve(app: axum::Router, uri: &str, accept: &str, authorization: Option<&str>) {
-    let request = Request::builder().uri(uri).header("accept", accept);
-    let request = if let Some(authorization) = authorization {
-        request.header("authorization", authorization)
-    } else {
-        request
-    }
-    .body(Body::empty())
-    .unwrap();
-    send(app, request).await;
-}
-
-async fn serve_from_proxy(app: axum::Router, uri: &str, accept: &str) {
-    let mut request = Request::builder()
+async fn serve(app: axum::Router, uri: &str, accept: &str) {
+    let request = Request::builder()
         .uri(uri)
         .header("accept", accept)
-        .header("x-forwarded-for", "192.0.2.1")
         .body(Body::empty())
         .unwrap();
-    request
-        .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 5000))));
     send(app, request).await;
 }
 
@@ -181,5 +154,5 @@ async fn send(app: axum::Router, request: Request<Body>) {
     let _ = response.into_body().collect().await.unwrap().to_bytes();
 }
 
-criterion_group!(benches, bench_serve);
+criterion_group!(benches, bench_serve, bench_rate_limit);
 criterion_main!(benches);

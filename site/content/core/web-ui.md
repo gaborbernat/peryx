@@ -62,6 +62,7 @@ sees the deleting identity. Every state has a text label, and narrow screens scr
 than widening the document. The page holds the username and password in memory, disables password autocomplete, and
 sends them in the Basic authorization header without writing them to the URL, browser storage, or the server-rendered
 document. The trash guide lists [error remedies and credential requirements](@/core/trash.md#troubleshooting).
+
 ## Usage analytics
 
 `/admin/analytics` reads the [`/+analytics/*` usage queries](@/core/monitor.md#query-package-usage) over the retained

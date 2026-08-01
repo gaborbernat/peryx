@@ -5025,6 +5025,7 @@ dependencies = [
 name = "peryx-index"
 version = "0.0.1"
 dependencies = [
+ "arc-swap",
  "bytes",
  "dashmap",
  "hdrhistogram",

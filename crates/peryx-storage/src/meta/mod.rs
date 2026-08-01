@@ -19,6 +19,7 @@ mod journal;
 mod placement;
 mod policy_decision;
 mod quota;
+mod repository;
 mod revocation;
 mod role_grant;
 mod user;
@@ -46,6 +47,11 @@ pub use policy_decision::{
 pub use quota::{
     AccountingClass, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage, QuotaRepairReport,
     QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
+};
+pub use repository::{
+    CreateRepositoryError, DesiredRepository, NewRepository, ReconcileAction, ReconcileRepositoryError,
+    ReconciledRepository, RepositoryFieldError, RepositoryId, RepositoryPage, RepositoryQuery, RepositoryQueryError,
+    RepositoryRecord, RepositoryState, RepositoryStateError, RepositoryUpdate, UpdateRepositoryError,
 };
 pub use revocation::{
     DigestRevocation, DigestRevocationPage, DigestRevocationQuery, DigestRevocationQueryError, DigestRevocationState,
@@ -92,6 +98,8 @@ const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new
 /// The neutral artifact-placement projection: source and byte availability keyed by content digest,
 /// so a package read resolves both dimensions with one indexed lookup and no content-store probe.
 const ARTIFACT_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("artifact_placement");
+const REPOSITORY: TableDefinition<&str, &[u8]> = TableDefinition::new("repository");
+const REPOSITORY_ROUTE: TableDefinition<&str, &str> = TableDefinition::new("repository_route");
 const SERIAL_KEY: &str = "serial";
 const WEBHOOK_SERIAL_KEY: &str = "webhook_delivery";
 const JOB_SERIAL_KEY: &str = "job_run";
@@ -208,6 +216,8 @@ impl MetaStore {
             txn.open_table(DIGEST_REVOCATION)?;
             txn.open_table(DIGEST_REVOCATION_STATE)?;
             txn.open_table(ARTIFACT_PLACEMENT)?;
+            txn.open_table(REPOSITORY)?;
+            txn.open_table(REPOSITORY_ROUTE)?;
         }
         txn.commit()?;
         Ok(Self {

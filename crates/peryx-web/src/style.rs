@@ -283,6 +283,13 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .trash-table caption { text-align: left; padding: 0 0 0.6rem; color: var(--text-soft); }
 .badge.trash-restorable { color: var(--ok); border-color: var(--ok); }
 .badge.trash-expired { color: var(--text-soft); border-color: var(--border); }
+.analytics-results { min-height: 4rem; }
+.usage-table { min-width: 44rem; }
+.usage-table caption { text-align: left; padding: 0 0 0.6rem; color: var(--text-soft); }
+.usage-table :is(td, th).num { text-align: right; font-variant-numeric: tabular-nums; }
+.usage-interval { color: var(--text-soft); margin: 0 0 0.4rem; }
+.usage-interval strong { color: var(--text); }
+.usage-retention { color: var(--warn); border-left: 3px solid var(--warn); padding-left: 0.6rem; margin: 0 0 0.8rem; }
 .page-link {
   border: 1px solid var(--border); border-radius: 7px; padding: 0.3rem 0.75rem; color: var(--accent);
 }

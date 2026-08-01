@@ -776,3 +776,230 @@ test("browses a layer's file contents and previews a text member", async ({ page
   await page.getByRole("link", { name: "etc/app.conf" }).click();
   await expect(page.locator(".page")).toContainText("debug = true");
 });
+
+function usageEnvelope(rowsKey, rows, { nextCursor = null, clamped = false, retainedFromDay = null } = {}) {
+  return {
+    [rowsKey]: rows,
+    interval: {
+      from_day: 19000,
+      to_day: 19030,
+      from_unix: 19000 * 86400,
+      to_unix: 19031 * 86400,
+      retained_from_day: retainedFromDay,
+      window_clamped_to_retention: clamped,
+    },
+    next_cursor: nextCursor,
+  };
+}
+
+async function searchAnalytics(page, { user = "administrator", password = "browser-admin-secret" } = {}) {
+  await page.locator("#analytics-user").fill(user);
+  await page.locator("#analytics-password").fill(password);
+  await page.locator(".analytics-filters button[type='submit']").click();
+}
+
+test("usage analytics maps filters to the API, keeps credentials out of the URL, and renders ties", async ({ page }) => {
+  await page.route("**/+analytics/top-packages?**", async (route) => {
+    expect(route.request().headers().authorization).toBe(
+      `Basic ${Buffer.from("administrator:browser-admin-secret").toString("base64")}`,
+    );
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("repository")).toBe("internal");
+    expect(url.searchParams.get("from")).toBe(String(Date.UTC(2024, 0, 2) / 1000));
+    expect(url.searchParams.get("to")).toBe(String(Date.UTC(2024, 0, 9) / 1000));
+    expect(url.searchParams.get("limit")).toBe("25");
+    expect(url.search).not.toContain("browser-admin-secret");
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(
+        usageEnvelope("packages", [
+          { repository: "internal", project: "alpha", downloads: 40, bytes: 2048 },
+          { repository: "internal", project: "beta", downloads: 40, bytes: 1024 },
+        ]),
+      ),
+    });
+  });
+  await goto(page, "/admin/analytics");
+  await page.locator("#analytics-repository").fill("internal");
+  await page.locator("#analytics-from").fill("2024-01-02");
+  await page.locator("#analytics-to").fill("2024-01-09");
+  await searchAnalytics(page);
+
+  const table = page.locator(".usage-top-table");
+  await expect(table.getByRole("columnheader")).toHaveText(["Repository", "Package", "Downloads", "Bytes"]);
+  // Ties keep the server's order rather than being reshuffled by the client.
+  await expect(table.locator("tbody tr").nth(0)).toContainText("alpha");
+  await expect(table.locator("tbody tr").nth(1)).toContainText("beta");
+  await expect(page.locator(".usage-interval")).toContainText("UTC, inclusive");
+  await expect(page.getByRole("status")).toContainText("Loaded 2 rows.");
+  await expect(page).toHaveURL(/\/admin\/analytics$/);
+  await expect(page.locator("#analytics-password")).toHaveAttribute("autocomplete", "off");
+  expect(
+    await page.evaluate(() =>
+      [localStorage, sessionStorage].flatMap((storage) =>
+        Array.from({ length: storage.length }, (_, index) => storage.getItem(storage.key(index))),
+      ),
+    ),
+  ).not.toContain("browser-admin-secret");
+});
+
+for (const [view, endpoint, rowsKey, row, headers] of [
+  [
+    "versions",
+    "versions",
+    "versions",
+    { repository: "internal", project: "alpha", version: null, downloads: 3, bytes: 90 },
+    ["Repository", "Package", "Version", "Downloads", "Bytes"],
+  ],
+  [
+    "sources",
+    "sources",
+    "sources",
+    { repository: "internal", project: "alpha", source: null, downloads: 3, bytes: 90 },
+    ["Repository", "Package", "Source", "Downloads", "Bytes"],
+  ],
+  [
+    "unused",
+    "unused",
+    "unused",
+    { repository: "internal", project: "gamma", lifetime_downloads: 12 },
+    ["Repository", "Package", "Lifetime downloads"],
+  ],
+  [
+    "timeline",
+    "timeline",
+    "buckets",
+    { day: 19000, start_unix: 19000 * 86400, end_unix: 19001 * 86400, downloads: 5, bytes: 500 },
+    ["Start (UTC)", "End (UTC)", "Downloads", "Bytes"],
+  ],
+]) {
+  test(`usage analytics renders the ${view} view with its own columns`, async ({ page }) => {
+    await page.route(`**/+analytics/${endpoint}?**`, (route) =>
+      route.fulfill({ contentType: "application/json", body: JSON.stringify(usageEnvelope(rowsKey, [row])) }),
+    );
+    await goto(page, "/admin/analytics");
+    await page.locator("#analytics-view").selectOption(view);
+    await searchAnalytics(page);
+    const table = page.locator(".usage-table");
+    await expect(table.getByRole("columnheader")).toHaveText(headers);
+    await expect(table.locator("caption")).toHaveText(/1 /);
+    // Absent version and source read as explicit text, never an empty cell.
+    if (view === "versions") await expect(table.locator("tbody td").nth(2)).toHaveText("—");
+    if (view === "sources") await expect(table.locator("tbody td").nth(2)).toHaveText("local store");
+    if (view === "timeline") await expect(table.locator("tbody td").nth(0)).toContainText("T00:00:00Z");
+  });
+}
+
+test("usage analytics distinguishes an empty window from one clamped to retention", async ({ page }) => {
+  let clamped = false;
+  await page.route("**/+analytics/top-packages?**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(usageEnvelope("packages", [], { clamped, retainedFromDay: clamped ? 19010 : null })),
+    }),
+  );
+  await goto(page, "/admin/analytics");
+  await searchAnalytics(page);
+  await expect(page.getByRole("status")).toContainText("No usage recorded");
+  await expect(page.getByRole("note")).toHaveCount(0);
+
+  clamped = true;
+  await searchAnalytics(page);
+  await expect(page.getByRole("note")).toContainText("Window clamped to retention");
+  await expect(page.getByRole("note")).toContainText("aged out");
+  await expect(page.getByRole("status")).toContainText("No usage recorded");
+});
+
+test("usage analytics pagination keeps the view and filters and works from the keyboard", async ({ page }) => {
+  let requests = 0;
+  await page.route("**/+analytics/versions?**", async (route) => {
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("repository")).toBe("internal");
+    const cursor = url.searchParams.get("cursor");
+    requests += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(
+        usageEnvelope(
+          "versions",
+          [{ repository: "internal", project: cursor === null ? "first" : "second", version: "1.0", downloads: 1, bytes: 2 }],
+          { nextCursor: cursor === null ? "page-2" : null },
+        ),
+      ),
+    });
+  });
+  await goto(page, "/admin/analytics");
+  await page.locator("#analytics-view").selectOption("versions");
+  await page.locator("#analytics-repository").fill("internal");
+  await searchAnalytics(page);
+  await expect(page.locator(".usage-table")).toContainText("first");
+
+  await page.getByRole("button", { name: "Next" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".usage-table")).toContainText("second");
+  await page.getByRole("button", { name: "Previous" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".usage-table")).toContainText("first");
+  expect(requests).toBe(3);
+});
+
+for (const [name, status, message] of [
+  ["invalid filter", 400, "One or more analytics filters are invalid."],
+  ["invalid local credential", 401, "The username or password was not accepted."],
+  ["repository token boundary", 403, "This repository token cannot inspect usage analytics."],
+  ["repository boundary", 404, "The repository was not found or is not available to this user."],
+  ["service failure", 503, "The analytics service is unavailable."],
+]) {
+  test(`usage analytics reports ${name} without response text`, async ({ page }) => {
+    await page.route("**/+analytics/top-packages?**", (route) =>
+      route.fulfill({ status, body: "secret-package must stay hidden" }),
+    );
+    await goto(page, "/admin/analytics");
+    await searchAnalytics(page);
+    await expect(page.getByRole("alert")).toHaveText(message);
+    await expect(page.getByRole("alert")).not.toContainText("secret-package");
+  });
+}
+
+test("usage analytics reports malformed success data and a network failure", async ({ page }) => {
+  await page.route("**/+analytics/top-packages?**", (route) => route.fulfill({ status: 200, body: "secret-package" }));
+  await goto(page, "/admin/analytics");
+  await searchAnalytics(page);
+  await expect(page.getByRole("alert")).toHaveText("The analytics service returned invalid data.");
+  await expect(page.getByRole("alert")).not.toContainText("secret-package");
+
+  await page.unroute("**/+analytics/top-packages?**");
+  await page.route("**/+analytics/top-packages?**", (route) => route.abort("connectionfailed"));
+  await searchAnalytics(page);
+  await expect(page.getByRole("alert")).toHaveText("The analytics service could not be reached.");
+});
+
+test("usage analytics enforces live operator and repository-token boundaries", async ({ page }) => {
+  await goto(page, "/admin/analytics");
+  // A live administrator holds operator analytics scope, so the default top view resolves.
+  await searchAnalytics(page);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("status")).toBeVisible();
+
+  // The source split is operator-only: a repository upload token cannot reach it.
+  await page.locator("#analytics-user").fill("__token__");
+  await page.locator("#analytics-password").fill(TOKEN);
+  await page.locator("#analytics-repository").fill("internal");
+  await page.locator("#analytics-view").selectOption("sources");
+  await page.locator(".analytics-filters button[type='submit']").click();
+  await expect(page.getByRole("alert")).toHaveText("This repository token cannot inspect usage analytics.");
+
+  await page.locator("#analytics-user").fill("administrator");
+  await page.locator("#analytics-password").fill("wrong password");
+  await page.locator("#analytics-view").selectOption("top");
+  await page.locator("#analytics-repository").fill("");
+  await page.locator(".analytics-filters button[type='submit']").click();
+  await expect(page.getByRole("alert")).toHaveText("The username or password was not accepted.");
+});
+
+test("usage analytics nav link reaches the route", async ({ page }) => {
+  await goto(page, "/");
+  await page.locator(".nav-links a", { hasText: "Usage" }).click();
+  await expect(page).toHaveURL(/\/admin\/analytics$/);
+  await expect(page.locator("h1", { hasText: "Usage analytics" })).toBeVisible();
+});

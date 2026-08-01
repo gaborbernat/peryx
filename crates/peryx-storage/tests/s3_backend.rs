@@ -31,6 +31,7 @@ const ENDPOINT: &str = "PERYX_S3_TEST_ENDPOINT";
 const STAGING_DIR: &str = "PERYX_S3_TEST_STAGING_DIR";
 const RUN_CONTAINERS: &str = "PERYX_RUN_CONTAINER_TESTS";
 const STREAM_BYTES: usize = 8 << 20;
+const CANCEL_MARKER: &str = "cancel-armed";
 static NEXT_CONTAINER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
@@ -172,33 +173,12 @@ fn part_response() -> ResponseTemplate {
         .insert_header("x-amz-checksum-sha256", "checksum")
 }
 
-async fn mount_multipart(server: &MockServer, delayed: Option<MultipartStage>) {
-    let delay = Duration::from_millis(250);
-    if matches!(delayed, Some(MultipartStage::Create)) {
-        Mock::given(method("POST"))
-            .and(query_param("uploads", ""))
-            .respond_with(create_response("upload-1").set_delay(delay))
-            .up_to_n_times(1)
-            .with_priority(1)
-            .mount(server)
-            .await;
-    }
+async fn mount_multipart(server: &MockServer) {
     Mock::given(method("POST"))
         .and(query_param("uploads", ""))
         .respond_with(create_response("upload-1"))
         .mount(server)
         .await;
-    if matches!(delayed, Some(MultipartStage::Part)) {
-        Mock::given(method("PUT"))
-            .and(query_param("uploadId", "upload-1"))
-            .and(header("content-encoding", "aws-chunked"))
-            .and(header("x-amz-trailer", "x-amz-checksum-sha256"))
-            .respond_with(part_response().set_delay(delay))
-            .up_to_n_times(1)
-            .with_priority(1)
-            .mount(server)
-            .await;
-    }
     Mock::given(method("PUT"))
         .and(query_param("uploadId", "upload-1"))
         .and(header("content-encoding", "aws-chunked"))
@@ -206,15 +186,6 @@ async fn mount_multipart(server: &MockServer, delayed: Option<MultipartStage>) {
         .respond_with(part_response())
         .mount(server)
         .await;
-    if matches!(delayed, Some(MultipartStage::Complete)) {
-        Mock::given(method("POST"))
-            .and(query_param("uploadId", "upload-1"))
-            .respond_with(complete_response().set_delay(delay))
-            .up_to_n_times(1)
-            .with_priority(1)
-            .mount(server)
-            .await;
-    }
     Mock::given(method("POST"))
         .and(query_param("uploadId", "upload-1"))
         .respond_with(complete_response())
@@ -227,21 +198,35 @@ async fn mount_multipart(server: &MockServer, delayed: Option<MultipartStage>) {
         .await;
 }
 
-async fn wait_for_stage(server: &MockServer, stage: MultipartStage) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if server
-                .received_requests()
-                .await
-                .is_some_and(|requests| requests.iter().any(|request| stage.matches(request)))
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+async fn arm_multipart_cancel(server: &MockServer, stage: MultipartStage, marker: PathBuf) {
+    // The moment the armed stage's request lands, drop the marker file the child watches so it aborts
+    // the in-flight upload at exactly this stage, then withhold the response. Part and complete are
+    // held until the abort drops the connection, so the first upload provably cannot finish before it
+    // is cancelled — no timing assumption. Create is issued from a detached task the abort never
+    // reaches, so holding it would deadlock the resume that waits on it; instead it is delayed just
+    // enough to stay in flight while the marker-driven, in-process abort (microseconds) lands.
+    let hold = Duration::from_mins(1);
+    let (verb, key, value, response, delay) = match stage {
+        MultipartStage::Create => (
+            "POST",
+            "uploads",
+            "",
+            create_response("upload-1"),
+            Duration::from_millis(500),
+        ),
+        MultipartStage::Part => ("PUT", "uploadId", "upload-1", part_response(), hold),
+        MultipartStage::Complete => ("POST", "uploadId", "upload-1", complete_response(), hold),
+    };
+    Mock::given(method(verb))
+        .and(query_param(key, value))
+        .respond_with(move |_: &Request| {
+            std::fs::write(&marker, []).unwrap();
+            response.clone().set_delay(delay)
+        })
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(server)
+        .await;
 }
 
 fn count_stage(requests: &[Request], stage: MultipartStage) -> usize {
@@ -394,7 +379,7 @@ async fn mount_wire_writes(server: &MockServer, behavior: WireBehavior) {
 
 async fn mount_wire_failures(server: &MockServer, behavior: WireBehavior) {
     match behavior {
-        WireBehavior::Multipart => mount_multipart(server, None).await,
+        WireBehavior::Multipart => mount_multipart(server).await,
         WireBehavior::HealthError => {
             Mock::given(method("GET"))
                 .and(query_param("location", ""))
@@ -466,7 +451,7 @@ async fn mount_wire_multipart_failures(server: &MockServer, behavior: WireBehavi
                 .await;
         }
         WireBehavior::PartMissingEtag => {
-            mount_multipart(server, None).await;
+            mount_multipart(server).await;
             Mock::given(method("PUT"))
                 .and(query_param("uploadId", "upload-1"))
                 .respond_with(ResponseTemplate::new(200))
@@ -476,7 +461,7 @@ async fn mount_wire_multipart_failures(server: &MockServer, behavior: WireBehavi
                 .await;
         }
         WireBehavior::PartMissingChecksum => {
-            mount_multipart(server, None).await;
+            mount_multipart(server).await;
             Mock::given(method("PUT"))
                 .and(query_param("uploadId", "upload-1"))
                 .respond_with(ResponseTemplate::new(200).insert_header("ETag", "part"))
@@ -486,7 +471,7 @@ async fn mount_wire_multipart_failures(server: &MockServer, behavior: WireBehavi
                 .await;
         }
         WireBehavior::CompleteExists => {
-            mount_multipart(server, None).await;
+            mount_multipart(server).await;
             Mock::given(method("POST"))
                 .and(query_param("uploadId", "upload-1"))
                 .respond_with(
@@ -499,7 +484,7 @@ async fn mount_wire_multipart_failures(server: &MockServer, behavior: WireBehavi
                 .await;
         }
         WireBehavior::CompleteFailure => {
-            mount_multipart(server, None).await;
+            mount_multipart(server).await;
             Mock::given(method("POST"))
                 .and(query_param("uploadId", "upload-1"))
                 .respond_with(
@@ -511,7 +496,7 @@ async fn mount_wire_multipart_failures(server: &MockServer, behavior: WireBehavi
                 .await;
         }
         WireBehavior::StaleUpload => {
-            mount_multipart(server, None).await;
+            mount_multipart(server).await;
             Mock::given(method("PUT"))
                 .and(query_param("uploadId", "upload-1"))
                 .respond_with(
@@ -524,7 +509,7 @@ async fn mount_wire_multipart_failures(server: &MockServer, behavior: WireBehavi
                 .await;
         }
         WireBehavior::ConflictExhausted => {
-            mount_multipart(server, None).await;
+            mount_multipart(server).await;
             Mock::given(method("POST"))
                 .and(query_param("uploadId", "upload-1"))
                 .respond_with(ResponseTemplate::new(409).set_body_raw(
@@ -997,7 +982,7 @@ async fn test_s3_rejects_a_response_without_an_object_length(#[case] operation: 
 #[tokio::test]
 async fn test_s3_accepts_a_peer_completed_multipart_upload() {
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     Mock::given(method("POST"))
         .and(query_param("uploadId", "upload-1"))
         .respond_with(service_error(404, "NoSuchUpload"))
@@ -1030,7 +1015,7 @@ async fn test_s3_accepts_a_peer_completed_multipart_upload() {
 #[tokio::test]
 async fn test_s3_bounds_recovery_from_missing_multipart_uploads() {
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     Mock::given(method("POST"))
         .and(query_param("uploadId", "upload-1"))
         .respond_with(service_error(404, "NoSuchUpload"))
@@ -1068,7 +1053,7 @@ async fn test_s3_bounds_recovery_from_missing_multipart_uploads() {
 #[tokio::test]
 async fn test_s3_cleans_up_when_peer_completion_status_cannot_be_checked() {
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     Mock::given(method("POST"))
         .and(query_param("uploadId", "upload-1"))
         .respond_with(service_error(404, "NoSuchUpload"))
@@ -1176,27 +1161,18 @@ async fn test_s3_drains_started_parts_before_aborting() {
 #[tokio::test]
 async fn test_s3_multipart_resumes_after_cancellation(#[case] stage: MultipartStage) {
     let server = MockServer::start().await;
-    mount_multipart(&server, Some(stage)).await;
     let staging = tempfile::tempdir().unwrap();
-    let mut process = child_command(
-        &server.uri(),
-        staging.path(),
-        "wire_cancel",
-        ROOT_ACCESS_KEY,
-        ROOT_SECRET_KEY,
-    )
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .unwrap();
-    wait_for_stage(&server, stage).await;
-    process.stdin.take().unwrap().write_all(b"cancel").await.unwrap();
+    mount_multipart(&server).await;
+    arm_multipart_cancel(&server, stage, staging.path().join(CANCEL_MARKER)).await;
     assert_child_succeeded(
-        &tokio::time::timeout(Duration::from_secs(10), process.wait_with_output())
-            .await
-            .unwrap()
-            .unwrap(),
+        &child(
+            &server.uri(),
+            staging.path(),
+            "wire_cancel",
+            ROOT_ACCESS_KEY,
+            ROOT_SECRET_KEY,
+        )
+        .await,
     );
     assert_eq!(
         count_stage(&server.received_requests().await.unwrap(), MultipartStage::Create),
@@ -1227,7 +1203,7 @@ async fn test_s3_multipart_adopts_a_journal_created_by_another_process() {
         .with_priority(1)
         .mount(&server)
         .await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
 
     assert_child_succeeded(
         &child(
@@ -1333,7 +1309,7 @@ async fn test_s3_reports_a_read_failure_after_losing_a_journal_race() {
 #[tokio::test]
 async fn test_s3_multipart_restarts_after_a_conditional_conflict() {
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     Mock::given(method("POST"))
         .and(query_param("uploadId", "upload-1"))
         .respond_with(ResponseTemplate::new(409).set_body_raw(
@@ -1370,7 +1346,7 @@ async fn test_s3_multipart_restarts_after_a_conditional_conflict() {
 #[tokio::test]
 async fn test_s3_failed_abort_preserves_the_upload_for_recovery() {
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     Mock::given(method("PUT"))
         .and(query_param("uploadId", "upload-1"))
         .respond_with(ResponseTemplate::new(500).set_body_raw(
@@ -1595,6 +1571,10 @@ async fn stream_failure(toxic: &str, attributes: &[&str], scenario: &str, after_
         .unwrap();
     let toxiproxy = toxiproxy(&minio).await;
     if after_open {
+        // Throttle the body from the outset so it stays on the wire for the later failure toxic, and
+        // so toxiproxy is never pumping a full-speed stream when that toxic is added — modifying a
+        // proxy mid-transfer races its data path and makes the toxic API return non-JSON. The client
+        // request timeout is generous enough that this throttle never starves the response headers.
         add_toxic(&toxiproxy.container, "bandwidth", &["rate=64"]).await;
     } else {
         add_toxic(&toxiproxy.container, toxic, attributes).await;
@@ -1765,7 +1745,7 @@ enum JournalDamage {
 #[tokio::test]
 async fn test_s3_replaces_a_malformed_multipart_journal(#[case] damage: JournalDamage) {
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     let staging = tempfile::tempdir().unwrap();
     let journal = multipart_journal(staging.path());
     std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
@@ -1810,24 +1790,33 @@ async fn test_s3_reports_an_unreadable_multipart_journal() {
 #[tokio::test]
 async fn test_s3_reports_a_multipart_journal_parent_race() {
     let server = MockServer::start().await;
-    mount_multipart(&server, Some(MultipartStage::Create)).await;
     let staging = tempfile::tempdir().unwrap();
-    let endpoint = server.uri();
-    let staging_path = staging.path().to_owned();
-    let upload = tokio::spawn(async move {
-        child(
-            &endpoint,
-            &staging_path,
+    let blocker = staging.path().join("s3-multipart");
+    // Replace the journal directory with a regular file the instant create is received — before the
+    // child gets the upload id back and tries to persist the journal — so the journal write always
+    // loses the race and fails, with no dependence on wall-clock timing.
+    Mock::given(method("POST"))
+        .and(query_param("uploads", ""))
+        .respond_with(move |_: &Request| {
+            std::fs::write(&blocker, []).unwrap();
+            create_response("upload-1")
+        })
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    mount_multipart(&server).await;
+
+    assert_child_succeeded(
+        &child(
+            &server.uri(),
+            staging.path(),
             "wire_journal_failure",
             ROOT_ACCESS_KEY,
             ROOT_SECRET_KEY,
         )
-        .await
-    });
-    wait_for_stage(&server, MultipartStage::Create).await;
-    std::fs::write(staging.path().join("s3-multipart"), []).unwrap();
-
-    assert_child_succeeded(&upload.await.unwrap());
+        .await,
+    );
 }
 
 #[cfg(unix)]
@@ -1836,7 +1825,7 @@ async fn test_s3_reports_an_unwritable_multipart_journal_directory() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     let staging = tempfile::tempdir().unwrap();
     let directory = staging.path().join("s3-multipart");
     std::fs::create_dir_all(&directory).unwrap();
@@ -1860,7 +1849,7 @@ async fn test_s3_reports_a_multipart_journal_removal_failure() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     let staging = tempfile::tempdir().unwrap();
     let journal = multipart_journal(staging.path());
     let directory = journal.parent().unwrap();
@@ -1894,7 +1883,7 @@ enum JournalCleanupPoint {
 #[tokio::test]
 async fn test_s3_reports_a_structural_journal_cleanup_failure(#[case] point: JournalCleanupPoint) {
     let server = MockServer::start().await;
-    mount_multipart(&server, None).await;
+    mount_multipart(&server).await;
     let staging = tempfile::tempdir().unwrap();
     let journal = multipart_journal(staging.path());
     std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
@@ -2034,7 +2023,11 @@ async fn test_s3_default_credential_chain_child() {
         settings.request_timeout = Duration::from_millis(500);
         settings.max_retries = 0;
     } else if scenario.starts_with("stream_") {
-        settings.request_timeout = Duration::from_millis(250);
+        // Comfortably clears opening the stream through the bandwidth toxic — the earlier 250 ms
+        // raced the throttled response headers and made open fail intermittently — while staying far
+        // below the object's throttled transfer time, so the stalled and trickling body reads still
+        // hit this deadline and fail.
+        settings.request_timeout = Duration::from_secs(2);
         settings.max_retries = 0;
     }
     let staging_dir = PathBuf::from(std::env::var_os(STAGING_DIR).unwrap());
@@ -2081,7 +2074,7 @@ async fn run_child_scenario(storage: &BlobStorage, staging_dir: &Path, scenario:
         | "wire_complete_exists"
         | "wire_stale_upload"
         | "wire_cancel"
-        | "wire_abort_failure" => run_wire_multipart_child(storage, scenario).await,
+        | "wire_abort_failure" => run_wire_multipart_child(storage, staging_dir, scenario).await,
         _ => unreachable!(),
     }
 }
@@ -2256,7 +2249,7 @@ async fn run_wire_failure_child(storage: &BlobStorage, scenario: &str) {
     }
 }
 
-async fn run_wire_multipart_child(storage: &BlobStorage, scenario: &str) {
+async fn run_wire_multipart_child(storage: &BlobStorage, staging_dir: &Path, scenario: &str) {
     match scenario {
         "wire_multipart" | "wire_conflict" | "wire_complete_exists" | "wire_stale_upload" => {
             storage.put_bytes(&vec![7; (5 << 20) + 1]).await.unwrap();
@@ -2281,10 +2274,9 @@ async fn run_wire_multipart_child(storage: &BlobStorage, scenario: &str) {
             let bytes = vec![7; (5 << 20) + 1];
             let other = storage.clone();
             let upload = tokio::spawn(async move { other.put_bytes(&bytes).await });
-            tokio::task::spawn_blocking(|| stdin().read_exact(&mut [0]))
-                .await
-                .unwrap()
-                .unwrap();
+            // The mock drops this marker the instant the armed stage's request lands, so the abort
+            // always happens while that stage is in flight, however slowly the machine schedules us.
+            wait_for_file(&staging_dir.join(CANCEL_MARKER)).await;
             upload.abort();
             assert!(upload.await.unwrap_err().is_cancelled());
             storage.put_bytes(&vec![7; (5 << 20) + 1]).await.unwrap();

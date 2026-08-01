@@ -6,6 +6,7 @@
 //! status, stats, metrics, `OpenAPI`, discovery).
 
 mod acl;
+mod analytics;
 mod discover;
 mod dispatch;
 mod oidc;
@@ -21,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use peryx_identity::Denial;
 
 pub use acl::{AclQuery, acl};
+pub use analytics::{analytics_sources, analytics_timeline, analytics_top, analytics_unused, analytics_versions};
 pub use discover::{api, openapi_spec};
 pub use dispatch::{dispatch_delete, dispatch_get, dispatch_post, dispatch_put, not_found};
 pub use oidc::{oidc_audience, oidc_mint_token};
@@ -29,7 +31,7 @@ pub use query::{search, search_error_response, search_response, search_response_
 pub use revocations::{DigestRevocationsQuery, inspect_revocation, lift_revocation, list_revocations, put_revocation};
 pub use status::{ReadinessQuery, StatusQuery, health, readiness, status};
 pub use ui::{ui_manifest, ui_member, ui_members, ui_project, ui_projects};
-pub use usage::{StatsQuery, TopPackagesQuery, ecosystem_summaries, family_descriptors, metrics, stats, top_packages};
+pub use usage::{StatsQuery, ecosystem_summaries, family_descriptors, metrics, stats};
 
 /// Map an authorization [`Denial`] to its HTTP answer: `403` when the credential is valid but holds no
 /// covering grant, `401` with a Basic challenge when the request could authenticate and did not.

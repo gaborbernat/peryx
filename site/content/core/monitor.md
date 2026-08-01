@@ -75,6 +75,75 @@ whole expired days on the aggregator thread and never touches a retained day's t
 reclaims durable storage. Existing durable snapshots that predate this aggregate, carry missing dimensions, or fail to
 parse rebuild from zero rather than blocking startup.
 
+## Query package usage
+
+The `/+analytics/*` endpoints read the [daily aggregate](#daily-version-and-source-usage) back as authorized queries.
+Five views share one set of parameters:
+
+| View                       | Rows keyed by                | Answers                                  |
+| -------------------------- | ---------------------------- | ---------------------------------------- |
+| `/+analytics/top-packages` | repository, project          | Which projects are downloaded most       |
+| `/+analytics/versions`     | repository, project, version | Which releases carry the traffic         |
+| `/+analytics/sources`      | repository, project, source  | Which upstream a cache miss routed to    |
+| `/+analytics/unused`       | repository, project          | Which projects went idle over the window |
+| `/+analytics/timeline`     | UTC day                      | How downloads move day to day            |
+
+Name a `repository` (an index route) you can read to scope the query to it; omit it for an operator-wide query across
+every repository, which needs the operator analytics grant. The `sources` view is operator-only: a repository-scoped
+credential cannot inspect which upstream served a project, since that is a property of the server's routing, not the
+repository. A repository's legacy upload token reaches its own repository when presented with the `__token__` username
+and a read grant.
+
+```shell
+# An operator's top ten across all repositories, last 30 days
+curl -s -u admin:"$PERYX_ADMIN_PASSWORD" 'http://127.0.0.1:4433/+analytics/top-packages?limit=10' | jq
+
+# One repository's release breakdown over an explicit range
+curl -s -u __token__:"$UPLOAD_TOKEN" \
+  'http://127.0.0.1:4433/+analytics/versions?repository=root/pypi&from=1704067200&to=1706659200' | jq
+
+# Walk the daily series page by page
+curl -s -u admin:"$PERYX_ADMIN_PASSWORD" 'http://127.0.0.1:4433/+analytics/timeline?repository=root/pypi&limit=50' | jq
+```
+
+Every response carries its rows, the resolved `interval`, and a `next_cursor`:
+
+```json
+{
+  "packages": [
+    {
+      "repository": "root/pypi",
+      "project": "pandas",
+      "downloads": 42,
+      "bytes": 64733247
+    }
+  ],
+  "interval": {
+    "from_day": 19722,
+    "to_day": 19752,
+    "from_unix": 1703980800,
+    "to_unix": 1706659200,
+    "retained_from_day": 19387,
+    "window_clamped_to_retention": false
+  },
+  "next_cursor": null
+}
+```
+
+`from` and `to` are Unix seconds, each floored to its UTC day. Leave them out for a trailing 30 days ending today; a
+window never runs past today and spans at most 366 days. The `interval` echoes the resolved day bounds so a caller reads
+the exact boundaries the totals cover rather than inferring them. Rows are deterministically ordered by downloads, then
+bytes, then identity, so ties never reshuffle between pages. Page with `limit` (1 through 100, default 25) and `cursor`:
+pass a response's `next_cursor` back as `cursor` for the next page, and stop when it is `null`.
+
+`retained_from_day` is the retention floor, absent under unbounded retention. When a query asks for data older than that
+floor, peryx clamps the start and sets `window_clamped_to_retention` to `true`. This is what tells an idle project apart
+from an aged-out one: an `unused` row reports `lifetime_downloads`, so a project with lifetime downloads but none in the
+window was genuinely idle over it, while `window_clamped_to_retention` warns that anything before the floor was pruned
+rather than quiet. Version and source rows report `null` for a distribution the ecosystem gave no version and for bytes
+served from the local store. No response ever holds a client's identity, address, or credential; the dimensions stay as
+bounded as the aggregate they read.
+
 ## Check operational status
 
 `/admin/status` combines `GET /+status?details=admin` with top-level `GET /+stats`. It shows the configured index

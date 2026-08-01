@@ -27,6 +27,13 @@ pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 const SECONDS_PER_DAY: i64 = 86_400;
 
+/// The window a usage query spans when it names no start: the trailing month up to its end day.
+const DEFAULT_USAGE_WINDOW_DAYS: i64 = 30;
+
+/// The widest window a single usage query may span, so scan and sort work stays bounded even under
+/// unbounded retention.
+const MAX_USAGE_WINDOW_DAYS: i64 = 366;
+
 /// The current on-disk shape of the daily-usage snapshot. A snapshot written under any other schema
 /// is rebuilt from zero rather than trusted, so a forward-incompatible format never blocks startup.
 const DAILY_SCHEMA: u32 = 1;
@@ -170,6 +177,64 @@ pub struct PackageUsage {
     pub bytes: u64,
 }
 
+/// One project version's downloads over the queried window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VersionUsage {
+    pub repository: String,
+    pub project: String,
+    /// The distribution version, or `None` when the ecosystem reported none.
+    pub version: Option<String>,
+    pub downloads: u64,
+    pub bytes: u64,
+}
+
+/// One project's downloads attributed to one routed source over the queried window. The source
+/// dimension is operator-scoped, so only an operator query builds these rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceUsage {
+    pub repository: String,
+    pub project: String,
+    /// The routed upstream, or `None` when the bytes were served from the local store.
+    pub source: Option<String>,
+    pub downloads: u64,
+    pub bytes: u64,
+}
+
+/// A project with durable lifetime downloads but none inside the queried window.
+///
+/// `lifetime_downloads` distinguishes a package that was simply idle in the window from one whose
+/// activity predates the retained interval reported alongside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnusedPackage {
+    pub repository: String,
+    pub project: String,
+    pub lifetime_downloads: u64,
+}
+
+/// One UTC-day time bucket with explicit half-open `[start_unix, end_unix)` bounds, so a caller reads
+/// the delta aggregation temporality of the OpenTelemetry metrics data model directly off each row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TimelineBucket {
+    pub day: i64,
+    pub start_unix: i64,
+    pub end_unix: i64,
+    pub downloads: u64,
+    pub bytes: u64,
+}
+
+/// The resolved day window a usage query ran over.
+///
+/// `retained_from_day` is the retention floor (absent under unbounded retention);
+/// `window_clamped_to_retention` marks a requested start that predated it, so a caller can tell
+/// missing rows apart from data aged out of retention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageInterval {
+    pub from_day: i64,
+    pub to_day: i64,
+    pub retained_from_day: Option<i64>,
+    pub window_clamped_to_retention: bool,
+}
+
 /// A driver's counter family as the dashboard needs it: the storage key, its human label, and the
 /// roles that report it.
 ///
@@ -289,6 +354,11 @@ const fn utc_day(unix_secs: i64) -> i64 {
     unix_secs.div_euclid(SECONDS_PER_DAY)
 }
 
+/// Present an absent daily dimension (empty version or source) as JSON `null` rather than `""`.
+fn non_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
 /// The system-wall-clock source used when no clock is injected: Unix seconds, saturating rather than
 /// panicking if the host clock predates the epoch.
 fn system_clock() -> Clock {
@@ -305,6 +375,10 @@ pub struct Metrics {
     sender: Sender<Event>,
     tree: Arc<RwLock<StatsTree>>,
     daily: Arc<RwLock<DailyBuckets>>,
+    /// Dates a usage query's window; the same clock the aggregator buckets downloads by.
+    clock: Clock,
+    /// The daily-bucket retention bound, so a query can report and clamp to the retained floor.
+    retention_days: Option<u32>,
 }
 
 impl Metrics {
@@ -356,11 +430,18 @@ impl Metrics {
         let daily = Arc::new(RwLock::new(daily_initial));
         let sink = Arc::clone(&tree);
         let daily_sink = Arc::clone(&daily);
+        let query_clock = clock.clone();
         std::thread::Builder::new()
             .name("peryx-metrics".to_owned())
             .spawn(move || aggregate(&receiver, &sink, &daily_sink, store.as_ref(), retention_days, &clock))
             .expect("spawn metrics thread");
-        Self { sender, tree, daily }
+        Self {
+            sender,
+            tree,
+            daily,
+            clock: query_clock,
+            retention_days,
+        }
     }
 
     /// A snapshot of the daily version-and-source usage buckets, ordered by day then dimension.
@@ -404,30 +485,43 @@ impl Metrics {
             .collect()
     }
 
-    /// Projects with the most downloads, ordered by count, bytes, repository, then project.
+    /// Resolve a usage query's day window from optional Unix-second bounds. The end defaults to today
+    /// and never runs ahead of it; the start defaults to a trailing [`DEFAULT_USAGE_WINDOW_DAYS`], is
+    /// capped to [`MAX_USAGE_WINDOW_DAYS`], and is raised to the retention floor when one is set.
+    #[must_use]
+    pub fn resolve_usage_interval(&self, from_secs: Option<i64>, to_secs: Option<i64>) -> UsageInterval {
+        let now_day = utc_day((self.clock)());
+        let retained_from_day = self.retention_days.map(|days| now_day - i64::from(days));
+        let to_day = to_secs.map_or(now_day, utc_day).min(now_day);
+        let requested_from = from_secs.map_or(to_day - (DEFAULT_USAGE_WINDOW_DAYS - 1), utc_day);
+        let from_day = requested_from.max(to_day - (MAX_USAGE_WINDOW_DAYS - 1));
+        UsageInterval {
+            window_clamped_to_retention: retained_from_day.is_some_and(|floor| from_day < floor),
+            from_day: retained_from_day.map_or(from_day, |floor| from_day.max(floor)),
+            to_day,
+            retained_from_day,
+        }
+    }
+
+    /// Projects by downloads over `interval`, ordered by downloads, bytes, repository, then project.
     ///
     /// # Panics
-    /// Panics if the aggregator thread panicked and poisoned the tree lock.
+    /// Panics if the aggregator thread panicked and poisoned the daily lock.
     #[must_use]
-    pub fn top_packages(&self, limit: usize) -> Vec<PackageUsage> {
-        let mut packages: Vec<_> = {
-            let tree = self.tree.read().expect("metrics lock");
-            tree.iter()
-                .flat_map(|(repository, index)| {
-                    index
-                        .projects
-                        .iter()
-                        .filter(|(_, stats)| stats.totals.base.downloads > 0)
-                        .map(move |(project, stats)| PackageUsage {
-                            repository: repository.clone(),
-                            project: project.clone(),
-                            downloads: stats.totals.base.downloads,
-                            bytes: stats.totals.base.bytes,
-                        })
-                })
-                .collect()
-        };
-        packages.sort_by(|left, right| {
+    pub fn usage_top(&self, repository: Option<&str>, interval: &UsageInterval) -> Vec<PackageUsage> {
+        let mut rows: Vec<_> = self
+            .fold_daily(repository, interval, |bucket| {
+                (bucket.repository.clone(), bucket.project.clone())
+            })
+            .into_iter()
+            .map(|((repository, project), totals)| PackageUsage {
+                repository,
+                project,
+                downloads: totals.downloads,
+                bytes: totals.bytes,
+            })
+            .collect();
+        rows.sort_by(|left, right| {
             right
                 .downloads
                 .cmp(&left.downloads)
@@ -435,8 +529,157 @@ impl Metrics {
                 .then_with(|| left.repository.cmp(&right.repository))
                 .then_with(|| left.project.cmp(&right.project))
         });
-        packages.truncate(limit);
-        packages
+        rows
+    }
+
+    /// Project versions by downloads over `interval`, ordered by downloads, bytes, then identity.
+    ///
+    /// # Panics
+    /// Panics if the aggregator thread panicked and poisoned the daily lock.
+    #[must_use]
+    pub fn usage_versions(&self, repository: Option<&str>, interval: &UsageInterval) -> Vec<VersionUsage> {
+        let mut rows: Vec<_> = self
+            .fold_daily(repository, interval, |bucket| {
+                (
+                    bucket.repository.clone(),
+                    bucket.project.clone(),
+                    bucket.version.clone(),
+                )
+            })
+            .into_iter()
+            .map(|((repository, project, version), totals)| VersionUsage {
+                repository,
+                project,
+                version: non_empty(version),
+                downloads: totals.downloads,
+                bytes: totals.bytes,
+            })
+            .collect();
+        rows.sort_by(|left, right| {
+            right
+                .downloads
+                .cmp(&left.downloads)
+                .then_with(|| right.bytes.cmp(&left.bytes))
+                .then_with(|| left.repository.cmp(&right.repository))
+                .then_with(|| left.project.cmp(&right.project))
+                .then_with(|| left.version.cmp(&right.version))
+        });
+        rows
+    }
+
+    /// Project downloads attributed to each routed source over `interval`, ordered by downloads,
+    /// bytes, then identity. The caller must have cleared the source dimension for the requester.
+    ///
+    /// # Panics
+    /// Panics if the aggregator thread panicked and poisoned the daily lock.
+    #[must_use]
+    pub fn usage_sources(&self, repository: Option<&str>, interval: &UsageInterval) -> Vec<SourceUsage> {
+        let mut rows: Vec<_> = self
+            .fold_daily(repository, interval, |bucket| {
+                (bucket.repository.clone(), bucket.project.clone(), bucket.source.clone())
+            })
+            .into_iter()
+            .map(|((repository, project, source), totals)| SourceUsage {
+                repository,
+                project,
+                source: non_empty(source),
+                downloads: totals.downloads,
+                bytes: totals.bytes,
+            })
+            .collect();
+        rows.sort_by(|left, right| {
+            right
+                .downloads
+                .cmp(&left.downloads)
+                .then_with(|| right.bytes.cmp(&left.bytes))
+                .then_with(|| left.repository.cmp(&right.repository))
+                .then_with(|| left.project.cmp(&right.project))
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        rows
+    }
+
+    /// Projects with durable downloads but none inside `interval`, ordered by lifetime downloads,
+    /// repository, then project. The universe is every project the retained totals have ever served.
+    ///
+    /// # Panics
+    /// Panics if the aggregator thread panicked and poisoned either lock.
+    #[must_use]
+    pub fn usage_unused(&self, repository: Option<&str>, interval: &UsageInterval) -> Vec<UnusedPackage> {
+        let active: std::collections::BTreeSet<(String, String)> = self
+            .fold_daily(repository, interval, |bucket| {
+                (bucket.repository.clone(), bucket.project.clone())
+            })
+            .into_keys()
+            .collect();
+        let tree = self.tree.read().expect("metrics lock");
+        let mut rows = Vec::new();
+        for (route, index) in tree.iter() {
+            if repository.is_some_and(|filter| route != filter) {
+                continue;
+            }
+            for (project, stats) in &index.projects {
+                if stats.totals.base.downloads > 0 && !active.contains(&(route.clone(), project.clone())) {
+                    rows.push(UnusedPackage {
+                        repository: route.clone(),
+                        project: project.clone(),
+                        lifetime_downloads: stats.totals.base.downloads,
+                    });
+                }
+            }
+        }
+        drop(tree);
+        rows.sort_by(|left, right| {
+            right
+                .lifetime_downloads
+                .cmp(&left.lifetime_downloads)
+                .then_with(|| left.repository.cmp(&right.repository))
+                .then_with(|| left.project.cmp(&right.project))
+        });
+        rows
+    }
+
+    /// Downloads bucketed by UTC day over `interval`, ascending by day so the series reads forward.
+    ///
+    /// # Panics
+    /// Panics if the aggregator thread panicked and poisoned the daily lock.
+    #[must_use]
+    pub fn usage_timeline(&self, repository: Option<&str>, interval: &UsageInterval) -> Vec<TimelineBucket> {
+        self.fold_daily(repository, interval, |bucket| bucket.day)
+            .into_iter()
+            .map(|(day, totals)| TimelineBucket {
+                day,
+                start_unix: day * SECONDS_PER_DAY,
+                end_unix: (day + 1) * SECONDS_PER_DAY,
+                downloads: totals.downloads,
+                bytes: totals.bytes,
+            })
+            .collect()
+    }
+
+    /// Fold the daily buckets inside `interval` (and one repository, when scoped) under a key the
+    /// caller derives, summing downloads and bytes into each group.
+    fn fold_daily<K: Ord>(
+        &self,
+        repository: Option<&str>,
+        interval: &UsageInterval,
+        key: impl Fn(&DailyKey) -> K,
+    ) -> BTreeMap<K, DailyTotals> {
+        let daily = self.daily.read().expect("metrics lock");
+        let mut folded: BTreeMap<K, DailyTotals> = BTreeMap::new();
+        for (bucket, totals) in daily.iter() {
+            if bucket.day < interval.from_day
+                || bucket.day > interval.to_day
+                || repository.is_some_and(|route| bucket.repository != route)
+            {
+                continue;
+            }
+            let group = folded.entry(key(bucket)).or_default();
+            group.downloads += totals.downloads;
+            group.bytes += totals.bytes;
+        }
+        drop(daily);
+        folded
     }
 
     /// The tree at the requested depth: everything, one index's projects, or one project's files.
@@ -734,7 +977,10 @@ mod tests {
 
     use peryx_storage::meta::{AnalyticsHandle, MetaStore};
 
-    use super::{Clock, DailySnapshot, DailyUsage, DownloadSnapshot, Event, Metrics, PackageUsage, SECONDS_PER_DAY};
+    use super::{
+        Clock, DailySnapshot, DailyUsage, DownloadSnapshot, Event, Metrics, PackageUsage, SECONDS_PER_DAY, SourceUsage,
+        TimelineBucket, UnusedPackage, UsageInterval, VersionUsage,
+    };
 
     fn store() -> (tempfile::TempDir, MetaStore) {
         let dir = tempfile::tempdir().unwrap();
@@ -993,43 +1239,330 @@ mod tests {
         assert_eq!(totals[1].base.pages, 1);
     }
 
+    fn durable_on(day: i64, retention: Option<u32>) -> (tempfile::TempDir, MetaStore, Metrics) {
+        let (dir, meta) = store();
+        let metrics = Metrics::start_durable(meta.analytics(), retention, clock_on_day(day));
+        (dir, meta, metrics)
+    }
+
     #[test]
-    fn test_top_packages_are_ranked_and_limited() {
-        let metrics = Metrics::start();
-        metrics.record(Event::Page {
-            route: "empty".into(),
-            project: "page-only".into(),
-        });
-        metrics.record(download("b", "large", "large.whl", 30));
-        metrics.record(download("a", "small", "small.whl", 20));
-        metrics.record(download("a", "small", "small.whl", 20));
-        metrics.record(download("a", "alpha", "alpha.whl", 40));
-        metrics.record(download("a", "beta", "beta.whl", 40));
-        settle(|| metrics.top_packages(4).len() == 4);
+    fn test_resolve_usage_interval_defaults_to_the_trailing_month() {
+        let (_dir, _meta, metrics) = durable_on(1_000, None);
+        assert_eq!(
+            metrics.resolve_usage_interval(None, None),
+            UsageInterval {
+                from_day: 971,
+                to_day: 1_000,
+                retained_from_day: None,
+                window_clamped_to_retention: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_usage_interval_honors_explicit_bounds_and_never_runs_past_today() {
+        let (_dir, _meta, metrics) = durable_on(1_000, None);
+        let interval = metrics.resolve_usage_interval(Some(950 * SECONDS_PER_DAY), Some(3_000 * SECONDS_PER_DAY));
+        assert_eq!(interval.from_day, 950);
+        assert_eq!(interval.to_day, 1_000);
+    }
+
+    #[test]
+    fn test_resolve_usage_interval_caps_span_without_retention() {
+        let (_dir, _meta, metrics) = durable_on(1_000, None);
+        assert_eq!(
+            metrics.resolve_usage_interval(Some(0), None),
+            UsageInterval {
+                from_day: 635,
+                to_day: 1_000,
+                retained_from_day: None,
+                window_clamped_to_retention: false,
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_usage_interval_clamps_to_retention_floor() {
+        let (_dir, _meta, metrics) = durable_on(1_000, Some(7));
+        assert_eq!(
+            metrics.resolve_usage_interval(Some(0), None),
+            UsageInterval {
+                from_day: 993,
+                to_day: 1_000,
+                retained_from_day: Some(993),
+                window_clamped_to_retention: true,
+            }
+        );
+    }
+
+    #[test]
+    fn test_usage_top_ranks_window_downloads_and_scopes_by_repository() {
+        let (_dir, _meta, metrics) = durable_on(500, None);
+        metrics.record(download_of("a", "flask", "1.0", None, 10));
+        metrics.record(download_of("a", "flask", "2.0", None, 30));
+        metrics.record(download_of("a", "django", "5.0", None, 5));
+        metrics.record(download_of("b", "numpy", "1.0", None, 99));
+        settle(|| metrics.daily_usage().len() == 4);
+        let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
-            metrics.top_packages(3),
+            metrics.usage_top(None, &interval),
             [
                 PackageUsage {
                     repository: "a".into(),
-                    project: "small".into(),
+                    project: "flask".into(),
+                    downloads: 2,
+                    bytes: 40,
+                },
+                PackageUsage {
+                    repository: "b".into(),
+                    project: "numpy".into(),
+                    downloads: 1,
+                    bytes: 99,
+                },
+                PackageUsage {
+                    repository: "a".into(),
+                    project: "django".into(),
+                    downloads: 1,
+                    bytes: 5,
+                },
+            ]
+        );
+        assert_eq!(
+            metrics.usage_top(Some("a"), &interval),
+            [
+                PackageUsage {
+                    repository: "a".into(),
+                    project: "flask".into(),
                     downloads: 2,
                     bytes: 40,
                 },
                 PackageUsage {
                     repository: "a".into(),
-                    project: "alpha".into(),
+                    project: "django".into(),
                     downloads: 1,
-                    bytes: 40,
-                },
-                PackageUsage {
-                    repository: "a".into(),
-                    project: "beta".into(),
-                    downloads: 1,
-                    bytes: 40,
+                    bytes: 5,
                 },
             ]
         );
-        assert!(metrics.top_packages(0).is_empty());
+    }
+
+    #[test]
+    fn test_usage_top_is_empty_when_the_window_predates_every_bucket() {
+        let (_dir, _meta, metrics) = durable_on(500, None);
+        metrics.record(download_of("a", "flask", "1.0", None, 10));
+        settle(|| metrics.daily_usage().len() == 1);
+        let interval = metrics.resolve_usage_interval(Some(100 * SECONDS_PER_DAY), Some(200 * SECONDS_PER_DAY));
+
+        assert!(metrics.usage_top(None, &interval).is_empty());
+    }
+
+    #[test]
+    fn test_usage_versions_splits_by_version_and_labels_absent_as_null() {
+        let (_dir, _meta, metrics) = durable_on(500, None);
+        metrics.record(download_of("a", "flask", "3.0", None, 10));
+        metrics.record(download_of("a", "flask", "3.0", None, 10));
+        metrics.record(download("a", "flask", "flask.whl", 5));
+        settle(|| metrics.daily_usage().len() == 2);
+        let interval = metrics.resolve_usage_interval(None, None);
+
+        assert_eq!(
+            metrics.usage_versions(None, &interval),
+            [
+                VersionUsage {
+                    repository: "a".into(),
+                    project: "flask".into(),
+                    version: Some("3.0".into()),
+                    downloads: 2,
+                    bytes: 20,
+                },
+                VersionUsage {
+                    repository: "a".into(),
+                    project: "flask".into(),
+                    version: None,
+                    downloads: 1,
+                    bytes: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_usage_sources_splits_by_source_and_labels_local_as_null() {
+        let (_dir, _meta, metrics) = durable_on(500, None);
+        metrics.record(download_of("a", "flask", "1.0", Some("pypi"), 10));
+        metrics.record(download_of("a", "flask", "1.0", None, 5));
+        settle(|| metrics.daily_usage().len() == 2);
+        let interval = metrics.resolve_usage_interval(None, None);
+
+        assert_eq!(
+            metrics.usage_sources(None, &interval),
+            [
+                SourceUsage {
+                    repository: "a".into(),
+                    project: "flask".into(),
+                    source: Some("pypi".into()),
+                    downloads: 1,
+                    bytes: 10,
+                },
+                SourceUsage {
+                    repository: "a".into(),
+                    project: "flask".into(),
+                    source: None,
+                    downloads: 1,
+                    bytes: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_usage_timeline_buckets_downloads_by_ascending_day() {
+        let (_dir, meta) = store();
+        let earlier = Metrics::start_durable(meta.analytics(), None, clock_on_day(500));
+        earlier.record(download_of("a", "flask", "1.0", None, 10));
+        settle(|| meta.analytics().load_daily().unwrap().is_some());
+        drop(earlier);
+
+        let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(501));
+        metrics.record(download_of("a", "flask", "1.0", None, 20));
+        metrics.record(download_of("a", "django", "1.0", None, 3));
+        settle(|| metrics.daily_usage().len() == 3);
+        let interval = metrics.resolve_usage_interval(None, None);
+
+        assert_eq!(
+            metrics.usage_timeline(None, &interval),
+            [
+                TimelineBucket {
+                    day: 500,
+                    start_unix: 500 * SECONDS_PER_DAY,
+                    end_unix: 501 * SECONDS_PER_DAY,
+                    downloads: 1,
+                    bytes: 10,
+                },
+                TimelineBucket {
+                    day: 501,
+                    start_unix: 501 * SECONDS_PER_DAY,
+                    end_unix: 502 * SECONDS_PER_DAY,
+                    downloads: 2,
+                    bytes: 23,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_usage_unused_distinguishes_idle_projects_from_active_and_page_only() {
+        let (_dir, meta) = store();
+        let past = Metrics::start_durable(meta.analytics(), None, clock_on_day(100));
+        past.record(download("a", "old", "old.whl", 7));
+        past.record(download("a", "old", "old.whl", 7));
+        settle(|| persisted_downloads(&meta.analytics()) == Some(2));
+        drop(past);
+
+        let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(500));
+        metrics.record(download("a", "flask", "flask.whl", 10));
+        metrics.record(Event::Page {
+            route: "a".into(),
+            project: "page-only".into(),
+        });
+        let interval = metrics.resolve_usage_interval(None, None);
+        settle(|| metrics.usage_top(None, &interval).len() == 1);
+
+        assert_eq!(
+            metrics.usage_unused(None, &interval),
+            [UnusedPackage {
+                repository: "a".into(),
+                project: "old".into(),
+                lifetime_downloads: 2,
+            }]
+        );
+        assert!(metrics.usage_unused(Some("other"), &interval).is_empty());
+    }
+
+    #[test]
+    fn test_usage_top_breaks_ties_by_repository_then_project() {
+        let (_dir, _meta, metrics) = durable_on(500, None);
+        metrics.record(download_of("a", "alpha", "1.0", None, 10));
+        metrics.record(download_of("a", "beta", "1.0", None, 10));
+        metrics.record(download_of("b", "alpha", "1.0", None, 10));
+        settle(|| metrics.daily_usage().len() == 3);
+        let interval = metrics.resolve_usage_interval(None, None);
+
+        assert_eq!(
+            metrics
+                .usage_top(None, &interval)
+                .into_iter()
+                .map(|row| (row.repository, row.project))
+                .collect::<Vec<_>>(),
+            [
+                ("a".to_owned(), "alpha".to_owned()),
+                ("a".to_owned(), "beta".to_owned()),
+                ("b".to_owned(), "alpha".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_usage_versions_breaks_ties_by_version() {
+        let (_dir, _meta, metrics) = durable_on(500, None);
+        metrics.record(download_of("a", "flask", "2.0", None, 10));
+        metrics.record(download_of("a", "flask", "1.0", None, 10));
+        settle(|| metrics.daily_usage().len() == 2);
+        let interval = metrics.resolve_usage_interval(None, None);
+
+        assert_eq!(
+            metrics
+                .usage_versions(None, &interval)
+                .into_iter()
+                .map(|row| row.version)
+                .collect::<Vec<_>>(),
+            [Some("1.0".to_owned()), Some("2.0".to_owned())]
+        );
+    }
+
+    #[test]
+    fn test_usage_sources_breaks_ties_by_source() {
+        let (_dir, _meta, metrics) = durable_on(500, None);
+        metrics.record(download_of("a", "flask", "1.0", Some("beta"), 10));
+        metrics.record(download_of("a", "flask", "1.0", Some("alpha"), 10));
+        settle(|| metrics.daily_usage().len() == 2);
+        let interval = metrics.resolve_usage_interval(None, None);
+
+        assert_eq!(
+            metrics
+                .usage_sources(None, &interval)
+                .into_iter()
+                .map(|row| row.source)
+                .collect::<Vec<_>>(),
+            [Some("alpha".to_owned()), Some("beta".to_owned())]
+        );
+    }
+
+    #[test]
+    fn test_usage_unused_breaks_ties_by_repository_then_project() {
+        let (_dir, meta) = store();
+        let past = Metrics::start_durable(meta.analytics(), None, clock_on_day(100));
+        for (route, project) in [("a", "alpha"), ("a", "beta"), ("b", "alpha")] {
+            past.record(download(route, project, "file.whl", 5));
+        }
+        settle(|| persisted_downloads(&meta.analytics()) == Some(3));
+        drop(past);
+
+        let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(500));
+        let interval = metrics.resolve_usage_interval(None, None);
+
+        assert_eq!(
+            metrics
+                .usage_unused(None, &interval)
+                .into_iter()
+                .map(|row| (row.repository, row.project, row.lifetime_downloads))
+                .collect::<Vec<_>>(),
+            [
+                ("a".to_owned(), "alpha".to_owned(), 1),
+                ("a".to_owned(), "beta".to_owned(), 1),
+                ("b".to_owned(), "alpha".to_owned(), 1),
+            ]
+        );
     }
 }

@@ -30,7 +30,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/+ready", get(handlers::readiness))
         .route("/+acl", get(handlers::acl))
         .route("/+stats", get(handlers::stats))
-        .route("/+analytics/top-packages", get(handlers::top_packages))
+        .route("/+analytics/top-packages", get(handlers::analytics_top))
+        .route("/+analytics/unused", get(handlers::analytics_unused))
+        .route("/+analytics/versions", get(handlers::analytics_versions))
+        .route("/+analytics/sources", get(handlers::analytics_sources))
+        .route("/+analytics/timeline", get(handlers::analytics_timeline))
         .route("/+policy/decisions", get(handlers::policy_decisions))
         .route("/+revocations", get(handlers::list_revocations))
         .route(

@@ -8,6 +8,7 @@
 //! [`version`](RepositoryRecord::version), the strong validator an update or disable checks its
 //! precondition against, and the whole change commits in one redb transaction.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Bound::{Excluded, Unbounded};
 
@@ -179,6 +180,52 @@ pub enum RepositoryQueryError {
     Store(#[from] MetaError),
     #[error("limit must be between 1 and {MAX_QUERY_LIMIT}")]
     InvalidLimit,
+}
+
+/// One repository a configuration source wants persisted, matched to a record by its route.
+///
+/// A migration builds one of these per configured repository. The route is the match key: a route
+/// already backed by a record keeps that record's identifier and version lineage, so a repository
+/// carried over from TOML is never re-homed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredRepository {
+    pub route: String,
+    pub display_name: String,
+    pub ecosystem: String,
+    pub definition: serde_json::Value,
+}
+
+/// What [`reconcile_repositories`](MetaStore::reconcile_repositories) did for one desired repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileAction {
+    Created,
+    Updated,
+    Unchanged,
+}
+
+/// The record a reconcile settled on for one route, and how it got there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciledRepository {
+    pub record: RepositoryRecord,
+    pub action: ReconcileAction,
+}
+
+/// A rejected reconcile. The whole batch commits or none of it does, so any of these leaves every
+/// record untouched.
+#[derive(Debug, thiserror::Error)]
+pub enum ReconcileRepositoryError {
+    #[error(transparent)]
+    Store(#[from] MetaError),
+    #[error(transparent)]
+    Field(#[from] RepositoryFieldError),
+    #[error("route {route} appears more than once in the desired set")]
+    DuplicateRoute { route: String },
+    #[error("route {route} is registered to ecosystem {found}, not {desired}")]
+    EcosystemChanged {
+        route: String,
+        found: String,
+        desired: String,
+    },
 }
 
 impl MetaStore {
@@ -371,6 +418,119 @@ impl MetaStore {
             next_cursor,
         })
     }
+
+    /// Reconcile the store against a configuration source, minting a stable identifier for each new
+    /// route and preserving the identifier of every route already backed by a record.
+    ///
+    /// A route absent from the store is created at version 1; a route whose display name or definition
+    /// changed commits its next version; an unchanged route keeps its version. Routes in the store but
+    /// absent from `desired` are left untouched, so a stable identifier outlives a configuration edit
+    /// that stops mentioning it. Ecosystem is immutable: a route whose configured ecosystem no longer
+    /// matches its record is rejected rather than re-homed. The whole batch commits in one transaction,
+    /// so any rejection leaves every record untouched.
+    ///
+    /// # Errors
+    /// Returns [`ReconcileRepositoryError::DuplicateRoute`] when `desired` names one route twice,
+    /// [`ReconcileRepositoryError::EcosystemChanged`] when a route's ecosystem no longer matches its
+    /// record, [`RepositoryFieldError`] for an invalid field, or a store error when the batch cannot be
+    /// read, encoded, or committed.
+    pub fn reconcile_repositories(
+        &self,
+        desired: &[DesiredRepository],
+        actor: &UserId,
+        now: i64,
+    ) -> Result<Vec<ReconciledRepository>, ReconcileRepositoryError> {
+        let mut seen = BTreeSet::new();
+        for repository in desired {
+            validate_route(&repository.route)?;
+            validate_display_name(&repository.display_name)?;
+            validate_ecosystem(&repository.ecosystem)?;
+            if !seen.insert(repository.route.as_str()) {
+                return Err(ReconcileRepositoryError::DuplicateRoute {
+                    route: repository.route.clone(),
+                });
+            }
+        }
+        let txn = self.db.begin_write().map_err(MetaError::from)?;
+        let mut reconciled = Vec::with_capacity(desired.len());
+        for repository in desired {
+            let existing = txn
+                .open_table(REPOSITORY_ROUTE)
+                .map_err(MetaError::from)?
+                .get(repository.route.as_str())
+                .map_err(MetaError::from)?
+                .map(|value| RepositoryId(value.value().to_owned()));
+            reconciled.push(match existing {
+                Some(id) => reconcile_existing(&txn, &id, repository, actor, now)?,
+                None => reconcile_new(&txn, repository, actor, now)?,
+            });
+        }
+        txn.commit().map_err(MetaError::from)?;
+        Ok(reconciled)
+    }
+}
+
+fn reconcile_new(
+    txn: &redb::WriteTransaction,
+    desired: &DesiredRepository,
+    actor: &UserId,
+    now: i64,
+) -> Result<ReconciledRepository, ReconcileRepositoryError> {
+    let record = RepositoryRecord {
+        id: RepositoryId::random(),
+        route: desired.route.clone(),
+        display_name: desired.display_name.clone(),
+        ecosystem: desired.ecosystem.clone(),
+        definition: desired.definition.clone(),
+        state: RepositoryState::Enabled,
+        version: 1,
+        created_by: actor.clone(),
+        created_at_unix: now,
+        updated_by: actor.clone(),
+        updated_at_unix: now,
+    };
+    write_record(txn, &record)?;
+    txn.open_table(REPOSITORY_ROUTE)
+        .map_err(MetaError::from)?
+        .insert(record.route.as_str(), record.id.as_str())
+        .map_err(MetaError::from)?;
+    Ok(ReconciledRepository {
+        record,
+        action: ReconcileAction::Created,
+    })
+}
+
+fn reconcile_existing(
+    txn: &redb::WriteTransaction,
+    id: &RepositoryId,
+    desired: &DesiredRepository,
+    actor: &UserId,
+    now: i64,
+) -> Result<ReconciledRepository, ReconcileRepositoryError> {
+    let mut record = load_for_update(txn, id)?.expect("route index points to a stored repository record");
+    if record.ecosystem != desired.ecosystem {
+        return Err(ReconcileRepositoryError::EcosystemChanged {
+            route: desired.route.clone(),
+            found: record.ecosystem,
+            desired: desired.ecosystem.clone(),
+        });
+    }
+    if record.display_name == desired.display_name && record.definition == desired.definition {
+        return Ok(ReconciledRepository {
+            record,
+            action: ReconcileAction::Unchanged,
+        });
+    }
+    record.display_name.clone_from(&desired.display_name);
+    record.definition.clone_from(&desired.definition);
+    record.version += 1;
+    record.updated_by = actor.clone();
+    record.updated_at_unix = now;
+    write_record(txn, &record)?;
+    Ok(ReconciledRepository {
+        record,
+        action: ReconcileAction::Updated,
+    })
 }
 
 fn load_for_update(txn: &redb::WriteTransaction, id: &RepositoryId) -> Result<Option<RepositoryRecord>, MetaError> {

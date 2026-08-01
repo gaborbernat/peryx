@@ -5,8 +5,9 @@ use rstest::rstest;
 use serde_json::json;
 
 use crate::meta::{
-    CreateRepositoryError, MetaError, MetaStore, NewRepository, RepositoryFieldError, RepositoryQuery,
-    RepositoryQueryError, RepositoryState, RepositoryStateError, RepositoryUpdate, UpdateRepositoryError,
+    CreateRepositoryError, DesiredRepository, MetaError, MetaStore, NewRepository, ReconcileAction,
+    ReconcileRepositoryError, RepositoryFieldError, RepositoryQuery, RepositoryQueryError, RepositoryState,
+    RepositoryStateError, RepositoryUpdate, UpdateRepositoryError,
 };
 
 fn store() -> (tempfile::TempDir, MetaStore) {
@@ -434,6 +435,197 @@ fn test_repository_errors_convert_display_and_report_a_source() {
         assert!(!field.to_string().is_empty());
         assert!(!format!("{field:?}").is_empty());
     }
+}
+
+fn desired(route: &str, display_name: &str, ecosystem: &str) -> DesiredRepository {
+    DesiredRepository {
+        route: route.to_owned(),
+        display_name: display_name.to_owned(),
+        ecosystem: ecosystem.to_owned(),
+        definition: json!({"kind": "hosted"}),
+    }
+}
+
+#[test]
+fn test_reconcile_repositories_creates_updates_and_preserves_identifiers() {
+    let (_dir, store) = store();
+    let actor = UserId::random();
+
+    let first = store
+        .reconcile_repositories(&[desired("a", "A", "pypi"), desired("b", "B", "oci")], &actor, 10)
+        .unwrap();
+    assert_eq!(
+        first.iter().map(|entry| entry.action).collect::<Vec<_>>(),
+        vec![ReconcileAction::Created, ReconcileAction::Created]
+    );
+    let id_a = first[0].record.id.clone();
+    let id_b = first[1].record.id.clone();
+    assert_eq!(first[0].record.version, 1);
+    assert_eq!(first[0].record.created_by, actor);
+
+    let second = store
+        .reconcile_repositories(&[desired("a", "A", "pypi"), desired("b", "B", "oci")], &actor, 20)
+        .unwrap();
+    assert_eq!(
+        second.iter().map(|entry| entry.action).collect::<Vec<_>>(),
+        vec![ReconcileAction::Unchanged, ReconcileAction::Unchanged]
+    );
+    assert_eq!(second[0].record.id, id_a);
+    assert_eq!(second[0].record.version, 1);
+
+    let editor = UserId::random();
+    let third = store
+        .reconcile_repositories(
+            &[
+                DesiredRepository {
+                    display_name: "A renamed".to_owned(),
+                    ..desired("a", "A", "pypi")
+                },
+                desired("b", "B", "oci"),
+                desired("c", "C", "pypi"),
+            ],
+            &editor,
+            30,
+        )
+        .unwrap();
+    assert_eq!(
+        third.iter().map(|entry| entry.action).collect::<Vec<_>>(),
+        vec![
+            ReconcileAction::Updated,
+            ReconcileAction::Unchanged,
+            ReconcileAction::Created
+        ]
+    );
+    assert_eq!(third[0].record.id, id_a);
+    assert_eq!(third[0].record.display_name, "A renamed");
+    assert_eq!(third[0].record.version, 2);
+    assert_eq!(third[0].record.updated_by, editor);
+    assert_eq!(third[0].record.updated_at_unix, 30);
+    assert_eq!(third[0].record.created_at_unix, 10);
+    assert_ne!(third[2].record.id, id_b);
+    assert_eq!(store.repository_by_route("c").unwrap().unwrap().id, third[2].record.id);
+
+    let fourth = store
+        .reconcile_repositories(
+            &[DesiredRepository {
+                definition: json!({"kind": "virtual"}),
+                ..desired("c", "C", "pypi")
+            }],
+            &editor,
+            40,
+        )
+        .unwrap();
+    assert_eq!(fourth[0].action, ReconcileAction::Updated);
+    assert_eq!(fourth[0].record.definition, json!({"kind": "virtual"}));
+    // Routes omitted from a reconcile keep their records untouched.
+    assert_eq!(store.repository(&id_a).unwrap().unwrap().display_name, "A renamed");
+}
+
+#[test]
+fn test_reconcile_repositories_rejects_duplicate_routes_in_the_batch() {
+    let (_dir, store) = store();
+    assert!(matches!(
+        store.reconcile_repositories(&[desired("dup", "A", "pypi"), desired("dup", "B", "pypi")], &UserId::random(), 1),
+        Err(ReconcileRepositoryError::DuplicateRoute { route }) if route == "dup"
+    ));
+    assert_eq!(store.repository_by_route("dup").unwrap(), None);
+}
+
+#[test]
+fn test_reconcile_repositories_rejects_an_ecosystem_change_and_rolls_back() {
+    let (_dir, store) = store();
+    let actor = UserId::random();
+    store
+        .reconcile_repositories(&[desired("b", "B", "pypi")], &actor, 1)
+        .unwrap();
+
+    let error = store
+        .reconcile_repositories(&[desired("a", "A", "oci"), desired("b", "B", "oci")], &actor, 2)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ReconcileRepositoryError::EcosystemChanged { route, found, desired }
+            if route == "b" && found == "pypi" && desired == "oci"
+    ));
+    // The first entry was staged in the same transaction, so the rejection rolls it back too.
+    assert_eq!(store.repository_by_route("a").unwrap(), None);
+    let unchanged = store.repository_by_route("b").unwrap().unwrap();
+    assert_eq!(unchanged.ecosystem, "pypi");
+    assert_eq!(unchanged.version, 1);
+}
+
+#[test]
+fn test_reconcile_repositories_validates_fields() {
+    let (_dir, store) = store();
+    assert!(matches!(
+        store.reconcile_repositories(&[desired("", "A", "pypi")], &UserId::random(), 1),
+        Err(ReconcileRepositoryError::Field(RepositoryFieldError::EmptyRoute))
+    ));
+}
+
+#[test]
+fn test_reconcile_repositories_surfaces_a_corrupt_record() {
+    let (dir, store) = store();
+    let record = store
+        .create_repository(new_repo("team/pypi", "R", "pypi", &UserId::random()), 1)
+        .unwrap();
+    drop(store);
+    let path = dir.path().join("peryx.redb");
+    let database = redb::Database::open(&path).unwrap();
+    let write = database.begin_write().unwrap();
+    {
+        let mut table = write
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new("repository"))
+            .unwrap();
+        table.insert(record.id.as_str(), b"not json".as_slice()).unwrap();
+    }
+    write.commit().unwrap();
+    drop(database);
+    let store = MetaStore::open_existing(path).unwrap();
+
+    assert!(matches!(
+        store.reconcile_repositories(&[desired("team/pypi", "R2", "pypi")], &UserId::random(), 2),
+        Err(ReconcileRepositoryError::Store(_))
+    ));
+}
+
+#[test]
+fn test_reconcile_types_convert_and_exercise_derives() {
+    let reconcile: ReconcileRepositoryError = MetaError::DriverPrecondition("boom".to_owned()).into();
+    assert!(!reconcile.to_string().is_empty());
+    assert!(!format!("{reconcile:?}").is_empty());
+    let _ = reconcile.source();
+    let reconcile_field: ReconcileRepositoryError = RepositoryFieldError::EmptyRoute.into();
+    assert!(!reconcile_field.to_string().is_empty());
+    let _ = reconcile_field.source();
+    assert!(
+        !ReconcileRepositoryError::DuplicateRoute { route: "r".to_owned() }
+            .to_string()
+            .is_empty()
+    );
+    assert!(
+        !ReconcileRepositoryError::EcosystemChanged {
+            route: "r".to_owned(),
+            found: "pypi".to_owned(),
+            desired: "oci".to_owned(),
+        }
+        .to_string()
+        .is_empty()
+    );
+
+    let want = desired("r", "R", "pypi");
+    assert_eq!(want.clone(), want);
+    assert!(format!("{want:?}").contains("DesiredRepository"));
+    assert!(format!("{:?}", ReconcileAction::Created).contains("Created"));
+
+    let (_dir, store) = store();
+    let reconciled = store
+        .reconcile_repositories(std::slice::from_ref(&want), &UserId::random(), 1)
+        .unwrap();
+    let one = reconciled[0].clone();
+    assert_eq!(one, reconciled[0]);
+    assert!(format!("{one:?}").contains("ReconciledRepository"));
+    assert_eq!(one.action, ReconcileAction::Created);
 }
 
 #[test]

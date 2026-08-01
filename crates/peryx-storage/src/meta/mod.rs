@@ -49,9 +49,9 @@ pub use quota::{
     QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
 };
 pub use repository::{
-    CreateRepositoryError, NewRepository, RepositoryFieldError, RepositoryId, RepositoryPage, RepositoryQuery,
-    RepositoryQueryError, RepositoryRecord, RepositoryState, RepositoryStateError, RepositoryUpdate,
-    UpdateRepositoryError,
+    CreateRepositoryError, DesiredRepository, NewRepository, ReconcileAction, ReconcileRepositoryError,
+    ReconciledRepository, RepositoryFieldError, RepositoryId, RepositoryPage, RepositoryQuery, RepositoryQueryError,
+    RepositoryRecord, RepositoryState, RepositoryStateError, RepositoryUpdate, UpdateRepositoryError,
 };
 pub use revocation::{
     DigestRevocation, DigestRevocationPage, DigestRevocationQuery, DigestRevocationQueryError, DigestRevocationState,

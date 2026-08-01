@@ -35,7 +35,7 @@ pub mod ssr;
 pub mod style;
 pub mod url;
 
-use pages::{AdminStatus, Browse, Dashboard, PolicyDecisions, Search, Stats, Trash, Upload};
+use pages::{AdminStatus, Browse, Dashboard, PolicyDecisions, Search, Stats, Trash, Upload, UsageAnalytics};
 
 /// The HTML document shell used by server rendering: head, hydration scripts, and the app.
 #[must_use]
@@ -82,6 +82,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/admin/status") view=AdminStatus ssr=SsrMode::Async />
                     <Route path=path!("/admin/policy-decisions") view=PolicyDecisions />
                     <Route path=path!("/admin/trash") view=Trash />
+                    <Route path=path!("/admin/analytics") view=UsageAnalytics />
                     <Route path=path!("/browse") view=Browse ssr=SsrMode::Async />
                     <Route path=path!("/search") view=Search ssr=SsrMode::Async />
                     <Route path=path!("/stats") view=Stats ssr=SsrMode::Async />
@@ -111,6 +112,7 @@ fn Header() -> impl IntoView {
                     <a href="/admin/status">"Status"</a>
                     <a href="/admin/policy-decisions">"Policy"</a>
                     <a href="/admin/trash">"Trash"</a>
+                    <a href="/admin/analytics">"Usage"</a>
                     <a href="/upload">"Upload"</a>
                     <a href=DOCS_URL rel=external_link_rel(DOCS_URL)>"Docs"</a>
                     <a href=REPO_URL rel=external_link_rel(REPO_URL)>"GitHub"</a>

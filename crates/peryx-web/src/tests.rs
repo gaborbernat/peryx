@@ -243,3 +243,174 @@ fn test_stats_project_reads_grouped_totals_and_files() {
     assert_eq!(stats.rows.len(), 1);
     assert_eq!(stats.rows[0].1.metadata, 2);
 }
+
+#[rstest]
+#[case::top("top", crate::model::AnalyticsView::Top, "/+analytics/top-packages")]
+#[case::versions("versions", crate::model::AnalyticsView::Versions, "/+analytics/versions")]
+#[case::sources("sources", crate::model::AnalyticsView::Sources, "/+analytics/sources")]
+#[case::unused("unused", crate::model::AnalyticsView::Unused, "/+analytics/unused")]
+#[case::timeline("timeline", crate::model::AnalyticsView::Timeline, "/+analytics/timeline")]
+#[case::unknown_defaults_to_top("mystery", crate::model::AnalyticsView::Top, "/+analytics/top-packages")]
+fn test_analytics_view_round_trips_query_and_path(
+    #[case] query: &str,
+    #[case] expected: crate::model::AnalyticsView,
+    #[case] path: &str,
+) {
+    let view = crate::model::AnalyticsView::from_query(query);
+    assert_eq!(view, expected);
+    assert_eq!(view.path(), path);
+}
+
+#[test]
+fn test_analytics_view_as_query_round_trips() {
+    for view in [
+        crate::model::AnalyticsView::Top,
+        crate::model::AnalyticsView::Versions,
+        crate::model::AnalyticsView::Sources,
+        crate::model::AnalyticsView::Unused,
+        crate::model::AnalyticsView::Timeline,
+    ] {
+        assert_eq!(crate::model::AnalyticsView::from_query(view.as_query()), view);
+    }
+}
+
+#[test]
+fn test_analytics_filters_build_encoded_url() {
+    let filters = crate::model::AnalyticsFilters {
+        view: "versions".to_owned(),
+        repository: "team/private".to_owned(),
+        from: "1970-01-02".to_owned(),
+        to: "1970-01-03".to_owned(),
+        limit: "50".to_owned(),
+    };
+    assert_eq!(
+        filters.url(Some("cursor-1")).unwrap(),
+        "/+analytics/versions?repository=team%2Fprivate&from=86400&to=172800&limit=50&cursor=cursor-1",
+    );
+}
+
+#[test]
+fn test_analytics_filters_omit_blank_optionals() {
+    let filters = crate::model::AnalyticsFilters::default();
+    assert_eq!(filters.url(None).unwrap(), "/+analytics/top-packages?limit=25");
+}
+
+#[test]
+fn test_analytics_filters_reject_invalid_date() {
+    let filters = crate::model::AnalyticsFilters {
+        from: "not-a-date".to_owned(),
+        ..crate::model::AnalyticsFilters::default()
+    };
+    assert_eq!(filters.url(None), Err("Invalid UTC date: not-a-date".to_owned()));
+}
+
+fn usage_envelope(rows_key: &str, rows: &serde_json::Value, next_cursor: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        rows_key: rows,
+        "interval": {
+            "from_day": 971,
+            "to_day": 1000,
+            "from_unix": 971 * 86_400,
+            "to_unix": 1_001 * 86_400,
+            "retained_from_day": null,
+            "window_clamped_to_retention": false,
+        },
+        "next_cursor": next_cursor,
+    })
+}
+
+#[test]
+fn test_usage_page_parses_top_rows_and_cursor() {
+    let value = usage_envelope(
+        "packages",
+        &serde_json::json!([{"repository": "root/pypi", "project": "veloxdemo", "downloads": 12, "bytes": 3400}]),
+        &serde_json::json!("next-page"),
+    );
+    let page = crate::model::UiUsagePage::parse(crate::model::AnalyticsView::Top, &value).unwrap();
+    assert_eq!(page.next_cursor.as_deref(), Some("next-page"));
+    assert_eq!(page.rows.len(), 1);
+    assert!(!page.rows.is_empty());
+    let crate::model::UiUsageRows::Top(rows) = page.rows else {
+        panic!("expected top rows");
+    };
+    assert_eq!(rows[0].downloads, 12);
+    assert_eq!(rows[0].bytes, 3400);
+}
+
+#[test]
+fn test_usage_page_parses_each_view() {
+    let cases = [
+        (
+            crate::model::AnalyticsView::Versions,
+            "versions",
+            serde_json::json!([{"repository": "r", "project": "p", "version": null, "downloads": 1, "bytes": 2}]),
+        ),
+        (
+            crate::model::AnalyticsView::Sources,
+            "sources",
+            serde_json::json!([{"repository": "r", "project": "p", "source": "pypi", "downloads": 1, "bytes": 2}]),
+        ),
+        (
+            crate::model::AnalyticsView::Unused,
+            "unused",
+            serde_json::json!([{"repository": "r", "project": "p", "lifetime_downloads": 9}]),
+        ),
+        (
+            crate::model::AnalyticsView::Timeline,
+            "buckets",
+            serde_json::json!([{"day": 1000, "start_unix": 86_400_000, "end_unix": 86_486_400, "downloads": 4, "bytes": 8}]),
+        ),
+    ];
+    for (view, key, rows) in cases {
+        let value = usage_envelope(key, &rows, &serde_json::Value::Null);
+        let page = crate::model::UiUsagePage::parse(view, &value).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.next_cursor, None);
+    }
+}
+
+#[test]
+fn test_usage_page_parses_empty_rows() {
+    let value = usage_envelope("packages", &serde_json::json!([]), &serde_json::Value::Null);
+    let page = crate::model::UiUsagePage::parse(crate::model::AnalyticsView::Top, &value).unwrap();
+    assert!(page.rows.is_empty());
+}
+
+#[rstest]
+#[case::missing_interval(serde_json::json!({"packages": [], "next_cursor": null}))]
+#[case::missing_rows(serde_json::json!({"interval": {"from_day": 0, "to_day": 0, "retained_from_day": null, "window_clamped_to_retention": false}, "next_cursor": null}))]
+#[case::cursor_not_string(usage_envelope("packages", &serde_json::json!([]), &serde_json::json!(7)))]
+#[case::row_wrong_shape(usage_envelope("packages", &serde_json::json!([{"repository": "r"}]), &serde_json::Value::Null))]
+fn test_usage_page_rejects_malformed(#[case] value: serde_json::Value) {
+    assert_eq!(
+        crate::model::UiUsagePage::parse(crate::model::AnalyticsView::Top, &value),
+        None
+    );
+}
+
+#[test]
+fn test_ui_interval_window_and_retention() {
+    let clamped = crate::model::UiInterval {
+        from_day: 100,
+        to_day: 130,
+        retained_from_day: Some(100),
+        window_clamped_to_retention: true,
+    };
+    assert_eq!(clamped.window(), "1970-04-11 to 1970-05-11");
+    assert_eq!(clamped.retained_from().as_deref(), Some("1970-04-11"));
+
+    let open = crate::model::UiInterval {
+        from_day: 0,
+        to_day: 0,
+        retained_from_day: None,
+        window_clamped_to_retention: false,
+    };
+    assert_eq!(open.window(), "1970-01-01 to 1970-01-01");
+    assert_eq!(open.retained_from(), None);
+}
+
+#[test]
+fn test_format_instant_renders_utc_and_falls_back() {
+    assert_eq!(crate::model::format_instant(0), "1970-01-01T00:00:00Z");
+    assert_eq!(crate::model::format_instant(i64::MAX), i64::MAX.to_string());
+}

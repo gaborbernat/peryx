@@ -13,6 +13,7 @@ use leptos::prelude::*;
 use crate::model::{UiCounters, UiSnapshot, UiStats};
 
 mod admin;
+mod analytics;
 mod archive;
 mod browse;
 mod dashboard;
@@ -25,6 +26,7 @@ mod trash;
 mod upload;
 
 pub use admin::AdminStatus;
+pub use analytics::UsageAnalytics;
 pub use browse::Browse;
 pub use dashboard::Dashboard;
 pub use policy_decisions::PolicyDecisions;

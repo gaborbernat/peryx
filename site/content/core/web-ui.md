@@ -62,6 +62,32 @@ sees the deleting identity. Every state has a text label, and narrow screens scr
 than widening the document. The page holds the username and password in memory, disables password autocomplete, and
 sends them in the Basic authorization header without writing them to the URL, browser storage, or the server-rendered
 document. The trash guide lists [error remedies and credential requirements](@/core/trash.md#troubleshooting).
+## Usage analytics
+
+`/admin/analytics` reads the [`/+analytics/*` usage queries](@/core/monitor.md#query-package-usage) over the retained
+daily download aggregate. The **View** selector switches between the five read-only shapes: top packages, version usage,
+source split, unused packages, and a daily timeline. Each view queries its own endpoint and renders its own columns, so
+a version row carries a version and a timeline row carries its UTC day window.
+
+Authorization matches the API. An operator analytics grant reads every repository at once when you leave the repository
+blank; naming a repository you can read scopes the query to it. The source split is operator-only, because which
+upstream served a cache miss is a property of the server's routing rather than of the repository. A repository's legacy
+upload token reaches its own repository with the `__token__` username and a read grant. The page holds the username and
+password in memory, disables password autocomplete, and sends them only in the Basic authorization header. It does not
+write them to the URL or browser storage.
+
+Filters map to the documented API query fields: repository, a UTC day range (`from` and `to`, sent as day-aligned Unix
+seconds), and page size. Submitting changed filters starts from the newest page; Previous and Next retain the cursor
+chain for the active view and filter set. Every page states its resolved UTC window. When a requested start predates the
+retention floor the page adds a distinct note that earlier data has aged out, so an empty window reads differently from
+one clamped to retention or from a failed query, which shows the HTTP outcome as bounded text without echoing the
+response body.
+
+The results use native tables with a caption and column headers. Absent values read as explicit text — a missing version
+as an em dash, a local-store hit as `local store` — never as an empty cell, and counts never depend on color. Narrow
+screens scroll each table inside its wrapper rather than widening the document. These choices follow the
+[WAI-ARIA table pattern](https://www.w3.org/WAI/ARIA/apg/patterns/table/) and [WCAG 2.2](https://www.w3.org/TR/WCAG22/)
+requirements for structure, link purpose, and reflow.
 
 ## Browsing packages
 

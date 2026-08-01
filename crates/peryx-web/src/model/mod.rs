@@ -3,6 +3,7 @@
 //! The server builds them from `AppState`; the browser rebuilds them from peryx's own JSON API
 //! (`/+status` and the PEP 691 simple endpoints), so both sides render identical pages.
 
+mod analytics;
 mod policy_decision;
 mod project;
 mod search;
@@ -10,6 +11,10 @@ mod snapshot;
 mod stats;
 mod trash;
 
+pub use analytics::{
+    AnalyticsFilters, AnalyticsView, UiInterval, UiPackageRow, UiSourceRow, UiTimelineRow, UiUnusedRow, UiUsagePage,
+    UiUsageRows, UiVersionRow, format_instant,
+};
 pub use policy_decision::{PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage};
 pub use project::{
     UiArtifactRef, UiFile, UiManifest, UiMember, UiMemberChunk, UiProject, UiProjectStatus, UiProjectView, UiRelease,

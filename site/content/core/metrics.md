@@ -35,14 +35,16 @@ scrape_configs:
 Values from every configured repository fold into a small fixed set before rendering, so a series exists only for a
 label combination some configured index produces.
 
-| Label       | Values                                               | On                          |
-| ----------- | ---------------------------------------------------- | --------------------------- |
-| `ecosystem` | `pypi`, `oci`                                        | Serving and quota series    |
-| `role`      | `cached`, `hosted`, `virtual`                        | Serving and quota series    |
-| `class`     | `listing`, `metadata`, `artifact`, `upload`, `admin` | Rate-limiter series         |
-| `kind`      | `cache_maintenance`, `catalog_sync`                  | Job series                  |
-| `outcome`   | `succeeded`, `failed`, `cancelled`                   | `peryx_jobs_finished_total` |
-| `reason`    | `conflict`, `queue_full`                             | `peryx_jobs_rejected_total` |
+| Label       | Values                                               | On                                     |
+| ----------- | ---------------------------------------------------- | -------------------------------------- |
+| `ecosystem` | `pypi`, `oci`                                        | Serving and quota series               |
+| `role`      | `cached`, `hosted`, `virtual`                        | Serving and quota series               |
+| `class`     | `listing`, `metadata`, `artifact`, `upload`, `admin` | Rate-limiter series                    |
+| `kind`      | `cache_maintenance`, `catalog_sync`                  | Job series                             |
+| `outcome`   | `succeeded`, `failed`, `cancelled`                   | `peryx_jobs_finished_total`            |
+| `reason`    | `conflict`, `queue_full`                             | `peryx_jobs_rejected_total`            |
+| `class`     | `schema`, `transport`, `apply`                       | `peryx_availability_sync_errors_total` |
+| `le`        | fixed second bounds and `+Inf`                       | `peryx_availability_apply_seconds`     |
 
 A serving family is scoped to the role that produces it: a cached-only family emits `role="cached"` series and no
 others. It emits one series per ecosystem that has an index in that role, so two cached indexes on different ecosystems
@@ -161,6 +163,25 @@ a serial from its primary.
 seconds, so read it against your write rate. It pairs with the
 [`/+ready`](@/core/high-availability.md#load-balancer-probes) probe that already gates the replica out of a read pool
 while it catches up.
+
+## Availability
+
+Also replica-only, these series read the sync loop rather than its committed frontier. Their labels are drawn from
+closed sets, never a repository, digest, node, or operation identity, so the whole group holds to a fixed budget of 14
+series whatever the store or topology size. `class` distinguishes a `schema` mismatch a retry cannot fix from a
+`transport` failure reaching the primary and an `apply` failure validating or committing a page. `le` on the histogram
+is a fixed ladder of second bounds plus `+Inf`.
+
+| Series                                 | Type      | Labels  | Meaning                                                   |
+| -------------------------------------- | --------- | ------- | --------------------------------------------------------- |
+| `peryx_availability_sync_cycles_total` | counter   |         | Sync cycles attempted, the denominator for an error rate. |
+| `peryx_availability_sync_errors_total` | counter   | `class` | Cycles that failed, split by bounded failure class.       |
+| `peryx_availability_pending_serials`   | gauge     |         | Serials the primary has that the replica has not applied. |
+| `peryx_availability_apply_seconds`     | histogram | `le`    | Per-cycle apply latency across a fixed bucket ladder.     |
+
+`peryx_availability_pending_serials` is the queue depth behind the frontier and moves with `peryx_replication_lag`;
+alert on a sustained `rate(peryx_availability_sync_errors_total{class="transport"}[5m])` to catch a primary a replica
+can no longer reach before the lag alert fires.
 
 ## Alerts worth building
 

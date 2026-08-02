@@ -77,3 +77,21 @@ fn test_parse_job_run_defaults_and_explicit_limits() {
         } if repository == "corp" && source == "primary"
     ));
 }
+
+#[test]
+fn test_parse_job_reindex_defaults_and_explicit_chunk_size() {
+    let Command::Job(defaults) = parse(&["peryx", "job", "reindex"]).command else {
+        panic!("expected job command");
+    };
+    let JobCommand::Reindex { chunk_size, .. } = defaults else {
+        panic!("expected job reindex");
+    };
+    assert_eq!(chunk_size, peryx_driver::jobs::DEFAULT_SEARCH_REBUILD_CHUNK);
+
+    let Command::Job(explicit) = parse(&["peryx", "job", "reindex", "--chunk-size", "50", "--data-dir", "/d"]).command
+    else {
+        panic!("expected job command");
+    };
+    assert_eq!(explicit.runtime_args().data_dir, Some(PathBuf::from("/d")));
+    assert!(matches!(explicit, JobCommand::Reindex { chunk_size: 50, .. }));
+}

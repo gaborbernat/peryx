@@ -21,10 +21,12 @@ mod timer;
 mod tests;
 
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use peryx_search::{RebuildOutcome, RebuildProgress};
 use peryx_storage::meta::JobKind;
 
 use crate::serving::EcosystemDriver;
@@ -50,6 +52,12 @@ pub const MAX_CATALOG_PROJECTS_PER_RUN: usize = 100_000;
 pub const MAX_CATALOG_CONCURRENCY: usize = 32;
 /// Startup rejects longer runs so a stuck source cannot occupy a worker indefinitely.
 pub const MAX_CATALOG_TIMEOUT: Duration = Duration::from_hours(24);
+
+/// Documents a search rebuild commits per chunk by default, balancing commit overhead against the
+/// writer memory held between commits.
+pub const DEFAULT_SEARCH_REBUILD_CHUNK: usize = 1_000;
+/// The CLI rejects larger chunks so one rebuild cannot buffer an unbounded batch before committing.
+pub const MAX_SEARCH_REBUILD_CHUNK: usize = 1_000_000;
 
 /// The source, repository, and work limits shared by scheduled and one-shot catalog syncs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +266,74 @@ impl NodeJob for JobHistoryCleanup {
                 });
             }
         }
+    }
+}
+
+const SEARCH_REBUILD: &str = "search_rebuild";
+
+/// Rebuild the node's derived package search index from authoritative metadata.
+///
+/// The index is ecosystem-neutral, so this job is too: it drives every installed ecosystem's indexer
+/// through the shared engine rather than acting on one ecosystem's store. It is an operator recovery
+/// path for when incremental refresh cannot bring the index current. The engine publishes the rebuilt
+/// index atomically, so searches keep serving the prior complete index until the rebuild finishes; a
+/// run cancelled at shutdown leaves the served index untouched.
+pub struct SearchRebuildJob {
+    chunk: NonZeroUsize,
+}
+
+impl SearchRebuildJob {
+    /// Rebuild the index committing `chunk` documents at a time.
+    #[must_use]
+    pub const fn new(chunk: NonZeroUsize) -> Self {
+        Self { chunk }
+    }
+}
+
+#[async_trait]
+impl NodeJob for SearchRebuildJob {
+    fn kind(&self) -> &'static str {
+        SEARCH_REBUILD
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    fn persist_as(&self) -> Option<JobKind> {
+        Some(JobKind::SearchRebuild)
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        let state = ctx.state();
+        let mut reported = 0_u64;
+        let outcome = state
+            .search
+            .rebuild(&state.indexer_ctx(), self.chunk, &mut |progress: RebuildProgress| {
+                if ctx.is_cancelled() {
+                    return ControlFlow::Break(());
+                }
+                if progress.indexed != reported {
+                    reported = progress.indexed;
+                    tracing::info!(
+                        indexed = progress.indexed,
+                        total = progress.total,
+                        "search rebuild progress"
+                    );
+                }
+                ControlFlow::Continue(())
+            })
+            .map_err(|error| JobFailure::new("search_rebuild", error.to_string()))?;
+        Ok(match outcome {
+            RebuildOutcome::Published { documents, .. } => JobReport {
+                processed: documents,
+                changed: documents,
+            },
+            RebuildOutcome::Aborted { documents } => JobReport {
+                processed: documents,
+                changed: 0,
+            },
+        })
     }
 }
 

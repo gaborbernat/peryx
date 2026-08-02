@@ -24,6 +24,8 @@ pub enum JobKind {
     CacheRefresh,
     /// A bounded remote project-catalog and file-metadata refresh.
     CatalogSync,
+    /// A full rebuild of the derived package search index from authoritative metadata.
+    SearchRebuild,
 }
 
 /// Where a job run stands: in flight, or finished one way or the other.

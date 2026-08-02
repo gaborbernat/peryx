@@ -42,12 +42,16 @@ impl Stores {
 
     pub(super) fn ctx<'a>(&'a self, lexicons: &'a LexiconRegistry) -> SearchCtx<'a> {
         SearchCtx {
-            indexer: IndexerCtx {
-                indexes: &self.indexes,
-                meta: &self.meta,
-                blobs: &self.blobs,
-            },
+            indexer: self.indexer_ctx(),
             lexicons,
+        }
+    }
+
+    pub(super) fn indexer_ctx(&self) -> IndexerCtx<'_> {
+        IndexerCtx {
+            indexes: &self.indexes,
+            meta: &self.meta,
+            blobs: &self.blobs,
         }
     }
 }

@@ -14,7 +14,7 @@ mod response;
 
 pub use access::{SearchAccess, SearchAccessPattern};
 pub use context::{IndexerCtx, SearchCtx};
-pub use engine::{PackageSearch, truncate_to_chars};
+pub use engine::{PackageSearch, RebuildOutcome, RebuildProgress, truncate_to_chars};
 pub use error::SearchError;
 pub use indexer::{EmptyIndexer, INDEXED_TEXT_BYTES, PackageDocument, PackageIndexer};
 pub use params::{PackageSource, SearchParams, SourceFilter};

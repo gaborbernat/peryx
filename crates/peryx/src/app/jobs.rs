@@ -2,12 +2,13 @@
 
 use std::io::Write;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
 use peryx_driver::jobs::{
     CatalogSyncParameters, JobLimits, JobScheduler, MAX_CATALOG_CONCURRENCY, MAX_CATALOG_PROJECTS_PER_RUN,
-    MAX_CATALOG_TIMEOUT, ScheduledJob, scheduled_job,
+    MAX_CATALOG_TIMEOUT, MAX_SEARCH_REBUILD_CHUNK, ScheduledJob, SearchRebuildJob, scheduled_job,
 };
 use peryx_storage::meta::{JobRunQuery, MetaStore};
 
@@ -39,6 +40,7 @@ pub fn job(config: &Config, command: &JobCommand, out: &mut dyn Write) -> anyhow
             *timeout_secs,
             out,
         ),
+        JobCommand::Reindex { chunk_size, .. } => run_search_rebuild(config, *chunk_size, out),
     }
 }
 
@@ -89,6 +91,28 @@ fn run_catalog_sync(
         let scheduler = JobScheduler::new(state.serving.clone(), JobLimits::node_local());
         let job = scheduled_job(&state, &ScheduledJob::CatalogSync(parameters)).map_err(anyhow::Error::msg)?;
         let result = scheduler.run(job).await.map_err(anyhow::Error::msg);
+        scheduler.shutdown().await;
+        result
+    })?;
+    writeln!(out, "processed\t{}", report.processed)?;
+    writeln!(out, "changed\t{}", report.changed)?;
+    Ok(())
+}
+
+fn run_search_rebuild(config: &Config, chunk_size: usize, out: &mut dyn Write) -> anyhow::Result<()> {
+    ensure!(
+        chunk_size <= MAX_SEARCH_REBUILD_CHUNK,
+        "chunk-size exceeds the per-run limit"
+    );
+    let chunk = NonZeroUsize::new(chunk_size).context("chunk-size must be positive")?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let report = runtime.block_on(async {
+        let state = crate::server::build_state(config)?;
+        let scheduler = JobScheduler::new(state.serving.clone(), JobLimits::node_local());
+        let result = scheduler
+            .run(Arc::new(SearchRebuildJob::new(chunk)))
+            .await
+            .map_err(anyhow::Error::msg);
         scheduler.shutdown().await;
         result
     })?;

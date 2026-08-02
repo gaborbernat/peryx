@@ -17,10 +17,12 @@ use super::attempts::{JobAttemptControl, JobAttemptError};
 use super::scheduler::{JobLimits, Submit};
 use super::{
     CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, JobContext, JobFailure, JobHistoryCleanup, JobReport,
-    JobScheduler, MaintenanceJob, NodeJob, Schedule, ScheduledJob, run_schedules, scheduled_job, submit_maintenance,
+    JobScheduler, MaintenanceJob, NodeJob, Schedule, ScheduledJob, SearchRebuildJob, run_schedules, scheduled_job,
+    submit_maintenance,
 };
 use crate::serving::{EcosystemDriver, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
+use peryx_search::{IndexerCtx, PackageDocument, PackageIndexer, PackageSource, SearchError};
 
 fn serving() -> (tempfile::TempDir, Arc<ServingState>) {
     let dir = tempfile::tempdir().unwrap();
@@ -1347,4 +1349,96 @@ async fn test_the_timer_stops_when_cancelled() {
     cancel.cancel();
     timer.await.unwrap();
     scheduler.shutdown().await;
+}
+
+struct CountedDocs(usize);
+
+impl PackageIndexer for CountedDocs {
+    fn documents(&self, _ctx: &IndexerCtx<'_>) -> Result<Vec<PackageDocument>, SearchError> {
+        Ok((0..self.0)
+            .map(|serial| PackageDocument {
+                display_name: format!("pkg{serial}"),
+                normalized_name: format!("pkg{serial}"),
+                route: "root".to_owned(),
+                index: "root".to_owned(),
+                ecosystem: "pypi".to_owned(),
+                source: PackageSource::Cached,
+                summary: None,
+                text: format!("pkg{serial}"),
+            })
+            .collect())
+    }
+}
+
+struct FailingDocs;
+
+impl PackageIndexer for FailingDocs {
+    fn documents(&self, _ctx: &IndexerCtx<'_>) -> Result<Vec<PackageDocument>, SearchError> {
+        Err(SearchError::Indexer("stored record could not be indexed".to_owned()))
+    }
+}
+
+fn state_with_indexer(indexer: Arc<dyn PackageIndexer>) -> (tempfile::TempDir, AppState) {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let clock: Clock = Arc::new(|| 1_000);
+    let mut state = AppState::with_clock(meta, blobs, 60, Vec::new(), clock);
+    let driver = Arc::new(StubDriver::new(0, Ok(RefreshSweep { checked: 0, changed: 0 })));
+    state.register_ecosystem(driver, indexer);
+    (dir, state)
+}
+
+fn rebuild_job(chunk: usize) -> Arc<SearchRebuildJob> {
+    Arc::new(SearchRebuildJob::new(NonZeroUsize::new(chunk).unwrap()))
+}
+
+#[tokio::test]
+async fn test_search_rebuild_persists_a_node_wide_run_and_reports_documents() {
+    let (_dir, state) = state_with_indexer(Arc::new(CountedDocs(2)));
+    let scheduler = JobScheduler::new(state.serving.clone(), JobLimits::node_local());
+
+    let report = scheduler.run(rebuild_job(1)).await.unwrap();
+    scheduler.shutdown().await;
+
+    assert_eq!(
+        report,
+        JobReport {
+            processed: 2,
+            changed: 2
+        }
+    );
+    let runs = job_runs(&state.serving.meta);
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(
+        (run.kind, run.scope.as_str(), run.state, run.items_processed),
+        (JobKind::SearchRebuild, "", JobState::Succeeded, 2)
+    );
+}
+
+#[tokio::test]
+async fn test_search_rebuild_cancelled_reports_no_change() {
+    let (_dir, state) = state_with_indexer(Arc::new(CountedDocs(2)));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let report = SearchRebuildJob::new(NonZeroUsize::new(1).unwrap())
+        .run(&context(state.serving.clone(), cancel))
+        .await
+        .unwrap();
+
+    assert_eq!(report, JobReport::default());
+}
+
+#[tokio::test]
+async fn test_search_rebuild_surfaces_an_indexer_failure() {
+    let (_dir, state) = state_with_indexer(Arc::new(FailingDocs));
+
+    let failure = SearchRebuildJob::new(NonZeroUsize::new(1).unwrap())
+        .run(&context(state.serving.clone(), CancellationToken::new()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(failure.code(), "search_rebuild");
 }

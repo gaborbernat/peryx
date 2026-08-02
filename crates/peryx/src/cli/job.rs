@@ -31,6 +31,14 @@ pub enum JobCommand {
         #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_CATALOG_TIMEOUT.as_secs())]
         timeout_secs: u64,
     },
+    /// Rebuild the derived package search index from authoritative metadata.
+    Reindex {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        /// Documents committed per chunk while rebuilding.
+        #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_SEARCH_REBUILD_CHUNK)]
+        chunk_size: usize,
+    },
 }
 
 impl JobCommand {
@@ -39,7 +47,7 @@ impl JobCommand {
         match self {
             Self::List(args) => &args.runtime,
             Self::Show(args) => &args.runtime,
-            Self::Run { runtime, .. } => runtime,
+            Self::Run { runtime, .. } | Self::Reindex { runtime, .. } => runtime,
         }
     }
 }

@@ -342,3 +342,56 @@ fn test_search_public_filter_labels_and_scan_errors() {
         SearchError::Meta(_)
     ));
 }
+
+/// A quarantining member of a virtual index must withhold the merged files from search whatever its listed
+/// order, so a benign sibling never leaks a project a quarantine should hide. Reverting the merge in
+/// `virtual_detail` back to a benign-wins rule makes the `[0, 1]` case index the served files and fail.
+async fn assert_search_quarantine_dominates(layers: Vec<usize>) {
+    let (_dir, state) = two_cached_virtual_state(layers);
+    put_cached_package(
+        &state,
+        "archived/peryxpkg",
+        "archived",
+        "peryxpkg",
+        &ProjectDetail {
+            meta: meta_status("archived", "sunset"),
+            name: "peryxpkg".to_owned(),
+            versions: vec!["1.0".to_owned()],
+            files: vec![file_with_hash("peryxpkg-1.0-py3-none-any.whl", &"a".repeat(64), None)],
+        },
+    );
+    put_cached_package(
+        &state,
+        "quarantined/peryxpkg",
+        "quarantined",
+        "peryxpkg",
+        &ProjectDetail {
+            meta: meta_status("quarantined", "waiting period"),
+            name: "peryxpkg".to_owned(),
+            versions: vec!["1.0".to_owned()],
+            files: vec![file_with_hash("peryxpkg-1.0-py3-none-any.whl", &"b".repeat(64), None)],
+        },
+    );
+
+    let (status, _headers, body) = get(
+        &state,
+        "/root/pypi/+search?q=peryxpkg&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"],
+        0,
+        "a quarantining member must withhold the virtual index's files whatever its order: {body}"
+    );
+}
+#[tokio::test]
+async fn test_search_virtual_quarantine_dominates_when_listed_after_a_benign_member() {
+    assert_search_quarantine_dominates(vec![0, 1]).await;
+}
+#[tokio::test]
+async fn test_search_virtual_quarantine_dominates_when_listed_before_a_benign_member() {
+    assert_search_quarantine_dominates(vec![1, 0]).await;
+}

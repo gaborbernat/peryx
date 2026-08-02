@@ -204,14 +204,18 @@ fn virtual_detail(
     let mut meta = Meta::default();
     for position in peryx_index::shadow_order(ctx.indexes, layers) {
         let detail = cached_detail(ctx, ctx.index_at(position), normalized, serve_route)?;
+        // A quarantining member has already withheld its own files by here, so its status must merge before
+        // the empty-file skip below; otherwise a benign member's files outlive the quarantine and get served.
+        // Mirror the most-restrictive rule the served page applies (see cache::resolve): the virtual index
+        // inherits its highest-severity member, so any quarantining member withholds files whatever its order.
+        if detail.meta.status().severity() > meta.status().severity() {
+            meta.project_status = detail.meta.project_status;
+            meta.project_status_reason = detail.meta.project_status_reason;
+        }
         if detail.files.is_empty() {
             continue;
         }
         versions.extend(detail.versions);
-        if meta.project_status.is_none() && detail.meta.project_status.is_some() {
-            meta.project_status = detail.meta.project_status;
-            meta.project_status_reason = detail.meta.project_status_reason;
-        }
         for file in detail.files {
             if seen.insert(file.filename.clone()) {
                 files.push(file);

@@ -1,5 +1,6 @@
 //! Overlay merging and raw-table classification: how a [`PartialConfig`] resolves onto defaults.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,17 +19,18 @@ use std::collections::HashSet;
 
 use super::ConfigError;
 use super::model::{
-    AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode,
-    CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, DcMember, DcMembership,
-    DcRole, IndexConfig, IndexKind, JobsConfig, LdapBindConfig, LdapProviderConfig, LogConfig, OidcProviderConfig,
-    ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig,
-    UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
+    AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityListenerConfig, AvailabilityListenerTls, AvailabilityMode,
+    BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE,
+    DEFAULT_REPLICA_POLL_INTERVAL_SECS, DcMember, DcMembership, DcRole, IndexConfig, IndexKind, JobsConfig,
+    LdapBindConfig, LdapProviderConfig, LogConfig, OidcProviderConfig, ReplicationConfig, S3StorageConfig,
+    SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig,
+    UpstreamTlsConfig, WebhookConfig, WebhookSecret,
 };
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawAvailability, RawBlobStorage, RawCredentialExec, RawDcMember, RawExternalGroupGrant, RawIndex,
-    RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawReplication, RawScheduledJob, RawTls, RawToken,
-    RawUpstream, RawWebhook,
+    RawAcme, RawAvailability, RawAvailabilityListener, RawBlobStorage, RawCredentialExec, RawDcMember,
+    RawExternalGroupGrant, RawIndex, RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawReplication,
+    RawScheduledJob, RawTls, RawToken, RawUpstream, RawWebhook,
 };
 
 impl Config {
@@ -83,8 +85,10 @@ impl Config {
         if let Some(mut availability) = partial.availability {
             let group = availability.group.take();
             let members = availability.members.take();
+            let listener = availability.listener.take();
             self.availability = classify_availability(availability)?;
             self.dc_membership = classify_membership(self.availability.mode(), group, members)?;
+            self.availability_listener = classify_listener(self.availability.mode(), listener)?;
         }
         if let Some(blob) = partial.blob {
             self.blob = classify_blob(blob)?;
@@ -377,6 +381,56 @@ fn classify_membership(
         members: resolve_members(&group, members)?,
         group,
     }))
+}
+
+/// The loopback socket the availability listener binds when `[availability.listener]` names none, so the
+/// control plane defaults to a private bind an operator must widen deliberately.
+const DEFAULT_AVAILABILITY_LISTENER_BIND: &str = "127.0.0.1:4460";
+
+/// Resolve the `[availability.listener]` table into a validated listener, or `None` when no table is
+/// configured. Single-node `none` opens no listener, so pairing it with a table is a configuration
+/// error; a non-loopback bind must terminate TLS or opt in to plaintext so the control plane is never
+/// exposed to the network unencrypted by omission.
+fn classify_listener(
+    mode: AvailabilityMode,
+    raw: Option<RawAvailabilityListener>,
+) -> Result<Option<AvailabilityListenerConfig>, ConfigError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if mode == AvailabilityMode::None {
+        return Err(ConfigError::Availability {
+            reason: "`none` mode opens no availability listener; select `dc` or `ha` first",
+        });
+    }
+    let bind: SocketAddr = raw
+        .bind
+        .as_deref()
+        .unwrap_or(DEFAULT_AVAILABILITY_LISTENER_BIND)
+        .parse()
+        .map_err(|_| ConfigError::Availability {
+            reason: "`[availability.listener] bind` must be a `host:port` socket address",
+        })?;
+    let tls = raw.tls.map(classify_listener_tls).transpose()?;
+    let allow_remote_plaintext = raw.allow_remote_plaintext.unwrap_or(false);
+    if tls.is_none() && !allow_remote_plaintext && !bind.ip().is_loopback() {
+        return Err(ConfigError::Availability {
+            reason: "a non-loopback availability listener needs `[availability.listener.tls]` or \
+                     `allow-remote-plaintext = true`",
+        });
+    }
+    Ok(Some(AvailabilityListenerConfig {
+        bind,
+        tls,
+        allow_remote_plaintext,
+    }))
+}
+
+fn classify_listener_tls(raw: RawTls) -> Result<AvailabilityListenerTls, ConfigError> {
+    match (raw.cert, raw.key) {
+        (Some(cert), Some(key)) => Ok(AvailabilityListenerTls { cert, key }),
+        _ => Err(ConfigError::Availability {
+            reason: "`[availability.listener.tls]` needs both `cert` and `key`",
+        }),
+    }
 }
 
 /// Validate a group's members: non-blank identities, a distinct group identity, unique node,

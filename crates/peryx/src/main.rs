@@ -125,6 +125,13 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
                 tokio_util::sync::CancellationToken::new(),
             ));
         }
+        if let (Some(listener_config), Some(posture)) = (
+            config.availability_listener.clone(),
+            peryx::availability::AvailabilityPosture::from_config(&config.availability),
+        ) {
+            let listener_router = peryx::availability::router(state.clone(), posture);
+            tokio::spawn(serve_availability_listener(listener_config, listener_router));
+        }
         let router = replication.mount(peryx::server::router_for(state));
         let _replication = replication.start();
         let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port)
@@ -164,6 +171,33 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
         }
         anyhow::Ok(())
     })
+}
+
+/// Serve the private availability control listener on its own socket, off the main serve path so a
+/// `dc` or `ha` node exposes administration without touching the public package routes. Bind or TLS
+/// failure logs and stops this listener alone, leaving package serving up.
+async fn serve_availability_listener(config: config::AvailabilityListenerConfig, router: axum::Router) {
+    let bind = config.bind;
+    let make_service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let result = match config.tls {
+        None => match tokio::net::TcpListener::bind(bind).await {
+            Ok(listener) => {
+                tracing::info!(%bind, scheme = "http", "peryx availability listener");
+                axum::serve(listener, make_service).await
+            }
+            Err(error) => Err(error),
+        },
+        Some(tls) => match axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key).await {
+            Ok(rustls) => {
+                tracing::info!(%bind, scheme = "https", "peryx availability listener");
+                axum_server::bind_rustls(bind, rustls).serve(make_service).await
+            }
+            Err(error) => Err(error),
+        },
+    };
+    if let Err(error) = result {
+        tracing::error!(%bind, %error, "availability listener stopped");
+    }
 }
 
 /// Prints the startup banner once, on a TTY only, so piped and CI output stays clean. Two builds,

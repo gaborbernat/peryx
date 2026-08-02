@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod app;
+pub mod availability;
 pub mod cli;
 pub mod config;
 pub mod logging;

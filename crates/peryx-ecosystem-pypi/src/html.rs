@@ -254,21 +254,57 @@ fn parse_gpg_sig(tag: &HTMLTag) -> Option<bool> {
     }
 }
 
-/// Decode the five entities a Simple page may carry, allocating only when one is present.
+/// Decode the HTML character references a Simple page may carry, allocating only when one is present.
 ///
-/// An entity begins with `&`, and almost no attribute or anchor text on a Simple page contains one.
-/// Five chained `replace` calls walked and reallocated the string five times to discover that.
+/// A reference begins with `&`, and almost no attribute or anchor text on a Simple page contains one,
+/// so the common case borrows. Named references cover the five HTML predefined entities plus `&apos;`;
+/// numeric references (`&#46;`, `&#x2e;`) decode to their Unicode scalar. Anything unterminated,
+/// unknown, or resolving to a control character or non-scalar value is left as written, so malformed
+/// upstream markup round-trips instead of turning into a stray character.
 fn decode_entities(text: &str) -> Cow<'_, str> {
     if !text.contains('&') {
         return Cow::Borrowed(text);
     }
-    Cow::Owned(
-        text.replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&amp;", "&"),
-    )
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        let reference = &rest[start..];
+        if let Some((decoded, consumed)) = decode_reference(reference) {
+            out.push(decoded);
+            rest = &reference[consumed..];
+        } else {
+            out.push('&');
+            rest = &reference[1..];
+        }
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// Decode one HTML character reference at the start of `text` (which begins with `&`), returning the
+/// decoded character and the byte length it spans, or `None` when the reference is not well-formed.
+fn decode_reference(text: &str) -> Option<(char, usize)> {
+    let end = text.find(';')?;
+    let body = &text[1..end];
+    let decoded = match body.strip_prefix('#') {
+        Some(digits) => {
+            let code = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => digits.parse().ok()?,
+            };
+            char::from_u32(code).filter(|character| !character.is_control())?
+        }
+        None => match body {
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            "amp" => '&',
+            _ => return None,
+        },
+    };
+    Some((decoded, end + 1))
 }
 
 fn percent_decode(text: &str) -> String {

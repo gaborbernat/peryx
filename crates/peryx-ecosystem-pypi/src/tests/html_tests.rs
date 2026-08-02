@@ -225,3 +225,56 @@ fn test_rejects_unsupported_major_api_version() {
     let err = parse_detail_html("x", html, &base()).unwrap_err();
     assert!(matches!(err, SimpleError::UnsupportedApiVersion(version) if version == "2.0"));
 }
+
+#[test]
+fn test_parse_html_decodes_named_and_numeric_character_references() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="a/">A&#46;B</a>
+        <a href="b/">A&#x2e;B</a>
+        <a href="c/">A&#X2E;B</a>
+        <a href="d/">a&amp;b</a>
+        <a href="e/">a&apos;b</a>
+        <a href="f/">a&lt;b&gt;c</a>
+        <a href="g/">a&quot;b</a>
+        <a href="h/">a&#39;b</a>
+        </body></html>"#;
+    let parsed = parse_index_html(html, &Url::parse("https://pypi.org/simple/").unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["A.B", "A.B", "A.B", "a&b", "a'b", "a<b>c", "a\"b", "a'b"],
+    );
+}
+
+#[test]
+fn test_parse_html_leaves_malformed_character_references_literal() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="a/">z&#0;z</a>
+        <a href="b/">z&#xD800;z</a>
+        <a href="c/">z&#4294967296;z</a>
+        <a href="d/">z&#zz;z</a>
+        <a href="e/">z&#xzz;z</a>
+        <a href="f/">z&bogus;z</a>
+        <a href="g/">z&amp z</a>
+        </body></html>"#;
+    let parsed = parse_index_html(html, &Url::parse("https://pypi.org/simple/").unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "z&#0;z",
+            "z&#xD800;z",
+            "z&#4294967296;z",
+            "z&#zz;z",
+            "z&#xzz;z",
+            "z&bogus;z",
+            "z&amp z",
+        ],
+    );
+}

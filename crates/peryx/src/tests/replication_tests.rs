@@ -19,8 +19,8 @@ use rstest::rstest;
 use tower::ServiceExt as _;
 
 use crate::config::{
-    AvailabilityConfig, Config, IndexKind, ReplicationConfig, SecretSource, TokenConfig, UpstreamConfig,
-    UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
+    AvailabilityConfig, Config, DcMember, DcMembership, DcRole, IndexKind, ReplicationConfig, SecretSource,
+    TokenConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
 };
 use crate::replication::ReplicationRuntime;
 use crate::server::{build_router, build_state, router_for};
@@ -83,6 +83,53 @@ fn primary_config() -> ReplicationConfig {
         source: "primary-a".to_owned(),
         token: SecretSource::Literal(TOKEN.to_owned()),
     }
+}
+
+#[tokio::test]
+async fn test_build_state_projects_the_configured_dc_topology() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        writer_identity: Some(WRITER_IDENTITY.to_owned()),
+        availability: AvailabilityConfig::Dc(primary_config()),
+        dc_membership: Some(DcMembership {
+            group: "east".to_owned(),
+            members: vec![
+                DcMember {
+                    node: WRITER_IDENTITY.to_owned(),
+                    dc: "east-1".to_owned(),
+                    address: "10.0.0.1:8080".to_owned(),
+                    role: DcRole::Writer,
+                },
+                DcMember {
+                    node: "replica-b".to_owned(),
+                    dc: "east-2".to_owned(),
+                    address: "10.0.0.2:8080".to_owned(),
+                    role: DcRole::Replica,
+                },
+            ],
+        }),
+        ..Config::default()
+    };
+
+    let topology = build_state(&config).unwrap().availability_topology().clone();
+
+    assert_eq!(topology.mode, peryx_core::TopologyMode::Dc);
+    assert_eq!(topology.group.as_deref(), Some("east"));
+    assert_eq!(topology.local_node.as_deref(), Some(WRITER_IDENTITY));
+    let roles = topology
+        .members
+        .iter()
+        .map(|member| (member.node.as_str(), member.role))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roles,
+        vec![
+            (WRITER_IDENTITY, peryx_core::NodeRole::Writer),
+            ("replica-b", peryx_core::NodeRole::Replica),
+        ],
+    );
+    assert_eq!(topology.members[0].address, "10.0.0.1:8080");
 }
 
 fn primary_stores() -> (tempfile::TempDir, MetaStore, BlobStore) {

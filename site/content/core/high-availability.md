@@ -131,6 +131,31 @@ reaches zero points at a stalled poll, which readiness reports as `sync_error` o
 `incompatible_schema` reason means the primary and replica were built against different replication protocol versions;
 upgrade the primary before routing reads to that replica.
 
+## Availability topology snapshot
+
+An operator surface needs one picture of the whole group, not a probe against each node. `GET /+availability/topology`
+returns that: one immutable snapshot of the configured availability topology, taken at a single instant and filtered to
+the caller's class, so a page renders it without traversing live membership and storage state on every poll. Every node
+serves it, including a `none` node, which reports its own single-node view.
+
+The snapshot names the `mode`, the `group`, and a `nodes` roster drawn from the
+[`[[availability.member]]`](@/core/configuration.md#availability) configuration. Each roster entry carries its `node`
+identity, `dc`, `role`, and a `local` flag marking the node that produced the snapshot. A `local` block reports this
+node's own live self-observation, which the process always knows: its `role`, its `liveness`, and the metadata
+`frontier` it has committed. `captured_at` dates the snapshot in Unix seconds, and `node_count` reports the full roster
+size when the `nodes` list is capped, so a stale or truncated render is visible rather than passing for a healthy,
+complete one.
+
+A peer's `liveness` is always `unknown`, with no frontier, because a node observes only itself until a consensus layer
+reports its peers; an operator reads a peer's health from that peer's own probes, and a snapshot never lets stale peer
+data read as `live`. The local node reports `live` when its metadata and blob stores can serve and `unready` otherwise.
+
+Fields are filtered to the caller's class, like `/+status`. Any caller reads `mode`, `group`, `captured_at`,
+`node_count`, and each node's `node`, `dc`, `role`, and `local` flag. `operator:read` adds the `liveness` of every node
+and the local `frontier`. `administration:read` adds each node's advertised `address`. An anonymous or repository-only
+caller never reads a liveness, frontier, or peer address. The response sends `Cache-Control: no-store`, and the node
+list is capped so one request cannot return an unbounded roster.
+
 ## Manual promotion
 
 1. Stop or fence the old writer so it cannot accept another mutation.

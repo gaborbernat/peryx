@@ -29,6 +29,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/+health", get(handlers::health))
         .route("/+ready", get(handlers::readiness))
         .route("/+acl", get(handlers::acl))
+        .route("/+availability/topology", get(handlers::availability_topology))
         .route("/+stats", get(handlers::stats))
         .route("/+analytics/top-packages", get(handlers::analytics_top))
         .route("/+analytics/unused", get(handlers::analytics_unused))

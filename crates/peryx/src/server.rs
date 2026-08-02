@@ -26,9 +26,9 @@ use peryx_upstream::{
 };
 
 use crate::config::{
-    AuthConfig, BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, IndexConfig,
-    IndexKind as ConfigKind, LdapBindConfig, LdapProviderConfig, OidcProviderConfig, ReplicationConfig, SecretSource,
-    UpstreamTlsConfig, WebhookSecret,
+    AuthConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, DcRole,
+    IndexConfig, IndexKind as ConfigKind, LdapBindConfig, LdapProviderConfig, OidcProviderConfig, ReplicationConfig,
+    SecretSource, UpstreamTlsConfig, WebhookSecret,
 };
 
 /// Leave S3 credential resolution with the SDK provider chain.
@@ -165,6 +165,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let oidc_logins = oidc_logins(&config.auth.oidc_providers, &state.meta)?;
     state.set_oidc_logins(oidc_logins);
     state.read_only = read_only;
+    state.set_availability_topology(availability_topology(config, read_only));
     if let Some(source) = &config.auth.signing_key {
         let key = source.read().context("read the token realm signing key")?;
         if key.trim().is_empty() {
@@ -182,6 +183,44 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         peryx_events::webhook::kick(state.serving.clone());
     }
     Ok(state)
+}
+
+/// Project the resolved configuration into the fixed availability topology the snapshot endpoint serves.
+///
+/// A writer knows its own roster identity, so it marks itself in the roster; a replica does not carry its
+/// identity, so it leaves the local mark unset and reports its own live status through the snapshot's
+/// dedicated local node instead.
+fn availability_topology(config: &Config, read_only: bool) -> peryx_core::TopologyConfig {
+    let mode = match config.availability.mode() {
+        AvailabilityMode::None => peryx_core::TopologyMode::None,
+        AvailabilityMode::Dc => peryx_core::TopologyMode::Dc,
+        AvailabilityMode::Ha => peryx_core::TopologyMode::Ha,
+    };
+    let (group, members) = config.dc_membership.as_ref().map_or_else(
+        || (None, Vec::new()),
+        |membership| {
+            let members = membership
+                .members
+                .iter()
+                .map(|member| peryx_core::TopologyMember {
+                    node: member.node.clone(),
+                    dc: member.dc.clone(),
+                    address: member.address.clone(),
+                    role: match member.role {
+                        DcRole::Writer => peryx_core::NodeRole::Writer,
+                        DcRole::Replica => peryx_core::NodeRole::Replica,
+                    },
+                })
+                .collect();
+            (Some(membership.group.clone()), members)
+        },
+    );
+    peryx_core::TopologyConfig {
+        mode,
+        group,
+        members,
+        local_node: (!read_only).then(|| config.writer_identity.clone()).flatten(),
+    }
 }
 
 /// Close attempts interrupted by a prior process before this writer serves management traffic.

@@ -162,6 +162,12 @@ impl AppState {
         self.serving_mut().trusted_publishing = Some(Arc::new(runtime));
     }
 
+    /// Install the fixed availability topology the binary resolved from configuration, so the topology
+    /// snapshot endpoint reports the group without reading configuration at request time.
+    pub fn set_availability_topology(&mut self, topology: peryx_core::TopologyConfig) {
+        self.serving_mut().availability_topology = topology;
+    }
+
     /// Install named LDAP login services after their secrets and trust files resolve at startup.
     pub fn set_ldap_logins(
         &mut self,

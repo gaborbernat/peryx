@@ -98,6 +98,12 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItemBuilder::new().operation(HttpMethod::Get, acl()).build(),
         )
         .path(
+            "/+availability/topology",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, availability_topology())
+                .build(),
+        )
+        .path(
             "/+api",
             PathItemBuilder::new().operation(HttpMethod::Get, discovery()).build(),
         )
@@ -333,6 +339,46 @@ fn status() -> OperationBuilder {
                     })))
                     .build(),
             ),
+        )
+}
+
+fn availability_topology() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Availability topology snapshot"))
+        .description(Some(
+            "One immutable picture of the availability group, taken at a single instant and filtered to \
+             the caller's class, so an operator surface renders it without traversing live membership and \
+             storage state. The mode, group, node identities, datacenters, and roles are public; each \
+             node's liveness and this node's committed frontier need operator authority; the advertised \
+             peer addresses need administrator authority. A peer's liveness is `unknown` until a \
+             consensus layer observes it, so stale peer data never reads as healthy. `captured_at` dates \
+             the snapshot, `node_count` reports the full roster size when the node list is capped, and \
+             the response is `no-store`. The example shows the administrator view.",
+        ))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "200",
+            ResponseBuilder::new()
+                .description("The availability topology snapshot")
+                .content(
+                    "application/json",
+                    ContentBuilder::new()
+                        .example(Some(json!({
+                            "mode": "dc",
+                            "group": "east",
+                            "captured_at": 1_800_000_000,
+                            "node_count": 2,
+                            "local": {"role": "writer", "liveness": "live", "frontier": 42},
+                            "nodes": [
+                                {"node": "writer-a", "dc": "east-1", "role": "writer", "local": true,
+                                 "liveness": "live", "frontier": 42, "address": "10.0.0.1:8080"},
+                                {"node": "replica-b", "dc": "east-2", "role": "replica", "local": false,
+                                 "liveness": "unknown", "address": "10.0.0.2:8080"}
+                            ]
+                        })))
+                        .build(),
+                ),
         )
 }
 

@@ -700,6 +700,59 @@
         ]
       }
     },
+    "/+availability/topology": {
+      "get": {
+        "description": "One immutable picture of the availability group, taken at a single instant and filtered to the caller's class, so an operator surface renders it without traversing live membership and storage state. The mode, group, node identities, datacenters, and roles are public; each node's liveness and this node's committed frontier need operator authority; the advertised peer addresses need administrator authority. A peer's liveness is `unknown` until a consensus layer observes it, so stale peer data never reads as healthy. `captured_at` dates the snapshot, `node_count` reports the full roster size when the node list is capped, and the response is `no-store`. The example shows the administrator view.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "captured_at": 1800000000,
+                  "group": "east",
+                  "local": {
+                    "frontier": 42,
+                    "liveness": "live",
+                    "role": "writer"
+                  },
+                  "mode": "dc",
+                  "node_count": 2,
+                  "nodes": [
+                    {
+                      "address": "10.0.0.1:8080",
+                      "dc": "east-1",
+                      "frontier": 42,
+                      "liveness": "live",
+                      "local": true,
+                      "node": "writer-a",
+                      "role": "writer"
+                    },
+                    {
+                      "address": "10.0.0.2:8080",
+                      "dc": "east-2",
+                      "liveness": "unknown",
+                      "local": false,
+                      "node": "replica-b",
+                      "role": "replica"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The availability topology snapshot"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Availability topology snapshot",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+grants": {
       "get": {
         "description": "Returns a bounded page of role grants in stable identifier order. A `user` filter reads one user's grants and a `resource` filter one reach's; both need administration authority over what they select, so a repository administrator may list its own repository but not the whole server.",

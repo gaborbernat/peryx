@@ -236,6 +236,33 @@ async fn test_policy_decisions_filters_authorized_repository_history() {
     );
 }
 
+#[tokio::test]
+async fn test_policy_decisions_scopes_to_one_project() {
+    let (_dir, meta, app) = app().await;
+    meta.record_policy_decision(decision("alpha", PolicyDecisionState::Deny, 10))
+        .unwrap();
+    meta.record_policy_decision(decision("beta", PolicyDecisionState::Deny, 20))
+        .unwrap();
+
+    let (status, _headers, document) = get(
+        &app,
+        "/+policy/decisions?repository=private&project=alpha",
+        Some(("__token__", ADMIN_SECRET)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        document["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|decision| decision["project"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["alpha"]
+    );
+}
+
 #[rstest]
 #[case::administrator("Alice", "/+policy/decisions", &[("other", "beta"), ("private", "alpha")])]
 #[case::administrator_repository("Alice", "/+policy/decisions?repository=private", &[("private", "alpha")])]
@@ -377,6 +404,7 @@ async fn test_policy_decisions_rejects_invalid_pagination(#[case] uri: &str, #[c
 
 #[rstest]
 #[case::repository("repository")]
+#[case::project("project")]
 #[case::rule("rule")]
 #[case::source("source")]
 #[tokio::test]

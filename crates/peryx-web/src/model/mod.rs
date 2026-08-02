@@ -7,6 +7,7 @@ mod analytics;
 mod policy_decision;
 mod project;
 mod search;
+mod shadow;
 mod snapshot;
 mod stats;
 mod trash;
@@ -23,6 +24,7 @@ pub use project::{
     provenance_source_label, provenance_validation_label, subject_match_label,
 };
 pub use search::{UiSearchPage, UiSearchResult, source_label};
+pub use shadow::{ShadowInspectionFilters, UiShadowCandidate, UiShadowDecision, UiShadowPage};
 pub use snapshot::{UiEcosystemSummary, UiHosted, UiIndex, UiMetricFamily, UiRecentUpload, UiSnapshot, UiUpstream};
 pub use stats::{UiCounters, UiStats, stats_index, stats_project, stats_routes};
 pub use trash::{TrashFilters, UiTrashPage, UiTrashRecord};

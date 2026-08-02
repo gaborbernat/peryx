@@ -14,6 +14,8 @@ mod manifest;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 mod policy_decisions;
 mod search;
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+mod shadow;
 mod simple;
 mod stats;
 mod status;
@@ -29,6 +31,8 @@ pub use manifest::{load_layer_chunk, load_layer_members, load_manifest};
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 pub use policy_decisions::load_policy_decisions;
 pub use search::load_search;
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+pub use shadow::load_shadow_candidates;
 pub use simple::{load_project_view, load_projects};
 pub use stats::load_stats;
 pub use status::{load_admin_snapshot, load_snapshot};

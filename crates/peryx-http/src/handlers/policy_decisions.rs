@@ -17,6 +17,7 @@ use crate::response_security::{
 #[derive(Debug, serde::Deserialize)]
 pub struct PolicyDecisionsQuery {
     repository: Option<String>,
+    project: Option<String>,
     state: Option<PolicyDecisionState>,
     rule: Option<String>,
     source: Option<String>,
@@ -43,6 +44,7 @@ async fn policy_decisions_response(state: &AppState, headers: &HeaderMap, uri: &
     };
     let mut query = PolicyDecisionQuery {
         repository: query.repository,
+        project: query.project,
         state: query.state,
         rule: query.rule,
         source: query.source,

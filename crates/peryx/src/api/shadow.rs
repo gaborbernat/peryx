@@ -31,7 +31,14 @@ fn shadow_example() -> serde_json::Value {
                 "filename": "example-1.0-py3-none-any.whl",
                 "digest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
                 "selected": false,
-                "reason": "precedence"
+                "reason": "precedence",
+                "decision": {
+                    "state": "deny",
+                    "rule": "blocked-project",
+                    "reason": "project is blocked by policy",
+                    "evaluated_at_unix": 1_700_000_000,
+                    "fresh": true
+                }
             }
         ],
         "next_cursor": null
@@ -87,11 +94,15 @@ fn shadow_candidates() -> OperationBuilder {
                  distribution filename and every candidate a member shadowed, with its configured member, \
                  source class, digest, and the reason it lost — `precedence` when a higher-precedence \
                  member already supplied the filename, or `fallback` when the repository's fallback policy \
-                 excluded a cached member. A caller who can read the repository may inspect it; the server \
-                 operator role, which carries no repository access, cannot. A repository's legacy upload \
-                 token retains access under the `__token__` username. The query reads stored records only \
-                 and never changes member order, installer responses, or policy evaluation, so shadowed \
-                 candidates stay absent from HTML and JSON installer selection.",
+                 excluded a cached member. Each candidate also carries the recorded policy decision that \
+                 governs its filename when one exists — `allow`, `deny`, or `wait`, with the matched rule, \
+                 a reason already stripped of any upstream URL or credential, and a retry time for a wait — \
+                 so an operator sees blocked and held candidates beside the shadowed ones. A caller who can \
+                 read the repository may inspect it; the server operator role, which carries no repository \
+                 access, cannot. A repository's legacy upload token retains access under the `__token__` \
+                 username. The query reads stored records only and never changes member order, installer \
+                 responses, or policy evaluation, so shadowed candidates stay absent from HTML and JSON \
+                 installer selection.",
             ))
             .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
             .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))

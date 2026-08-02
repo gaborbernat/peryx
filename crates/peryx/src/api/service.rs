@@ -637,6 +637,28 @@ fn analytics_timeline() -> OperationBuilder {
     )
 }
 
+fn policy_decisions_example() -> serde_json::Value {
+    json!({
+        "decisions": [{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "repository": "private",
+            "project": "example",
+            "version": "1.0",
+            "filename": "example-1.0-py3-none-any.whl",
+            "source": "pypi",
+            "action": "serve",
+            "state": "deny",
+            "rule": "blocked-project",
+            "reason": "project is blocked",
+            "evaluated_at_unix": 1_800_000_000,
+            "input_generation": {"repository": 42, "catalog": 7, "policy": 3},
+            "next_eligible_at_unix": null,
+            "fresh": true
+        }],
+        "next_cursor": "pd_000000000000002a"
+    })
+}
+
 fn policy_decisions() -> OperationBuilder {
     let mut operation = OperationBuilder::new()
         .tag("operations")
@@ -652,28 +674,7 @@ fn policy_decisions() -> OperationBuilder {
         .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
         .response(
             "200",
-            api_json_response(
-                "The matching decisions, newest first",
-                json!({
-                    "decisions": [{
-                        "id": "550e8400-e29b-41d4-a716-446655440000",
-                        "repository": "private",
-                        "project": "example",
-                        "version": "1.0",
-                        "filename": "example-1.0-py3-none-any.whl",
-                        "source": "pypi",
-                        "action": "serve",
-                        "state": "deny",
-                        "rule": "blocked-project",
-                        "reason": "project is blocked",
-                        "evaluated_at_unix": 1_800_000_000,
-                        "input_generation": {"repository": 42, "catalog": 7, "policy": 3},
-                        "next_eligible_at_unix": null,
-                        "fresh": true
-                    }],
-                    "next_cursor": "pd_000000000000002a"
-                }),
-            ),
+            api_json_response("The matching decisions, newest first", policy_decisions_example()),
         )
         .response(
             "400",
@@ -713,6 +714,11 @@ fn policy_decisions() -> OperationBuilder {
             "repository",
             "Repository route to inspect, at most 512 bytes",
             json!("private"),
+        ),
+        (
+            "project",
+            "Filter to one project's decisions, at most 512 bytes",
+            json!("example"),
         ),
         ("state", "Filter by `allow`, `deny`, or `wait`", json!("deny")),
         (

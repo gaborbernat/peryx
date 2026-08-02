@@ -228,6 +228,39 @@ fn test_policy_decision_query_filters_and_paginates() {
 }
 
 #[test]
+fn test_policy_decision_query_scopes_to_one_project() {
+    let (_dir, meta) = store();
+    for (project, state, evaluated_at_unix) in [
+        ("alpha", PolicyDecisionState::Deny, 10),
+        ("beta", PolicyDecisionState::Deny, 20),
+        ("alpha", PolicyDecisionState::Allow, 30),
+    ] {
+        meta.record_policy_decision(decision(project, state, evaluated_at_unix))
+            .unwrap();
+    }
+
+    let scoped = meta
+        .query_policy_decisions(&PolicyDecisionQuery {
+            project: Some("alpha".to_owned()),
+            limit: 10,
+            ..PolicyDecisionQuery::default()
+        })
+        .unwrap();
+
+    assert_eq!(
+        scoped
+            .decisions
+            .iter()
+            .map(|item| (item.record.project.as_str(), item.record.state))
+            .collect::<Vec<_>>(),
+        vec![
+            ("alpha", PolicyDecisionState::Allow),
+            ("alpha", PolicyDecisionState::Deny)
+        ]
+    );
+}
+
+#[test]
 fn test_policy_decision_rejects_zero_limit() {
     let (_dir, meta) = store();
     let query = PolicyDecisionQuery {
@@ -268,6 +301,7 @@ fn test_policy_decision_query_bounds_text_filters() {
     let oversized = "x".repeat(513);
     let mut candidate = decision("bounded", PolicyDecisionState::Allow, 10);
     candidate.repository = &bounded;
+    candidate.project = &bounded;
     candidate.rule = Some(&bounded);
     candidate.source = Some(&bounded);
     let expected = meta.record_policy_decision(candidate).unwrap();
@@ -275,6 +309,10 @@ fn test_policy_decision_query_bounds_text_filters() {
     for query in [
         PolicyDecisionQuery {
             repository: Some(bounded.clone()),
+            ..PolicyDecisionQuery::default()
+        },
+        PolicyDecisionQuery {
+            project: Some(bounded.clone()),
             ..PolicyDecisionQuery::default()
         },
         PolicyDecisionQuery {
@@ -298,6 +336,13 @@ fn test_policy_decision_query_bounds_text_filters() {
             "repository",
             PolicyDecisionQuery {
                 repository: Some(oversized.clone()),
+                ..PolicyDecisionQuery::default()
+            },
+        ),
+        (
+            "project",
+            PolicyDecisionQuery {
+                project: Some(oversized.clone()),
                 ..PolicyDecisionQuery::default()
             },
         ),

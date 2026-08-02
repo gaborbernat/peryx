@@ -549,6 +549,201 @@ test("policy decision view reports a network failure", async ({ page }) => {
   await expect(page.getByRole("alert")).toHaveText("The policy decision service could not be reached.");
 });
 
+function shadowCandidate(overrides = {}) {
+  return {
+    member: "pypi",
+    source: "cached",
+    filename: "example-1.0-py3-none-any.whl",
+    digest: "sha256:abcd",
+    selected: false,
+    reason: "precedence",
+    ...overrides,
+  };
+}
+
+test("shadow inspection labels outcome, source, and decision without colour alone", async ({ page }) => {
+  await page.route("**/+shadow/candidates?**", async (route) => {
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("repository")).toBe("root/pypi");
+    expect(url.searchParams.get("project")).toBe("veloxdemo");
+    expect(url.search).not.toContain("browser-admin-secret");
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        candidates: [
+          shadowCandidate({
+            member: "hosted",
+            source: "hosted",
+            selected: true,
+            reason: null,
+            decision: { state: "deny", rule: "blocked-project", reason: "project is blocked", evaluated_at_unix: 0, next_eligible_at_unix: null, fresh: true },
+          }),
+          shadowCandidate({
+            decision: { state: "wait", rule: "cooldown", reason: "rate limited", evaluated_at_unix: 0, next_eligible_at_unix: 60, fresh: true },
+          }),
+          shadowCandidate({ filename: "example-2.0-py3-none-any.whl", selected: true, reason: null }),
+        ],
+        next_cursor: null,
+      }),
+    });
+  });
+  await goto(page, "/admin/shadow");
+  await page.locator("#shadow-user").fill("administrator");
+  await page.locator("#shadow-password").fill("browser-admin-secret");
+  await page.locator("#shadow-repository").fill("root/pypi");
+  await page.locator("#shadow-project").fill("veloxdemo");
+  await page.locator(".policy-filters button[type='submit']").click();
+
+  const table = page.locator(".shadow-inspection-table");
+  await expect(table.getByRole("columnheader")).toHaveText([
+    "Outcome",
+    "Decision",
+    "Source",
+    "Member",
+    "File",
+    "Digest",
+    "Shadowed because",
+    "Rule",
+    "Reason",
+    "Next eligible (UTC)",
+  ]);
+  await expect(table).toContainText("Selected");
+  await expect(table).toContainText("Shadowed");
+  await expect(table).toContainText("Denied");
+  await expect(table).toContainText("Waiting");
+  await expect(table).toContainText("hosted upload");
+  await expect(table).toContainText("cached upstream");
+  await expect(table).toContainText("Higher-precedence member");
+  await expect(table).toContainText("1970-01-01T00:01:00Z");
+  const undecided = table.locator("tbody tr", { hasText: "example-2.0-py3-none-any.whl" });
+  await expect(undecided.locator("td").nth(1)).toHaveText("—");
+});
+
+test("shadow inspection escapes policy text and leaks no upstream url", async ({ page }) => {
+  const candidate = shadowCandidate({
+    reason: "fallback",
+    decision: {
+      state: "deny",
+      rule: '<img src="missing" onerror="window.shadowRuleExecuted=true">',
+      reason: "<script>window.shadowReasonExecuted=true</script>",
+      evaluated_at_unix: 0,
+      next_eligible_at_unix: null,
+      fresh: false,
+    },
+  });
+  await page.route("**/+shadow/candidates?**", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ candidates: [candidate], next_cursor: null }) }),
+  );
+  await goto(page, "/admin/shadow");
+  await page.locator("#shadow-user").fill("administrator");
+  await page.locator("#shadow-password").fill("browser-admin-secret");
+  await page.locator("#shadow-repository").fill("root/pypi");
+  await page.locator("#shadow-project").fill("veloxdemo");
+  await page.locator(".policy-filters button[type='submit']").click();
+
+  const row = page.locator(".shadow-inspection-table tbody tr");
+  await expect(row).toContainText("Stale Denied");
+  await expect(row.locator("td").nth(7)).toHaveText(candidate.decision.rule);
+  await expect(row.locator("td").nth(8)).toHaveText(candidate.decision.reason);
+  await expect(row.locator("img, script")).toHaveCount(0);
+  expect(await page.evaluate(() => [window.shadowRuleExecuted, window.shadowReasonExecuted])).toEqual([undefined, undefined]);
+  await expect(page.locator(".shadow-inspection-table")).not.toContainText("http");
+});
+
+test("shadow inspection distinguishes an empty result", async ({ page }) => {
+  await page.route("**/+shadow/candidates?**", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ candidates: [], next_cursor: null }) }),
+  );
+  await goto(page, "/admin/shadow");
+  await page.locator("#shadow-user").fill("administrator");
+  await page.locator("#shadow-password").fill("browser-admin-secret");
+  await page.locator("#shadow-repository").fill("root/pypi");
+  await page.locator("#shadow-project").fill("missing");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("status")).toHaveText("No candidates resolved for this repository and project.");
+});
+
+test("shadow inspection pages a large project from the keyboard on a narrow screen", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 820 });
+  let requests = 0;
+  await page.route("**/+shadow/candidates?**", async (route) => {
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("repository")).toBe("root/pypi");
+    expect(url.searchParams.get("project")).toBe("large-demo");
+    const cursor = url.searchParams.get("cursor");
+    requests += 1;
+    const candidates = Array.from({ length: 100 }, (_, index) =>
+      shadowCandidate({ filename: `large-${String(index).padStart(3, "0")}.whl`, selected: index === 0, reason: index === 0 ? null : "precedence" }),
+    );
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ candidates, next_cursor: cursor === null ? "page-2" : null }),
+    });
+  });
+  await goto(page, "/admin/shadow");
+  await page.locator("#shadow-user").fill("administrator");
+  await page.locator("#shadow-user").focus();
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#shadow-password")).toBeFocused();
+  await page.locator("#shadow-password").fill("browser-admin-secret");
+  await page.locator("#shadow-repository").fill("root/pypi");
+  await page.locator("#shadow-project").fill("large-demo");
+  await page.locator(".policy-filters button[type='submit']").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".shadow-inspection-table tbody tr")).toHaveCount(100);
+  await expect(page.locator(".shadow-inspection-page .table-scroll")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)).toBe(false);
+
+  await page.getByRole("button", { name: "Next" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+  await page.getByRole("button", { name: "Previous" }).focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".shadow-inspection-table tbody tr")).toHaveCount(100);
+  expect(requests).toBe(3);
+});
+
+test("shadow inspection enforces live administrator and repository-token boundaries", async ({ page }) => {
+  await goto(page, "/admin/shadow");
+
+  await page.locator("#shadow-user").fill("administrator");
+  await page.locator("#shadow-password").fill("browser-admin-secret");
+  await page.locator("#shadow-repository").fill("root/pypi");
+  await page.locator("#shadow-project").fill("veloxdemo");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.locator(".policy-results")).not.toContainText("Enter credentials");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  await page.locator("#shadow-user").fill("__token__");
+  await page.locator("#shadow-password").fill("playwright-reader");
+  await page.locator("#shadow-repository").fill("internal");
+  await page.locator("#shadow-project").fill("veloxdemo");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("alert")).toHaveText("This repository token cannot inspect shadowed candidates.");
+
+  await page.locator("#shadow-user").fill("administrator");
+  await page.locator("#shadow-password").fill("wrong password");
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("alert")).toHaveText("The username or password was not accepted.");
+});
+
+test("shadow inspection rejects a blank repository or project before any request", async ({ page }) => {
+  let requested = false;
+  await page.route("**/+shadow/candidates?**", (route) => {
+    requested = true;
+    return route.fulfill({ contentType: "application/json", body: JSON.stringify({ candidates: [], next_cursor: null }) });
+  });
+  await goto(page, "/admin/shadow");
+  await page.locator("#shadow-user").fill("administrator");
+  await page.locator("#shadow-password").fill("browser-admin-secret");
+  await page.evaluate(() => {
+    for (const field of ["#shadow-repository", "#shadow-project"]) document.querySelector(field).removeAttribute("required");
+  });
+  await page.locator(".policy-filters button[type='submit']").click();
+  await expect(page.getByRole("alert")).toHaveText("Enter a repository and a project to inspect.");
+  expect(requested).toBe(false);
+});
+
 test("every page sets the differentiated app favicon", async ({ page }) => {
   await goto(page, "/admin/status");
   await expect(page.locator("head link[rel='icon']")).toHaveAttribute("href", "/favicon.svg");

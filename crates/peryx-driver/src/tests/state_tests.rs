@@ -8,7 +8,7 @@ use peryx_policy::Policy;
 use rstest::rstest;
 
 use crate::rate_limit::RateLimitConfig;
-use crate::state::{AppState, DEFAULT_HOT_CACHE_BYTES, RuntimeOptions};
+use crate::state::{AppState, DEFAULT_HOT_CACHE_BYTES, ReadableFrontier, RuntimeOptions, SEARCH_VIEW};
 use peryx_events::webhook::WebhookRuntime;
 
 #[test]
@@ -128,4 +128,78 @@ fn route_index(name: &str, route: &str, kind: IndexKind) -> Index {
         policy: Policy::default(),
         acl: IndexAcl::default(),
     }
+}
+
+fn replica_state() -> (tempfile::TempDir, AppState) {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
+    let state = AppState::new(meta, blobs, 60, Vec::new());
+    (dir, state)
+}
+
+/// Raise the store's authoritative serial by `count` journaled writes.
+fn advance_authority(state: &AppState, count: usize) {
+    state
+        .meta
+        .commit_driver_txn::<(), peryx_storage::meta::MetaError>(|txn| {
+            for entry in 0..count {
+                txn.put(&format!("k{entry}"), b"v")?;
+            }
+            Ok(((), (0..count).map(|entry| format!("j{entry}").into_bytes()).collect()))
+        })
+        .unwrap();
+}
+
+#[test]
+fn test_fresh_replica_exposes_nothing_with_no_view_lagging() {
+    let (_dir, state) = replica_state();
+
+    assert_eq!(
+        state.readable_frontier().unwrap(),
+        ReadableFrontier {
+            serial: 0,
+            blocking: None,
+        }
+    );
+}
+
+#[test]
+fn test_a_lagging_search_view_holds_readability_below_the_authority() {
+    let (_dir, state) = replica_state();
+    advance_authority(&state, 2);
+
+    assert_eq!(
+        state.readable_frontier().unwrap(),
+        ReadableFrontier {
+            serial: 0,
+            blocking: Some(SEARCH_VIEW.to_owned()),
+        }
+    );
+}
+
+#[test]
+fn test_advancing_the_search_view_lifts_readability_and_never_regresses() {
+    let (_dir, state) = replica_state();
+    advance_authority(&state, 2);
+
+    assert_eq!(state.advance_view_frontier(SEARCH_VIEW, 2).unwrap(), 2);
+    assert_eq!(
+        state.readable_frontier().unwrap(),
+        ReadableFrontier {
+            serial: 2,
+            blocking: None,
+        }
+    );
+
+    assert_eq!(state.advance_view_frontier(SEARCH_VIEW, 1).unwrap(), 2);
+    assert_eq!(state.readable_frontier().unwrap().serial, 2);
+}
+
+#[test]
+fn test_persist_search_frontier_records_the_live_engine_frontier() {
+    let (_dir, state) = replica_state();
+
+    assert_eq!(state.persist_search_frontier().unwrap(), 0);
+    assert_eq!(state.meta.view_frontier(SEARCH_VIEW).unwrap(), None);
 }

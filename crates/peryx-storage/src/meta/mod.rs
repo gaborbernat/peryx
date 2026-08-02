@@ -14,6 +14,7 @@ mod blob_placement;
 mod bootstrap;
 mod error;
 mod external_identity;
+mod frontier;
 mod index;
 mod job;
 mod journal;
@@ -89,6 +90,7 @@ const POLICY_DECISION: TableDefinition<&str, &[u8]> = TableDefinition::new("poli
 const POLICY_DECISION_CURRENT: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current");
 const POLICY_DECISION_CURRENT_ID: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current_id");
 const POLICY_INPUT_GENERATION: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_input_generation");
+const DERIVED_VIEW_FRONTIER: TableDefinition<&str, u64> = TableDefinition::new("derived_view_frontier");
 const QUOTA_USAGE: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_usage");
 const QUOTA_PROJECT: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_project");
 const QUOTA_VERSION: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_version");
@@ -222,6 +224,7 @@ impl MetaStore {
             txn.open_table(POLICY_DECISION_CURRENT)?;
             txn.open_table(POLICY_DECISION_CURRENT_ID)?;
             txn.open_table(POLICY_INPUT_GENERATION)?;
+            txn.open_table(DERIVED_VIEW_FRONTIER)?;
             txn.open_table(QUOTA_USAGE)?;
             txn.open_table(QUOTA_PROJECT)?;
             txn.open_table(QUOTA_VERSION)?;

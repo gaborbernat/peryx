@@ -25,12 +25,13 @@ use peryx_ecosystem_oci::LibraryPrefix;
 
 use crate::config::{
     AuthConfig, AvailabilityConfig, BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig,
-    IndexConfig, IndexKind, LdapBindConfig, LdapProviderConfig, OidcProviderConfig, ReplicationConfig, S3StorageConfig,
-    SecretSource, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
+    IndexConfig, IndexKind, LdapBindConfig, LdapProviderConfig, LogSink, OidcProviderConfig, ReplicationConfig,
+    S3StorageConfig, SecretSource, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig,
+    WebhookSecret,
 };
 use crate::server::{
-    build_blob_storage, build_index_settings, build_indexes, build_router, build_state, recover_job_attempts,
-    router_for, upstream_auth,
+    build_blob_storage, build_index_settings, build_indexes, build_router, build_state, check_config,
+    recover_job_attempts, router_for, upstream_auth,
 };
 
 fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
@@ -1218,6 +1219,68 @@ fn test_build_state_reports_missing_webhook_secret_env() {
         err.to_string()
             .contains("read webhook secret env var PERYX_TEST_MISSING_WEBHOOK_SECRET")
     );
+}
+
+#[test]
+fn test_check_config_accepts_the_default_topology() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_with(&dir, vec![hosted("hosted")]);
+
+    check_config(&config).unwrap();
+}
+
+#[rstest]
+#[case::cross_field(blank_writer_config, "validate configuration")]
+#[case::logging(file_log_config, "validate logging configuration")]
+#[case::index_topology(bad_upstream_config, "build cached index pypi")]
+#[case::ecosystem_settings(bad_settings_config, "unknown field `bogus`")]
+#[case::webhook(bad_webhook_config, "build webhook targets")]
+fn test_check_config_reports_the_error_serve_would_hit(
+    #[case] build: fn(&tempfile::TempDir) -> Config,
+    #[case] needle: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+
+    let err = check_config(&build(&dir)).unwrap_err();
+
+    assert!(err.to_string().contains(needle), "{err}");
+}
+
+fn blank_writer_config(dir: &tempfile::TempDir) -> Config {
+    Config {
+        writer_identity: Some("   ".to_owned()),
+        ..config_with(dir, vec![hosted("hosted")])
+    }
+}
+
+fn file_log_config(dir: &tempfile::TempDir) -> Config {
+    let mut config = config_with(dir, vec![hosted("hosted")]);
+    config.log.sink = LogSink::File;
+    config
+}
+
+fn bad_upstream_config(dir: &tempfile::TempDir) -> Config {
+    config_with(dir, vec![cached("pypi", "not a url")])
+}
+
+fn bad_settings_config(dir: &tempfile::TempDir) -> Config {
+    let mut index = hosted("images");
+    index.ecosystem = peryx_core::Ecosystem::Oci;
+    index
+        .ecosystem_settings
+        .insert("bogus".to_owned(), toml::Value::from("x"));
+    config_with(dir, vec![index])
+}
+
+fn bad_webhook_config(dir: &tempfile::TempDir) -> Config {
+    let mut index = hosted("hosted");
+    index.webhooks.push(WebhookConfig {
+        name: "ci".to_owned(),
+        url: "ftp://ci.example/hook".to_owned(),
+        secret: WebhookSecret::Literal("secret".to_owned()),
+        events: Vec::new(),
+    });
+    config_with(dir, vec![index])
 }
 
 #[test]

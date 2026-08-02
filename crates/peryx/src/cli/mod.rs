@@ -1,6 +1,7 @@
 //! Command-line interface.
 
 mod cache;
+mod config;
 mod index;
 mod job;
 mod maintenance;
@@ -18,6 +19,7 @@ pub use cache::{
     CacheCommand, CacheListArgs, CachePurgeCommand, CachePurgeOrphanedBlobsArgs, CachePurgeProjectArgs,
     CacheRuntimeArgs,
 };
+pub use config::{ConfigCheckArgs, ConfigCommand};
 pub use index::{IndexCommand, IndexListArgs, IndexShowArgs};
 pub use job::{JobCommand, JobListArgs, JobShowArgs};
 #[cfg(feature = "self-update")]
@@ -67,6 +69,9 @@ pub enum Command {
     Serve(RuntimeArgs),
     /// Initialize a data directory.
     Init(RuntimeArgs),
+    /// Validate a resolved configuration without starting the server.
+    #[command(subcommand)]
+    Config(ConfigCommand),
     /// Create the first local administrator.
     BootstrapAdministrator(BootstrapAdministratorArgs),
     /// Create, inspect, list, and lift digest revocations.

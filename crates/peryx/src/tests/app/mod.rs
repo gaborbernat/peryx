@@ -12,6 +12,7 @@ use crate::config::Config;
 
 mod bootstrap_tests;
 mod cache_tests;
+mod config_tests;
 mod fsck_tests;
 mod indexes_tests;
 mod job_tests;

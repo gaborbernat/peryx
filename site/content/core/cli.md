@@ -14,6 +14,7 @@ peryx <COMMAND>
 | ---------------- | ------------------------------------------------------------------------------------- |
 | `serve`          | Run the server                                                                        |
 | `init`           | Create the data directory and its stores, then exit                                   |
+| `config check`   | Validate the resolved configuration without starting the server                       |
 | `config-snippet` | Print `pip.conf`, `uv.toml`, or `.pypirc` for one configured index                    |
 | `index`          | List and inspect the configured indexes                                               |
 | `job`            | Inspect durable job-run history and rebuild the search index                          |
@@ -53,6 +54,24 @@ peryx <COMMAND>
 
 Flags override the config file; see [Configuration](@/core/configuration.md) for the full precedence and the `[[index]]`
 schema.
+
+## `config check`
+
+Resolve the configuration from every source — file, `PERYX_*` environment variables, then these flags — and report
+whether `serve` would accept it, without opening the data directory, binding a socket, or reaching an upstream. It runs
+the cross-field rules (trusted publishers need a signing key, an LDAP group mapping must name a configured index, a read
+replica needs a writer identity), the logging-sink check, and the full index assembly: duplicate names or routes,
+virtual indexes that reference an unknown or non-hosted member, ecosystem `[policy]` and `[index.settings]` keys, secret
+files that cannot be read, and webhook targets. A `0` exit status with `configuration is valid` means a restart will
+start; a non-zero status prints the first problem `serve` would hit. TLS certificate material is loaded at bind time and
+is not checked here.
+
+```
+peryx config check [--config <path>] [--data-dir <path>]
+```
+
+It takes the same [`serve` and `init` options](#serve-and-init-options), so a check reflects the flags and environment a
+later `serve` will see.
 
 ## `index`
 

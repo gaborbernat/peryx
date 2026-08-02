@@ -212,6 +212,31 @@ memory or I/O blew out is not a pass. The `none` path is the zero-durability bas
 against, so a mode's budget is the marginal cost it adds over `none`, not an absolute number that hardware alone can
 move.
 
+## Verifying the invariants
+
+A partition-and-failover bug reproduces once under a wall clock and then hides, so the contract is checked against a
+seed instead of a clock. The `peryx-replication` crate carries a deterministic simulator: a seed fixes the topology and
+a bounded list of actions, and an explicit model owns its own storage, network, and authority state so one seed yields
+one result on every platform. Nothing in it opens a socket, reads the disk, or samples a clock.
+
+The model checks five safety invariants after every action, one per promise the modes above make normative. A committed
+serial carries exactly one authority epoch, so a fenced former primary cannot overwrite a decision the current authority
+already made. Applying the same operation twice changes nothing, because replay after a retry or reconnect must not
+double-count. A node's frontier never moves backward. An operation a node has made visible stays visible. And every
+acknowledged operation is durable at the authority, which is the RPO promise stated as a serial rather than a duration.
+
+A checker earns trust only by failing on a real defect, so the simulator injects one at a time: each disables a single
+safety rule and must turn into its matching invariant failure and no other. When a seed does fail, the run reduces to a
+minimal action list that still breaks the same invariant, and the whole run serializes into one trace artifact carrying
+the seed, topology, injected faults, executed actions, and the first invariant that broke, which a failing CI lane can
+attach and a developer can replay byte-for-byte.
+
+The simulator checks a model of the replica contract, not the production replica. It carries its own explicit state
+rather than driving the real sync path, and it delivers each authority's stream in serial order, so it exercises
+fencing, replay, and lag but leaves message reorder and wire-level page validation to the replica's own tests. Feeding
+the seeded plan through the production replica is the next step that would make the harness catch a regression in the
+sync path itself.
+
 ## Related
 
 - Operate the single-writer model that is today's `none`: [high availability](@/core/high-availability.md)

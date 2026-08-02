@@ -9,6 +9,7 @@ mod error;
 mod http;
 mod protocol;
 mod replica;
+pub mod sim;
 
 pub use envelope::{
     AuthorityEpoch, CURRENT_SCHEMA_VERSION, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, MIN_SCHEMA_VERSION,

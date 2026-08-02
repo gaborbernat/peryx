@@ -214,6 +214,7 @@ move.
 
 ## Related
 
+- Size and stand up each mode's shape: [availability deployment and sizing](@/core/availability-deployment.md)
 - Operate the single-writer model that is today's `none`: [high availability](@/core/high-availability.md)
 - Where mutations and the change serial live: [architecture](@/core/architecture.md)
 - How latency and throughput are measured: [performance and methodology](@/core/performance.md)

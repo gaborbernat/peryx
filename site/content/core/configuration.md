@@ -882,7 +882,8 @@ versioning or replication on the object store.
 The `[availability]` table picks the runtime availability contract this node promises for authoritative mutations. Its
 `mode` selects one of `none`, `dc`, or `ha`, whose acknowledgement guarantees the
 [availability contracts](@/core/availability-contracts.md) fix. An omitted table, and an explicit `mode = "none"`,
-resolve to the same single-node configuration, so a zero-config deployment carries no availability state at all.
+resolve to the same single-node configuration, so a zero-config deployment carries no availability state at all. To size
+and stand up each mode's shape, see [availability deployment and sizing](@/core/availability-deployment.md).
 
 ```toml
 [availability]

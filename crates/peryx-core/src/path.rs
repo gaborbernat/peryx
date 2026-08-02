@@ -27,8 +27,10 @@ pub enum PathSafetyError {
     InvalidEncoding(String),
 }
 
+// `_` is peryx's machine-endpoint namespace (the `/_/oidc/*` trusted-publishing routes); unlike the
+// `+` prefix, `_` is a valid route segment, so a route claiming it would shadow those endpoints.
 const RESERVED_ROUTE_PREFIXES: &[&str] = &[
-    "+stats", "+status", "admin", "api-docs", "browse", "metrics", "pkg", "stats",
+    "+stats", "+status", "_", "admin", "api-docs", "browse", "metrics", "pkg", "stats",
 ];
 
 #[must_use]
@@ -276,6 +278,12 @@ mod tests {
             validate_route("admin/status"),
             Err(PathSafetyError::ReservedRoute("admin/status".to_owned()))
         );
+        for route in ["_", "_/oidc"] {
+            assert_eq!(
+                validate_route(route),
+                Err(PathSafetyError::ReservedRoute(route.to_owned()))
+            );
+        }
     }
 
     #[test]

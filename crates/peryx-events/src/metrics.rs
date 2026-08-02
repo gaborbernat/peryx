@@ -369,10 +369,19 @@ fn system_clock() -> Clock {
     })
 }
 
+/// What the aggregator thread pulls off its channel: request-path observations, plus a test-only
+/// barrier the aggregator acknowledges once it has drained and persisted everything queued ahead of
+/// it, so a test can await a deterministic point instead of polling the shared snapshots.
+enum Message {
+    Event(Event),
+    #[cfg(test)]
+    Barrier(Sender<()>),
+}
+
 /// The recording half handed to request handlers: a clone-cheap sender plus the shared snapshots.
 #[derive(Clone)]
 pub struct Metrics {
-    sender: Sender<Event>,
+    sender: Sender<Message>,
     tree: Arc<RwLock<StatsTree>>,
     daily: Arc<RwLock<DailyBuckets>>,
     /// Dates a usage query's window; the same clock the aggregator buckets downloads by.
@@ -456,7 +465,17 @@ impl Metrics {
 
     /// Record one event; never blocks, and a stopped aggregator is ignored.
     pub fn record(&self, event: Event) {
-        let _ = self.sender.send(event);
+        let _ = self.sender.send(Message::Event(event));
+    }
+
+    /// Block until the aggregator has drained and persisted every event recorded before this call.
+    /// The channel is FIFO, so the barrier lands behind those events; the aggregator acknowledges it
+    /// only after their snapshots are written, giving tests a deterministic settle point.
+    #[cfg(test)]
+    fn sync(&self) {
+        let (ack, done) = channel();
+        self.sender.send(Message::Barrier(ack)).expect("aggregator alive");
+        done.recv().expect("aggregator acknowledged");
     }
 
     /// A snapshot of one index's totals per route, for the dashboard cards and Prometheus.
@@ -718,25 +737,40 @@ impl Metrics {
 /// after each batch that changed it. Serializing happens under the lock (cheap); the durable write
 /// happens after releasing it, so a slow disk never stalls the aggregator's readers.
 fn aggregate(
-    receiver: &Receiver<Event>,
+    receiver: &Receiver<Message>,
     tree: &Arc<RwLock<StatsTree>>,
     daily: &Arc<RwLock<DailyBuckets>>,
     store: Option<&AnalyticsHandle>,
     retention_days: Option<u32>,
     clock: &Clock,
 ) {
-    while let Ok(event) = receiver.recv() {
-        let mut dirty = matches!(&event, Event::Download { .. });
+    while let Ok(first) = receiver.recv() {
+        let mut dirty = false;
         let mut downloads = Vec::new();
-        collect_daily(&event, clock, &mut downloads);
+        #[cfg(test)]
+        let mut acks = Vec::new();
         let pending = {
             let mut tree = tree.write().expect("metrics lock");
-            apply(&mut tree, event);
+            absorb(
+                first,
+                &mut tree,
+                clock,
+                &mut dirty,
+                &mut downloads,
+                #[cfg(test)]
+                &mut acks,
+            );
             // Batch whatever else is already queued under the same lock acquisition.
-            while let Ok(event) = receiver.try_recv() {
-                dirty |= matches!(&event, Event::Download { .. });
-                collect_daily(&event, clock, &mut downloads);
-                apply(&mut tree, event);
+            while let Ok(message) = receiver.try_recv() {
+                absorb(
+                    message,
+                    &mut tree,
+                    clock,
+                    &mut dirty,
+                    &mut downloads,
+                    #[cfg(test)]
+                    &mut acks,
+                );
             }
             (dirty && store.is_some())
                 .then(|| serde_json::to_vec(&snapshot_downloads(&tree)).expect("serialize metrics snapshot"))
@@ -760,6 +794,33 @@ fn aggregate(
                 let _ = store.save_daily(&serde_json::to_vec(&snapshot).expect("serialize daily usage snapshot"));
             }
         }
+        // Acknowledge barriers only once this batch's snapshots are on disk, so a synced test observes
+        // the durable state, not just the in-memory tree.
+        #[cfg(test)]
+        for ack in acks {
+            let _ = ack.send(());
+        }
+    }
+}
+
+/// Fold one message into the batch: apply an event to the tree and note its daily downloads, or park a
+/// barrier's acknowledgement for the aggregator to fire after the batch persists.
+fn absorb(
+    message: Message,
+    tree: &mut StatsTree,
+    clock: &Clock,
+    dirty: &mut bool,
+    downloads: &mut Vec<(DailyKey, u64)>,
+    #[cfg(test)] acks: &mut Vec<Sender<()>>,
+) {
+    match message {
+        Message::Event(event) => {
+            *dirty |= matches!(&event, Event::Download { .. });
+            collect_daily(&event, clock, downloads);
+            apply(tree, event);
+        }
+        #[cfg(test)]
+        Message::Barrier(ack) => acks.push(ack),
     }
 }
 
@@ -993,13 +1054,10 @@ mod tests {
         Arc::new(move || day * SECONDS_PER_DAY + SECONDS_PER_DAY / 2)
     }
 
-    fn settle(done: impl Fn() -> bool) {
-        // The aggregator runs on its own thread; poll until the last event lands.
-        let settled = (0..500).any(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            done()
-        });
-        assert!(settled, "metrics aggregator never settled");
+    fn settle(metrics: &Metrics, done: impl Fn() -> bool) {
+        // Drain the aggregator through its barrier, then assert the state it settled on.
+        metrics.sync();
+        assert!(done(), "metrics settled on an unexpected state");
     }
 
     fn persisted_downloads(store: &AnalyticsHandle) -> Option<u64> {
@@ -1041,7 +1099,7 @@ mod tests {
         });
         metrics.record(download("root/pypi", "pandas", filename, 100));
         metrics.record(download("root/pypi", "pandas", filename, 50));
-        settle(|| persisted_downloads(&meta.analytics()) == Some(2));
+        settle(&metrics, || persisted_downloads(&meta.analytics()) == Some(2));
         drop(metrics);
 
         let restarted = Metrics::start_durable(meta.analytics(), None, clock_on_day(0));
@@ -1062,7 +1120,7 @@ mod tests {
             route: "pypi".into(),
             project: "flask".into(),
         });
-        settle(|| {
+        settle(&metrics, || {
             metrics
                 .index_totals()
                 .get("pypi")
@@ -1080,7 +1138,7 @@ mod tests {
         metrics.record(download_of("pypi", "flask", "3.0", Some("pypi-org"), 40));
         metrics.record(download_of("pypi", "flask", "2.0", Some("pypi-org"), 5));
         metrics.record(download_of("pypi", "flask", "3.0", None, 7));
-        settle(|| metrics.daily_usage().len() == 3);
+        settle(&metrics, || metrics.daily_usage().len() == 3);
 
         assert_eq!(
             metrics.daily_usage(),
@@ -1121,13 +1179,13 @@ mod tests {
         let (_dir, meta) = store();
         let old = Metrics::start_durable(meta.analytics(), Some(7), clock_on_day(100));
         old.record(download_of("pypi", "flask", "1.0", Some("up"), 3));
-        settle(|| old.daily_usage().len() == 1);
+        settle(&old, || old.daily_usage().len() == 1);
         drop(old);
 
         // Ten days later a fresh download lands; the day-100 bucket is now beyond the 7-day window.
         let metrics = Metrics::start_durable(meta.analytics(), Some(7), clock_on_day(110));
         metrics.record(download_of("pypi", "flask", "2.0", Some("up"), 9));
-        settle(|| metrics.daily_usage().iter().any(|row| row.day == 110));
+        settle(&metrics, || metrics.daily_usage().iter().any(|row| row.day == 110));
 
         assert_eq!(
             metrics.daily_usage(),
@@ -1148,7 +1206,7 @@ mod tests {
         let (_dir, meta) = store();
         let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(42));
         metrics.record(download_of("pypi", "flask", "3.0", Some("up"), 12));
-        settle(|| meta.analytics().load_daily().unwrap().is_some());
+        settle(&metrics, || meta.analytics().load_daily().unwrap().is_some());
         drop(metrics);
 
         let restarted = Metrics::start_durable(meta.analytics(), None, clock_on_day(42));
@@ -1174,7 +1232,7 @@ mod tests {
         assert!(metrics.daily_usage().is_empty());
 
         metrics.record(download_of("pypi", "flask", "3.0", Some("up"), 4));
-        settle(|| metrics.daily_usage().len() == 1);
+        settle(&metrics, || metrics.daily_usage().len() == 1);
         assert_eq!(metrics.daily_usage()[0].bytes, 4);
     }
 
@@ -1205,7 +1263,7 @@ mod tests {
         let (_dir, meta) = store();
         let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(3));
         metrics.record(download("pypi", "flask", "flask-3.0.whl", 8));
-        settle(|| meta.analytics().load_daily().unwrap().is_some());
+        settle(&metrics, || meta.analytics().load_daily().unwrap().is_some());
         drop(metrics);
 
         let restarted = Metrics::start_durable(meta.analytics(), None, clock_on_day(3));
@@ -1230,7 +1288,9 @@ mod tests {
             route: "credential-bearing-route".into(),
             project: "actor-token".into(),
         });
-        settle(|| metrics.index_totals().contains_key("credential-bearing-route"));
+        settle(&metrics, || {
+            metrics.index_totals().contains_key("credential-bearing-route")
+        });
 
         let totals = metrics.totals_for_routes(["missing", "credential-bearing-route"]);
 
@@ -1302,7 +1362,7 @@ mod tests {
         metrics.record(download_of("a", "flask", "2.0", None, 30));
         metrics.record(download_of("a", "django", "5.0", None, 5));
         metrics.record(download_of("b", "numpy", "1.0", None, 99));
-        settle(|| metrics.daily_usage().len() == 4);
+        settle(&metrics, || metrics.daily_usage().len() == 4);
         let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
@@ -1351,7 +1411,7 @@ mod tests {
     fn test_usage_top_is_empty_when_the_window_predates_every_bucket() {
         let (_dir, _meta, metrics) = durable_on(500, None);
         metrics.record(download_of("a", "flask", "1.0", None, 10));
-        settle(|| metrics.daily_usage().len() == 1);
+        settle(&metrics, || metrics.daily_usage().len() == 1);
         let interval = metrics.resolve_usage_interval(Some(100 * SECONDS_PER_DAY), Some(200 * SECONDS_PER_DAY));
 
         assert!(metrics.usage_top(None, &interval).is_empty());
@@ -1363,7 +1423,7 @@ mod tests {
         metrics.record(download_of("a", "flask", "3.0", None, 10));
         metrics.record(download_of("a", "flask", "3.0", None, 10));
         metrics.record(download("a", "flask", "flask.whl", 5));
-        settle(|| metrics.daily_usage().len() == 2);
+        settle(&metrics, || metrics.daily_usage().len() == 2);
         let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
@@ -1392,7 +1452,7 @@ mod tests {
         let (_dir, _meta, metrics) = durable_on(500, None);
         metrics.record(download_of("a", "flask", "1.0", Some("pypi"), 10));
         metrics.record(download_of("a", "flask", "1.0", None, 5));
-        settle(|| metrics.daily_usage().len() == 2);
+        settle(&metrics, || metrics.daily_usage().len() == 2);
         let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
@@ -1421,13 +1481,13 @@ mod tests {
         let (_dir, meta) = store();
         let earlier = Metrics::start_durable(meta.analytics(), None, clock_on_day(500));
         earlier.record(download_of("a", "flask", "1.0", None, 10));
-        settle(|| meta.analytics().load_daily().unwrap().is_some());
+        settle(&earlier, || meta.analytics().load_daily().unwrap().is_some());
         drop(earlier);
 
         let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(501));
         metrics.record(download_of("a", "flask", "1.0", None, 20));
         metrics.record(download_of("a", "django", "1.0", None, 3));
-        settle(|| metrics.daily_usage().len() == 3);
+        settle(&metrics, || metrics.daily_usage().len() == 3);
         let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
@@ -1457,7 +1517,7 @@ mod tests {
         let past = Metrics::start_durable(meta.analytics(), None, clock_on_day(100));
         past.record(download("a", "old", "old.whl", 7));
         past.record(download("a", "old", "old.whl", 7));
-        settle(|| persisted_downloads(&meta.analytics()) == Some(2));
+        settle(&past, || persisted_downloads(&meta.analytics()) == Some(2));
         drop(past);
 
         let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(500));
@@ -1467,7 +1527,7 @@ mod tests {
             project: "page-only".into(),
         });
         let interval = metrics.resolve_usage_interval(None, None);
-        settle(|| metrics.usage_top(None, &interval).len() == 1);
+        settle(&metrics, || metrics.usage_top(None, &interval).len() == 1);
 
         assert_eq!(
             metrics.usage_unused(None, &interval),
@@ -1486,7 +1546,7 @@ mod tests {
         metrics.record(download_of("a", "alpha", "1.0", None, 10));
         metrics.record(download_of("a", "beta", "1.0", None, 10));
         metrics.record(download_of("b", "alpha", "1.0", None, 10));
-        settle(|| metrics.daily_usage().len() == 3);
+        settle(&metrics, || metrics.daily_usage().len() == 3);
         let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
@@ -1508,7 +1568,7 @@ mod tests {
         let (_dir, _meta, metrics) = durable_on(500, None);
         metrics.record(download_of("a", "flask", "2.0", None, 10));
         metrics.record(download_of("a", "flask", "1.0", None, 10));
-        settle(|| metrics.daily_usage().len() == 2);
+        settle(&metrics, || metrics.daily_usage().len() == 2);
         let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
@@ -1526,7 +1586,7 @@ mod tests {
         let (_dir, _meta, metrics) = durable_on(500, None);
         metrics.record(download_of("a", "flask", "1.0", Some("beta"), 10));
         metrics.record(download_of("a", "flask", "1.0", Some("alpha"), 10));
-        settle(|| metrics.daily_usage().len() == 2);
+        settle(&metrics, || metrics.daily_usage().len() == 2);
         let interval = metrics.resolve_usage_interval(None, None);
 
         assert_eq!(
@@ -1546,7 +1606,7 @@ mod tests {
         for (route, project) in [("a", "alpha"), ("a", "beta"), ("b", "alpha")] {
             past.record(download(route, project, "file.whl", 5));
         }
-        settle(|| persisted_downloads(&meta.analytics()) == Some(3));
+        settle(&past, || persisted_downloads(&meta.analytics()) == Some(3));
         drop(past);
 
         let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(500));

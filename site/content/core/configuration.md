@@ -1038,9 +1038,11 @@ Use one of `secret` or `secret_env`. Supported event names are `upload`, `yank`,
 `promote`, `project-status`, and `management`. Peryx emits `upload`, `yank`, `unyank`, `delete`, and `restore` from the
 write endpoints in this release; the other names reserve the contract for management surfaces that use this runtime.
 
-Peryx stores pending deliveries in the metadata database and sends them outside the request path. A failed delivery
-retries up to five attempts with capped backoff of 5, 15, 45, and 135 seconds. Delivery does not follow redirects. A
-`3xx` response counts as a failed attempt rather than reposting the signed payload to a location the target picks. The
+Peryx stores pending deliveries in the metadata database and sends them outside the request path. Delivery does not
+follow redirects, so a `3xx` response counts as a failed attempt rather than reposting the signed payload to a location
+the target picks. Transient failures retry up to five attempts with capped backoff of 5, 15, 45, and 135 seconds: a
+`5xx` response, `408 Request Timeout`, `429 Too Many Requests`, a redirect, or a transport error. Any other `4xx`
+response cannot succeed on a repeat, so the delivery fails at once rather than spending its remaining attempts. The
 delivery log stores the payload, target name, attempt count, next retry time, response status, and last error. It does
 not store webhook secrets.
 

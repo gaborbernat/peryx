@@ -128,6 +128,38 @@ pub(super) fn overlay_state_without_upload() -> (tempfile::TempDir, Arc<AppState
     (dir, crate::tests::wired(AppState::new(meta, blobs, 60, indexes)))
 }
 
+/// A virtual index over two cached members, `archived` then `quarantined`, listed in `layers` order so a
+/// test can prove the merged status is independent of where the operator lists the quarantining member.
+pub(super) fn two_cached_virtual_state(layers: Vec<usize>) -> (tempfile::TempDir, Arc<AppState>) {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+    let cached = |name: &str| Index {
+        name: name.to_owned(),
+        route: name.to_owned(),
+        ecosystem: peryx_core::Ecosystem::Pypi,
+        kind: IndexKind::Cached {
+            client: UpstreamClient::new("https://example.test/simple/").unwrap(),
+            offline: false,
+        },
+        policy: Policy::default(),
+        acl: IndexAcl::default(),
+    };
+    let indexes = vec![
+        cached("archived"),
+        cached("quarantined"),
+        Index {
+            name: "root/pypi".to_owned(),
+            route: "root/pypi".to_owned(),
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+            ecosystem: peryx_core::Ecosystem::Pypi,
+            kind: IndexKind::Virtual { layers, upload: None },
+        },
+    ];
+    (dir, crate::tests::wired(AppState::new(meta, blobs, 60, indexes)))
+}
+
 pub(super) fn file_with_hash(filename: &str, sha256: &str, requires_python: Option<&str>) -> File {
     File {
         filename: filename.to_owned(),

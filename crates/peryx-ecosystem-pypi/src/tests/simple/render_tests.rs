@@ -62,3 +62,55 @@ fn test_render_detail_html_falls_back_to_non_sha256_hash_fragment() {
 
     assert!(html.contains("#md5=deadbeef"));
 }
+
+#[test]
+fn test_render_detail_html_escapes_hash_fragment() {
+    let html = render_detail_html(&ProjectDetail {
+        meta: Meta::default(),
+        name: "proj".to_owned(),
+        versions: vec!["1.0".to_owned()],
+        files: vec![File {
+            filename: "proj-1.0.tar.gz".to_owned(),
+            url: "https://files.example/proj-1.0.tar.gz".to_owned(),
+            hashes: BTreeMap::from([("sha256".to_owned(), "de\" onclick=alert(1) x=\"".to_owned())]),
+            requires_python: None,
+            size: None,
+            upload_time: None,
+            yanked: Yanked::No,
+            core_metadata: CoreMetadata::Absent,
+            dist_info_metadata: CoreMetadata::Absent,
+            gpg_sig: None,
+            provenance: Provenance::Absent,
+        }],
+    });
+
+    assert!(html.contains("#sha256=de&quot; onclick=alert(1) x=&quot;"));
+    assert!(!html.contains("de\" onclick=alert(1)"));
+}
+
+#[test]
+fn test_render_detail_html_escapes_core_metadata_hash() {
+    let hashes = BTreeMap::from([("sha256".to_owned(), "ab\" onload=alert(1) x=\"".to_owned())]);
+    let html = render_detail_html(&ProjectDetail {
+        meta: Meta::default(),
+        name: "proj".to_owned(),
+        versions: vec!["1.0".to_owned()],
+        files: vec![File {
+            filename: "proj-1.0-py3-none-any.whl".to_owned(),
+            url: "https://files.example/proj-1.0-py3-none-any.whl".to_owned(),
+            hashes: BTreeMap::new(),
+            requires_python: None,
+            size: None,
+            upload_time: None,
+            yanked: Yanked::No,
+            core_metadata: CoreMetadata::Hashes(hashes.clone()),
+            dist_info_metadata: CoreMetadata::Hashes(hashes),
+            gpg_sig: None,
+            provenance: Provenance::Absent,
+        }],
+    });
+
+    assert!(html.contains("data-core-metadata=\"sha256=ab&quot; onload=alert(1) x=&quot;\""));
+    assert!(html.contains("data-dist-info-metadata=\"sha256=ab&quot; onload=alert(1) x=&quot;\""));
+    assert!(!html.contains("onload=alert(1) x=\"\""));
+}

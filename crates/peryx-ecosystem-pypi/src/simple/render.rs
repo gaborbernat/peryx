@@ -32,7 +32,10 @@ pub fn render_detail_html(detail: &ProjectDetail) -> String {
             .get_key_value("sha256")
             .or_else(|| file.hashes.iter().next())
         {
-            let _ = write!(out, "#{algo}={hash}");
+            out.push('#');
+            push_escaped(&mut out, algo, Escape::Attr);
+            out.push('=');
+            push_escaped(&mut out, hash, Escape::Attr);
         }
         out.push('"');
         if let Some(requires_python) = &file.requires_python {
@@ -64,10 +67,8 @@ fn push_core_metadata_attr(out: &mut String, core_metadata: &CoreMetadata) {
         CoreMetadata::Available => out.push_str(" data-core-metadata=\"true\" data-dist-info-metadata=\"true\""),
         CoreMetadata::Hashes(hashes) => match hashes.get("sha256") {
             Some(sha256) => {
-                let _ = write!(
-                    out,
-                    " data-core-metadata=\"sha256={sha256}\" data-dist-info-metadata=\"sha256={sha256}\""
-                );
+                push_attr(out, " data-core-metadata=\"sha256=", sha256);
+                push_attr(out, " data-dist-info-metadata=\"sha256=", sha256);
             }
             None => out.push_str(" data-core-metadata=\"true\" data-dist-info-metadata=\"true\""),
         },

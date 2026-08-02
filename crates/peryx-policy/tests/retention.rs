@@ -78,6 +78,12 @@ fn each_selector_reports_its_stable_rule_name() {
         (RetentionSelector::Cached, "cached"),
         (RetentionSelector::Trash, "trash"),
         (RetentionSelector::Orphan, "orphan"),
+        (
+            RetentionSelector::Visibility {
+                state: RetentionVisibility::Yanked,
+            },
+            "visibility",
+        ),
     ] {
         assert_eq!(selector.name(), name);
     }
@@ -268,6 +274,42 @@ fn an_orphan_rule_matches_unreferenced_candidates() {
 }
 
 #[test]
+fn a_visibility_rule_matches_only_candidates_in_the_named_state() {
+    let policy = expiring(RetentionSelector::Visibility {
+        state: RetentionVisibility::Yanked,
+    });
+    let mut yanked = candidate("flask", "1.0", 0);
+    yanked.visibility = RetentionVisibility::Yanked;
+
+    let decisions = policy.plan_project(None, vec![yanked, candidate("flask", "2.0", 1)]);
+
+    assert_eq!(
+        outcomes(&decisions),
+        vec![
+            ("flask-1.0.whl", RetentionOutcome::Remove, Some("visibility")),
+            ("flask-2.0.whl", RetentionOutcome::Retain, None),
+        ]
+    );
+}
+
+#[test]
+fn a_visibility_keep_rule_protects_hidden_candidates_from_an_expire_sweep() {
+    let policy = RetentionPolicy::compile(&RetentionConfig {
+        keep: vec![RetentionSelector::Visibility {
+            state: RetentionVisibility::Hidden,
+        }],
+        expire: vec![RetentionSelector::ProjectPrefix { prefix: String::new() }],
+    });
+    let mut hidden = candidate("flask", "1.0", 0);
+    hidden.visibility = RetentionVisibility::Hidden;
+
+    let decisions = policy.plan_project(None, vec![hidden]);
+
+    assert_eq!(decisions[0].outcome, RetentionOutcome::Retain);
+    assert_eq!(decisions[0].rule, Some("visibility"));
+}
+
+#[test]
 fn a_cached_keep_rule_protects_cached_candidates() {
     let policy = keeping(RetentionSelector::Cached);
     let mut cached = candidate("flask", "1.0", 0);
@@ -368,6 +410,9 @@ fn equal_rules_compile_to_one_version_and_distinct_rules_diverge() {
             RetentionSelector::Cached,
             RetentionSelector::Trash,
             RetentionSelector::Orphan,
+            RetentionSelector::Visibility {
+                state: RetentionVisibility::Yanked,
+            },
         ],
         expire: vec![RetentionSelector::Orphan],
     };
@@ -383,6 +428,16 @@ fn equal_rules_compile_to_one_version_and_distinct_rules_diverge() {
     assert_ne!(
         keeping(RetentionSelector::Orphan).version(),
         expiring(RetentionSelector::Orphan).version()
+    );
+    assert_ne!(
+        keeping(RetentionSelector::Visibility {
+            state: RetentionVisibility::Yanked,
+        })
+        .version(),
+        keeping(RetentionSelector::Visibility {
+            state: RetentionVisibility::Hidden,
+        })
+        .version()
     );
     assert_ne!(
         keeping(RetentionSelector::Source {
@@ -413,7 +468,8 @@ fn a_config_deserializes_every_selector_from_json() {
             ],
             "expire": [
                 {"selector": "trash"},
-                {"selector": "orphan"}
+                {"selector": "orphan"},
+                {"selector": "visibility", "state": "yanked"}
             ]
         }"#,
     )
@@ -435,7 +491,13 @@ fn a_config_deserializes_every_selector_from_json() {
                 RetentionSelector::KeepLatest { count: 5 },
                 RetentionSelector::Cached,
             ],
-            expire: vec![RetentionSelector::Trash, RetentionSelector::Orphan],
+            expire: vec![
+                RetentionSelector::Trash,
+                RetentionSelector::Orphan,
+                RetentionSelector::Visibility {
+                    state: RetentionVisibility::Yanked,
+                },
+            ],
         }
     );
 }

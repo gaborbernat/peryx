@@ -28,7 +28,10 @@ pub enum RetentionClass {
 }
 
 /// A candidate's logical visibility, recorded on the decision so an operator sees what a removal hides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// A [`RetentionSelector::Visibility`] rule also matches on it, so a policy can name one of these states
+/// directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetentionVisibility {
     Active,
@@ -60,6 +63,11 @@ pub enum RetentionSelector {
     Trash,
     /// Match a candidate whose content no live reference reaches.
     Orphan,
+    /// Match a candidate in the named logical [visibility](RetentionVisibility) state: a yanked release
+    /// an author retracted, a hidden artifact, or an active one. This reads the same visibility a
+    /// decision reports, so an `expire` rule can reclaim retracted releases a `keep-latest` count would
+    /// otherwise pin.
+    Visibility { state: RetentionVisibility },
 }
 
 impl RetentionSelector {
@@ -74,6 +82,7 @@ impl RetentionSelector {
             Self::Cached => "cached",
             Self::Trash => "trash",
             Self::Orphan => "orphan",
+            Self::Visibility { .. } => "visibility",
         }
     }
 
@@ -92,6 +101,7 @@ impl RetentionSelector {
             Self::Cached => candidate.class == RetentionClass::Cached,
             Self::Trash => candidate.class == RetentionClass::Trash,
             Self::Orphan => candidate.orphan,
+            Self::Visibility { state } => candidate.visibility == *state,
         }
     }
 }
@@ -302,6 +312,7 @@ fn encode_selector(hash: &mut u64, selector: &RetentionSelector) {
         RetentionSelector::Cached => fnv1a(hash, &[4]),
         RetentionSelector::Trash => fnv1a(hash, &[5]),
         RetentionSelector::Orphan => fnv1a(hash, &[6]),
+        RetentionSelector::Visibility { state } => fnv1a(hash, &[7, *state as u8]),
     }
 }
 

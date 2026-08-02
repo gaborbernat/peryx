@@ -366,11 +366,11 @@ impl PackageSearch {
                 return Ok(Box::new(AllQuery));
             }
             return Ok(Box::new(RegexQuery::from_pattern(
-                &format!(".*{}.*", pattern.to_ascii_lowercase()),
+                &format!(".*{}.*", fold_lowercase(pattern)),
                 self.fields.raw,
             )?));
         }
-        let query = query.to_ascii_lowercase();
+        let query = fold_lowercase(query);
         let terms = query_terms(&query);
         if terms.is_empty() {
             let pattern = format!(".*{}.*", escape_regex(&query));
@@ -421,7 +421,7 @@ impl PackageSearch {
         doc.add_text(self.fields.search, &package.text);
         doc.add_text(
             self.fields.raw,
-            truncate_to_chars(&package.text.to_ascii_lowercase(), RAW_REGEX_BYTES),
+            truncate_to_chars(&fold_lowercase(&package.text), RAW_REGEX_BYTES),
         );
         doc
     }
@@ -502,6 +502,14 @@ fn tokenizers() -> TokenizerManager {
     .build();
     manager.register(SUBSTRING_TOKENIZER, tokenizer);
     manager
+}
+
+/// Fold to lowercase the way the substring index does, so an accented or non-Latin query matches the
+/// text it indexed. Tantivy's `LowerCaser` maps each character through `char::to_lowercase`; matching
+/// it needs the same per-character fold, not `to_ascii_lowercase` (which leaves non-ASCII letters
+/// uppercase) nor `str::to_lowercase` (which special-cases final sigma).
+fn fold_lowercase(value: &str) -> String {
+    value.chars().flat_map(char::to_lowercase).collect()
 }
 
 fn query_terms(query: &str) -> Vec<String> {

@@ -94,6 +94,44 @@ fn test_search_rebuilds_after_epoch_bump() {
 }
 
 #[test]
+fn test_search_folds_case_for_non_ascii_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(OneDoc {
+        name: "ZÜRICH",
+        ecosystem: "pypi",
+    }));
+
+    for (case, query) in [
+        ("uppercase accented substring term", "ZÜRICH"),
+        ("lowercase accented substring term", "zürich"),
+        ("accented regex over the raw field", "re:zürich"),
+    ] {
+        let response = search
+            .search(
+                &stores.ctx(&lexicons),
+                SearchParams {
+                    query: query.to_owned(),
+                    ..SearchParams::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            response
+                .results
+                .iter()
+                .map(|result| result.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["ZÜRICH"],
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn test_authorized_search_filters_before_counting_and_pagination() {
     let dir = tempfile::tempdir().unwrap();
     let stores = Stores::open(&dir);

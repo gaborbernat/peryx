@@ -238,6 +238,8 @@ fn classify_blob(raw: RawBlobStorage) -> Result<BlobStorageConfig, ConfigError> 
         multipart_threshold_bytes,
         part_size_bytes,
         upload_concurrency,
+        conditional_writes,
+        checksum_writes,
     } = raw
     else {
         return Ok(BlobStorageConfig::Filesystem);
@@ -253,6 +255,8 @@ fn classify_blob(raw: RawBlobStorage) -> Result<BlobStorageConfig, ConfigError> 
         multipart_threshold: multipart_threshold_bytes.unwrap_or(16 << 20),
         part_size: part_size_bytes.unwrap_or(16 << 20),
         upload_concurrency: upload_concurrency.unwrap_or(4),
+        conditional_writes: conditional_writes.unwrap_or(true),
+        checksum_writes: checksum_writes.unwrap_or(true),
     };
     // Validate through the backend's own builder so config and runtime agree on what is usable.
     peryx_storage::blob::S3Config::new((&config).into()).map_err(|error| ConfigError::Blob {

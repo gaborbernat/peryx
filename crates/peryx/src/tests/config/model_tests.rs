@@ -3,7 +3,12 @@ use std::path::PathBuf;
 
 use peryx_driver::rate_limit::RateLimitConfig;
 
-use crate::config::{AvailabilityConfig, Config, IndexKind, LogConfig, ReplicationConfig, SecretSource};
+use peryx_storage::blob::DurabilityRequirement;
+
+use crate::config::{
+    AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, IndexKind, LogConfig, ReplicationConfig,
+    S3StorageConfig, SecretSource,
+};
 
 #[test]
 fn test_secret_source_file_returns_trimmed_contents() {
@@ -141,4 +146,98 @@ fn test_config_accepts_a_replica_writer_identity() {
     };
 
     config.validate().unwrap();
+}
+
+fn s3_blob(conditional_writes: bool, checksum_writes: bool) -> BlobStorageConfig {
+    BlobStorageConfig::S3(S3StorageConfig {
+        endpoint: "https://s3.example.com".to_owned(),
+        bucket: "cache".to_owned(),
+        prefix: String::new(),
+        region: "us-east-1".to_owned(),
+        path_style: false,
+        request_timeout: std::time::Duration::from_secs(30),
+        max_retries: 3,
+        multipart_threshold: 16 << 20,
+        part_size: 16 << 20,
+        upload_concurrency: 4,
+        conditional_writes,
+        checksum_writes,
+    })
+}
+
+fn dc_primary() -> AvailabilityConfig {
+    AvailabilityConfig::Dc(ReplicationConfig::Primary {
+        source: "primary-a".to_owned(),
+        token: SecretSource::Literal("secret".to_owned()),
+    })
+}
+
+#[rstest::rstest]
+#[case::filesystem_dc(dc_primary(), BlobStorageConfig::Filesystem)]
+#[case::filesystem_ha(AvailabilityConfig::Ha(ReplicationConfig::Primary {
+    source: "primary-a".to_owned(),
+    token: SecretSource::Literal("secret".to_owned()),
+}), BlobStorageConfig::Filesystem)]
+#[case::object_store_dc(dc_primary(), s3_blob(true, true))]
+#[case::basic_object_store_none(AvailabilityConfig::None, s3_blob(false, false))]
+fn test_config_accepts_a_backend_that_proves_the_mode_durability(
+    #[case] availability: AvailabilityConfig,
+    #[case] blob: BlobStorageConfig,
+) {
+    let config = Config {
+        availability,
+        blob,
+        ..Config::default()
+    };
+
+    config.validate().unwrap();
+}
+
+#[rstest::rstest]
+#[case::dc_without_conditional_writes(
+    dc_primary(),
+    s3_blob(false, true),
+    "blob storage durability: dc availability requires conditional create-if-absent writes, \
+     which the configured backend cannot prove"
+)]
+#[case::ha_without_checksum_writes(
+    AvailabilityConfig::Ha(ReplicationConfig::Primary {
+        source: "primary-a".to_owned(),
+        token: SecretSource::Literal("secret".to_owned()),
+    }),
+    s3_blob(true, false),
+    "blob storage durability: ha availability requires checksum-validated writes, \
+     which the configured backend cannot prove"
+)]
+fn test_config_rejects_a_backend_that_cannot_prove_the_mode_durability(
+    #[case] availability: AvailabilityConfig,
+    #[case] blob: BlobStorageConfig,
+    #[case] expected: &str,
+) {
+    let config = Config {
+        availability,
+        blob,
+        ..Config::default()
+    };
+
+    assert_eq!(config.validate().unwrap_err().to_string(), expected);
+}
+
+#[test]
+fn test_availability_mode_maps_to_its_durability_requirement() {
+    assert_eq!(AvailabilityMode::None.as_str(), "none");
+    assert_eq!(AvailabilityMode::Dc.as_str(), "dc");
+    assert_eq!(AvailabilityMode::Ha.as_str(), "ha");
+    assert_eq!(
+        AvailabilityMode::None.durability_requirement(),
+        DurabilityRequirement::LOCAL
+    );
+    assert_eq!(
+        AvailabilityMode::Dc.durability_requirement(),
+        DurabilityRequirement::REPLICATED
+    );
+    assert_eq!(
+        AvailabilityMode::Ha.durability_requirement(),
+        DurabilityRequirement::REPLICATED
+    );
 }

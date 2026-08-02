@@ -115,6 +115,8 @@ fn settings(endpoint: String) -> S3Settings {
         multipart_threshold: 5 << 20,
         part_size: 5 << 20,
         upload_concurrency: 2,
+        conditional_writes: true,
+        checksum_writes: true,
     }
 }
 

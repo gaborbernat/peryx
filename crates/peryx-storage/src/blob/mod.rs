@@ -10,6 +10,7 @@ use std::path::Path;
 use sha2::{Digest as _, Sha256};
 
 mod backend;
+mod durability;
 mod error;
 mod s3;
 mod storage;
@@ -19,6 +20,7 @@ pub use backend::{
     BlobBackend, BlobCapabilities, BlobDurability, BlobLease, BlobRead, BlobReadBody, BlobStaged, BlobSupport,
     BlobTail, BlobWrite,
 };
+pub use durability::{DurabilityCapabilities, DurabilityRequirement, DurabilityShortfall};
 pub use error::{BlobError, BlobErrorContext, BlobErrorKind, BlobOperation, BlobScanError};
 pub use s3::{S3Addressing, S3Backend, S3Client, S3Config, S3ConfigError, S3Error, S3Settings};
 pub use storage::{BlobBlocking, BlobStorage};

@@ -61,6 +61,13 @@ pub enum ConfigError {
     Jobs { index: usize, reason: &'static str },
     #[error("blob storage: {reason}")]
     Blob { reason: String },
+    #[error(
+        "blob storage durability: {mode} availability requires {shortfall}, which the configured backend cannot prove"
+    )]
+    Durability {
+        mode: &'static str,
+        shortfall: &'static str,
+    },
     #[error("writer identity: {reason}")]
     WriterIdentity { reason: &'static str },
     #[error("secret file {path} holds no secret")]

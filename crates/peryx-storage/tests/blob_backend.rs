@@ -3,7 +3,7 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use peryx_storage::blob::{
     BlobBackend, BlobDurability, BlobError, BlobErrorKind, BlobOperation, BlobRead, BlobReadBody, BlobStorage,
-    BlobSupport, Digest,
+    BlobSupport, Digest, DurabilityCapabilities, S3Config, S3Settings,
 };
 
 async fn bytes(read: BlobRead) -> Vec<u8> {
@@ -109,6 +109,63 @@ fn test_filesystem_capabilities_are_actionable() {
     assert_eq!(BlobSupport::Native.as_str(), "native");
     assert_eq!(BlobSupport::Emulated.as_str(), "emulated");
     assert_eq!(BlobSupport::Unsupported.as_str(), "unsupported");
+}
+
+fn s3_storage(conditional_writes: bool, checksum_writes: bool, staging: &std::path::Path) -> BlobStorage {
+    let config = S3Config::new(S3Settings {
+        endpoint: "https://s3.example.com".to_owned(),
+        bucket: "bucket".to_owned(),
+        prefix: String::new(),
+        region: "us-east-1".to_owned(),
+        path_style: true,
+        request_timeout: std::time::Duration::from_secs(5),
+        max_retries: 0,
+        multipart_threshold: 16 << 20,
+        part_size: 8 << 20,
+        upload_concurrency: 1,
+        conditional_writes,
+        checksum_writes,
+    })
+    .unwrap();
+    BlobStorage::s3(config, staging.to_path_buf())
+}
+
+#[test]
+fn test_filesystem_durability_proves_every_guarantee_locally() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        BlobStorage::filesystem(dir.path()).durability(),
+        DurabilityCapabilities::FILESYSTEM
+    );
+}
+
+#[test]
+fn test_object_store_durability_mirrors_the_declared_endpoint_guarantees() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        s3_storage(true, true, dir.path()).durability(),
+        DurabilityCapabilities::object_store(true, true)
+    );
+    assert_eq!(
+        s3_storage(false, false, dir.path()).durability(),
+        DurabilityCapabilities::object_store(false, false)
+    );
+}
+
+#[tokio::test]
+async fn test_streamed_commit_rejects_a_checksum_mismatch_and_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = BlobStorage::filesystem(dir.path());
+    let mut write = storage.begin().await.unwrap();
+    write
+        .write_chunk(bytes::Bytes::from_static(b"corrupted"))
+        .await
+        .unwrap();
+    let claimed = Digest::of(b"declared");
+    let error = write.commit(&claimed).await.unwrap_err();
+    assert_eq!(error.kind(), BlobErrorKind::DigestMismatch);
+    assert!(storage.head(&claimed).await.unwrap().is_none());
+    assert!(storage.head(&Digest::of(b"corrupted")).await.unwrap().is_none());
 }
 
 #[tokio::test]

@@ -903,6 +903,8 @@ mod s3_staged_tests {
             multipart_threshold: 16 << 20,
             part_size: 8 << 20,
             upload_concurrency: 1,
+            conditional_writes: true,
+            checksum_writes: true,
         };
         S3Backend::new(S3Config::new(settings).unwrap(), staging.to_path_buf())
     }

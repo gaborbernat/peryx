@@ -813,6 +813,8 @@ max_retries = 3
 multipart_threshold_bytes = 16777216
 part_size_bytes = 16777216
 upload_concurrency = 4
+conditional_writes = true
+checksum_writes = true
 ```
 
 | Key                         | Meaning                                                           | Default      |
@@ -828,6 +830,8 @@ upload_concurrency = 4
 | `multipart_threshold_bytes` | Objects at or below this size upload in one `PUT`                 | `16777216`   |
 | `part_size_bytes`           | Multipart part size, from 5 MiB through 5 GiB                     | `16777216`   |
 | `upload_concurrency`        | Parts uploaded at once during a multipart upload                  | `4`          |
+| `conditional_writes`        | Endpoint enforces `If-None-Match` create-if-absent writes         | `true`       |
+| `checksum_writes`           | Endpoint validates the SHA-256 checksum sent with each write      | `true`       |
 
 Endpoint base paths are preserved. User information, queries, and fragments are rejected because credentials belong in
 the AWS provider chain rather than the endpoint URL.
@@ -845,6 +849,24 @@ chain: environment variables, shared config and credentials files, web identity,
 metadata. These providers cache and refresh temporary credentials. The bucket policy must allow `s3:GetObject`,
 `s3:PutObject`, `s3:DeleteObject`, and `s3:AbortMultipartUpload` on `<prefix>/*`, plus `s3:GetBucketLocation` on the
 bucket for health checks.
+
+### Durability capabilities
+
+Each backend proves a durability scope and the atomic-write evidence a completed write carries, resolved once at
+startup. The filesystem backend commits within a single host's failure domain behind an atomic rename that refuses to
+clobber an existing blob and publishes only bytes that hash to the expected digest. An S3-compatible backend commits
+within its object store's failure domain, and what it can prove there depends on the endpoint, not the provider brand:
+AWS S3 honors `If-None-Match` create-if-absent writes and validates the SHA-256 checksum on every write, while some
+S3-compatible gateways reject the `*` precondition or skip checksum validation. The operator declares each guarantee per
+instance with `conditional_writes` and `checksum_writes`, both `true` by default; set the one your endpoint lacks to
+`false`.
+
+`[availability]` modes that replicate their acknowledgement read these capabilities before serving traffic, because a
+mode that acknowledges a write across nodes cannot treat a bare storage success as proof. `none` acknowledges from local
+durability alone and accepts any backend. `dc` and `ha` require both conditional create-if-absent and checksum-validated
+writes, so startup rejects a `dc` or `ha` mode backed by an S3 endpoint declared without one of them, naming the missing
+guarantee and never the endpoint, bucket, or credentials. The filesystem backend proves both, so it satisfies every
+mode.
 
 ### Backup and failure recovery
 

@@ -47,6 +47,8 @@ fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
             multipart_threshold: 16 << 20,
             part_size: 16 << 20,
             upload_concurrency: 4,
+            conditional_writes: true,
+            checksum_writes: true,
         }),
         ..Config::default()
     }

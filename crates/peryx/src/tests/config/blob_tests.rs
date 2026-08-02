@@ -32,6 +32,8 @@ fn test_blob_s3_backend_from_toml_applies_defaults() {
             multipart_threshold: 16 << 20,
             part_size: 16 << 20,
             upload_concurrency: 4,
+            conditional_writes: true,
+            checksum_writes: true,
         })
     );
 }
@@ -65,6 +67,8 @@ fn test_blob_s3_backend_from_toml_overrides_every_field() {
             multipart_threshold: 32,
             part_size: 8 << 20,
             upload_concurrency: 8,
+            conditional_writes: true,
+            checksum_writes: true,
         })
     );
 }

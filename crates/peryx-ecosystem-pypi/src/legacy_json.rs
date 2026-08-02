@@ -167,17 +167,19 @@ fn find_release_version(detail: &ProjectDetail, requested: &str) -> Option<Strin
 /// wins.
 fn latest_release_version(detail: &ProjectDetail) -> Option<String> {
     let versions = release_versions(detail);
-    let rank = |version: &str| {
-        let parsed = parse_version(version);
-        let stable = parsed.as_ref().is_some_and(|parsed| !parsed.any_prerelease());
-        (!release_yanked(detail, version), stable, parsed)
-    };
-    let ranked = versions
+    let groups = group_by_version(detail);
+    let best = versions
         .iter()
-        .filter(|version| release_files(detail, version).next().is_some())
-        .max_by(|left, right| rank(left).cmp(&rank(right)).then_with(|| left.cmp(right)))
-        .cloned();
-    ranked.map_or_else(|| versions.into_iter().next(), Some)
+        .filter_map(|version| {
+            let files = groups.get(&version_key(version))?;
+            let parsed = parse_version(version);
+            let stable = parsed.as_ref().is_some_and(|parsed| !parsed.any_prerelease());
+            let active = files.iter().any(|file| !yanked_bool(&file.yanked));
+            Some((active, stable, parsed, version))
+        })
+        .max()
+        .map(|(.., version)| version.clone());
+    best.or_else(|| versions.into_iter().next())
 }
 
 fn release_versions(detail: &ProjectDetail) -> Vec<String> {

@@ -254,6 +254,42 @@ fn test_checkpoint_with_a_stale_fence_is_rejected() {
 }
 
 #[test]
+fn test_checkpoint_by_a_newer_fence_fences_out_the_superseded_worker() {
+    let (_dir, store) = store();
+    let key = target(1);
+    begin(&store, &key, 1, 0);
+    let promoted = store.checkpoint_transfer_attempt(&key, 500, policy(), 2, 5).unwrap();
+    assert_eq!(
+        promoted.record().state,
+        TransferAttemptState::InProgress { transferred: 500 }
+    );
+    let error = store
+        .checkpoint_transfer_attempt(&key, SIZE, policy(), 1, 6)
+        .unwrap_err();
+    assert!(matches!(error, TransferAttemptError::StaleFence { .. }));
+    assert_eq!(
+        store.transfer_attempt(&key).unwrap().unwrap().state,
+        TransferAttemptState::InProgress { transferred: 500 }
+    );
+}
+
+#[test]
+fn test_checkpoint_cannot_regress_a_completed_attempt_from_a_stale_worker() {
+    let (_dir, store) = store();
+    let key = target(1);
+    begin(&store, &key, 1, 0);
+    store.complete_transfer_attempt(&key, &digest(1), SIZE, 2, 5).unwrap();
+    let error = store
+        .checkpoint_transfer_attempt(&key, SIZE, policy(), 1, 6)
+        .unwrap_err();
+    assert!(matches!(error, TransferAttemptError::StaleFence { .. }));
+    assert_eq!(
+        store.transfer_attempt(&key).unwrap().unwrap().state,
+        TransferAttemptState::Succeeded { size: SIZE }
+    );
+}
+
+#[test]
 fn test_fail_records_a_classified_terminal_state() {
     let (_dir, store) = store();
     let key = target(1);

@@ -273,7 +273,16 @@ impl MetaStore {
         now: i64,
     ) -> Result<CheckpointOutcome, TransferAttemptError> {
         let placement = key.encode();
-        let (sequence, mut record) = self.open_attempt(&placement, fence)?;
+        let txn = self.db.begin_write().map_err(MetaError::from)?;
+        let Some((sequence, mut record)) = read_current(&txn, &placement)? else {
+            return Err(TransferAttemptError::NoOpenAttempt);
+        };
+        if fence < record.fence {
+            return Err(TransferAttemptError::StaleFence {
+                current: record.fence,
+                applied: fence,
+            });
+        }
         let TransferAttemptState::InProgress { transferred: durable } = record.state else {
             return Err(TransferAttemptError::NoOpenAttempt);
         };
@@ -292,9 +301,9 @@ impl MetaStore {
             return Ok(CheckpointOutcome::Coalesced(record));
         }
         record.state = TransferAttemptState::InProgress { transferred };
+        record.fence = record.fence.max(fence);
         record.updated_at_unix = now;
         record.checkpointed_at_unix = now;
-        let txn = self.db.begin_write().map_err(MetaError::from)?;
         write_at(&txn, &placement, sequence, &record)?;
         txn.commit().map_err(MetaError::from)?;
         Ok(CheckpointOutcome::Persisted(record))
@@ -437,20 +446,6 @@ impl MetaStore {
                 },
             )
             .collect())
-    }
-
-    fn open_attempt(&self, placement: &str, fence: u64) -> Result<(u64, TransferAttemptRecord), TransferAttemptError> {
-        let txn = self.db.begin_read().map_err(MetaError::from)?;
-        let Some((sequence, record)) = read_current_read(&txn, placement)? else {
-            return Err(TransferAttemptError::NoOpenAttempt);
-        };
-        if fence < record.fence {
-            return Err(TransferAttemptError::StaleFence {
-                current: record.fence,
-                applied: fence,
-            });
-        }
-        Ok((sequence, record))
     }
 
     fn finish_attempt(

@@ -178,7 +178,11 @@ impl MemoryRaftLog {
         }
     }
 
-    /// Restore a log from [`RaftLog::snapshot`] bytes, bounding the result by `limits`.
+    /// Restore a log from [`RaftLog::snapshot`] bytes.
+    ///
+    /// Restore checks the header magic and version, the length framing, and the contiguous-index and
+    /// monotonic-term invariants of every decoded entry. `limits` bounds later [`RaftLog::append`]
+    /// calls; it does not cap the decoded entry count or payload sizes, which the input length bounds.
     ///
     /// # Errors
     /// Returns [`RaftLogError::Truncated`] when the bytes end inside a field,

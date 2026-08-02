@@ -377,6 +377,43 @@ fn test_restore_rejects_a_truncated_entry_and_payload() {
 }
 
 #[test]
+fn test_restore_rejects_bytes_that_end_mid_entry() {
+    let header = |count: u64| {
+        let mut bytes = 0x5052_584c_u32.to_be_bytes().to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&count.to_be_bytes());
+        bytes
+    };
+    let at_index = {
+        let mut bytes = header(1);
+        bytes.extend_from_slice(&2u64.to_be_bytes());
+        bytes
+    };
+    let at_length = {
+        let mut bytes = header(1);
+        bytes.extend_from_slice(&2u64.to_be_bytes());
+        bytes.extend_from_slice(&1u64.to_be_bytes());
+        bytes
+    };
+
+    for (bytes, section) in [
+        (header(1), "entry term"),
+        (at_index, "entry index"),
+        (at_length, "payload length"),
+    ] {
+        let error = MemoryRaftLog::restore(&bytes, DEFAULT_LOG_LIMITS).unwrap_err();
+        assert_eq!(
+            error,
+            RaftLogError::Truncated {
+                section,
+                needed: 8,
+                actual: 0,
+            }
+        );
+    }
+}
+
+#[test]
 fn test_restore_rejects_bad_magic() {
     let mut bytes = seeded().snapshot();
     bytes[0] = 0;

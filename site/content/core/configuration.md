@@ -407,8 +407,9 @@ the role. peryx rejects unknown keys.
 A `route` is a raw URL path prefix. It must be one or more non-empty path segments separated by `/`; each segment may
 contain only ASCII letters, digits, `-`, `.`, `_`, and `~`. Startup rejects routes with a leading or trailing `/`, empty
 segments, percent encoding, traversal segments, control characters, spaces, and routes whose first segment is reserved
-for Peryx endpoints such as `browse`, `stats`, `+stats`, `+status`, `api-docs`, `metrics`, `pkg`, and `_` (the
-`/_/oidc/*` trusted-publishing namespace).
+for a Peryx endpoint: `+stats`, `+status`, `_`, `admin`, `api-docs`, `browse`, `favicon.svg`, `metrics`, `pkg`, `search`,
+`stats`, or `upload`. These are the paths peryx's own API and web UI serve (the `_` segment is the `/_/oidc/*`
+trusted-publishing namespace), so an index may not shadow one.
 
 Declaring any `[[index]]` replaces the default topology, which ships a trio per ecosystem: a cached upstream, a hosted
 store, and a virtual index that layers the two.

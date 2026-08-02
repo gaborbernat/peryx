@@ -24,6 +24,7 @@ mod repository;
 mod revocation;
 mod role_grant;
 mod scoped_token;
+mod transfer_attempt;
 mod user;
 mod webhook;
 mod writer;
@@ -72,6 +73,11 @@ pub use scoped_token::{
     NewScopedToken, RevokeScopedTokenOutcome, ScopedTokenPage, ScopedTokenQuery, ScopedTokenQueryError,
     ScopedTokenRecord,
 };
+pub use transfer_attempt::{
+    AttemptRetention, BeginOutcome, CheckpointOutcome, CheckpointPolicy, MAX_ATTEMPTS_PER_PLACEMENT,
+    TransferAttemptError, TransferAttemptMetric, TransferAttemptRecord, TransferAttemptState, TransferAttemptStatus,
+    TransferPlan,
+};
 pub use user::UserStoreError;
 pub use webhook::{NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus};
 
@@ -114,6 +120,9 @@ const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new
 /// so a package read resolves both dimensions with one indexed lookup and no content-store probe.
 const ARTIFACT_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("artifact_placement");
 const BLOB_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("blob_placement");
+/// The durable transfer attempts populating blob placements: one current attempt and a bounded retry
+/// history per `(digest, backend, data center, location)`, keyed by placement then attempt sequence.
+const TRANSFER_ATTEMPT: TableDefinition<&str, &[u8]> = TableDefinition::new("transfer_attempt");
 const REPOSITORY: TableDefinition<&str, &[u8]> = TableDefinition::new("repository");
 const REPOSITORY_ROUTE: TableDefinition<&str, &str> = TableDefinition::new("repository_route");
 const SCOPED_TOKEN: TableDefinition<&str, &[u8]> = TableDefinition::new("scoped_token");
@@ -237,6 +246,7 @@ impl MetaStore {
             txn.open_table(DIGEST_REVOCATION_STATE)?;
             txn.open_table(ARTIFACT_PLACEMENT)?;
             txn.open_table(BLOB_PLACEMENT)?;
+            txn.open_table(TRANSFER_ATTEMPT)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;
             txn.open_table(SCOPED_TOKEN)?;

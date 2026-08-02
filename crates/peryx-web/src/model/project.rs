@@ -1,6 +1,6 @@
 pub use peryx_core::{
-    UiArtifactRef, UiArtifactSource, UiByteAvailability, UiFile, UiManifest, UiMember, UiMemberChunk, UiProject,
-    UiProjectStatus, UiProjectView, UiRelease,
+    UiArtifactRef, UiArtifactSource, UiAttestation, UiByteAvailability, UiFile, UiManifest, UiMember, UiMemberChunk,
+    UiProject, UiProjectStatus, UiProjectView, UiProvenance, UiProvenanceSource, UiRelease, UiSubjectMatch,
 };
 
 use super::string_at;
@@ -56,6 +56,72 @@ pub const fn byte_availability_label(availability: UiByteAvailability) -> Placem
             key: "unavailable",
             text: "unavailable",
             hint: "Not stored locally and no upstream to supply it",
+        },
+    }
+}
+
+/// How a file's PEP 740 provenance source renders: whether peryx holds the document or only relays
+/// an upstream claim.
+#[must_use]
+pub const fn provenance_source_label(source: UiProvenanceSource) -> PlacementLabel {
+    match source {
+        UiProvenanceSource::Hosted => PlacementLabel {
+            key: "hosted",
+            text: "hosted",
+            hint: "Uploaded here; peryx bound each attestation to this distribution at upload",
+        },
+        UiProvenanceSource::Mirrored => PlacementLabel {
+            key: "mirrored",
+            text: "mirrored",
+            hint: "Advertised by an upstream index; peryx relays the claim without reading it",
+        },
+    }
+}
+
+/// How an attestation's subject binding renders. peryx checks the binding, never the signature, so a
+/// match says the bundle was issued for this file, not that it is trustworthy.
+#[must_use]
+pub const fn subject_match_label(subject: UiSubjectMatch) -> PlacementLabel {
+    match subject {
+        UiSubjectMatch::Matched => PlacementLabel {
+            key: "matched",
+            text: "subject matched",
+            hint: "An attestation subject names this file's digest",
+        },
+        UiSubjectMatch::Mismatched => PlacementLabel {
+            key: "mismatched",
+            text: "subject mismatch",
+            hint: "No attestation subject binds this file's digest",
+        },
+        UiSubjectMatch::Unknown => PlacementLabel {
+            key: "unknown",
+            text: "subject unknown",
+            hint: "The statement carried no readable subject to compare",
+        },
+    }
+}
+
+/// The one-line validation result the panel states for a file's provenance.
+///
+/// Derived from how peryx obtained the document and whether it could read it. peryx never verifies a
+/// Sigstore signature, so the result reports what peryx checked, not that any attestation is genuine.
+#[must_use]
+pub const fn provenance_validation_label(source: UiProvenanceSource, malformed: bool) -> PlacementLabel {
+    match (source, malformed) {
+        (UiProvenanceSource::Hosted, false) => PlacementLabel {
+            key: "verified-binding",
+            text: "binding verified",
+            hint: "peryx enforced the subject binding at upload; Sigstore signatures are not checked",
+        },
+        (UiProvenanceSource::Hosted, true) => PlacementLabel {
+            key: "unreadable",
+            text: "unreadable",
+            hint: "Provenance is present but its stored document could not be read",
+        },
+        (UiProvenanceSource::Mirrored, _) => PlacementLabel {
+            key: "unverified",
+            text: "unverified claim",
+            hint: "Upstream advertises provenance; peryx neither fetched nor verified it",
         },
     }
 }

@@ -163,6 +163,7 @@ fn placement_file(filename: &str, source: UiArtifactSource, availability: UiByte
         has_metadata: false,
         upstream: None,
         provenance: None,
+        provenance_detail: None,
         source,
         availability,
     }

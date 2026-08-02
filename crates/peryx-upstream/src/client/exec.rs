@@ -378,3 +378,59 @@ impl HelperResponse {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use command_group::AsyncCommandGroup as _;
+    use tokio::process::Command;
+
+    use super::terminate;
+
+    fn spawn(script: &str) -> command_group::AsyncGroupChild {
+        Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .group()
+            .spawn()
+            .expect("test helper child spawns")
+    }
+
+    // Reaping the child before terminate runs pins try_wait to the cached status, so the early
+    // return is taken on every run rather than only when the helper happens to have exited in time.
+    #[tokio::test]
+    async fn test_terminate_returns_promptly_when_the_child_already_exited() {
+        let mut child = spawn("exit 0");
+        assert!(child.wait().await.expect("child is reaped").success());
+
+        tokio::time::timeout(Duration::from_secs(5), terminate(&mut child))
+            .await
+            .expect("terminate returns without waiting on an already-exited child");
+
+        assert_eq!(
+            child
+                .try_wait()
+                .expect("status stays available")
+                .map(|status| status.success()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_terminate_kills_a_running_child() {
+        let mut child = spawn("sleep 300");
+        assert!(child.try_wait().expect("child is still running").is_none());
+
+        tokio::time::timeout(Duration::from_secs(5), terminate(&mut child))
+            .await
+            .expect("terminate kills and reaps the running child");
+
+        assert!(
+            matches!(child.try_wait().expect("status is available after terminate"), Some(status) if !status.success())
+        );
+    }
+}

@@ -540,8 +540,33 @@ fn next_page_query_of(value: &HeaderValue) -> Option<String> {
 /// comma-separated link-values (`rel="prev"`, `rel="next"`, …); the `next` one drives pagination, so
 /// picking the first `<...>` blindly can walk backwards.
 fn next_page_query(link: &str) -> Option<String> {
-    let target = link.split(',').find(|value| value.contains("rel=\"next\""))?;
+    let target = link_values(link)
+        .into_iter()
+        .find(|value| value.contains("rel=\"next\""))?;
     let start = target.find('<')? + 1;
     let end = target[start..].find('>')? + start;
     target[start..end].split_once('?').map(|(_, query)| query.to_owned())
+}
+
+/// Split an RFC 8288 `Link` header into its link-values. A comma separates link-values, but is also a
+/// legal unencoded query sub-delimiter (RFC 3986) inside the angle-bracketed target, so a comma within
+/// `<…>` belongs to that target rather than ending it. Splitting on every comma would break a cursor
+/// that carries one, drop the `next` link-value, and silently truncate the listing.
+fn link_values(link: &str) -> Vec<&str> {
+    let mut values = Vec::new();
+    let mut start = 0;
+    let mut in_target = false;
+    for (index, byte) in link.bytes().enumerate() {
+        match byte {
+            b'<' => in_target = true,
+            b'>' => in_target = false,
+            b',' if !in_target => {
+                values.push(&link[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    values.push(&link[start..]);
+    values
 }

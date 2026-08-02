@@ -101,7 +101,8 @@ a type badge in its ecosystem's own word (a PyPI package or an OCI image), so a 
 
 `/search` keeps `q`, `type`, `page`, and `page_size` in the URL. The `type` filter accepts uploaded, cached, and
 override packages; the UI labels the last one as `Override`. Page size choices are 25, 50, and 100, and the browser
-stores the last selected size for the next search.
+stores the last selected size for the next search. Matching is case-insensitive and folds accented and non-Latin letters
+the way the index does, so a search for `café` finds `Café` and one for `ZÜRICH` finds `zürich`.
 
 An index card links to its project list, filterable as you type. For a PyPI index, a project page shows everything an
 index page carries: the rendered long description, summary, install command with a copy button, versions, dependencies,

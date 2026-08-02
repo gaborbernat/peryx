@@ -15,6 +15,8 @@ use axum::response::{IntoResponse, Response};
 use peryx_driver::state::AppState;
 use peryx_identity::{Action, authorize_all};
 
+use crate::response_security::ProtectedCachePolicy;
+
 /// The index whose ACL to describe, by its route.
 #[derive(Debug, serde::Deserialize)]
 pub struct AclQuery {
@@ -47,11 +49,13 @@ pub async fn acl(State(state): State<Arc<AppState>>, headers: HeaderMap, Query(q
             })
         })
         .collect();
-    axum::Json(serde_json::json!({
+    let mut response = axum::Json(serde_json::json!({
         "index": index.name,
         "route": index.route,
         "anonymous_read": index.acl.anonymous_read,
         "tokens": tokens,
     }))
-    .into_response()
+    .into_response();
+    ProtectedCachePolicy::NoStore.apply(response.headers_mut());
+    response
 }

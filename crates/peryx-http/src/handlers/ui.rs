@@ -15,6 +15,8 @@ use peryx_driver::serving::EcosystemDriver;
 use peryx_driver::state::AppState;
 use peryx_identity::Denial;
 
+use crate::response_security::ProtectedCachePolicy;
+
 #[derive(Debug, serde::Deserialize)]
 pub struct IndexQuery {
     index: String,
@@ -73,7 +75,7 @@ pub async fn ui_projects(
             if let Some(access) = access {
                 names.retain(|project| access.authorize_project(project).is_ok());
             }
-            axum::Json(names).into_response()
+            private_json(names)
         }
         Err(message) => server_error(&message),
     }
@@ -95,7 +97,7 @@ pub async fn ui_project(
         .browse_project(state.serving.clone(), position, query.project)
         .await
     {
-        Ok(Some(view)) => axum::Json(view).into_response(),
+        Ok(Some(view)) => private_json(view),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(message) => server_error(&message),
     }
@@ -118,7 +120,7 @@ pub async fn ui_manifest(
         .manifest_view(state.serving.clone(), position, query.project, query.reference)
         .await
     {
-        Ok(Some(view)) => axum::Json(view).into_response(),
+        Ok(Some(view)) => private_json(view),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(message) => server_error(&message),
     }
@@ -140,7 +142,7 @@ pub async fn ui_members(
         .artifact_members(state.serving.clone(), position, query.project, query.digest)
         .await
     {
-        Ok(members) => axum::Json(members).into_response(),
+        Ok(members) => private_json(members),
         Err(message) => server_error(&message),
     }
 }
@@ -169,7 +171,7 @@ pub async fn ui_member(
         )
         .await
     {
-        Ok(chunk) => axum::Json(chunk).into_response(),
+        Ok(chunk) => private_json(chunk),
         Err(message) => server_error(&message),
     }
 }
@@ -179,6 +181,14 @@ fn resolve(state: &AppState, route: &str) -> Option<(usize, Arc<dyn EcosystemDri
     let position = state.indexes.iter().position(|index| index.route == route)?;
     let driver = state.driver_for(state.index_at(position).ecosystem)?.clone();
     Some((position, driver))
+}
+
+/// Serialize authenticated browse data as JSON that no cache may retain: these views carry an index's
+/// private project and content metadata, gated by its read ACL.
+fn private_json<T: serde::Serialize>(value: T) -> Response {
+    let mut response = axum::Json(value).into_response();
+    ProtectedCachePolicy::NoStore.apply(response.headers_mut());
+    response
 }
 
 fn server_error(message: &str) -> Response {

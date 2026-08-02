@@ -116,3 +116,21 @@ async fn test_acl_is_404_for_an_unknown_index() {
     let (status, _document) = get(&app, "/+acl?index=nope", Some(ADMIN_SECRET)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn test_acl_response_is_not_cached() {
+    let (_dir, app) = acl_app();
+    let credential = STANDARD.encode(format!("anyuser:{ADMIN_SECRET}"));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/+acl?index=hosted")
+                .header(header::AUTHORIZATION, format!("Basic {credential}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+}

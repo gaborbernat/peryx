@@ -471,6 +471,20 @@ async fn test_ui_project_returns_the_browse_view() {
     assert_eq!(document["names"], serde_json::json!(["1.0"]));
 }
 
+#[rstest]
+#[case::projects("/+ui/projects?index=good")]
+#[case::project("/+ui/project?index=good&project=flask")]
+#[case::manifest("/+ui/manifest?index=good&project=img&ref=1.0")]
+#[case::members("/+ui/members?index=good&project=img&digest=sha256:a")]
+#[case::member("/+ui/member?index=good&project=img&digest=sha256:a&member=f")]
+#[tokio::test]
+async fn test_ui_data_responses_are_not_cached(#[case] uri: &str) {
+    let (_dir, app) = ui_app();
+    let (status, headers, _document) = get_probe(&app, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+}
+
 #[tokio::test]
 async fn test_ui_project_page_exposes_contact_names_and_addresses_separately() {
     let (_dir, app) = ui_app();

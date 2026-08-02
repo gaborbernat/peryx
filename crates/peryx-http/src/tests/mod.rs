@@ -1,5 +1,6 @@
 mod acl_tests;
 mod analytics_tests;
+mod availability_tests;
 mod fallback_tests;
 mod grant_tests;
 mod oidc_tests;

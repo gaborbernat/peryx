@@ -61,6 +61,9 @@ pub struct ServingState {
     pub requests: AtomicU64,
     /// Whether this process serves as a replica and rejects client mutations.
     pub read_only: bool,
+    /// The fixed availability topology this process was configured with, projected per request into a
+    /// role-filtered snapshot. Single-node `none` mode holds an empty roster.
+    pub(super) availability_topology: peryx_core::TopologyConfig,
     /// Immutable repository-route positions for request dispatch.
     pub(super) route_resolver: RouteResolver,
     pub indexes: Vec<Index>,
@@ -176,6 +179,12 @@ impl ServingState {
     #[must_use]
     pub async fn is_ready(&self, writes: bool) -> bool {
         self.meta.current_serial().is_ok() && self.blobs.health().await.is_ok() && (!writes || !self.read_only)
+    }
+
+    /// The fixed availability topology this process serves a role-filtered snapshot from.
+    #[must_use]
+    pub const fn availability_topology(&self) -> &peryx_core::TopologyConfig {
+        &self.availability_topology
     }
 
     /// Find the index whose route is the longest segment-aligned prefix of `path` (which has no

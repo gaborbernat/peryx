@@ -7,6 +7,7 @@
 
 mod acl;
 mod analytics;
+mod availability;
 mod discover;
 mod dispatch;
 mod grants;
@@ -29,6 +30,7 @@ use peryx_identity::Denial;
 
 pub use acl::{AclQuery, acl};
 pub use analytics::{analytics_sources, analytics_timeline, analytics_top, analytics_unused, analytics_versions};
+pub use availability::availability_topology;
 pub use discover::{api, openapi_spec};
 pub use dispatch::{dispatch_delete, dispatch_get, dispatch_post, dispatch_put, not_found};
 pub use grants::{GrantsQuery, create_grant, inspect_grant, list_grants, revoke_grant};

@@ -78,12 +78,6 @@ pub struct PartialConfig {
     /// The `[availability]` table: the runtime availability mode and the replication topology a
     /// stronger mode carries. Absent, like `mode = "none"`, selects single-node operation.
     pub availability: Option<RawAvailability>,
-    /// The deprecated top-level `[replication]` table. Pre-availability releases configured a
-    /// single-datacenter role here; it now maps to `[availability]` with `mode = "dc"` carrying the
-    /// same role. Present alongside `[availability]` it names the topology twice, an unsafe
-    /// combination that stops startup rather than choosing a winner.
-    #[serde(rename = "replication")]
-    pub legacy_replication: Option<RawReplication>,
     pub jobs: PartialJobsConfig,
     /// A `[blob]` table selecting the blob storage backend.
     pub blob: Option<RawBlobStorage>,

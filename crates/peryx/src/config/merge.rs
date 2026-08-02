@@ -80,7 +80,7 @@ impl Config {
         self.log = self.log.apply(partial.log);
         self.rate_limit = apply_rate_limit(self.rate_limit, partial.rate_limit);
         self.auth = self.auth.apply(partial.auth)?;
-        if let Some(mut availability) = partial.availability {
+        if let Some(mut availability) = migrate_legacy_replication(partial.legacy_replication, partial.availability)? {
             let group = availability.group.take();
             let members = availability.members.take();
             self.availability = classify_availability(availability)?;
@@ -266,6 +266,39 @@ fn classify_blob(raw: RawBlobStorage) -> Result<BlobStorageConfig, ConfigError> 
         reason: error.to_string(),
     })?;
     Ok(BlobStorageConfig::S3(config))
+}
+
+/// The one deprecation notice a migrated legacy `[replication]` table emits. It names the retired key,
+/// its replacement, the behavior the mapping fixes, and the release that drops the compatibility path.
+const LEGACY_REPLICATION_NOTICE: &str = "the top-level `[replication]` table is deprecated; move it \
+    under `[availability]` with `mode = \"dc\"`. It resolves to `dc` mode and never `ha`, so no stronger \
+    durability is inferred, and support is removed in the 0.1.0 release.";
+
+/// Reconcile the deprecated top-level `[replication]` table with the `[availability]` table.
+///
+/// The legacy table is the pre-availability single-datacenter form, so it maps to `mode = "dc"` carrying
+/// the same role and warns once. Both tables together names the topology twice, possibly with different
+/// intent, so it stops startup rather than silently preferring one. It never maps to `ha`: that mode
+/// promises remote durability the flat settings never expressed.
+fn migrate_legacy_replication(
+    legacy: Option<RawReplication>,
+    availability: Option<RawAvailability>,
+) -> Result<Option<RawAvailability>, ConfigError> {
+    match (legacy, availability) {
+        (Some(_), Some(_)) => Err(ConfigError::Replication {
+            reason: "configure the topology under `[availability]`, not both it and the legacy `[replication]` table",
+        }),
+        (Some(role), None) => {
+            tracing::warn!("{LEGACY_REPLICATION_NOTICE}");
+            Ok(Some(RawAvailability {
+                mode: Some(AvailabilityMode::Dc),
+                replication: Some(role),
+                group: None,
+                members: None,
+            }))
+        }
+        (None, availability) => Ok(availability),
+    }
 }
 
 /// Resolve the `[availability]` table into a mode and its topology. `none` carries no replication, so

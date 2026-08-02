@@ -894,7 +894,7 @@ mode = "none"
 replication client, route, or task. `dc` and `ha` name the stronger promises later work fulfills; each needs a
 `[availability.replication]` role that carries it, so peryx rejects a `dc` or `ha` mode with no role, and rejects a
 `[availability.replication]` role under `none`, naming the `availability` field. Selecting `dc` or `ha` replaces the
-former top-level `[replication]` table, which no longer parses.
+former top-level `[replication]` table, whose [migration](#migrating-the-legacy-replication-table) is described below.
 
 ```toml
 [availability]
@@ -976,6 +976,39 @@ or `address`; a `node` that reuses the `group` identity; anything other than exa
 configured replica. It never probes a member's `address`, so an unreachable configured peer is a valid topology, not a
 configuration error. A roster requires `dc` or `ha` mode; declaring one under `none` is rejected, naming the
 `availability` field.
+
+### Migrating the legacy `[replication]` table
+
+Releases before the availability model configured a single-datacenter role in a top-level `[replication]` table. That
+table still loads for one deprecation window: peryx maps it to `[availability]` with `mode = "dc"`, carrying the same
+`role`, `source`/`upstream`, `token`/`token_file`, `poll_interval_secs`, and `page_size`. The mapping never selects
+`ha`; that mode promises remote-datacenter durability the flat table never expressed, so nothing is silently upgraded.
+
+```toml
+# Legacy — deprecated, still accepted
+[replication]
+role = "primary"
+source = "writer-a"
+token_file = "/run/secrets/replication-token"
+```
+
+```toml
+# Equivalent — write this instead
+[availability]
+mode = "dc"
+
+[availability.replication]
+role = "primary"
+source = "writer-a"
+token_file = "/run/secrets/replication-token"
+```
+
+A `[replication]` table logs one deprecation warning at startup that names the retired key, its replacement, the `dc`
+behavior it maps to, and the removal release. Configuring both `[replication]` and `[availability]` names the topology
+twice, so peryx refuses to start rather than choose between them; delete the legacy table once you have moved its keys.
+`peryx config check` prints the effective availability mode and the resolved role's non-secret address, so you can
+confirm the conversion — and that the credential never appears — before a restart. Support for `[replication]` is
+removed in the 0.1.0 release; migrate before upgrading to it.
 
 ## `[auth]`
 

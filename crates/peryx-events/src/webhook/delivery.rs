@@ -98,7 +98,14 @@ async fn deliver_due<H: WebhookHost>(host: &Arc<H>) {
 async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRecord) {
     let now = host.now();
     let Some(target) = host.webhooks().target(&delivery.index, &delivery.target) else {
-        record_failure(host.as_ref(), &delivery, now, None, "webhook target is not configured");
+        record_failure(
+            host.as_ref(),
+            &delivery,
+            now,
+            None,
+            "webhook target is not configured",
+            true,
+        );
         return;
     };
     let signature = signature(&target.secret, now, &delivery.id, delivery.payload.as_bytes());
@@ -131,10 +138,18 @@ async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRec
                 now,
                 Some(status),
                 &format!("http status {status}"),
+                !is_permanent(status),
             );
         }
         Err(err) => {
-            record_failure(host.as_ref(), &delivery, now, None, &err.without_url().to_string());
+            record_failure(
+                host.as_ref(),
+                &delivery,
+                now,
+                None,
+                &err.without_url().to_string(),
+                true,
+            );
         }
     }
 }
@@ -175,12 +190,13 @@ fn record_failure<H: WebhookHost>(
     now: i64,
     response_status: Option<u16>,
     error: &str,
+    retriable: bool,
 ) {
     let attempts = delivery.attempts + 1;
-    let (status, next_attempt_at_unix) = if attempts >= MAX_ATTEMPTS {
-        (WebhookDeliveryStatus::Failed, None)
-    } else {
+    let (status, next_attempt_at_unix) = if retriable && attempts < MAX_ATTEMPTS {
         (WebhookDeliveryStatus::Pending, Some(now + backoff_secs(attempts)))
+    } else {
+        (WebhookDeliveryStatus::Failed, None)
     };
     let result = host.meta().update_webhook_delivery(
         &delivery.id,
@@ -253,10 +269,21 @@ fn backoff_secs(attempts: u16) -> i64 {
     secs
 }
 
+/// Whether an HTTP status rules out any later success, so the delivery fails at once instead of
+/// spending its remaining attempts on a response that will not change. A client error other than
+/// `408 Request Timeout` and `429 Too Many Requests` is permanent; both of those, every `5xx`, and a
+/// transport error stay retriable.
+fn is_permanent(status: u16) -> bool {
+    (400..500).contains(&status) && status != 408 && status != 429
+}
+
 #[cfg(test)]
 mod tests {
+    use peryx_storage::meta::MetaStore;
+    use rstest::rstest;
+
     use super::*;
-    use crate::webhook::WebhookEventKind;
+    use crate::webhook::{WebhookEventKind, WebhookRuntime};
 
     #[test]
     fn test_backoff_caps() {
@@ -315,5 +342,71 @@ mod tests {
             ..record
         }));
         log_delivery_failure(None);
+    }
+
+    #[rstest]
+    #[case(400, true)]
+    #[case(404, true)]
+    #[case(410, true)]
+    #[case(422, true)]
+    #[case(408, false)]
+    #[case(429, false)]
+    #[case(500, false)]
+    #[case(503, false)]
+    fn test_is_permanent_flags_only_non_retriable_client_errors(#[case] status: u16, #[case] permanent: bool) {
+        assert_eq!(is_permanent(status), permanent);
+    }
+
+    struct TestHost {
+        webhooks: WebhookRuntime,
+        meta: MetaStore,
+        now: i64,
+    }
+
+    impl WebhookHost for TestHost {
+        fn webhooks(&self) -> &WebhookRuntime {
+            &self.webhooks
+        }
+        fn meta(&self) -> &MetaStore {
+            &self.meta
+        }
+        fn now(&self) -> i64 {
+            self.now
+        }
+    }
+
+    #[rstest]
+    #[case::permanent(false, WebhookDeliveryStatus::Failed, false)]
+    #[case::transient(true, WebhookDeliveryStatus::Pending, true)]
+    fn test_record_failure_only_reschedules_retriable_responses(
+        #[case] retriable: bool,
+        #[case] expected: WebhookDeliveryStatus,
+        #[case] rescheduled: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let host = TestHost {
+            webhooks: WebhookRuntime::disabled(),
+            meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
+            now: 1_000,
+        };
+        assert!(host.webhooks().is_empty(), "no target is needed to record a failure");
+        let id = host
+            .meta()
+            .enqueue_webhook_delivery(NewWebhookDelivery {
+                index: "hosted",
+                target: "ci",
+                event: "upload",
+                payload: "{}",
+                created_at_unix: 10,
+            })
+            .unwrap();
+        let delivery = host.meta().get_webhook_delivery(&id).unwrap().unwrap();
+
+        record_failure(&host, &delivery, host.now(), Some(404), "http status 404", retriable);
+
+        let stored = host.meta().get_webhook_delivery(&id).unwrap().unwrap();
+        assert_eq!(stored.status, expected);
+        assert_eq!(stored.attempts, 1);
+        assert_eq!(stored.next_attempt_at_unix.is_some(), rescheduled);
     }
 }

@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod availability_listener_tests;
 mod cli;
 mod config;
 mod logging_tests;

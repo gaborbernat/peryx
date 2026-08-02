@@ -17,12 +17,12 @@ pub use load::{from_env, from_file, from_toml};
 #[cfg(test)]
 pub(crate) use merge::classify_tls;
 pub use model::{
-    AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode,
-    CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, DcMember, DcMembership,
-    DcRole, IndexConfig, IndexKind, JobsConfig, JobsMode, LdapBindConfig, LdapProviderConfig, LogConfig, LogFormat,
-    LogSink, OidcProviderConfig, PrefetchConfig, PrefetchMode, ReplicationConfig, S3StorageConfig, SecretSource,
-    TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig,
-    WebhookConfig, WebhookSecret,
+    AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityListenerConfig, AvailabilityListenerTls, AvailabilityMode,
+    BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE,
+    DEFAULT_REPLICA_POLL_INTERVAL_SECS, DcMember, DcMembership, DcRole, IndexConfig, IndexKind, JobsConfig, JobsMode,
+    LdapBindConfig, LdapProviderConfig, LogConfig, LogFormat, LogSink, OidcProviderConfig, PrefetchConfig,
+    PrefetchMode, ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig,
+    UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
 };
 pub use raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,

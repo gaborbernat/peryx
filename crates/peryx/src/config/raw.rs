@@ -125,6 +125,17 @@ pub struct RawAvailability {
     /// The `[[availability.member]]` array: the static datacenter group roster.
     #[serde(rename = "member")]
     pub members: Option<Vec<RawDcMember>>,
+    /// The `[availability.listener]` table: the private control listener a `dc` or `ha` node exposes.
+    pub listener: Option<RawAvailabilityListener>,
+}
+
+/// The raw `[availability.listener]` table before address and TLS validation.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RawAvailabilityListener {
+    pub bind: Option<String>,
+    pub tls: Option<RawTls>,
+    pub allow_remote_plaintext: Option<bool>,
 }
 
 /// One `[[availability.member]]` table before identity and role validation.

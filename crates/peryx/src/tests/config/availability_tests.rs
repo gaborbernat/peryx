@@ -1,10 +1,17 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use std::path::PathBuf;
+
 use rstest::rstest;
 
 use super::toml_config;
-use crate::config::{self, AvailabilityConfig, AvailabilityMode, Config, ReplicationConfig, SecretSource};
+use crate::config::{
+    self, AvailabilityConfig, AvailabilityListenerTls, AvailabilityMode, Config, ReplicationConfig, SecretSource,
+};
+
+const DC_PRIMARY: &str =
+    "[availability]\nmode = \"dc\"\n[availability.replication]\nrole = \"primary\"\nsource = \"a\"\ntoken = \"b\"\n";
 
 #[test]
 fn test_omitted_table_and_explicit_none_resolve_alike() {
@@ -70,4 +77,87 @@ fn test_dc_and_ha_carry_distinct_topology() {
     };
 
     assert_ne!(AvailabilityConfig::Dc(replica()), AvailabilityConfig::Ha(replica()));
+}
+
+#[test]
+fn test_listener_absent_by_default_and_under_dc_without_table() {
+    assert!(Config::default().availability_listener.is_none());
+    assert!(toml_config(DC_PRIMARY).availability_listener.is_none());
+}
+
+#[test]
+fn test_listener_defaults_to_a_private_loopback_bind() {
+    let listener = toml_config(&format!("{DC_PRIMARY}[availability.listener]\n"))
+        .availability_listener
+        .expect("dc listener");
+
+    assert!(listener.bind.ip().is_loopback());
+    assert_eq!(listener.bind.port(), 4460);
+    assert!(listener.tls.is_none());
+    assert!(!listener.allow_remote_plaintext);
+}
+
+#[test]
+fn test_listener_accepts_an_explicit_loopback_bind() {
+    let listener = toml_config(&format!(
+        "{DC_PRIMARY}[availability.listener]\nbind = \"127.0.0.1:9100\"\n"
+    ))
+    .availability_listener
+    .expect("dc listener");
+
+    assert_eq!(listener.bind.port(), 9100);
+}
+
+#[test]
+fn test_listener_remote_bind_opts_into_plaintext() {
+    let listener = toml_config(&format!(
+        "{DC_PRIMARY}[availability.listener]\nbind = \"0.0.0.0:9100\"\nallow-remote-plaintext = true\n"
+    ))
+    .availability_listener
+    .expect("dc listener");
+
+    assert!(!listener.bind.ip().is_loopback());
+    assert!(listener.allow_remote_plaintext);
+}
+
+#[test]
+fn test_listener_remote_bind_terminates_tls() {
+    let listener = toml_config(&format!(
+        "{DC_PRIMARY}[availability.listener]\nbind = \"0.0.0.0:9100\"\n[availability.listener.tls]\ncert = \"/c.pem\"\nkey = \"/k.pem\"\n"
+    ))
+    .availability_listener
+    .expect("dc listener");
+
+    assert_eq!(
+        listener.tls,
+        Some(AvailabilityListenerTls {
+            cert: PathBuf::from("/c.pem"),
+            key: PathBuf::from("/k.pem"),
+        })
+    );
+}
+
+#[rstest]
+#[case::none_opens_none(
+    "[availability]\nmode = \"none\"\n[availability.listener]\n",
+    "`none` mode opens no availability listener"
+)]
+#[case::remote_plaintext_refused(
+    &format!("{DC_PRIMARY}[availability.listener]\nbind = \"0.0.0.0:9100\"\n"),
+    "non-loopback availability listener needs"
+)]
+#[case::invalid_bind(
+    &format!("{DC_PRIMARY}[availability.listener]\nbind = \"not-an-address\"\n"),
+    "must be a `host:port` socket address"
+)]
+#[case::tls_needs_cert_and_key(
+    &format!("{DC_PRIMARY}[availability.listener]\nbind = \"0.0.0.0:9100\"\n[availability.listener.tls]\ncert = \"/c.pem\"\n"),
+    "needs both `cert` and `key`"
+)]
+fn test_listener_rejects_unsafe_or_malformed_tables(#[case] text: &str, #[case] expected: &str) {
+    let error = config::from_toml(PathBuf::from("x.toml"), text)
+        .and_then(|partial| Config::default().apply(partial))
+        .unwrap_err();
+
+    assert!(error.to_string().contains(expected), "{error}");
 }

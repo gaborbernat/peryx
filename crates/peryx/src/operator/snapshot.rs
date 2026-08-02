@@ -451,6 +451,9 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         // The static datacenter roster does not yet drive the runtime, so a backup omits it and
         // restores to the same effective behavior; snapshotting it lands with the migration work.
         dc_membership: _,
+        // The availability listener is a per-node network binding, not restorable cluster state, so a
+        // backup omits it; a restored node re-reads its listener from configuration, like the roster above.
+        availability_listener: _,
         jobs,
         blob,
     } = config;

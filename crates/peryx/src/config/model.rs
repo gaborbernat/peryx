@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
+use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -57,6 +58,9 @@ pub struct Config {
     /// The static datacenter replication group, when one is configured. Absent under single-node
     /// `none` mode and whenever no `[[availability.member]]` roster is given.
     pub dc_membership: Option<DcMembership>,
+    /// The private availability control listener a `dc` or `ha` node exposes, when one is configured.
+    /// Single-node `none` opens none, so the field is `None` there and the runtime allocates no socket.
+    pub availability_listener: Option<AvailabilityListenerConfig>,
     pub jobs: JobsConfig,
     /// Where blobs are stored: the local filesystem (default) or an S3-compatible object store.
     pub blob: BlobStorageConfig,
@@ -298,6 +302,32 @@ pub struct DcMembership {
     /// The group's identity, distinct from every member identity within it.
     pub group: String,
     pub members: Vec<DcMember>,
+}
+
+/// The private control listener a `dc` or `ha` node exposes for availability administration.
+///
+/// Availability controls never share the public package routes: this listener carries the
+/// administrator-scoped surface on its own socket, private-bound by default so the control plane is not
+/// reachable from the package network unless an operator deliberately widens the bind and grants it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityListenerConfig {
+    /// The socket the listener binds. Defaults to a loopback address; a non-loopback bind is refused
+    /// unless [`tls`](Self::tls) terminates the connection or [`allow_remote_plaintext`] permits it.
+    ///
+    /// [`allow_remote_plaintext`]: Self::allow_remote_plaintext
+    pub bind: SocketAddr,
+    /// The certificate and key that terminate TLS, or `None` to serve the listener over plain HTTP.
+    pub tls: Option<AvailabilityListenerTls>,
+    /// Whether a non-loopback bind may serve plain HTTP. Off by default so an operator cannot expose the
+    /// control plane to the network unencrypted without stating the intent.
+    pub allow_remote_plaintext: bool,
+}
+
+/// A PEM certificate chain and private key that terminate TLS on the availability listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailabilityListenerTls {
+    pub cert: PathBuf,
+    pub key: PathBuf,
 }
 
 impl Config {
@@ -853,6 +883,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             availability: AvailabilityConfig::None,
             dc_membership: None,
+            availability_listener: None,
             jobs: JobsConfig::default(),
             blob: BlobStorageConfig::Filesystem,
         }

@@ -282,8 +282,10 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         Ok(Some(digest))
     }
 
-    /// The referrer descriptors upstream records for `repo`/`digest`, or empty on any failure (a
-    /// registry predating the referrers API answers `404`, which must not fail the whole response).
+    /// The referrer descriptors upstream records for `repo`/`digest`. A registry predating the referrers
+    /// API answers `404`; the spec then directs a fallback to the referrers tag schema, an image index
+    /// tagged after the subject digest, so a signature or SBOM pushed before the API existed stays
+    /// discoverable through the cache. Any other failure yields empty rather than failing the response.
     async fn upstream_referrers(
         &self,
         index: &str,
@@ -291,24 +293,30 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         repo: &str,
         digest: &str,
     ) -> Vec<serde_json::Value> {
-        let Ok(response) = self
+        let repo = self.upstream_repo(index, client, repo);
+        match self
             .upstream
-            .referrers(
-                client.base_url(),
-                client.auth(),
-                &self.upstream_repo(index, client, repo),
-                digest,
-            )
+            .referrers(client.base_url(), client.auth(), &repo, digest)
             .await
-        else {
-            return Vec::new();
-        };
-        bounded_body(response, MAX_MANIFEST_BYTES)
-            .await
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|document| document["manifests"].as_array().cloned())
-            .unwrap_or_default()
+        {
+            Ok(response) => referrer_manifests(response).await,
+            Err(crate::upstream::UpstreamError::Status(StatusCode::NOT_FOUND)) => {
+                let Ok(response) = self
+                    .upstream
+                    .manifest(
+                        client.base_url(),
+                        client.auth(),
+                        &repo,
+                        &crate::name::referrers_tag(digest),
+                    )
+                    .await
+                else {
+                    return Vec::new();
+                };
+                referrer_manifests(response).await
+            }
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Serve `GET /v2/<name>/referrers/<digest>`: the manifests that declare the digest their subject,
@@ -383,6 +391,16 @@ pub(super) fn stored_tag_names(
         }
     }
     Ok(names)
+}
+
+/// Read an upstream referrers document, from the API or the fallback tag, into its `manifests` array.
+async fn referrer_manifests(response: reqwest::Response) -> Vec<serde_json::Value> {
+    bounded_body(response, MAX_MANIFEST_BYTES)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|document| document["manifests"].as_array().cloned())
+        .unwrap_or_default()
 }
 
 fn add_referrer(

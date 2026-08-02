@@ -201,6 +201,14 @@ held only to the general grammar. A well-formed but unknown subject is `200` wit
 `?artifactType=<type>` query filters the result to the descriptors whose `artifactType` matches, and the response then
 carries `OCI-Filters-Applied: artifactType` so a client knows the filter was honored.
 
+For a proxy member peryx also unions in what its upstream reports. A registry that predates the referrers API answers
+`404` on the `/referrers/` route and instead publishes a subject's referrers as an image index under the referrers tag
+schema: a tag built from the subject digest as the algorithm truncated to 32 characters, a `-`, then the encoded portion
+truncated to 64, with any character a tag disallows replaced by `-` (so `sha256:<hex>` becomes `sha256-<hex>`). On that
+`404` peryx fetches the fallback tag and merges its `manifests`, so a signature, SBOM, or attestation pushed to such a
+registry before the API existed stays discoverable through the cache. When the upstream serves the referrers API
+directly peryx uses its response and never asks for the tag.
+
 ## Discovery
 
 `GET /+api` is peryx's cross-ecosystem discovery document, not a `/v2/` route. It lists every configured index; an OCI

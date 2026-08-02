@@ -327,6 +327,34 @@ fn is_text_member(path: &str) -> bool {
     ) {
         return true;
     }
+    // Conventional extensionless text files distributions and image layers ship. Their extension
+    // forms (`README.md`, `LICENSE.txt`) already match the table below, so without the bare names the
+    // browser marks the files a reader most often opens unpreviewable. Case-sensitive like the
+    // metadata names above: these are the forms packaging tools and image builds emit.
+    if matches!(
+        filename,
+        "README"
+            | "LICENSE"
+            | "LICENCE"
+            | "COPYING"
+            | "COPYRIGHT"
+            | "AUTHORS"
+            | "CONTRIBUTORS"
+            | "CHANGELOG"
+            | "CHANGES"
+            | "NEWS"
+            | "NOTICE"
+            | "INSTALL"
+            | "THANKS"
+            | "TODO"
+            | "MANIFEST"
+            | "MANIFEST.in"
+            | "Makefile"
+            | "Dockerfile"
+            | "Containerfile"
+    ) {
+        return true;
+    }
     std::path::Path::new(filename)
         .extension()
         .and_then(|extension| extension.to_str())

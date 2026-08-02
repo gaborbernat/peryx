@@ -183,6 +183,14 @@ fn test_envelope_decode_walks_string_escapes_without_counting_brackets() {
 }
 
 #[test]
+fn test_envelope_decode_accepts_an_unrecognized_non_ff_version() {
+    let traceparent = "fe-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    let original = traced(traceparent);
+    let decoded = OperationEnvelope::decode(&original.encode(), DecodeLimits::default()).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
 fn test_envelope_decode_rejects_each_malformed_traceparent() {
     let cases = [
         "too-few-parts",
@@ -192,6 +200,7 @@ fn test_envelope_decode_rejects_each_malformed_traceparent() {
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa-01",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1",
         "0g-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
     ];

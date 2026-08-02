@@ -297,6 +297,9 @@ fn exceeds_depth(bytes: &[u8], max: usize) -> bool {
     false
 }
 
+/// Whether `value` is a well-formed W3C traceparent. Beyond the field shapes, this enforces the three
+/// values the spec singles out as invalid: an all-zero trace-id, an all-zero parent-id, and the
+/// reserved version `ff`. An unrecognized non-`ff` version stays valid for forward compatibility.
 fn valid_traceparent(value: &str) -> bool {
     let mut fields = value.split('-');
     let (Some(version), Some(trace_id), Some(parent_id), Some(flags), None) = (
@@ -309,6 +312,7 @@ fn valid_traceparent(value: &str) -> bool {
         return false;
     };
     version.len() == 2
+        && version != "ff"
         && trace_id.len() == 32
         && parent_id.len() == 16
         && flags.len() == 2

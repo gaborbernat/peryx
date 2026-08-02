@@ -10,8 +10,9 @@ use peryx_storage::meta::MetaStore;
 
 use super::snapshot::config_snapshot;
 use super::{
-    BACKUP_FORMAT, BLOB_INDEX_HEADER, BackupManifest, ManifestBlobIndex, ManifestFile, backup_blob_path,
-    backup_blob_relpath, copy_hashed, hash_existing_file, is_empty_dir, unix_now, write_hashed, write_manifest,
+    BACKUP_FORMAT, BLOB_INDEX_HEADER, BackupManifest, ManifestAvailability, ManifestBlobIndex, ManifestFile,
+    backup_blob_path, backup_blob_relpath, config_availability, copy_hashed, hash_existing_file, is_empty_dir,
+    unix_now, write_hashed, write_manifest,
 };
 use crate::config::Config;
 
@@ -39,7 +40,7 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
     let source_blobs = BlobStorage::filesystem(config.data_dir.join("blobs"));
     let mut blob_count = 0_u64;
     let mut blob_bytes = 0_u64;
-    {
+    let (metadata_frontier, placements) = {
         let meta = MetaStore::open_existing(path.join("metadata/peryx.redb")).context("open copied metadata store")?;
         let mut index = BufWriter::new(File::create(path.join("blobs.tsv")).context("create blobs.tsv")?);
         writeln!(index, "{BLOB_INDEX_HEADER}")?;
@@ -67,7 +68,17 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
             writeln!(index, "{digest_hex}\t{size}\t{relpath}")?;
         }
         index.into_inner()?.sync_all()?;
-    }
+        let metadata_frontier = meta.current_serial().context("read metadata frontier")?;
+        let placements = meta.count_artifact_placements().context("count artifact placements")?;
+        (metadata_frontier, placements)
+    };
+    let (mode, membership) = config_availability(config);
+    let availability = ManifestAvailability {
+        mode,
+        metadata_frontier,
+        placements,
+        membership,
+    };
     let metadata_info = {
         let hashed = hash_existing_file(&path.join("metadata/peryx.redb")).context("hash metadata store")?;
         ManifestFile {
@@ -91,11 +102,19 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
             count: blob_count,
             blob_bytes,
         },
+        availability,
     };
     write_manifest(path, &manifest)?;
     writeln!(out, "created\t{}", path.display())?;
     writeln!(out, "metadata\t{}", config.data_dir.join("peryx.redb").display())?;
     writeln!(out, "blobs\t{blob_count}\t{blob_bytes}")?;
+    let mode = &manifest.availability.mode;
+    let frontier = manifest.availability.metadata_frontier;
+    let placements = manifest.availability.placements;
+    writeln!(
+        out,
+        "availability\t{mode}\tfrontier {frontier}\tplacements {placements}"
+    )?;
     Ok(())
 }
 

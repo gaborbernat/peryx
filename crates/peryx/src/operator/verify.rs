@@ -1,6 +1,6 @@
 //! Backup verification: manifest, blob index, and metadata reference checks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead as _, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -10,8 +10,8 @@ use peryx_storage::blob::Digest;
 use peryx_storage::meta::MetaStore;
 
 use super::{
-    BLOB_INDEX_HEADER, BackupCheck, BackupManifest, BlobIndexEntry, HashedFile, ManifestFile, backup_blob_relpath,
-    hash_existing_file, read_manifest,
+    BLOB_INDEX_HEADER, BackupCheck, BackupManifest, BlobIndexEntry, HashedFile, ManifestAvailability, ManifestFile,
+    backup_blob_relpath, hash_existing_file, read_manifest,
 };
 
 /// Verify a backup directory.
@@ -58,14 +58,99 @@ pub(super) fn check_backup(path: &Path, manifest: &BackupManifest, out: &mut dyn
     }
     if verify_metadata_file(path, &manifest.metadata, out, &mut problems)? == ManifestFileCheck::Match {
         match MetaStore::open_existing_read_only(path.join(&manifest.metadata.path)) {
-            Ok(meta) => check_metadata_references(&blobs, &meta, out, &mut problems)?,
+            Ok(meta) => {
+                check_metadata_references(&blobs, &meta, out, &mut problems)?;
+                check_availability_state(&manifest.availability, &meta, out, &mut problems)?;
+            }
             Err(err) => {
                 problems += 1;
                 writeln!(out, "problem\tmetadata\t{}\t{err}", manifest.metadata.path)?;
             }
         }
     }
+    check_membership(&manifest.availability, out, &mut problems)?;
     Ok(BackupCheck { problems, blobs })
+}
+
+/// Re-derive the recovery point from the copied metadata store and reject a manifest that names a
+/// different one, catching a metadata file swapped for one taken at another point or edited in place.
+fn check_availability_state(
+    availability: &ManifestAvailability,
+    meta: &MetaStore,
+    out: &mut dyn Write,
+    problems: &mut u64,
+) -> anyhow::Result<()> {
+    let frontier = meta.current_serial().context("read backup metadata frontier")?;
+    if availability.metadata_frontier != frontier {
+        *problems += 1;
+        let expected = availability.metadata_frontier;
+        writeln!(
+            out,
+            "problem\tavailability\tfrontier\texpected {expected}, found {frontier}"
+        )?;
+    }
+    let placements = meta
+        .count_artifact_placements()
+        .context("count backup artifact placements")?;
+    if availability.placements != placements {
+        *problems += 1;
+        let expected = availability.placements;
+        writeln!(
+            out,
+            "problem\tavailability\tplacements\texpected {expected}, found {placements}"
+        )?;
+    }
+    Ok(())
+}
+
+/// Reject a datacenter roster the runtime could never consume: an empty group or member set, a
+/// duplicated node, datacenter, or address identity, or a member count of writers other than one.
+fn check_membership(
+    availability: &ManifestAvailability,
+    out: &mut dyn Write,
+    problems: &mut u64,
+) -> anyhow::Result<()> {
+    let Some(membership) = &availability.membership else {
+        return Ok(());
+    };
+    if membership.group.is_empty() {
+        *problems += 1;
+        writeln!(out, "problem\tavailability\tmembership\tempty group")?;
+    }
+    if membership.members.is_empty() {
+        *problems += 1;
+        writeln!(out, "problem\tavailability\tmembership\tempty roster")?;
+    }
+    let mut nodes = BTreeSet::new();
+    let mut dcs = BTreeSet::new();
+    let mut addresses = BTreeSet::new();
+    let mut writers = 0_u64;
+    for member in &membership.members {
+        if !nodes.insert(member.node.as_str()) {
+            *problems += 1;
+            writeln!(out, "problem\tavailability\tmembership\tduplicate node {}", member.node)?;
+        }
+        if !dcs.insert(member.dc.as_str()) {
+            *problems += 1;
+            writeln!(out, "problem\tavailability\tmembership\tduplicate dc {}", member.dc)?;
+        }
+        if !addresses.insert(member.address.as_str()) {
+            *problems += 1;
+            let address = &member.address;
+            writeln!(out, "problem\tavailability\tmembership\tduplicate address {address}")?;
+        }
+        if member.role == "writer" {
+            writers += 1;
+        }
+    }
+    if !membership.members.is_empty() && writers != 1 {
+        *problems += 1;
+        writeln!(
+            out,
+            "problem\tavailability\tmembership\texpected one writer, found {writers}"
+        )?;
+    }
+    Ok(())
 }
 
 fn verify_manifest_file(

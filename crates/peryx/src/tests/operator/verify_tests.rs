@@ -54,11 +54,11 @@ fn test_backup_verify_reports_mismatched_blob() {
 #[test]
 fn test_backup_verify_rejects_unsupported_manifest_format() {
     let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
-    mutate_manifest(&backup, |manifest| manifest["format"] = serde_json::json!(2));
+    mutate_manifest(&backup, |manifest| manifest["format"] = serde_json::json!(3));
 
     let err = operator::backup_verify(&backup, &mut Vec::new()).unwrap_err();
 
-    assert!(err.to_string().contains("unsupported backup format 2"));
+    assert!(err.to_string().contains("unsupported backup format 3"));
 }
 
 #[test]
@@ -331,4 +331,67 @@ fn mutate_manifest(backup: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
     let mut manifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     mutate(&mut manifest);
     std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+}
+
+#[test]
+fn test_backup_verify_rejects_stale_metadata_frontier() {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    mutate_manifest(&backup, |manifest| {
+        manifest["availability"]["metadata_frontier"] = serde_json::json!(999);
+    });
+
+    let mut out = Vec::new();
+    let err = operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(err.to_string().contains("backup verification failed"));
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("problem\tavailability\tfrontier\texpected 999, found ")
+    );
+}
+
+#[test]
+fn test_backup_verify_rejects_mismatched_placement_count() {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    mutate_manifest(&backup, |manifest| {
+        manifest["availability"]["placements"] = serde_json::json!(5);
+    });
+
+    let mut out = Vec::new();
+    let err = operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(err.to_string().contains("backup verification failed"));
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("problem\tavailability\tplacements\texpected 5, found 0")
+    );
+}
+
+#[rstest]
+#[case::empty_roster(serde_json::json!({"group": "g", "members": []}), "empty roster")]
+#[case::two_writers(
+    serde_json::json!({"group": "g", "members": [
+        {"node": "a", "dc": "east", "address": "10.0.0.1:1", "role": "writer"},
+        {"node": "b", "dc": "west", "address": "10.0.0.2:1", "role": "writer"},
+    ]}),
+    "expected one writer, found 2"
+)]
+#[case::duplicate_identity(
+    serde_json::json!({"group": "", "members": [
+        {"node": "a", "dc": "east", "address": "10.0.0.1:1", "role": "replica"},
+        {"node": "a", "dc": "east", "address": "10.0.0.1:1", "role": "replica"},
+    ]}),
+    "duplicate node a"
+)]
+fn test_backup_verify_rejects_malformed_membership(#[case] membership: serde_json::Value, #[case] expected: &str) {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    mutate_manifest(&backup, |manifest| manifest["availability"]["membership"] = membership);
+
+    let mut out = Vec::new();
+    let err = operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(err.to_string().contains("backup verification failed"));
+    assert!(String::from_utf8(out).unwrap().contains(expected), "{expected}");
 }

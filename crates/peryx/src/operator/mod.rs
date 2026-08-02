@@ -11,6 +11,8 @@ use peryx_storage::blob::Digest;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::config::{Config, DcMembership, DcRole};
+
 mod backup;
 mod import;
 mod restore;
@@ -24,7 +26,7 @@ pub use restore::restore;
 pub use verify::backup_verify;
 pub use writer::promote_writer;
 
-const BACKUP_FORMAT: u32 = 1;
+const BACKUP_FORMAT: u32 = 2;
 const BUFFER_BYTES: usize = 1024 * 1024;
 const BLOB_INDEX_HEADER: &str = "sha256\tsize_bytes\tpath";
 
@@ -35,6 +37,37 @@ struct BackupManifest {
     config: ManifestFile,
     metadata: ManifestFile,
     blob_index: ManifestBlobIndex,
+    availability: ManifestAvailability,
+}
+
+/// The availability state a backup pins to one recovery point.
+///
+/// The metadata copy is a single snapshot; `metadata_frontier` names it with the store's control-plane
+/// serial and `placements` sizes its artifact-availability projection, so a verifier re-derives both
+/// from the copied store and rejects a metadata file swapped for one taken at a different point. `mode`
+/// and `membership` carry the datacenter roster the configuration snapshot omits, making the manifest
+/// the backup's sole record of the topology the recovery point belongs to.
+#[derive(Debug, Serialize, Deserialize)]
+struct ManifestAvailability {
+    mode: String,
+    metadata_frontier: u64,
+    placements: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    membership: Option<ManifestMembership>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManifestMembership {
+    group: String,
+    members: Vec<ManifestMember>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManifestMember {
+    node: String,
+    dc: String,
+    address: String,
+    role: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,6 +100,37 @@ struct BlobIndexEntry {
 struct BackupCheck {
     problems: u64,
     blobs: BTreeMap<String, BlobIndexEntry>,
+}
+
+/// The availability mode and datacenter roster a manifest records from the effective configuration.
+///
+/// The configuration snapshot carries the mode but omits the static roster, so the manifest is the
+/// backup's only durable record of it.
+fn config_availability(config: &Config) -> (String, Option<ManifestMembership>) {
+    (
+        config.availability.mode().as_str().to_owned(),
+        config.dc_membership.as_ref().map(manifest_membership),
+    )
+}
+
+fn manifest_membership(membership: &DcMembership) -> ManifestMembership {
+    ManifestMembership {
+        group: membership.group.clone(),
+        members: membership
+            .members
+            .iter()
+            .map(|member| ManifestMember {
+                node: member.node.clone(),
+                dc: member.dc.clone(),
+                address: member.address.clone(),
+                role: match member.role {
+                    DcRole::Writer => "writer",
+                    DcRole::Replica => "replica",
+                }
+                .to_owned(),
+            })
+            .collect(),
+    }
 }
 
 fn write_manifest(path: &Path, manifest: &BackupManifest) -> anyhow::Result<()> {

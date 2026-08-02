@@ -1,13 +1,13 @@
 use peryx_storage::blob::BlobStore;
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{ArtifactSource, MetaStore};
 
 use std::path::PathBuf;
 
 use rstest::rstest;
 
 use crate::config::{
-    self, BlobStorageConfig, Config, IndexKind, JobsConfig, JobsMode, LogConfig, LogFormat, LogSink, S3StorageConfig,
-    SecretSource,
+    self, AvailabilityConfig, BlobStorageConfig, Config, DcMember, DcMembership, DcRole, IndexKind, JobsConfig,
+    JobsMode, LogConfig, LogFormat, LogSink, ReplicationConfig, S3StorageConfig, SecretSource,
 };
 use crate::operator;
 
@@ -685,4 +685,86 @@ fn test_backup_snapshots_upstream_env_references_not_values() {
     let snapshot = std::fs::read_to_string(backup.join("config.toml")).unwrap();
     assert!(snapshot.contains("password_env = \"CORP_PASSWORD\""), "{snapshot}");
     assert!(snapshot.contains("token_env = \"CORP_TOKEN\""), "{snapshot}");
+}
+
+fn read_manifest_json(backup: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(backup.join("manifest.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn test_backup_records_dc_availability_state_and_membership() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    let meta = MetaStore::open(data_dir.join("peryx.redb")).unwrap();
+    meta.record_artifact_placement("sha256:aa", ArtifactSource::Hosted, true)
+        .unwrap();
+    meta.record_artifact_placement("sha256:bb", ArtifactSource::Proxy, false)
+        .unwrap();
+    let frontier = meta.current_serial().unwrap();
+    drop(meta);
+
+    let config = Config {
+        data_dir,
+        availability: AvailabilityConfig::Dc(ReplicationConfig::Primary {
+            source: "primary-a".to_owned(),
+            token: SecretSource::Literal("replication-token".to_owned()),
+        }),
+        dc_membership: Some(DcMembership {
+            group: "group-a".to_owned(),
+            members: vec![
+                DcMember {
+                    node: "node-a".to_owned(),
+                    dc: "east".to_owned(),
+                    address: "10.0.0.1:8443".to_owned(),
+                    role: DcRole::Writer,
+                },
+                DcMember {
+                    node: "node-b".to_owned(),
+                    dc: "west".to_owned(),
+                    address: "10.0.0.2:8443".to_owned(),
+                    role: DcRole::Replica,
+                },
+            ],
+        }),
+        ..Config::default()
+    };
+    let backup = root.path().join("backup");
+    let mut out = Vec::new();
+    operator::backup_create(&config, &backup, &mut out).unwrap();
+
+    assert!(String::from_utf8(out).unwrap().contains("availability\tdc\tfrontier"));
+    let manifest = read_manifest_json(&backup);
+    let availability = &manifest["availability"];
+    assert_eq!(availability["mode"], "dc");
+    assert_eq!(availability["metadata_frontier"], frontier);
+    assert_eq!(availability["placements"], 2);
+    assert_eq!(availability["membership"]["group"], "group-a");
+    assert_eq!(availability["membership"]["members"][0]["node"], "node-a");
+    assert_eq!(availability["membership"]["members"][0]["dc"], "east");
+    assert_eq!(availability["membership"]["members"][0]["address"], "10.0.0.1:8443");
+    assert_eq!(availability["membership"]["members"][0]["role"], "writer");
+    assert_eq!(availability["membership"]["members"][1]["role"], "replica");
+
+    operator::backup_verify(&backup, &mut Vec::new()).unwrap();
+}
+
+#[test]
+fn test_backup_records_none_availability_without_membership() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    drop(MetaStore::open(data_dir.join("peryx.redb")).unwrap());
+    let config = Config {
+        data_dir,
+        ..Config::default()
+    };
+    let backup = root.path().join("backup");
+    operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
+
+    let manifest = read_manifest_json(&backup);
+    let availability = &manifest["availability"];
+    assert_eq!(availability["mode"], "none");
+    assert_eq!(availability["placements"], 0);
+    assert!(availability.get("membership").is_none());
 }

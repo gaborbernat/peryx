@@ -10,7 +10,7 @@
 
 use std::ops::Bound::{Excluded, Unbounded};
 
-use redb::ReadableTable as _;
+use redb::{ReadableTable as _, ReadableTableMetadata as _};
 use serde::{Deserialize, Serialize};
 
 use super::{ARTIFACT_PLACEMENT, MetaError, MetaStore};
@@ -200,6 +200,17 @@ impl MetaStore {
             .get(digest)?
             .map(|value| serde_json::from_slice(value.value()))
             .transpose()?)
+    }
+
+    /// Count persisted artifact placements: the size of the availability projection a backup records
+    /// and a verifier re-derives to catch a metadata copy taken at a different recovery point.
+    ///
+    /// # Errors
+    /// Returns a store error if the table cannot be read.
+    pub fn count_artifact_placements(&self) -> Result<u64, MetaError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(ARTIFACT_PLACEMENT)?;
+        Ok(table.len()?)
     }
 
     /// Record a newly seen artifact of `source` whose verified bytes are `present`, replacing any prior

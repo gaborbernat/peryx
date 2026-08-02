@@ -225,3 +225,4 @@ row references.
 - Where the counters come from: [architecture](@/core/architecture.md)
 - The endpoint and counter reference: [HTTP endpoints](@/ecosystems/pypi/reference/endpoints.md)
 - The counters in a browser: [the web UI](@/core/web-ui.md)
+- Wire the probes and series per shape: [availability deployment and sizing](@/core/availability-deployment.md)

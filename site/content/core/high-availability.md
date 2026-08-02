@@ -154,3 +154,9 @@ upgrade the primary before routing reads to that replica.
 Promotion changes the store's claim; it does not copy data or stop the old process. peryx does not provide leader
 election or online promotion. Do not promote until you fence the old writer, and do not start two writers against copies
 that can diverge.
+
+## Related
+
+- Size and stand up each shape: [availability deployment and sizing](@/core/availability-deployment.md)
+- What each mode's acknowledgement promises: [availability contracts](@/core/availability-contracts.md)
+- The mode and replication keys: [`[availability]`](@/core/configuration.md#availability)

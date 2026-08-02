@@ -26,6 +26,8 @@ matches one dimension:
 - `cached`: a cached artifact.
 - `trash`: a soft-deleted artifact.
 - `orphan`: an artifact no live reference reaches.
+- `visibility`: an artifact in the named logical `state` — `yanked` for a release its author retracted, `hidden` for a
+  hidden artifact, or `active`. This reads the same visibility a decision reports.
 
 The same rule protects in `keep` and removes in `expire`; the group gives it meaning. An `age` rule matches nothing when
 the artifact carries no publish time or the evaluation supplies no clock, so the planner ages only what it can date.
@@ -40,6 +42,7 @@ keep = [
 expire = [
   { selector = "trash" },
   { selector = "project-prefix", prefix = "scratch-" },
+  { selector = "visibility", state = "yanked" },
 ]
 ```
 

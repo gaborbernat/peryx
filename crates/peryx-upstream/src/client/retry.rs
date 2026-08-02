@@ -3,6 +3,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, RETRY_AFTER};
 use url::Url;
 
 use super::redact_url;
@@ -10,9 +11,26 @@ use super::redact_url;
 pub const MAX_RETRIES: u32 = 2;
 const RETRY_BASE_MILLIS: u64 = 100;
 const RETRY_CAP_MILLIS: u64 = 2_000;
+const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
 
 pub(super) fn should_retry_status(status: StatusCode) -> bool {
     status.is_server_error() || matches!(status, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS)
+}
+
+/// The wait a retryable response asks for through `Retry-After`, clamped to a bounded cap.
+///
+/// Honors both RFC 9110 forms: a delay in seconds or an HTTP-date. Returns `None` when the header is
+/// absent, malformed, or already in the past, which leaves the caller on its jittered backoff.
+#[must_use]
+pub fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    let delay = value.parse::<u64>().map(Duration::from_secs).ok().or_else(|| {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(SystemTime::now())
+            .ok()
+    })?;
+    Some(delay.min(RETRY_AFTER_CAP))
 }
 
 #[must_use]
@@ -35,8 +53,8 @@ pub(super) async fn sleep_before_retry_str(url: &str, attempt: u32, err: &reqwes
     tokio::time::sleep(delay).await;
 }
 
-pub(super) async fn sleep_before_retry_status(url: &Url, attempt: u32, status: StatusCode) {
-    let delay = retry_delay(attempt);
+pub(super) async fn sleep_before_retry_status(url: &Url, attempt: u32, status: StatusCode, headers: &HeaderMap) {
+    let delay = retry_after(headers).unwrap_or_else(|| retry_delay(attempt));
     let url = redact_url(url.as_str());
     let delay_ms = delay.as_millis();
     tracing::debug!(url, %status, delay_ms, "upstream returned retryable status");

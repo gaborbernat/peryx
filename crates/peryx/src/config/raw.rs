@@ -100,6 +100,8 @@ pub enum RawBlobStorage {
         multipart_threshold_bytes: Option<u64>,
         part_size_bytes: Option<u64>,
         upload_concurrency: Option<usize>,
+        conditional_writes: Option<bool>,
+        checksum_writes: Option<bool>,
     },
 }
 

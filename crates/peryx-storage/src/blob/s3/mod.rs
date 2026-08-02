@@ -30,7 +30,7 @@ pub use self::config::{S3Addressing, S3Config, S3ConfigError, S3Settings};
 use super::store::BlobStore;
 use super::{
     BlobBackend, BlobCapabilities, BlobDurability, BlobError, BlobLease, BlobMetadata, BlobOperation, BlobRead,
-    BlobReadBody, BlobStaged, BlobSupport, BlobWrite, Digest,
+    BlobReadBody, BlobStaged, BlobSupport, BlobWrite, Digest, DurabilityCapabilities,
 };
 
 /// The S3-compatible blob backend.
@@ -62,6 +62,12 @@ impl S3Backend {
             staging: BlobStore::new(staging_dir),
             acquisitions: Arc::default(),
         }
+    }
+
+    /// The durability guarantees the configured endpoint proves for a completed write.
+    #[must_use]
+    pub const fn durability(&self) -> DurabilityCapabilities {
+        self.client.config().durability()
     }
 
     fn key_for(&self, digest: &Digest) -> String {

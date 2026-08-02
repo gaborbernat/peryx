@@ -500,6 +500,8 @@ fn test_backup_snapshots_the_s3_blob_backend_and_restores_it() {
         multipart_threshold: 1024,
         part_size: 8 << 20,
         upload_concurrency: 6,
+        conditional_writes: true,
+        checksum_writes: true,
     };
     let config = Config {
         data_dir,
@@ -537,6 +539,8 @@ fn test_backup_rejects_a_secret_bearing_s3_endpoint_without_leaking_it() {
             multipart_threshold: 16 << 20,
             part_size: 16 << 20,
             upload_concurrency: 4,
+            conditional_writes: true,
+            checksum_writes: true,
         }),
         ..Config::default()
     };

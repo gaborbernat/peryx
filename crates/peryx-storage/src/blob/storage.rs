@@ -4,7 +4,7 @@ use std::ops::Range;
 use super::s3::S3Backend;
 use super::{
     BlobBackend, BlobCapabilities, BlobEntry, BlobError, BlobLease, BlobMetadata, BlobOperation, BlobRead,
-    BlobScanError, BlobStaged, BlobStore, BlobWrite, Digest, S3Config,
+    BlobScanError, BlobStaged, BlobStore, BlobWrite, Digest, DurabilityCapabilities, S3Config,
 };
 
 /// The blob backend selected for this process.
@@ -64,6 +64,18 @@ impl BlobStorage {
         match &self.backend {
             Backend::Filesystem(store) => store.capabilities(),
             Backend::S3(backend) => backend.capabilities(),
+        }
+    }
+
+    /// The durability guarantees the configured backend proves for a completed write.
+    ///
+    /// A single-host filesystem commits behind an atomic rename that refuses to clobber and verifies
+    /// the digest; an object store proves only what its configured endpoint honors.
+    #[must_use]
+    pub fn durability(&self) -> DurabilityCapabilities {
+        match &self.backend {
+            Backend::Filesystem(_) => DurabilityCapabilities::FILESYSTEM,
+            Backend::S3(backend) => backend.durability(),
         }
     }
 

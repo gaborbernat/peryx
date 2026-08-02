@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use url::Url;
 
+use crate::blob::DurabilityCapabilities;
+
 const MIN_PART_SIZE: u64 = 5 << 20;
 const MAX_PART_SIZE: u64 = 5 << 30;
 
@@ -47,6 +49,11 @@ pub struct S3Config {
     pub multipart_threshold: u64,
     pub part_size: u64,
     pub upload_concurrency: usize,
+    /// The endpoint enforces `If-None-Match` create-if-absent writes. AWS S3 does; some S3-compatible
+    /// endpoints reject the `*` precondition, so the operator declares it per instance.
+    pub conditional_writes: bool,
+    /// The endpoint validates the SHA-256 checksum the backend sends with every write.
+    pub checksum_writes: bool,
 }
 
 impl fmt::Debug for S3Config {
@@ -63,6 +70,8 @@ impl fmt::Debug for S3Config {
             .field("multipart_threshold", &self.multipart_threshold)
             .field("part_size", &self.part_size)
             .field("upload_concurrency", &self.upload_concurrency)
+            .field("conditional_writes", &self.conditional_writes)
+            .field("checksum_writes", &self.checksum_writes)
             .finish()
     }
 }
@@ -80,6 +89,8 @@ pub struct S3Settings {
     pub multipart_threshold: u64,
     pub part_size: u64,
     pub upload_concurrency: usize,
+    pub conditional_writes: bool,
+    pub checksum_writes: bool,
 }
 
 impl fmt::Debug for S3Settings {
@@ -96,6 +107,8 @@ impl fmt::Debug for S3Settings {
             .field("multipart_threshold", &self.multipart_threshold)
             .field("part_size", &self.part_size)
             .field("upload_concurrency", &self.upload_concurrency)
+            .field("conditional_writes", &self.conditional_writes)
+            .field("checksum_writes", &self.checksum_writes)
             .finish()
     }
 }
@@ -155,7 +168,15 @@ impl S3Config {
             multipart_threshold: settings.multipart_threshold,
             part_size: settings.part_size,
             upload_concurrency: settings.upload_concurrency,
+            conditional_writes: settings.conditional_writes,
+            checksum_writes: settings.checksum_writes,
         })
+    }
+
+    /// The durability guarantees this configured endpoint proves for a completed write.
+    #[must_use]
+    pub const fn durability(&self) -> DurabilityCapabilities {
+        DurabilityCapabilities::object_store(self.conditional_writes, self.checksum_writes)
     }
 
     #[must_use]
@@ -181,6 +202,7 @@ mod tests {
     use rstest::rstest;
 
     use super::{S3Addressing, S3Config, S3ConfigError, S3Settings};
+    use crate::blob::DurabilityCapabilities;
 
     fn settings() -> S3Settings {
         S3Settings {
@@ -194,6 +216,8 @@ mod tests {
             multipart_threshold: 16 << 20,
             part_size: 8 << 20,
             upload_concurrency: 4,
+            conditional_writes: true,
+            checksum_writes: true,
         }
     }
 
@@ -283,5 +307,23 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, S3ConfigError::EndpointComponents);
         assert!(!error.to_string().contains("secret"));
+    }
+
+    #[rstest]
+    #[case::verified(true, true)]
+    #[case::no_conditional(false, true)]
+    #[case::no_checksum(true, false)]
+    #[case::basic(false, false)]
+    fn test_config_reports_declared_durability(#[case] conditional_writes: bool, #[case] checksum_writes: bool) {
+        let config = S3Config::new(S3Settings {
+            conditional_writes,
+            checksum_writes,
+            ..settings()
+        })
+        .unwrap();
+        assert_eq!(
+            config.durability(),
+            DurabilityCapabilities::object_store(conditional_writes, checksum_writes)
+        );
     }
 }

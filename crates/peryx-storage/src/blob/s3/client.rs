@@ -408,6 +408,8 @@ mod tests {
             multipart_threshold: 16 << 20,
             part_size: 8 << 20,
             upload_concurrency: 1,
+            conditional_writes: true,
+            checksum_writes: true,
         })
         .unwrap();
         let (http_client, request) = capture_request(None);

@@ -12,6 +12,7 @@ use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig};
 use peryx_http::{DEFAULT_HOT_CACHE_BYTES, DEFAULT_MAX_STALE_SECS};
 use peryx_identity::{Action, ExternalGroupGrant, Glob, Grant, IndexAcl, NamedToken, ProviderId};
 use peryx_policy::PolicyConfig;
+use peryx_storage::blob::{DurabilityCapabilities, DurabilityRequirement};
 use peryx_upstream::ExecCredentialConfig;
 use serde::Deserialize;
 use toml::Table;
@@ -68,6 +69,17 @@ pub enum BlobStorageConfig {
     S3(S3StorageConfig),
 }
 
+impl BlobStorageConfig {
+    /// The durability guarantees the selected backend proves for a completed write.
+    #[must_use]
+    pub const fn durability(&self) -> DurabilityCapabilities {
+        match self {
+            Self::Filesystem => DurabilityCapabilities::FILESYSTEM,
+            Self::S3(config) => DurabilityCapabilities::object_store(config.conditional_writes, config.checksum_writes),
+        }
+    }
+}
+
 /// The non-secret settings that address an S3-compatible bucket.
 #[derive(Clone, PartialEq, Eq)]
 pub struct S3StorageConfig {
@@ -81,6 +93,10 @@ pub struct S3StorageConfig {
     pub multipart_threshold: u64,
     pub part_size: u64,
     pub upload_concurrency: usize,
+    /// The endpoint enforces `If-None-Match` create-if-absent writes.
+    pub conditional_writes: bool,
+    /// The endpoint validates the SHA-256 checksum the backend sends with each write.
+    pub checksum_writes: bool,
 }
 
 impl fmt::Debug for S3StorageConfig {
@@ -97,6 +113,8 @@ impl fmt::Debug for S3StorageConfig {
             .field("multipart_threshold", &self.multipart_threshold)
             .field("part_size", &self.part_size)
             .field("upload_concurrency", &self.upload_concurrency)
+            .field("conditional_writes", &self.conditional_writes)
+            .field("checksum_writes", &self.checksum_writes)
             .finish()
     }
 }
@@ -114,6 +132,8 @@ impl From<&S3StorageConfig> for peryx_storage::blob::S3Settings {
             multipart_threshold: config.multipart_threshold,
             part_size: config.part_size,
             upload_concurrency: config.upload_concurrency,
+            conditional_writes: config.conditional_writes,
+            checksum_writes: config.checksum_writes,
         }
     }
 }
@@ -167,6 +187,30 @@ pub enum AvailabilityMode {
     Dc,
     /// Metadata durability in a remote datacenter.
     Ha,
+}
+
+impl AvailabilityMode {
+    /// The `mode` value that selects this variant.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Dc => "dc",
+            Self::Ha => "ha",
+        }
+    }
+
+    /// What this mode requires of the blob backend before a write may be acknowledged as durable.
+    ///
+    /// `none` acknowledges from local durability alone; `dc` and `ha` replicate their acknowledgement,
+    /// so they accept only race-safe, integrity-checked writes rather than a bare storage success.
+    #[must_use]
+    pub const fn durability_requirement(self) -> DurabilityRequirement {
+        match self {
+            Self::None => DurabilityRequirement::LOCAL,
+            Self::Dc | Self::Ha => DurabilityRequirement::REPLICATED,
+        }
+    }
 }
 
 /// The resolved `[availability]` table: the selected mode and its topology.
@@ -291,6 +335,13 @@ impl Config {
                     reason: "group mapping repository must name a configured index",
                 });
             }
+        }
+        let mode = self.availability.mode();
+        if let Err(shortfall) = self.blob.durability().check(mode.durability_requirement()) {
+            return Err(ConfigError::Durability {
+                mode: mode.as_str(),
+                shortfall: shortfall.as_str(),
+            });
         }
         match self.writer_identity.as_deref() {
             Some(identity) if identity.trim().is_empty() => Err(ConfigError::WriterIdentity {

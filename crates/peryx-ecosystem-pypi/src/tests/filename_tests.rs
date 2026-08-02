@@ -19,6 +19,37 @@ fn test_distribution_version_segment_reads_sdist_version_after_the_last_dash() {
 }
 
 #[test]
+fn test_distribution_version_segment_reads_legacy_archive_suffixes() {
+    // A mirror still serves pre-PEP 625 sdists compressed as bzip2, xz, or the legacy `.tar.Z`/`.tgz`
+    // spellings; the version is the last `-` segment there too, just as for `.tar.gz`.
+    for (filename, expected) in [
+        ("pytz-2012j.tar.bz2", Some("2012j")),
+        ("python-dateutil-2.8.2.tar.bz2", Some("2.8.2")),
+        ("proj-1.0.tar.xz", Some("1.0")),
+        ("proj-1.0.tar.Z", Some("1.0")),
+        ("proj-1.0.TGZ", Some("1.0")),
+    ] {
+        assert_eq!(distribution_version_segment(filename), expected, "{filename}");
+    }
+}
+
+#[test]
+fn test_distribution_version_segment_never_leaks_the_extension() {
+    // The version must not carry the file extension: a bare `.egg` release and any unrecognized
+    // installer previously reported `3.0.egg` / `1.0.exe` instead of the release or nothing.
+    for (filename, expected) in [
+        ("simplejson-3.0.egg", Some("3.0")),
+        ("foo-1.0.exe", None),
+        ("foo-1.0.win32.msi", None),
+        ("foo-1.0.rpm", None),
+        ("proj-.tar.gz", None),
+        ("proj--py3-none-any.whl", None),
+    ] {
+        assert_eq!(distribution_version_segment(filename), expected, "{filename}");
+    }
+}
+
+#[test]
 fn test_parse_distribution_filename_accepts_upload_formats() {
     for (filename, kind, name, version) in [
         ("Flask-1.0-py3-none-any.whl", DistributionKind::Wheel, "Flask", "1.0"),

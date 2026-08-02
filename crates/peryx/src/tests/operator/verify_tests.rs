@@ -7,7 +7,7 @@ use rstest::rstest;
 
 use crate::operator;
 
-use super::{blob_relpath, valid_backup};
+use super::{FailOnLine, blob_relpath, valid_backup};
 
 #[test]
 fn test_backup_verify_reports_ok_for_valid_backup() {
@@ -394,4 +394,70 @@ fn test_backup_verify_rejects_malformed_membership(#[case] membership: serde_jso
 
     assert!(err.to_string().contains("backup verification failed"));
     assert!(String::from_utf8(out).unwrap().contains(expected), "{expected}");
+}
+
+#[test]
+fn test_backup_verify_propagates_frontier_report_error() {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    mutate_manifest(&backup, |manifest| {
+        manifest["availability"]["metadata_frontier"] = serde_json::json!(999);
+    });
+
+    let mut out = FailOnLine {
+        needle: "\n",
+        ..FailOnLine::default()
+    };
+    operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(
+        out.seen
+            .contains("problem\tavailability\tfrontier\texpected 999, found "),
+        "{}",
+        out.seen
+    );
+}
+
+#[test]
+fn test_backup_verify_propagates_placements_report_error() {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    mutate_manifest(&backup, |manifest| {
+        manifest["availability"]["placements"] = serde_json::json!(5);
+    });
+
+    let mut out = FailOnLine {
+        needle: "\n",
+        ..FailOnLine::default()
+    };
+    operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(
+        out.seen
+            .contains("problem\tavailability\tplacements\texpected 5, found 0"),
+        "{}",
+        out.seen
+    );
+}
+
+#[test]
+fn test_backup_verify_propagates_membership_report_error() {
+    let (_source, _root, _config, backup, _content_digest, _metadata_digest) = valid_backup();
+    mutate_manifest(&backup, |manifest| {
+        manifest["availability"]["membership"] = serde_json::json!({"group": "g", "members": [
+            {"node": "a", "dc": "east", "address": "10.0.0.1:1", "role": "writer"},
+            {"node": "b", "dc": "west", "address": "10.0.0.2:1", "role": "writer"},
+        ]});
+    });
+
+    let mut out = FailOnLine {
+        needle: "\n",
+        ..FailOnLine::default()
+    };
+    operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(
+        out.seen
+            .contains("problem\tavailability\tmembership\texpected one writer, found 2"),
+        "{}",
+        out.seen
+    );
 }

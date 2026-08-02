@@ -21,7 +21,7 @@ const fn exec_path() -> &'static str {
     "/credential-helper"
 }
 
-use super::backup_fixture;
+use super::{FailOnLine, backup_fixture};
 
 #[test]
 fn test_backup_create_rejects_existing_target_paths() {
@@ -747,6 +747,40 @@ fn test_backup_records_dc_availability_state_and_membership() {
     assert_eq!(availability["membership"]["members"][1]["role"], "replica");
 
     operator::backup_verify(&backup, &mut Vec::new()).unwrap();
+}
+
+#[test]
+fn test_backup_create_propagates_availability_summary_write_error() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    let meta = MetaStore::open(data_dir.join("peryx.redb")).unwrap();
+    meta.record_artifact_placement("sha256:aa", ArtifactSource::Hosted, true)
+        .unwrap();
+    let frontier = meta.current_serial().unwrap();
+    drop(meta);
+    let config = Config {
+        data_dir,
+        availability: AvailabilityConfig::Dc(ReplicationConfig::Primary {
+            source: "primary-a".to_owned(),
+            token: SecretSource::Literal("replication-token".to_owned()),
+        }),
+        ..Config::default()
+    };
+    let backup = root.path().join("backup");
+
+    let mut out = FailOnLine {
+        needle: "\tplacements",
+        ..FailOnLine::default()
+    };
+    operator::backup_create(&config, &backup, &mut out).unwrap_err();
+
+    assert!(out.seen.contains("blobs\t"), "{}", out.seen);
+    assert!(
+        out.seen.contains(&format!("availability\tdc\tfrontier {frontier}")),
+        "{}",
+        out.seen
+    );
 }
 
 #[test]

@@ -532,3 +532,27 @@ async fn test_proxy_tag_list_skips_a_prev_member_to_rewrite_the_next_link() {
     assert!(link.contains("</v2/hub/app/tags/list?last=z>"), "{link}");
     assert!(!link.contains("last=a"), "{link}");
 }
+
+#[tokio::test]
+async fn test_proxy_tag_list_keeps_a_comma_in_the_next_cursor() {
+    let server = MockServer::start().await;
+    // RFC 3986 permits an unencoded comma in a URI query, so an upstream continuation cursor may carry
+    // one; splitting the RFC 8288 Link on every comma breaks the target, drops the `next` member, and
+    // silently truncates the proxied tag list. The comma-bearing query must survive the rewrite.
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", "</v2/app/tags/list?last=z&token=a,b>; rel=\"next\"")
+                .set_body_raw(br#"{"name":"app","tags":["m"]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    let link = headers[header::LINK].to_str().unwrap();
+    assert!(link.contains("</v2/hub/app/tags/list?last=z&token=a,b>"), "{link}");
+    assert!(link.contains("rel=\"next\""), "{link}");
+}

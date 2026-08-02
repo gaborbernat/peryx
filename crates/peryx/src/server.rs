@@ -139,7 +139,9 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     )
     .context(format!("open search index {}", search_path.display()))?;
     peryx_ecosystem_pypi::install(&mut state);
-    peryx_ecosystem_oci::install(&mut state, oci_settings);
+    // A `dc` or `ha` node records authoritative OCI mutations in the replication outbox; single-node
+    // `none` carries no replica to reconcile them, so it journals nothing.
+    peryx_ecosystem_oci::install(&mut state, oci_settings, config.availability.replication().is_some());
     let ldap_logins = ldap_logins(&config.auth.ldap_providers, &state.meta)?;
     state.set_ldap_logins(ldap_logins);
     let oidc_logins = oidc_logins(&config.auth.oidc_providers, &state.meta)?;

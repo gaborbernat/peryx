@@ -175,15 +175,25 @@ pub fn commit_blob_membership(
     repo: &str,
     digest: &str,
     reservation: Option<QuotaReservationRecord>,
+    journal: bool,
 ) -> Result<(), ServeError> {
     finalize(meta, reservation, |txn| {
         txn.put(&store::blob_membership_key(index, repo, digest), &[])?;
-        Ok(((), Vec::new()))
+        let entries = crate::outbox::record(journal, || crate::outbox::OciMutation::MountBlob {
+            index: index.to_owned(),
+            repo: repo.to_owned(),
+            digest: digest.to_owned(),
+        });
+        Ok(((), entries))
     })
 }
 
 /// Publish a manifest by digest and optional tag, committing a quota reservation with it when the
 /// push was metered. Reports whether the searchable tag set grew.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the manifest, its reference, its quota reservation, and its outbox entry commit in one transaction"
+)]
 pub fn publish_manifest(
     meta: &MetaStore,
     index: &str,
@@ -192,6 +202,7 @@ pub fn publish_manifest(
     manifest: &Manifest,
     reference: &Reference,
     reservation: Option<QuotaReservationRecord>,
+    journal: bool,
 ) -> Result<bool, ServeError> {
     let body = |txn: &mut DriverTxn| -> Result<(bool, Vec<Vec<u8>>), ServeError> {
         let tag = match reference {
@@ -199,7 +210,13 @@ pub fn publish_manifest(
             Reference::Digest(_) => None,
         };
         let grew = store::publish_manifest_txn(txn, index, repo, canonical, manifest, tag)?;
-        Ok((grew, Vec::new()))
+        let entries = crate::outbox::record(journal, || crate::outbox::OciMutation::PublishManifest {
+            index: index.to_owned(),
+            repo: repo.to_owned(),
+            digest: canonical.to_owned(),
+            tag: tag.map(str::to_owned),
+        });
+        Ok((grew, entries))
     };
     finalize(meta, reservation, body)
 }

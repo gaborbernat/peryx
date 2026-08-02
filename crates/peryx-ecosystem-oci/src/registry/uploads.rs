@@ -24,6 +24,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             Ok(target) => target,
             Err(response) => return Ok(response),
         };
+        let journal = self.journal_outbox;
         let params = query_params(query);
         if let (Some(mount), Some(source)) = (params.get("mount"), params.get("from"))
             && let Some(storage) = store::blob_digest(mount)
@@ -54,7 +55,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                         crate::quota::Admission::Reserved(record) => Some(record),
                     }
                 };
-                crate::quota::commit_blob_membership(&state.meta, &index.name, &repo, mount, reservation)?;
+                crate::quota::commit_blob_membership(&state.meta, &index.name, &repo, mount, reservation, journal)?;
                 return Ok(blob_created(name, mount));
             }
         }
@@ -64,7 +65,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             if let Err(err) = append_body(&mut pending, &mut size, body, index, &repo).await {
                 return err.into_response();
             }
-            return commit_blob(state, pending, index, &repo, name, digest, size).await;
+            return commit_blob(state, pending, index, &repo, name, digest, size, journal).await;
         }
         let now = (state.clock)();
         let session = Self::random_session()?;
@@ -243,7 +244,17 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 "finishing an upload requires a digest",
             ));
         };
-        commit_blob(state, entry.pending, index, &repo, name, &digest, entry.offset).await
+        commit_blob(
+            state,
+            entry.pending,
+            index,
+            &repo,
+            name,
+            &digest,
+            entry.offset,
+            self.journal_outbox,
+        )
+        .await
     }
 }
 

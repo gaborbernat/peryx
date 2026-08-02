@@ -20,6 +20,7 @@ pub(in crate::registry) async fn put_manifest(
     body: Body,
     name: &str,
     reference: &Reference,
+    journal: bool,
 ) -> Result<Response, ServeError> {
     let (index, repo, identity) = match resolve_writable(state, name, headers, Action::Write) {
         Ok(target) => target,
@@ -96,6 +97,7 @@ pub(in crate::registry) async fn put_manifest(
         &manifest,
         reference,
         reservation,
+        journal,
     )? {
         state.bump_search_epoch();
     }
@@ -172,6 +174,7 @@ pub(in crate::registry) fn delete_manifest(
     name: &str,
     reference: &Reference,
     query: &str,
+    journal: bool,
 ) -> Result<Response, ServeError> {
     let (index, repo, identity) = match resolve_writable(state, name, headers, Action::Delete) {
         Ok(target) => target,
@@ -184,14 +187,14 @@ pub(in crate::registry) fn delete_manifest(
     };
     let (removed, version, digest) = match reference {
         Reference::Tag(tag) => {
-            let digest = store::trash_tag(&state.meta, &index.name, &repo, tag, &info)?;
+            let digest = store::trash_tag(&state.meta, &index.name, &repo, tag, &info, journal)?;
             if digest.is_some() {
                 state.bump_search_epoch();
             }
             (digest.is_some(), Some(tag.clone()), digest)
         }
         Reference::Digest(digest) => {
-            let removed = store::trash_manifest(&state.meta, &index.name, &repo, digest, &info)?;
+            let removed = store::trash_manifest(&state.meta, &index.name, &repo, digest, &info, journal)?;
             if removed.is_some_and(|tags| tags > 0) {
                 state.bump_search_epoch();
             }
@@ -223,19 +226,20 @@ pub(in crate::registry) fn restore_manifest(
     headers: &HeaderMap,
     name: &str,
     reference: &Reference,
+    journal: bool,
 ) -> Result<Response, ServeError> {
     let (index, repo, identity) = match resolve_writable(state, name, headers, Action::Delete) {
         Ok(target) => target,
         Err(response) => return Ok(response),
     };
     let (version, digest, restored, conflicts) = match reference {
-        Reference::Tag(tag) => match store::restore_tag(&state.meta, &index.name, &repo, tag)? {
+        Reference::Tag(tag) => match store::restore_tag(&state.meta, &index.name, &repo, tag, journal)? {
             store::RestoreTagOutcome::Missing => {
                 return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
             }
             store::RestoreTagOutcome::Restored { digest } => (Some(tag.clone()), digest, 1, Vec::new()),
         },
-        Reference::Digest(digest) => match store::restore_manifest(&state.meta, &index.name, &repo, digest)? {
+        Reference::Digest(digest) => match store::restore_manifest(&state.meta, &index.name, &repo, digest, journal)? {
             store::RestoreManifestOutcome::Missing => {
                 return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
             }

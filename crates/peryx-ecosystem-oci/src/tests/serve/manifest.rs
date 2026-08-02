@@ -442,3 +442,76 @@ async fn test_referrers_tolerate_an_upstream_without_the_api() {
     let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(doc["manifests"].as_array().unwrap().is_empty());
 }
+#[tokio::test]
+async fn test_referrers_fall_back_to_the_tag_schema_when_the_api_is_absent() {
+    let server = MockServer::start().await;
+    let subject = format!("sha256:{}", "a".repeat(64));
+    let sig = format!("sha256:{}", "b".repeat(64));
+    // The upstream predates the referrers API, so the API path answers 404 and the referrers live in
+    // an image index tagged after the subject digest per the OCI referrers tag schema.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/nginx/referrers/{subject}")))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    let index = format!(
+        r#"{{"schemaVersion":2,"manifests":[{{"digest":"{sig}","artifactType":"application/vnd.example.sig"}}]}}"#,
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/nginx/manifests/sha256-{}", "a".repeat(64))))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(index.into_bytes(), "application/vnd.oci.image.index.v1+json"),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let base = format!("/v2/hub/library/nginx/referrers/{subject}");
+
+    let (status, _, body) = send(&app, Method::GET, &base).await;
+    assert_eq!(status, StatusCode::OK);
+    let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["manifests"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["manifests"][0]["digest"], sig);
+
+    let (status, headers, body) = send(
+        &app,
+        Method::GET,
+        &format!("{base}?artifactType=application/vnd.example.sig"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["oci-filters-applied"], "artifactType");
+    let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["manifests"].as_array().unwrap().len(), 1);
+}
+#[tokio::test]
+async fn test_referrers_do_not_fall_back_on_a_non_404_upstream_error() {
+    let server = MockServer::start().await;
+    let subject = format!("sha256:{}", "a".repeat(64));
+    let sig = format!("sha256:{}", "b".repeat(64));
+    // Only a 404 signals a missing referrers API; a 500 is a transient fault, so peryx must report an
+    // empty union rather than mistaking it for an old registry and pulling the fallback tag.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/nginx/referrers/{subject}")))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let index = format!(
+        r#"{{"schemaVersion":2,"manifests":[{{"digest":"{sig}","artifactType":"application/vnd.example.sig"}}]}}"#,
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/nginx/manifests/sha256-{}", "a".repeat(64))))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(index.into_bytes(), "application/vnd.oci.image.index.v1+json"),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, _, body) = send(&app, Method::GET, &format!("/v2/hub/library/nginx/referrers/{subject}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(doc["manifests"].as_array().unwrap().is_empty());
+}

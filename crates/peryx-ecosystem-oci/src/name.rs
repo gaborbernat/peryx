@@ -223,6 +223,30 @@ pub fn valid_content_digest(digest: &str) -> bool {
     }
 }
 
+/// The OCI referrers tag-schema name for a subject `digest`: the algorithm truncated to 32 characters,
+/// a `-`, then the encoded portion truncated to 64, with every character a tag disallows replaced by
+/// `-`. A registry predating the referrers API publishes a subject's referrers as an image index under
+/// this tag, so a pull-through proxy falls back to it when the referrers API answers `404`.
+#[must_use]
+pub fn referrers_tag(digest: &str) -> String {
+    let (algorithm, encoded) = digest.split_once(':').unwrap_or((digest, ""));
+    format!("{}-{}", tag_component(algorithm, 32), tag_component(encoded, 64))
+}
+
+/// Truncate a digest part to `limit` characters and map anything outside the tag grammar to `-`.
+fn tag_component(part: &str, limit: usize) -> String {
+    part.chars()
+        .take(limit)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +478,25 @@ mod tests {
         assert!(valid_tag("_leading-underscore"));
         assert!(!valid_tag(&"x".repeat(129)));
         assert!(valid_tag(&"x".repeat(128)));
+    }
+
+    #[test]
+    fn test_referrers_tag_builds_the_fallback_tag_schema() {
+        let cases = [
+            (
+                format!("sha256:{}", "a".repeat(64)),
+                format!("sha256-{}", "a".repeat(64)),
+            ),
+            (
+                format!("sha512:{}", "b".repeat(128)),
+                format!("sha512-{}", "b".repeat(64)),
+            ),
+            (format!("{}:eee", "a".repeat(40)), format!("{}-eee", "a".repeat(32))),
+            ("sha256+test:ab+cd".to_owned(), "sha256-test-ab-cd".to_owned()),
+            ("sha256".to_owned(), "sha256-".to_owned()),
+        ];
+        for (digest, expected) in cases {
+            assert_eq!(referrers_tag(&digest), expected, "digest {digest}");
+        }
     }
 }

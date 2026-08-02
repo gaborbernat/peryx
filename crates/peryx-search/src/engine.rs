@@ -1,7 +1,9 @@
 //! The ecosystem-neutral tantivy index: schema, tokenizers, and query execution.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -14,7 +16,7 @@ use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer, TokenizerMana
 use tantivy::{Index as TantivyIndex, IndexReader, Order, Term};
 
 use crate::access::{SearchAccess, SearchAccessPattern};
-use crate::context::SearchCtx;
+use crate::context::{IndexerCtx, SearchCtx};
 use crate::error::SearchError;
 use crate::indexer::{CompositeIndexer, PackageDocument, PackageIndexer, default_indexer};
 use crate::params::{PackageSource, SearchParams};
@@ -35,6 +37,29 @@ pub struct PackageSearch {
     epoch: AtomicU64,
     indexed_epoch: Mutex<Option<u64>>,
     rebuild_lock: Mutex<()>,
+    /// The on-disk index directory, or `None` for an in-memory index. An eager rebuild uses it to
+    /// mark an in-flight rebuild so a restart that interrupts one discards the partial index.
+    home: Option<PathBuf>,
+}
+
+/// How far an eager [`rebuild`](PackageSearch::rebuild) has progressed, reported once per committed
+/// chunk so a caller can surface operator progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RebuildProgress {
+    /// Documents committed to the new index so far.
+    pub indexed: u64,
+    /// Documents the rebuild will commit in total.
+    pub total: u64,
+}
+
+/// How an eager [`rebuild`](PackageSearch::rebuild) ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildOutcome {
+    /// The rebuilt index replaced the served one; `documents` were published across `commits` chunks.
+    Published { documents: u64, commits: u64 },
+    /// The caller cancelled before publication; the served index kept its prior contents. `documents`
+    /// counts the chunks committed before the abort, which a restart or the next lazy refresh discards.
+    Aborted { documents: u64 },
 }
 
 impl PackageSearch {
@@ -52,6 +77,7 @@ impl PackageSearch {
                 .create_in_ram()
                 .expect("search schema and tokenizer constants are valid"),
             fields,
+            None,
         )
         .expect("in-memory package search reader opens")
     }
@@ -68,6 +94,11 @@ impl PackageSearch {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SearchError> {
         let path = path.as_ref();
         std::fs::create_dir_all(path)?;
+        if rebuild_marker(path).exists() {
+            tracing::warn!(path = %path.display(), "search index rebuild was interrupted; discarding the partial index");
+            reset_dir(path)?;
+            std::fs::remove_file(rebuild_marker(path))?;
+        }
         let (schema, fields) = search_schema();
         let index = match open_index(path, &schema) {
             Err(SearchError::Tantivy(tantivy::TantivyError::SchemaError(_))) => {
@@ -77,10 +108,10 @@ impl PackageSearch {
             }
             result => result?,
         };
-        Self::from_index(index, fields)
+        Self::from_index(index, fields, Some(path.to_path_buf()))
     }
 
-    fn from_index(index: TantivyIndex, fields: SearchFields) -> Result<Self, SearchError> {
+    fn from_index(index: TantivyIndex, fields: SearchFields, home: Option<PathBuf>) -> Result<Self, SearchError> {
         let reader = index
             .reader_builder()
             .reload_policy(tantivy::ReloadPolicy::Manual)
@@ -93,6 +124,7 @@ impl PackageSearch {
             epoch: AtomicU64::new(0),
             indexed_epoch: Mutex::new(None),
             rebuild_lock: Mutex::new(()),
+            home,
         })
     }
 
@@ -106,6 +138,84 @@ impl PackageSearch {
     /// Call after committing a mutation that changes searchable documents.
     pub fn bump_epoch(&self) {
         self.epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Rebuild the whole index from authoritative metadata, committing in chunks and publishing the
+    /// result atomically.
+    ///
+    /// Unlike the lazy refresh a search triggers, this is an eager operator recovery path for when the
+    /// derived index falls behind: it re-derives every document, adds them to the served index in
+    /// `chunk` batches so peak writer memory stays bounded, and reloads the reader only once every
+    /// chunk has committed. Concurrent searches keep serving the prior complete index until that final
+    /// reload publishes the rebuilt one, so no partial state is ever visible. On disk, a marker records
+    /// the in-flight rebuild, so a restart that interrupts one discards the partial index and starts
+    /// over rather than serving it.
+    ///
+    /// `observe` is called before each chunk with the running progress; returning
+    /// [`ControlFlow::Break`] cancels the rebuild, leaving the served index untouched.
+    ///
+    /// # Errors
+    /// Returns a search error if the documents cannot be derived, the writer cannot commit, or the
+    /// in-flight marker cannot be written.
+    ///
+    /// # Panics
+    /// Panics if the rebuild lock was poisoned by a prior panic while rebuilding.
+    pub fn rebuild(
+        &self,
+        ctx: &IndexerCtx<'_>,
+        chunk: NonZeroUsize,
+        observe: &mut dyn FnMut(RebuildProgress) -> ControlFlow<()>,
+    ) -> Result<RebuildOutcome, SearchError> {
+        let _guard = self.rebuild_lock.lock().expect("search rebuild lock");
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let documents = self.indexer.documents(ctx)?;
+        let total = documents.len() as u64;
+        self.mark_rebuilding()?;
+        let mut writer = self
+            .index
+            .writer_with_num_threads::<TantivyDocument>(1, WRITER_MEMORY_BYTES)?;
+        writer.delete_all_documents()?;
+        let mut indexed = 0_u64;
+        let mut commits = 0_u64;
+        for slice in documents.chunks(chunk.get()) {
+            if observe(RebuildProgress { indexed, total }).is_break() {
+                return Ok(RebuildOutcome::Aborted { documents: indexed });
+            }
+            for package in slice {
+                writer.add_document(self.document(package))?;
+            }
+            writer.commit()?;
+            commits += 1;
+            indexed += slice.len() as u64;
+        }
+        if commits == 0 {
+            writer.commit()?;
+            commits = 1;
+        }
+        let _ = observe(RebuildProgress { indexed, total });
+        self.reader.reload()?;
+        self.clear_rebuilding();
+        *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
+        Ok(RebuildOutcome::Published {
+            documents: indexed,
+            commits,
+        })
+    }
+
+    /// Record that an on-disk rebuild is in flight, so an interrupted rebuild is discarded on restart.
+    fn mark_rebuilding(&self) -> Result<(), SearchError> {
+        if let Some(home) = &self.home {
+            std::fs::write(rebuild_marker(home), [])?;
+        }
+        Ok(())
+    }
+
+    /// Clear the in-flight marker after a rebuild publishes. Removal is best-effort: a marker left
+    /// behind only makes the next restart rebuild an already-complete index, never serve a partial one.
+    fn clear_rebuilding(&self) {
+        if let Some(home) = &self.home {
+            let _ = std::fs::remove_file(rebuild_marker(home));
+        }
     }
 
     /// Search cached package documents.
@@ -167,7 +277,12 @@ impl PackageSearch {
     }
 
     fn ensure_current(&self, ctx: &SearchCtx<'_>) -> Result<(), SearchError> {
-        let _guard = self.rebuild_lock.lock().expect("search rebuild lock");
+        // A held lock means an eager rebuild or another refresh is running; serve the current reader
+        // rather than block or race a second writer. An eager rebuild leaves the reader on the prior
+        // complete index until it publishes, so this serves complete results, never partial ones.
+        let Ok(_guard) = self.rebuild_lock.try_lock() else {
+            return Ok(());
+        };
         let epoch = self.epoch.load(Ordering::Relaxed);
         if self
             .indexed_epoch
@@ -338,6 +453,12 @@ fn open_index(path: &Path, schema: &Schema) -> Result<TantivyIndex, SearchError>
 fn reset_dir(path: &Path) -> std::io::Result<()> {
     std::fs::remove_dir_all(path)?;
     std::fs::create_dir_all(path)
+}
+
+/// The sibling file that marks an in-flight rebuild of the index at `path`. It sits beside the index
+/// directory rather than inside it so tantivy's own file management never touches it.
+fn rebuild_marker(path: &Path) -> PathBuf {
+    path.with_extension("rebuilding")
 }
 
 fn search_schema() -> (Schema, SearchFields) {

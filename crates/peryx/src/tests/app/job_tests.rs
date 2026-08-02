@@ -35,6 +35,13 @@ fn run_command(
     }
 }
 
+fn reindex_command(chunk_size: usize) -> JobCommand {
+    JobCommand::Reindex {
+        runtime: RuntimeArgs::default(),
+        chunk_size,
+    }
+}
+
 fn catalog_server() -> (String, std::thread::JoinHandle<()>) {
     use std::io::{Read as _, Write as _};
 
@@ -252,6 +259,39 @@ fn test_job_run_rejects_invalid_limits_before_opening_the_store(
         &mut Vec::new(),
     )
     .unwrap_err();
+
+    assert_eq!(error.to_string(), expected);
+}
+
+#[test]
+fn test_job_reindex_rebuilds_the_search_index_and_records_a_node_wide_run() {
+    let (_dir, meta, config) = store_and_config();
+    drop(meta);
+    let mut out = Vec::new();
+
+    app::job(&config, &reindex_command(1), &mut out).unwrap();
+
+    assert_eq!(String::from_utf8(out).unwrap(), "processed\t0\nchanged\t0\n");
+    let runs = MetaStore::open(config.data_dir.join("peryx.redb"))
+        .unwrap()
+        .list_job_runs()
+        .unwrap();
+    assert_eq!(runs[0].kind, JobKind::SearchRebuild);
+    assert_eq!(runs[0].scope, "");
+    assert_eq!(runs[0].state, JobState::Succeeded);
+}
+
+#[rstest]
+#[case::zero(0, "chunk-size must be positive")]
+#[case::too_large(1_000_001, "chunk-size exceeds the per-run limit")]
+fn test_job_reindex_rejects_invalid_chunk_size_before_opening_the_store(
+    #[case] chunk_size: usize,
+    #[case] expected: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_at(&dir);
+
+    let error = app::job(&config, &reindex_command(chunk_size), &mut Vec::new()).unwrap_err();
 
     assert_eq!(error.to_string(), expected);
 }

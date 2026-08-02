@@ -16,6 +16,7 @@ peryx <COMMAND>
 | `init`           | Create the data directory and its stores, then exit                                   |
 | `config-snippet` | Print `pip.conf`, `uv.toml`, or `.pypirc` for one configured index                    |
 | `index`          | List and inspect the configured indexes                                               |
+| `job`            | Inspect durable job-run history and rebuild the search index                          |
 | `cache`          | Inspect, validate, and clean the on-disk cache                                        |
 | `backup`         | Create and verify offline backups                                                     |
 | `restore`        | Restore an offline backup into a data directory                                       |
@@ -63,6 +64,36 @@ or a cached index's upstream. `--ecosystem` filters `list` to one ecosystem (`py
 peryx index list [--ecosystem pypi|oci] [--config <path>] [--data-dir <path>]
 peryx index show <index> [--config <path>] [--data-dir <path>]
 ```
+
+## `job`
+
+Inspect the durable history of background jobs and run the ones an operator triggers on demand. `list` prints the most
+recent runs newest-first as JSON; `show` prints one run by its `jr_…` id. `run` starts a one-shot catalog sync for a
+cached repository. Every run records a durable history entry you can read back with `list` and `show`.
+
+```
+peryx job list [--data-dir <path>] [--config <path>]
+peryx job show <id> [--data-dir <path>] [--config <path>]
+peryx job run --repository <name> [--source <name>] [--max-projects <n>] [--concurrency <n>] [--timeout-secs <n>]
+peryx job reindex [--chunk-size <n>] [--data-dir <path>] [--config <path>]
+```
+
+### `job reindex`
+
+Rebuild the derived package search index from the authoritative metadata store. The search index is a cache: it normally
+refreshes on its own as pages and tags are served, and a schema change discards and rebuilds it on the next start.
+`reindex` is the recovery path for when that incremental refresh cannot bring the index current — after a partial
+restore, say, or a bug that left the index stale. It re-derives every document and republishes the index in one
+node-wide run recorded as a `search_rebuild` job.
+
+The rebuild commits in batches of `--chunk-size` documents (default `1000`), so peak writer memory stays bounded rather
+than scaling with the catalog. Each committed batch logs its progress (`indexed` of `total`) at `info`; follow the
+server log, or `job show` the run, to watch a long rebuild advance.
+
+Publication is atomic. Searches keep serving the prior complete index for the whole rebuild and switch to the new one
+only once every batch has committed, so a query never sees a half-built index. If the process stops mid-rebuild, the
+partial index is discarded on the next start and the incremental refresh rebuilds it — a restart never serves partial
+results. A rebuild cancelled at shutdown leaves the served index untouched.
 
 ## `config-snippet`
 

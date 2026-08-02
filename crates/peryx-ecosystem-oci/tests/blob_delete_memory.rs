@@ -35,7 +35,7 @@ async fn test_blob_delete_uses_bounded_memory() {
         acl: IndexAcl::upload_token(TOKEN),
     };
     let mut state = AppState::with_clock(meta, blobs, 60, vec![index], Arc::new(|| 1000));
-    peryx_ecosystem_oci::install(&mut state, std::iter::empty());
+    peryx_ecosystem_oci::install(&mut state, std::iter::empty(), false);
     let state = Arc::new(state);
     let app = peryx_http::router(Arc::clone(&state));
     let bytes = b"layer";

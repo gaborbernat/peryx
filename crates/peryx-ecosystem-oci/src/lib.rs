@@ -33,6 +33,7 @@ mod error;
 mod mirror;
 mod name;
 pub mod openapi;
+mod outbox;
 mod quota;
 pub(crate) mod registry;
 mod search_oci;
@@ -57,11 +58,22 @@ pub use store::referenced_blob_digests;
 /// Wire the OCI registry driver into a freshly built [`AppState`], with each OCI index's compiled
 /// [`IndexSettings`] keyed by index name. An index absent from `settings` takes the defaults.
 ///
+/// `journal_outbox` records each authoritative hosted mutation in the driver-transaction outbox for a
+/// replica to reconcile; the composition root sets it from the resolved availability mode, so a
+/// single-node `none` deployment records nothing extra.
+///
 /// Installs only when an `oci`-ecosystem index is configured: with none, the state keeps its no-op
 /// driver and the `/v2/` namespace stays inert, so a deployment without OCI indexes carries no OCI cost.
-pub fn install(state: &mut AppState, settings: impl IntoIterator<Item = (String, IndexSettings)>) {
+pub fn install(
+    state: &mut AppState,
+    settings: impl IntoIterator<Item = (String, IndexSettings)>,
+    journal_outbox: bool,
+) {
     if state.indexes.iter().any(|index| index.ecosystem == Ecosystem::Oci) {
-        state.register_ecosystem(Arc::new(OciRegistry::new(settings)), Arc::new(OciIndexer));
+        state.register_ecosystem(
+            Arc::new(OciRegistry::new(settings, journal_outbox)),
+            Arc::new(OciIndexer),
+        );
         state.register_lexicon(Ecosystem::Oci, &OCI_LEXICON);
     }
 }

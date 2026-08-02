@@ -13,6 +13,8 @@ use peryx_core::{Ecosystem, TrashRecord};
 use peryx_storage::meta::{ArtifactOrigin, ArtifactSource, DriverTxn, MetaError, MetaStore};
 use serde::{Deserialize, Serialize};
 
+use crate::outbox::{self, OciMutation};
+
 /// The driver-KV prefix every manifest is keyed under, its digest following.
 mod descriptors;
 pub use descriptors::{blob_digest, linux_amd64_child, manifest_descriptors, referenced_blob_digests};
@@ -487,6 +489,7 @@ pub fn trash_tag(
     repo: &str,
     tag: &str,
     info: &TrashInfo,
+    journal: bool,
 ) -> Result<Option<String>, MetaError> {
     meta.commit_driver_txn(|txn| {
         let key = tag_key(index, repo, tag);
@@ -501,7 +504,13 @@ pub fn trash_tag(
         txn.put(&tag_trash_key(index, repo, tag), &trash)?;
         txn.remove(&key)?;
         txn.remove(&tag_freshness_key(index, repo, tag))?;
-        Ok((Some(digest), Vec::new()))
+        let entries = outbox::record(journal, || OciMutation::TrashTag {
+            index: index.to_owned(),
+            repo: repo.to_owned(),
+            tag: tag.to_owned(),
+            digest: digest.clone(),
+        });
+        Ok((Some(digest), entries))
     })
 }
 
@@ -516,6 +525,7 @@ pub fn trash_manifest(
     repo: &str,
     digest: &str,
     info: &TrashInfo,
+    journal: bool,
 ) -> Result<Option<usize>, MetaError> {
     meta.commit_driver_txn(|txn| {
         if txn.get(&manifest_trash_key(index, repo, digest))?.is_some()
@@ -545,7 +555,14 @@ pub fn trash_manifest(
             tags: tags.clone(),
         })?;
         txn.put(&manifest_trash_key(index, repo, digest), &trash)?;
-        Ok((Some(tags.len()), Vec::new()))
+        let count = tags.len();
+        let entries = outbox::record(journal, || OciMutation::TrashManifest {
+            index: index.to_owned(),
+            repo: repo.to_owned(),
+            digest: digest.to_owned(),
+            tags,
+        });
+        Ok((Some(count), entries))
     })
 }
 
@@ -554,7 +571,13 @@ pub fn trash_manifest(
 ///
 /// # Errors
 /// Returns a store error if the transition fails.
-pub fn restore_tag(meta: &MetaStore, index: &str, repo: &str, tag: &str) -> Result<RestoreTagOutcome, MetaError> {
+pub fn restore_tag(
+    meta: &MetaStore,
+    index: &str,
+    repo: &str,
+    tag: &str,
+    journal: bool,
+) -> Result<RestoreTagOutcome, MetaError> {
     meta.commit_driver_txn(|txn| {
         let trash_key = tag_trash_key(index, repo, tag);
         let Some(raw) = txn.get(&trash_key)? else {
@@ -564,7 +587,13 @@ pub fn restore_tag(meta: &MetaStore, index: &str, repo: &str, tag: &str) -> Resu
         txn.put(&tag_key(index, repo, tag), trashed.digest.as_bytes())?;
         txn.remove(&trash_key)?;
         txn.remove(&manifest_trash_key(index, repo, &trashed.digest))?;
-        Ok((RestoreTagOutcome::Restored { digest: trashed.digest }, Vec::new()))
+        let entries = outbox::record(journal, || OciMutation::RestoreTag {
+            index: index.to_owned(),
+            repo: repo.to_owned(),
+            tag: tag.to_owned(),
+            digest: trashed.digest.clone(),
+        });
+        Ok((RestoreTagOutcome::Restored { digest: trashed.digest }, entries))
     })
 }
 
@@ -578,6 +607,7 @@ pub fn restore_manifest(
     index: &str,
     repo: &str,
     digest: &str,
+    journal: bool,
 ) -> Result<RestoreManifestOutcome, MetaError> {
     meta.commit_driver_txn(|txn| {
         let trash_key = manifest_trash_key(index, repo, digest);
@@ -597,7 +627,13 @@ pub fn restore_manifest(
             }
         }
         txn.remove(&trash_key)?;
-        Ok((RestoreManifestOutcome::Restored { restored, conflicts }, Vec::new()))
+        let entries = outbox::record(journal, || OciMutation::RestoreManifest {
+            index: index.to_owned(),
+            repo: repo.to_owned(),
+            digest: digest.to_owned(),
+            tags: restored.clone(),
+        });
+        Ok((RestoreManifestOutcome::Restored { restored, conflicts }, entries))
     })
 }
 
@@ -1008,7 +1044,7 @@ mod tests {
         let (_dir, meta) = store();
         record_manifest(&meta, "hub", "library/nginx", "sha256:a", &image("{}")).unwrap();
         put_tag(&meta, "hub", "library/nginx", "latest", "sha256:a").unwrap();
-        trash_tag(&meta, "hub", "library/nginx", "latest", &info()).unwrap();
+        trash_tag(&meta, "hub", "library/nginx", "latest", &info(), false).unwrap();
 
         let records = trash_records(&meta, "hub").unwrap();
 
@@ -1029,7 +1065,7 @@ mod tests {
     fn test_trash_records_reports_an_untagged_digest_deletion_once() {
         let (_dir, meta) = store();
         record_manifest(&meta, "hub", "library/nginx", "sha256:a", &image("{}")).unwrap();
-        trash_manifest(&meta, "hub", "library/nginx", "sha256:a", &info()).unwrap();
+        trash_manifest(&meta, "hub", "library/nginx", "sha256:a", &info(), false).unwrap();
 
         let records = trash_records(&meta, "hub").unwrap();
 
@@ -1044,7 +1080,7 @@ mod tests {
         record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
         put_tag(&meta, "hub", "app", "1.0", "sha256:a").unwrap();
         put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
-        trash_manifest(&meta, "hub", "app", "sha256:a", &info()).unwrap();
+        trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false).unwrap();
 
         let mut references: Vec<Option<String>> = trash_records(&meta, "hub")
             .unwrap()
@@ -1065,7 +1101,7 @@ mod tests {
         let (_dir, meta) = store();
         record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
         put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
-        trash_tag(&meta, "hub", "app", "latest", &info()).unwrap();
+        trash_tag(&meta, "hub", "app", "latest", &info(), false).unwrap();
         delete_manifest(&meta, "sha256:a").unwrap();
 
         let records = trash_records(&meta, "hub").unwrap();
@@ -1079,7 +1115,7 @@ mod tests {
         let (_dir, meta) = store();
         record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
         put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
-        trash_tag(&meta, "hub", "app", "latest", &info()).unwrap();
+        trash_tag(&meta, "hub", "app", "latest", &info(), false).unwrap();
         meta.put_driver_value(&tag_trash_key("hub", "app", "corrupt"), b"not json")
             .unwrap();
 

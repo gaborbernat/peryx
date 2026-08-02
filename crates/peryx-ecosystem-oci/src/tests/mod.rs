@@ -7,6 +7,7 @@ mod discovery_tests;
 mod metrics_tests;
 mod mirror_tests;
 mod negotiate_tests;
+mod outbox_tests;
 mod policy_tests;
 mod push_tests;
 mod quota_tests;
@@ -48,10 +49,15 @@ fn app_with(dir: &TempDir, index: Index) -> (Arc<AppState>, axum::Router) {
 
 /// Build an app over several indexes, wiring the real driver.
 fn app_with_indexes(dir: &TempDir, indexes: Vec<Index>) -> (Arc<AppState>, axum::Router) {
+    app_with_journal(dir, indexes, false)
+}
+
+/// Build an app over several indexes, choosing whether authoritative mutations record outbox entries.
+fn app_with_journal(dir: &TempDir, indexes: Vec<Index>, journal: bool) -> (Arc<AppState>, axum::Router) {
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
     let blobs = BlobStore::new(dir.path().join("blobs"));
     let mut state = AppState::with_clock(meta, blobs, 60, indexes, Arc::new(|| 1000));
-    crate::install(&mut state, HashMap::new());
+    crate::install(&mut state, HashMap::new(), journal);
     let state = Arc::new(state);
     (state.clone(), router(state))
 }
@@ -100,7 +106,7 @@ fn realm_app_with_clock_and_limits(
         rate_limit,
         Vec::<(String, usize)>::new(),
     );
-    crate::install(&mut state, HashMap::new());
+    crate::install(&mut state, HashMap::new(), false);
     state.set_token_realm(Signer::new(b"realm-test-signing-key", crate::TOKEN_SERVICE), 300);
     let state = Arc::new(state);
     (state.clone(), router(state))
@@ -157,7 +163,7 @@ fn proxy_with_settings(dir: &TempDir, upstream: &str, settings: IndexSettings) -
     let client = UpstreamClient::new(upstream).unwrap();
     let index = oci_index("hub", "hub", IndexKind::Cached { client, offline: false });
     let mut state = AppState::with_clock(meta, blobs, 60, vec![index], Arc::new(|| 1000));
-    crate::install(&mut state, HashMap::from([("hub".to_owned(), settings)]));
+    crate::install(&mut state, HashMap::from([("hub".to_owned(), settings)]), false);
     let state = Arc::new(state);
     (state.clone(), router(state))
 }
@@ -200,7 +206,7 @@ fn proxy_with_stale(
     );
     let mut state = AppState::with_clock(meta, blobs, 60, vec![index], clock);
     state.max_stale_secs = max_stale_secs;
-    crate::install(&mut state, HashMap::new());
+    crate::install(&mut state, HashMap::new(), false);
     let state = Arc::new(state);
     (state.clone(), router(state))
 }
@@ -225,7 +231,7 @@ fn hosted_with_clock(
     let blobs = BlobStore::new(dir.path().join("blobs"));
     let index = writable_index("store", "store", true, token);
     let mut state = AppState::with_clock(meta, blobs, 60, vec![index], clock);
-    crate::install(&mut state, HashMap::new());
+    crate::install(&mut state, HashMap::new(), false);
     let state = Arc::new(state);
     (state.clone(), router(state))
 }
@@ -415,7 +421,7 @@ fn rate_limited_oci_app(dir: &TempDir) -> axum::Router {
         },
         Vec::<(String, usize)>::new(),
     );
-    crate::install(&mut state, HashMap::new());
+    crate::install(&mut state, HashMap::new(), false);
     router(Arc::new(state))
 }
 

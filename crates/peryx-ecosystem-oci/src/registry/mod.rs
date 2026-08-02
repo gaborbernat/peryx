@@ -142,6 +142,10 @@ pub struct OciRegistryWithHasher<S> {
     settings: std::collections::HashMap<String, IndexSettings>,
     uploads: tokio::sync::Mutex<std::collections::HashMap<String, UploadSession>>,
     blob_memberships: RwLock<BlobMembershipCache<S>>,
+    /// Whether an authoritative hosted mutation records a typed operation in the driver-transaction
+    /// outbox. Set from the availability mode: `false` under single-node `none`, so its write path is
+    /// byte-for-byte the pre-outbox behavior.
+    journal_outbox: bool,
 }
 #[derive(Default)]
 struct BlobMembershipCache<S> {
@@ -192,11 +196,12 @@ struct UploadSession {
 const UPLOAD_SESSION_TTL_SECS: i64 = 3600;
 impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> {
     /// Build the driver with its shared upstream client and each OCI index's settings, keyed by index
-    /// name.
+    /// name. `journal_outbox` records authoritative hosted mutations for replication.
     #[must_use]
-    pub fn new(settings: impl IntoIterator<Item = (String, IndexSettings)>) -> Self {
+    pub fn new(settings: impl IntoIterator<Item = (String, IndexSettings)>, journal_outbox: bool) -> Self {
         Self {
             settings: settings.into_iter().collect(),
+            journal_outbox,
             ..Self::default()
         }
     }
@@ -439,13 +444,13 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 self.serve_manifest(&state, &name, &reference, head, accept).await
             }
             OciRoute::Manifest { name, reference } if method == Method::PUT => {
-                put_manifest(&state, headers, body, &name, &reference).await
+                put_manifest(&state, headers, body, &name, &reference, self.journal_outbox).await
             }
             OciRoute::Manifest { name, reference } if method == Method::DELETE => {
-                delete_manifest(&state, headers, &name, &reference, query)
+                delete_manifest(&state, headers, &name, &reference, query, self.journal_outbox)
             }
             OciRoute::ManifestRestore { name, reference } if method == Method::PUT => {
-                restore_manifest(&state, headers, &name, &reference)
+                restore_manifest(&state, headers, &name, &reference, self.journal_outbox)
             }
             OciRoute::Blob { name, digest } if read => self.serve_blob(&state, &name, &digest, head, headers).await,
             OciRoute::Blob { name, digest } if method == Method::DELETE => {

@@ -49,7 +49,7 @@ fn hosted_with_webhook(dir: &tempfile::TempDir, events: &[&str]) -> (Arc<AppStat
         Arc::new(|| 1000),
         webhooks,
     );
-    crate::install(&mut state, std::collections::HashMap::new());
+    crate::install(&mut state, std::collections::HashMap::new(), false);
     let state = Arc::new(state);
     (state.clone(), router(state))
 }

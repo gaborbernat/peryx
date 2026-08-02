@@ -444,6 +444,10 @@ fn download_error_response(err: DownloadError) -> Response {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a monolithic upload commits the staged blob, its quota reservation, and its outbox entry together"
+)]
 pub(super) async fn commit_blob(
     state: &ServingState,
     pending: BlobWrite,
@@ -452,6 +456,7 @@ pub(super) async fn commit_blob(
     name: &str,
     digest: &str,
     bytes: u64,
+    journal: bool,
 ) -> Result<Response, ServeError> {
     let Some(storage) = store::blob_digest(digest) else {
         return Ok(error_response(
@@ -474,7 +479,7 @@ pub(super) async fn commit_blob(
     };
     match pending.commit(&storage).await {
         Ok(()) => {
-            crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation)?;
+            crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
             Ok(blob_created(name, digest))
         }
         Err(err) => {

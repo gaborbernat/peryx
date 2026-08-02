@@ -5057,6 +5057,7 @@ dependencies = [
  "futures-util",
  "hdrhistogram",
  "http-body-util",
+ "peryx-identity",
  "peryx-storage",
  "redb",
  "reqwest",

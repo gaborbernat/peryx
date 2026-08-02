@@ -16,12 +16,17 @@ pub use envelope::{
 };
 pub use error::SyncError;
 pub use http::{DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PrimaryHttpConfigError, primary_router};
-pub use protocol::{BlobReference, Change, ChangePage, MetadataMutation, PROTOCOL_VERSION, Primary};
+pub use protocol::{
+    BlobReference, Change, ChangePage, MetadataMutation, PROTOCOL_VERSION, PlacementAvailability, PlacementDescriptor,
+    Primary,
+};
 pub use replica::{Replica, ReplicaState, SyncOutcome};
 
 #[cfg(test)]
 mod envelope_tests;
 #[cfg(test)]
 mod http_tests;
+#[cfg(test)]
+mod protocol_tests;
 #[cfg(test)]
 mod tests;

@@ -90,6 +90,53 @@ pub trait Primary: Sync {
     async fn blob(&self, digest: &peryx_storage::blob::Digest) -> Result<Self::BlobStream, Self::Error>;
 }
 
+/// The routing state a peer advertises for one blob placement, without the storage crate's internal
+/// transition machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementAvailability {
+    Pending,
+    Verified,
+    Failed,
+    Revoked,
+}
+
+impl From<peryx_storage::meta::BlobPlacementStatus> for PlacementAvailability {
+    fn from(status: peryx_storage::meta::BlobPlacementStatus) -> Self {
+        match status {
+            peryx_storage::meta::BlobPlacementStatus::Pending => Self::Pending,
+            peryx_storage::meta::BlobPlacementStatus::Verified => Self::Verified,
+            peryx_storage::meta::BlobPlacementStatus::Failed => Self::Failed,
+            peryx_storage::meta::BlobPlacementStatus::Revoked => Self::Revoked,
+        }
+    }
+}
+
+/// One blob placement a peer advertises: where a digest lives and whether it is serveable, carried over
+/// the replication boundary without the storage record's fencing and timing fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacementDescriptor {
+    pub digest: String,
+    pub backend: String,
+    pub data_center: String,
+    pub location: String,
+    pub availability: PlacementAvailability,
+    pub generation: u64,
+}
+
+impl From<&peryx_storage::meta::BlobPlacementRecord> for PlacementDescriptor {
+    fn from(record: &peryx_storage::meta::BlobPlacementRecord) -> Self {
+        Self {
+            digest: record.key.digest.canonical(),
+            backend: record.key.backend.as_str().to_owned(),
+            data_center: record.key.data_center.as_str().to_owned(),
+            location: record.key.location.as_str().to_owned(),
+            availability: record.state.status().into(),
+            generation: record.generation,
+        }
+    }
+}
+
 mod base64_bytes {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;

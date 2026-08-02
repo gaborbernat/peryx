@@ -1,6 +1,7 @@
 use crate::blob::{BlobStore, Digest};
 
 mod error_tests;
+mod storage_tests;
 mod store_tests;
 
 pub(super) fn store() -> (tempfile::TempDir, BlobStore) {

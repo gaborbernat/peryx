@@ -10,6 +10,7 @@ use std::sync::Arc;
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase as _, TableDefinition};
 
 mod analytics;
+mod blob_placement;
 mod bootstrap;
 mod error;
 mod external_identity;
@@ -27,6 +28,11 @@ mod webhook;
 mod writer;
 
 pub use analytics::AnalyticsHandle;
+pub use blob_placement::{
+    BackendId, BackendLocation, BlobPlacementError, BlobPlacementFailure, BlobPlacementKey, BlobPlacementOutcome,
+    BlobPlacementRecord, BlobPlacementRouting, BlobPlacementState, BlobPlacementStatus, BlobPlacementTransition,
+    DataCenterId, MAX_PLACEMENTS_PER_DIGEST, PlacementKeyError,
+};
 pub use bootstrap::AdministratorBootstrapError;
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use external_identity::ExternalIdentityStoreError;
@@ -102,6 +108,7 @@ const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new
 /// The neutral artifact-placement projection: source and byte availability keyed by content digest,
 /// so a package read resolves both dimensions with one indexed lookup and no content-store probe.
 const ARTIFACT_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("artifact_placement");
+const BLOB_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("blob_placement");
 const REPOSITORY: TableDefinition<&str, &[u8]> = TableDefinition::new("repository");
 const REPOSITORY_ROUTE: TableDefinition<&str, &str> = TableDefinition::new("repository_route");
 const SERIAL_KEY: &str = "serial";
@@ -221,6 +228,7 @@ impl MetaStore {
             txn.open_table(DIGEST_REVOCATION)?;
             txn.open_table(DIGEST_REVOCATION_STATE)?;
             txn.open_table(ARTIFACT_PLACEMENT)?;
+            txn.open_table(BLOB_PLACEMENT)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;
         }

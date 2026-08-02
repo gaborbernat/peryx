@@ -1,0 +1,133 @@
++++
+title = "Back up and restore"
+description = "Capture a self-contained, verifiable backup of a data directory and restore it into a fresh node."
+weight = 11
++++
+
+A backup is a self-contained directory that reproduces a peryx node's durable state: its effective configuration, its
+metadata store, and every blob that metadata references. It is offline by construction. `peryx backup create` reads a
+stopped or quiescent data directory and writes files with hash checks; nothing about it talks to a running server, an
+upstream, or an object store's control plane. That makes a backup portable. Copy it to another host, verify it there,
+and restore it into an empty data directory to rebuild the node.
+
+Reach for this when you move a node between hosts, seed a staging environment from production state, or hold a
+point-in-time image before a risky migration. It is not continuous replication: for a hot standby that follows the
+writer, run a [read replica](@/core/high-availability.md). A backup is the cold copy you keep, verify, and restore on
+your own schedule.
+
+## What a backup contains
+
+`backup create` writes a directory with four parts:
+
+- `manifest.json`: the format version, a creation timestamp, and the SHA-256 and byte size of every other file. It is
+  the root of trust the verifier checks everything against.
+- `config.toml`: an effective configuration snapshot, the merged result of the config file and any runtime overrides
+  rather than a copy of the source file. Restoring it reproduces the settings the node ran with.
+- `metadata/peryx.redb`: a copy of the metadata store.
+- `blobs.tsv` and `blobs/sha256/…`: a tab-separated index of `sha256`, `size_bytes`, and path, plus one file per blob
+  laid out by digest.
+
+The backup copies only referenced blobs. It scans the metadata store for the digests every installed ecosystem names and
+copies exactly those, so an unreferenced blob left behind by an interrupted upload never enters the backup. A backup is
+therefore a compaction that carries the live working set, not the on-disk residue. `backup create` rehashes each blob as
+it copies it; a blob whose bytes no longer hash to its digest aborts the backup rather than sealing corruption into it.
+
+The configuration snapshot never contains a secret. It records S3 credentials, upload tokens read from files, and
+webhook secrets sourced from the environment as references (the path or environment variable name), not values. Even so,
+the snapshot names your indexes, upstreams, and routes, so treat a backup directory as sensitive and store it with the
+same care as the node.
+
+## Create a backup
+
+`backup create` takes the same `--config` and `--data-dir` flags as `serve`, followed by the target directory:
+
+```console
+$ peryx backup create --data-dir /var/lib/peryx /backups/peryx-2026-08-01
+created	/backups/peryx-2026-08-01
+metadata	/var/lib/peryx/peryx.redb
+blobs	1284	5311746048
+```
+
+The target must be empty or absent; the command refuses to write into a directory that already holds files, so a stray
+path never merges two backups.
+
+Take the copy against a quiescent writer. `backup create` copies the metadata file directly rather than opening the live
+database, so an image captured while the writer commits can be inconsistent. Stop the node first, or run the backup
+against one you have switched to `read_only`. A [read replica](@/core/high-availability.md) rejects mutations and runs
+no background maintenance, so its metadata holds still while you copy it. Blobs need no such care: they are
+content-addressed and immutable once written, so copying them alongside a live reader is safe.
+
+## Verify a backup
+
+`backup verify` rereads a backup and reports whether it can still be trusted, without touching any data directory:
+
+```console
+$ peryx backup verify /backups/peryx-2026-08-01
+ok
+```
+
+Verification rehashes the config snapshot and the blob index against the manifest, rehashes every blob against its own
+digest, and confirms the recorded blob count and total bytes match what the index lists. It then opens the copied
+metadata store and checks that every digest the metadata references is present in the backup, the property that makes a
+restore complete rather than dangling. Any mismatch prints a `problem` line naming the file and the discrepancy, and the
+command exits non-zero:
+
+```console
+$ peryx backup verify /backups/peryx-2026-08-01
+problem	blob	sha256:1f3a…	sha256 expected sha256:1f3a…, found sha256:9c02…
+problems	1
+```
+
+Verify on the machine that holds the backup, not only the one that wrote it. A backup that passed at creation but fails
+after a copy across hosts or a spell on cold storage has caught bit rot or a truncated transfer before a restore depends
+on it. Cheap and read-only, `backup verify` belongs on a schedule against every backup you intend to keep.
+
+## Restore a backup
+
+`restore` writes a backup into a data directory that a server can then serve:
+
+```console
+$ peryx restore /backups/peryx-2026-08-01 --data-dir /var/lib/peryx
+restored	/var/lib/peryx
+blobs	1284	5311746048
+```
+
+Restore verifies the backup in full before it writes a single byte, so a corrupt backup halts recovery instead of
+populating a data directory with damaged state. It refuses a target that already holds files unless you pass `--force`,
+which replaces the directory wholesale. That guard keeps a restore from colliding with a node that is still live.
+Restore into an empty path, then start the server against it:
+
+```console
+$ peryx restore /backups/peryx-2026-08-01 --data-dir /var/lib/peryx --force
+$ peryx serve --data-dir /var/lib/peryx
+```
+
+The restored `config.toml` records the `data_dir` the backup came from. When that differs from the `--data-dir` you
+restore into, the command still restores but prints a warning, because the snapshot's path no longer matches where the
+data now lives:
+
+```console
+warning	config	data_dir	backup=/var/lib/peryx	restore=/srv/peryx/data
+```
+
+Reconcile it before serving: point the running node at the new location with `--data-dir`, or edit the `data_dir` in the
+restored configuration so the snapshot and the on-disk layout agree.
+
+## Object storage backends
+
+`backup create` copies referenced blob bytes from the node's local filesystem blob store under `<data_dir>/blobs`. When
+the node stores blobs in an [S3-compatible bucket](@/core/configuration.md#blob) instead, those bytes live in the
+bucket, not on local disk. The configuration snapshot records the S3 backend and restores it, but the blob bytes are not
+the backup's to carry. Back the bucket up with the object store's own tooling (versioning, replication, or a
+lifecycle-managed copy), and rely on `backup create` for the metadata and configuration that address it. A restore then
+pairs the metadata image with a bucket that already holds the referenced objects.
+
+## Operational notes
+
+A backup is a point-in-time image, not a journal: it captures the state at the instant you copy it and knows nothing of
+writes that land afterward. Size the interval to how much recent state you can afford to rebuild from upstream, and keep
+`backup verify` on a timer so a backup's health is known before the day you need it. Because a backup carries only the
+referenced working set, its size tracks live artifacts rather than historical churn. A node that has reclaimed
+unreferenced blobs backs up no smaller, since orphans were never in the working set.
+
+For the exact flags on each command, see the [command line reference](@/core/cli.md).

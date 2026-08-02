@@ -258,7 +258,7 @@ pub fn blob_body(read: BlobRead) -> Body {
     }
 }
 
-fn authorized(headers: &HeaderMap, expected: &str) -> bool {
+pub fn authorized(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -275,7 +275,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             == 0
 }
 
-fn unauthorized() -> Response {
+pub fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer realm=\"peryx-replication\"")],

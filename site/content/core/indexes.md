@@ -53,6 +53,11 @@ one URL where your own content wins over upstream. peryx names these cached, hos
   and unioned versions; its source policy can instead select hosted candidates at project level or disable cached
   fallback. Uploads land in the virtual index's designated hosted layer. A layer can be another virtual index.
 
+A cached index rides out transient upstream failures: server errors, request timeouts, and `429` rate limits retry with
+bounded jittered backoff. When a rate-limited or overloaded upstream answers with a `Retry-After` hint, peryx waits the
+interval the server asks for, in either the delay-seconds or HTTP-date form and capped at 30 seconds, rather than
+its own backoff, so a recovering mirror is not hammered while it catches up.
+
 {% mermaid() %}
 flowchart LR
   req["GET simple/utils/"] --> virtual["virtual root/pypi"]

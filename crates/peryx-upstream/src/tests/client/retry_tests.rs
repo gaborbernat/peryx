@@ -1,14 +1,85 @@
 use std::fs::File;
 use std::io::{Read as _, Seek as _};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
+use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use rstest::rstest;
 use tracing::dispatcher::DefaultGuard;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::simple_client;
 use crate::client::UpstreamClient;
-use crate::client::retry::MAX_RETRIES;
+use crate::client::retry::{MAX_RETRIES, retry_after};
+
+#[rstest]
+#[case::seconds(Some(b"5".as_slice()), Some(Duration::from_secs(5)))]
+#[case::zero(Some(b"0".as_slice()), Some(Duration::from_secs(0)))]
+#[case::at_cap(Some(b"30".as_slice()), Some(Duration::from_secs(30)))]
+#[case::over_cap(Some(b"120".as_slice()), Some(Duration::from_secs(30)))]
+#[case::padded(Some(b" 5 ".as_slice()), Some(Duration::from_secs(5)))]
+#[case::malformed(Some(b"soon".as_slice()), None)]
+#[case::non_ascii(Some(b"\xff".as_slice()), None)]
+#[case::absent(None, None)]
+fn test_retry_after_reads_the_header(#[case] value: Option<&[u8]>, #[case] expected: Option<Duration>) {
+    let mut headers = HeaderMap::new();
+    if let Some(value) = value {
+        headers.insert(RETRY_AFTER, HeaderValue::from_bytes(value).unwrap());
+    }
+
+    assert_eq!(retry_after(&headers), expected);
+}
+
+#[test]
+fn test_retry_after_caps_a_future_http_date() {
+    let future = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        RETRY_AFTER,
+        HeaderValue::from_str(&httpdate::fmt_http_date(future)).unwrap(),
+    );
+
+    assert_eq!(retry_after(&headers), Some(Duration::from_secs(30)));
+}
+
+#[test]
+fn test_retry_after_ignores_a_past_http_date() {
+    let past = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        RETRY_AFTER,
+        HeaderValue::from_str(&httpdate::fmt_http_date(past)).unwrap(),
+    );
+
+    assert_eq!(retry_after(&headers), None);
+}
+
+#[tokio::test]
+async fn test_fetch_bytes_honors_retry_after_on_a_retryable_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/pkg.whl"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/pkg.whl"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wheelbytes".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = simple_client(&server);
+
+    let bytes = client
+        .fetch_bytes(&format!("{}/files/pkg.whl", server.uri()))
+        .await
+        .unwrap();
+
+    assert_eq!(&bytes[..], b"wheelbytes");
+}
 
 #[tokio::test(start_paused = true)]
 async fn test_sleep_before_retry_logs_a_redacted_url_and_status() {

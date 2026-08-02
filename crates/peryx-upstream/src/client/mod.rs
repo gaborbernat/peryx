@@ -609,7 +609,7 @@ impl UpstreamClient {
                 Ok(response) if should_retry_status(response.status()) && attempt < MAX_RETRIES => {
                     let url = response.url().clone();
                     let status = response.status();
-                    sleep_before_retry_status(&url, attempt, status).await;
+                    sleep_before_retry_status(&url, attempt, status, response.headers()).await;
                     attempt += 1;
                 }
                 Ok(response) => {

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{PackageName, is_valid_name, normalize_name, normalize_name_cow};
+use crate::{PackageName, is_valid_name, normalize_name, normalize_name_cow, project_of_filename};
 
 #[test]
 fn test_normalize_name_cow_borrows_already_normal_and_owns_the_rest() {
@@ -43,6 +43,23 @@ fn test_package_name_normalizes_and_displays() {
 #[test]
 fn test_package_name_equal_when_normalized_equal() {
     assert_eq!(PackageName::new("Foo_Bar"), PackageName::new("foo-bar"));
+}
+
+#[test]
+fn test_project_of_filename_keys_the_whole_hyphenated_sdist_name() {
+    let cases = [
+        ("python-dateutil-2.8.2.tar.gz", "python-dateutil"),
+        ("python-dateutil-2.8.2.zip", "python-dateutil"),
+        ("python-dateutil-2.8.2.tar.bz2", "python-dateutil"),
+        ("flask-1.0.tar.gz", "flask"),
+        ("Flask-1.0.tar.gz", "flask"),
+        ("flask-1.0-py3-none-any.whl", "flask"),
+        ("python_dateutil-2.8.2-py2.py3-none-any.whl", "python-dateutil"),
+        ("standalone", "standalone"),
+    ];
+    for (filename, expected) in cases {
+        assert_eq!(project_of_filename(filename), expected, "{filename}");
+    }
 }
 
 #[test]

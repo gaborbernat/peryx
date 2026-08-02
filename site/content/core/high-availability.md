@@ -92,6 +92,45 @@ backend peryx-readers
 Use `/+ready?writes=true` for the writer pool. Do not use `/+health` for load balancing because it detects a process
 that cannot answer at all, so it remains successful during recoverable dependency failures.
 
+## Availability health and readiness
+
+A `dc` or `ha` node serves two more probes scoped to replication itself. A `none` node runs no availability subsystem,
+so it mounts neither.
+
+`GET /+replication/v1/health` is the availability liveness probe. It answers `200 OK` in every configured mode with a
+document a load balancer can ignore and an operator can read. It never fails on a frontier gap, because a restart cannot
+advance a replica toward its primary.
+
+`GET /+replication/v1/ready` is the availability readiness probe. It answers `200 OK` when the node can serve at its
+frontier and `503 Service Unavailable` otherwise, naming every cause in `reasons`:
+
+- `blob_store` — the mounted blob store failed its reachability check, so the mount cannot answer package requests.
+- `frontier_lag` — a replica has not yet reached the primary's latest observed serial.
+- `sync_error` — a replica's last poll of its primary failed.
+- `incompatible_schema` — a replica's primary speaks an unsupported replication protocol version, which a later poll
+  cannot resolve without upgrading the primary.
+
+Both documents are filtered to the caller's class, like `/+status`. Any caller reads `mode`, `role`, `ready`, and
+`reasons`. `operator:read` adds a replica's `serial`, `primary_serial`, `lag`, and synced counters, or a primary's own
+`serial`. `administration:read` adds the redacted `upstream` origin a replica follows, with credentials, query, and
+fragment removed. An anonymous or repository-only caller never reads a serial, lag, or peer origin, so the topology
+stays off an unauthenticated response. Both probes send `Cache-Control: no-store`.
+
+Point a replica read pool at readiness so a lagging or disconnected replica leaves rotation without a restart:
+
+```haproxy
+backend peryx-replicas
+    option httpchk GET /+replication/v1/ready
+    http-check expect status 200
+    server replica-1 10.0.0.21:4433 check
+    server replica-2 10.0.0.22:4433 check
+```
+
+When readiness reports `frontier_lag`, compare the replica's `lag` against the primary's write rate: a lag that never
+reaches zero points at a stalled poll, which readiness reports as `sync_error` once a poll fails. An
+`incompatible_schema` reason means the primary and replica were built against different replication protocol versions;
+upgrade the primary before routing reads to that replica.
+
 ## Manual promotion
 
 1. Stop or fence the old writer so it cannot accept another mutation.

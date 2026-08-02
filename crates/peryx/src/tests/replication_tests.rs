@@ -268,7 +268,7 @@ async fn test_replica_runtime_drains_available_pages() {
     drop(guard);
 
     let router = runtime.mount(router_for(state.clone()));
-    let mut task = runtime.start().unwrap();
+    let availability = runtime.start().unwrap();
     let deadline = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(deadline);
     loop {
@@ -276,7 +276,6 @@ async fn test_replica_runtime_drains_available_pages() {
             break;
         }
         tokio::select! {
-            result = &mut task => panic!("replica runtime stopped before draining pages: {result:?}"),
             () = &mut deadline => panic!(
                 "replica runtime did not drain pages; current serial is {}",
                 state.meta.current_serial().unwrap()
@@ -284,7 +283,7 @@ async fn test_replica_runtime_drains_available_pages() {
             () = tokio::time::sleep(Duration::from_millis(5)) => {}
         }
     }
-    task.abort();
+    drop(availability);
 
     assert_eq!(state.meta.journal_after(0, 10).unwrap().len(), 3);
 }
@@ -598,7 +597,9 @@ async fn test_disabled_runtime_mounts_no_routes_or_task() {
     assert_eq!(get(&router, "/+replication/v1/health").await.0, StatusCode::NOT_FOUND);
     assert_eq!(get(&router, "/+replication/v1/ready").await.0, StatusCode::NOT_FOUND);
     let (_, body) = get(&router, "/metrics").await;
-    assert!(!String::from_utf8(body).unwrap().contains("peryx_replication_"));
+    let metrics = String::from_utf8(body).unwrap();
+    assert!(!metrics.contains("peryx_replication_"), "{metrics}");
+    assert!(!metrics.contains("peryx_availability_worker_"), "{metrics}");
 }
 
 #[test]

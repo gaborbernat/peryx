@@ -20,15 +20,24 @@ const EXTERNAL_LINK_REL: &str = "external nofollow noopener noreferrer";
 /// Markdown is rendered when the document declares `text/markdown`, reStructuredText when it declares
 /// `text/x-rst` or declares nothing, which is the default Core Metadata mandates. Other content types,
 /// and reStructuredText that fails to render, are shown as preformatted text.
+///
+/// The media type is matched on its type/subtype alone, ignoring any `; charset=…; variant=…`
+/// parameters, and case-insensitively: RFC 2045 makes the type/subtype case-insensitive, so
+/// `Text/Markdown` names the same renderer as `text/markdown`.
 #[must_use]
 pub fn render(text: &str, content_type: Option<&str>) -> RenderedDescription {
-    let content_type = content_type.unwrap_or("text/x-rst");
-    if content_type.starts_with("text/markdown") {
+    let media_type = content_type
+        .unwrap_or("text/x-rst")
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if media_type.eq_ignore_ascii_case("text/markdown") {
         RenderedDescription {
             html: render_markdown(text),
             notice: None,
         }
-    } else if content_type.starts_with("text/x-rst") {
+    } else if media_type.eq_ignore_ascii_case("text/x-rst") {
         rst_html(text).map_or_else(
             || RenderedDescription {
                 html: render_plain(text),

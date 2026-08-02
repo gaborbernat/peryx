@@ -16,6 +16,7 @@ use crate::authz::AuthorizationService;
 use crate::jobs::JobAttemptControl;
 use crate::rate_limit::{RateLimiter, UpstreamLimits};
 use crate::revocations::RevocationService;
+use crate::tokens::TokenService;
 use crate::users::UserService;
 use peryx_events::metrics::Metrics;
 use peryx_events::webhook::WebhookRuntime;
@@ -46,6 +47,8 @@ pub struct ServingState {
     pub authorization: AuthorizationService,
     /// Digest revocation lifecycle and serving decisions.
     pub revocations: RevocationService,
+    /// Scoped API token lifecycle: create, list, inspect, rotate, revoke, and verification.
+    pub tokens: TokenService,
     /// Durable attempt state shared by the scheduler and management handlers.
     pub job_attempts: JobAttemptControl,
     pub blobs: BlobStorage,

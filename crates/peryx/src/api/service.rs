@@ -80,7 +80,7 @@ fn grant_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
-    grant_paths(quota_paths(analytics_paths(paths)))
+    let paths = grant_paths(quota_paths(analytics_paths(paths)))
         .path(
             "/+status",
             PathItemBuilder::new().operation(HttpMethod::Get, status()).build(),
@@ -147,7 +147,8 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItemBuilder::new()
                 .operation(HttpMethod::Post, lift_revocation())
                 .build(),
-        )
+        );
+    token_paths(paths)
         .path(
             "/metrics",
             PathItemBuilder::new().operation(HttpMethod::Get, metrics()).build(),
@@ -168,6 +169,31 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
             "/_/oidc/mint-token",
             PathItemBuilder::new()
                 .operation(HttpMethod::Post, oidc_mint_token())
+                .build(),
+        )
+}
+
+/// Register the scoped-token lifecycle paths, kept apart so the service path list stays short.
+fn token_paths(paths: PathsBuilder) -> PathsBuilder {
+    paths
+        .path(
+            "/+tokens",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Post, create_token())
+                .operation(HttpMethod::Get, list_tokens())
+                .build(),
+        )
+        .path(
+            "/+tokens/{id}",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, inspect_token())
+                .operation(HttpMethod::Delete, revoke_token())
+                .build(),
+        )
+        .path(
+            "/+tokens/{id}/rotate",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Post, rotate_token())
                 .build(),
         )
 }
@@ -1400,6 +1426,197 @@ fn retention_export() -> OperationBuilder {
                 json!({"error": "retention service unavailable"}),
             ),
         )
+}
+
+fn scoped_token_example() -> serde_json::Value {
+    json!({
+        "id": "tok_550e8400e29b41d4a716446655440000",
+        "name": "ci-upload",
+        "reach": {"kind": "repository", "name": "hosted"},
+        "actions": ["read", "write"],
+        "created_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+        "created_at_unix": 1_800_000_000,
+        "expires_at": 1_800_600_000,
+        "revoked_at": null,
+        "revision": 1
+    })
+}
+
+fn token_id_parameter() -> utoipa::openapi::path::Parameter {
+    ParameterBuilder::new()
+        .name("id")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("The stable token identifier returned at creation"))
+        .example(Some(json!("tok_550e8400e29b41d4a716446655440000")))
+        .build()
+}
+
+fn token_errors(operation: OperationBuilder) -> OperationBuilder {
+    operation
+        .tag("operations")
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local user credential was presented"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The caller cannot manage this reach or token, or it does not exist"),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication, authorization, or token storage is unavailable",
+                json!({"error": "token service unavailable"}),
+            ),
+        )
+}
+
+fn create_token() -> OperationBuilder {
+    token_errors(
+        OperationBuilder::new()
+            .summary(Some("Create a scoped token"))
+            .description(Some(
+                "Mints a named token over a reach the caller is authorized to grant: omit `repository` for a \
+                 server-wide token, which requires administrator authority, or name a repository route for a \
+                 token scoped to it, which requires repository write there. The response reveals the secret \
+                 once; later reads never do. A repository manager cannot mint a server-wide or \
+                 cross-repository token.",
+            ))
+            .request_body(Some(
+                RequestBodyBuilder::new()
+                    .required(Some(Required::True))
+                    .content(
+                        "application/json",
+                        ContentBuilder::new()
+                            .example(Some(json!({
+                                "name": "ci-upload",
+                                "repository": "hosted",
+                                "actions": ["read", "write"],
+                                "expires_at": 1_800_600_000
+                            })))
+                            .build(),
+                    )
+                    .build(),
+            )),
+    )
+    .response(
+        "201",
+        api_json_response(
+            "The created token and its one-time secret",
+            json!({"token": scoped_token_example(), "secret": "peryx_XSm1t3nR9k...redacted"}),
+        ),
+    )
+    .response(
+        "400",
+        api_json_response(
+            "The name, actions, or expiry is invalid",
+            json!({"error": "at least one action is required"}),
+        ),
+    )
+    .response(
+        "413",
+        ResponseBuilder::new().description("The request exceeds the fixed body limit"),
+    )
+    .response("415", ResponseBuilder::new().description("The request is not JSON"))
+    .response(
+        "422",
+        ResponseBuilder::new().description("The JSON request body is invalid"),
+    )
+}
+
+fn list_tokens() -> OperationBuilder {
+    let mut operation = token_errors(
+        OperationBuilder::new()
+            .summary(Some("List scoped tokens"))
+            .description(Some(
+                "Returns a bounded page of token metadata over one reach in stable id order, secrets never \
+                 included. Omit `repository` for the server reach, or name a repository route for its tokens.",
+            )),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "The matching token metadata",
+            json!({"tokens": [scoped_token_example()], "next_cursor": null}),
+        ),
+    )
+    .response(
+        "400",
+        api_json_response("The limit is invalid", json!({"error": "invalid limit"})),
+    );
+    for (name, description, example) in [
+        (
+            "repository",
+            "Index route to list tokens for; omit for server-wide tokens",
+            json!("hosted"),
+        ),
+        (
+            "cursor",
+            "Exclusive token id from the prior page",
+            json!("tok_550e8400e29b41d4a716446655440000"),
+        ),
+        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
+    ] {
+        operation = operation.parameter(
+            ParameterBuilder::new()
+                .name(name)
+                .parameter_in(ParameterIn::Query)
+                .description(Some(description))
+                .example(Some(example)),
+        );
+    }
+    operation
+}
+
+fn inspect_token() -> OperationBuilder {
+    token_errors(
+        OperationBuilder::new()
+            .summary(Some("Inspect a scoped token"))
+            .description(Some(
+                "Returns one token's metadata, revoked or live, without its secret.",
+            ))
+            .parameter(token_id_parameter()),
+    )
+    .response("200", api_json_response("The token metadata", scoped_token_example()))
+}
+
+fn rotate_token() -> OperationBuilder {
+    token_errors(
+        OperationBuilder::new()
+            .summary(Some("Rotate a scoped token"))
+            .description(Some(
+                "Issues a new secret for the token, invalidating the prior one and leaving its id, reach, and \
+                 actions unchanged. The response reveals the new secret once. A revoked token cannot be \
+                 rotated. A failed rotation leaves the prior secret valid.",
+            ))
+            .parameter(token_id_parameter()),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "The rotated token and its new one-time secret",
+            json!({"token": scoped_token_example(), "secret": "peryx_a7Qb2Lp0Zx...redacted"}),
+        ),
+    )
+}
+
+fn revoke_token() -> OperationBuilder {
+    token_errors(
+        OperationBuilder::new()
+            .summary(Some("Revoke a scoped token"))
+            .description(Some(
+                "Revokes the token so it stops authenticating on its next request, retaining the record and \
+                 its lifecycle evidence. Idempotent: revoking an already-revoked token returns its unchanged \
+                 record.",
+            ))
+            .parameter(token_id_parameter()),
+    )
+    .response(
+        "200",
+        api_json_response("The revoked token metadata", scoped_token_example()),
+    )
 }
 
 fn metrics() -> OperationBuilder {

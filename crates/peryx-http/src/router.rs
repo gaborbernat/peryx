@@ -57,6 +57,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/+grants/{id}",
             get(handlers::inspect_grant).merge(delete(handlers::revoke_grant)),
         )
+        .route(
+            "/+tokens",
+            post(handlers::create_token).merge(get(handlers::list_tokens)),
+        )
+        .route(
+            "/+tokens/{id}",
+            get(handlers::inspect_token).merge(axum::routing::delete(handlers::revoke_token)),
+        )
+        .route("/+tokens/{id}/rotate", post(handlers::rotate_token))
         .route("/+ui/projects", get(handlers::ui_projects))
         .route("/+ui/project", get(handlers::ui_project))
         .route("/+ui/manifest", get(handlers::ui_manifest))

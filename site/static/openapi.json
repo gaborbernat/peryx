@@ -2436,6 +2436,388 @@
         ]
       }
     },
+    "/+tokens": {
+      "get": {
+        "description": "Returns a bounded page of token metadata over one reach in stable id order, secrets never included. Omit `repository` for the server reach, or name a repository route for its tokens.",
+        "parameters": [
+          {
+            "description": "Index route to list tokens for; omit for server-wide tokens",
+            "example": "hosted",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Exclusive token id from the prior page",
+            "example": "tok_550e8400e29b41d4a716446655440000",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "next_cursor": null,
+                  "tokens": [
+                    {
+                      "actions": [
+                        "read",
+                        "write"
+                      ],
+                      "created_at_unix": 1800000000,
+                      "created_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+                      "expires_at": 1800600000,
+                      "id": "tok_550e8400e29b41d4a716446655440000",
+                      "name": "ci-upload",
+                      "reach": {
+                        "kind": "repository",
+                        "name": "hosted"
+                      },
+                      "revision": 1,
+                      "revoked_at": null
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The matching token metadata"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "invalid limit"
+                }
+              }
+            },
+            "description": "The limit is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot manage this reach or token, or it does not exist"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "token service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or token storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "List scoped tokens",
+        "tags": [
+          "operations"
+        ]
+      },
+      "post": {
+        "description": "Mints a named token over a reach the caller is authorized to grant: omit `repository` for a server-wide token, which requires administrator authority, or name a repository route for a token scoped to it, which requires repository write there. The response reveals the secret once; later reads never do. A repository manager cannot mint a server-wide or cross-repository token.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "actions": [
+                  "read",
+                  "write"
+                ],
+                "expires_at": 1800600000,
+                "name": "ci-upload",
+                "repository": "hosted"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "secret": "peryx_XSm1t3nR9k...redacted",
+                  "token": {
+                    "actions": [
+                      "read",
+                      "write"
+                    ],
+                    "created_at_unix": 1800000000,
+                    "created_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+                    "expires_at": 1800600000,
+                    "id": "tok_550e8400e29b41d4a716446655440000",
+                    "name": "ci-upload",
+                    "reach": {
+                      "kind": "repository",
+                      "name": "hosted"
+                    },
+                    "revision": 1,
+                    "revoked_at": null
+                  }
+                }
+              }
+            },
+            "description": "The created token and its one-time secret"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "at least one action is required"
+                }
+              }
+            },
+            "description": "The name, actions, or expiry is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot manage this reach or token, or it does not exist"
+          },
+          "413": {
+            "description": "The request exceeds the fixed body limit"
+          },
+          "415": {
+            "description": "The request is not JSON"
+          },
+          "422": {
+            "description": "The JSON request body is invalid"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "token service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or token storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Create a scoped token",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+tokens/{id}": {
+      "delete": {
+        "description": "Revokes the token so it stops authenticating on its next request, retaining the record and its lifecycle evidence. Idempotent: revoking an already-revoked token returns its unchanged record.",
+        "parameters": [
+          {
+            "description": "The stable token identifier returned at creation",
+            "example": "tok_550e8400e29b41d4a716446655440000",
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "actions": [
+                    "read",
+                    "write"
+                  ],
+                  "created_at_unix": 1800000000,
+                  "created_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+                  "expires_at": 1800600000,
+                  "id": "tok_550e8400e29b41d4a716446655440000",
+                  "name": "ci-upload",
+                  "reach": {
+                    "kind": "repository",
+                    "name": "hosted"
+                  },
+                  "revision": 1,
+                  "revoked_at": null
+                }
+              }
+            },
+            "description": "The revoked token metadata"
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot manage this reach or token, or it does not exist"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "token service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or token storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Revoke a scoped token",
+        "tags": [
+          "operations"
+        ]
+      },
+      "get": {
+        "description": "Returns one token's metadata, revoked or live, without its secret.",
+        "parameters": [
+          {
+            "description": "The stable token identifier returned at creation",
+            "example": "tok_550e8400e29b41d4a716446655440000",
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "actions": [
+                    "read",
+                    "write"
+                  ],
+                  "created_at_unix": 1800000000,
+                  "created_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+                  "expires_at": 1800600000,
+                  "id": "tok_550e8400e29b41d4a716446655440000",
+                  "name": "ci-upload",
+                  "reach": {
+                    "kind": "repository",
+                    "name": "hosted"
+                  },
+                  "revision": 1,
+                  "revoked_at": null
+                }
+              }
+            },
+            "description": "The token metadata"
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot manage this reach or token, or it does not exist"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "token service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or token storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Inspect a scoped token",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
+    "/+tokens/{id}/rotate": {
+      "post": {
+        "description": "Issues a new secret for the token, invalidating the prior one and leaving its id, reach, and actions unchanged. The response reveals the new secret once. A revoked token cannot be rotated. A failed rotation leaves the prior secret valid.",
+        "parameters": [
+          {
+            "description": "The stable token identifier returned at creation",
+            "example": "tok_550e8400e29b41d4a716446655440000",
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "secret": "peryx_a7Qb2Lp0Zx...redacted",
+                  "token": {
+                    "actions": [
+                      "read",
+                      "write"
+                    ],
+                    "created_at_unix": 1800000000,
+                    "created_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+                    "expires_at": 1800600000,
+                    "id": "tok_550e8400e29b41d4a716446655440000",
+                    "name": "ci-upload",
+                    "reach": {
+                      "kind": "repository",
+                      "name": "hosted"
+                    },
+                    "revision": 1,
+                    "revoked_at": null
+                  }
+                }
+              }
+            },
+            "description": "The rotated token and its new one-time secret"
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot manage this reach or token, or it does not exist"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "token service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or token storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Rotate a scoped token",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+trash": {
       "get": {
         "description": "Soft-deleted PyPI and OCI artifacts across repositories, newest deletion first. An administrator inspects every repository and sees the deleting actor; a repository reader inspects one repository they can read, with actor details redacted by the role filter. A repository's legacy upload token retains access to that repository under the `__token__` username. `restorable` and its `state` are derived from whether the content is still retained and the recovery window is open; a record leaves the window after its `deadline_unix`. Responses carry no credentials or request headers and never enter a shared cache.",

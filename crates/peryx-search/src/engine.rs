@@ -28,6 +28,10 @@ const MAX_NGRAM: usize = 12;
 const RAW_REGEX_BYTES: usize = 32 * 1024;
 const WRITER_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const REGEX_SPECIALS: &str = "\\.+*?()|[]{}^$";
+/// The term the `available` field carries for a locally available package; the availability filter
+/// matches on it. Absence of this exact term is what excludes a remote-only or unavailable package.
+const AVAILABLE_LOCAL: &str = "local";
+const AVAILABLE_REMOTE: &str = "remote";
 
 pub struct PackageSearch {
     index: TantivyIndex,
@@ -269,6 +273,7 @@ impl PackageSearch {
             query: params.query,
             route: params.route,
             source_type: params.source,
+            availability: params.availability,
             page: params.page,
             page_size: params.page_size,
             total,
@@ -321,6 +326,12 @@ impl PackageSearch {
         if let Some(route) = &params.route {
             queries.push(Box::new(TermQuery::new(
                 Term::from_field_text(self.fields.route, route),
+                IndexRecordOption::Basic,
+            )));
+        }
+        if params.availability.local_only() {
+            queries.push(Box::new(TermQuery::new(
+                Term::from_field_text(self.fields.available, AVAILABLE_LOCAL),
                 IndexRecordOption::Basic,
             )));
         }
@@ -398,6 +409,7 @@ impl PackageSearch {
             type_label: String::new(),
             source_type: PackageSource::from_value(&stored_text(doc, self.fields.source))
                 .unwrap_or(PackageSource::Cached),
+            available_locally: stored_text(doc, self.fields.available) == AVAILABLE_LOCAL,
             summary: non_empty_string(stored_text(doc, self.fields.summary)),
         }
     }
@@ -414,6 +426,14 @@ impl PackageSearch {
         doc.add_text(self.fields.normalized, &package.normalized_name);
         doc.add_text(self.fields.display, &package.display_name);
         doc.add_text(self.fields.source, package.source.as_str());
+        doc.add_text(
+            self.fields.available,
+            if package.available_locally {
+                AVAILABLE_LOCAL
+            } else {
+                AVAILABLE_REMOTE
+            },
+        );
         doc.add_text(self.fields.index, &package.index);
         doc.add_text(self.fields.ecosystem, &package.ecosystem);
         doc.add_text(self.fields.summary, package.summary.as_deref().unwrap_or_default());
@@ -433,6 +453,7 @@ struct SearchFields {
     normalized: Field,
     display: Field,
     source: Field,
+    available: Field,
     index: Field,
     ecosystem: Field,
     summary: Field,
@@ -482,7 +503,8 @@ fn search_schema() -> (Schema, SearchFields) {
         route: builder.add_text_field("route", exact.clone()),
         normalized: builder.add_text_field("normalized", exact.clone()),
         display: builder.add_text_field("display", stored.clone()),
-        source: builder.add_text_field("source", exact),
+        source: builder.add_text_field("source", exact.clone()),
+        available: builder.add_text_field("available", exact),
         index: builder.add_text_field("index", stored.clone()),
         ecosystem: builder.add_text_field("ecosystem", stored.clone()),
         summary: builder.add_text_field("summary", stored),

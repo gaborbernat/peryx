@@ -77,9 +77,53 @@ fn document(ctx: &IndexerCtx<'_>, index: &Index, repo: &str) -> Result<PackageDo
         index: index.name.clone(),
         ecosystem: index.ecosystem.as_str().to_owned(),
         source: source(&index.kind),
+        available_locally: available_locally(ctx, index, repo)?,
         summary: Some(format!("{} tag{}", tags.len(), if tags.len() == 1 { "" } else { "s" })),
         text,
     })
+}
+
+/// Whether the repository can be pulled from local storage right now, decided from the #441 placement
+/// of its tags' target manifests so search agrees with a by-digest read without probing the content
+/// store. A repository is locally available when at least one tag targets a manifest whose bytes are
+/// local: a pushed manifest, or a mirrored one already fetched. A tag whose manifest was discovered
+/// but never fetched projects remote-only and does not count.
+fn available_locally(ctx: &IndexerCtx<'_>, index: &Index, repo: &str) -> Result<bool, SearchError> {
+    let mut targets = BTreeSet::new();
+    collect_tag_targets(ctx, index, repo, &mut targets)?;
+    for digest in targets {
+        if ctx
+            .meta
+            .get_artifact_placement(&digest)?
+            .is_some_and(|placement| placement.availability.is_local())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The distinct manifest digests the repository's tags target across an index's stores, unioned over a
+/// virtual index's layers the same way its tags and repositories are.
+fn collect_tag_targets(
+    ctx: &IndexerCtx<'_>,
+    index: &Index,
+    repo: &str,
+    targets: &mut BTreeSet<String>,
+) -> Result<(), SearchError> {
+    match &index.kind {
+        IndexKind::Cached { .. } | IndexKind::Hosted { .. } => {
+            for (_tag, digest) in store::list_tag_targets(ctx.meta, &index.name, repo)? {
+                targets.insert(digest);
+            }
+        }
+        IndexKind::Virtual { layers, .. } => {
+            for &position in layers {
+                collect_tag_targets(ctx, ctx.index_at(position), repo, targets)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Every tag a repository has across an index's stores, sorted and distinct.

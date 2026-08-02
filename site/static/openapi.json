@@ -2061,6 +2061,13 @@
             "required": false
           },
           {
+            "description": "`local` returns only packages whose bytes are available from local storage now; omit or `all` returns every indexed package.",
+            "example": "local",
+            "in": "query",
+            "name": "availability",
+            "required": false
+          },
+          {
             "description": "One-based page number.",
             "example": 1,
             "in": "query",
@@ -2080,11 +2087,13 @@
             "content": {
               "application/json": {
                 "example": {
+                  "availability": "all",
                   "page": 1,
                   "page_size": 25,
                   "query": "flask",
                   "results": [
                     {
+                      "available": true,
                       "display_name": "Flask",
                       "index": "root/pypi",
                       "normalized_name": "flask",
@@ -3852,6 +3861,13 @@
             "required": false
           },
           {
+            "description": "`local` returns only packages whose bytes are available from local storage now; omit or `all` returns every indexed package.",
+            "example": "local",
+            "in": "query",
+            "name": "availability",
+            "required": false
+          },
+          {
             "description": "One-based page number.",
             "example": 1,
             "in": "query",
@@ -3878,11 +3894,13 @@
             "content": {
               "application/json": {
                 "example": {
+                  "availability": "all",
                   "page": 1,
                   "page_size": 25,
                   "query": "flask",
                   "results": [
                     {
+                      "available": true,
                       "display_name": "Flask",
                       "index": "root/pypi",
                       "normalized_name": "flask",

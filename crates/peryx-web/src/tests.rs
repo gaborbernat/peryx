@@ -235,6 +235,7 @@ fn test_search_page_from_json() {
     let value = serde_json::json!({
         "query": "flask",
         "type": "override",
+        "availability": "local",
         "page": 2,
         "page_size": 50,
         "total": 51,
@@ -243,14 +244,25 @@ fn test_search_page_from_json() {
             "normalized_name": "flask",
             "route": "root/pypi",
                         "type": "override",
+            "available": true,
+            "summary": "web framework",
+        }, {
+            "display_name": "Django",
+            "normalized_name": "django",
+            "route": "root/pypi",
+            "type": "cached",
             "summary": "web framework",
         }],
     });
     let page = UiSearchPage::from_search(&value);
     assert_eq!(page.query, "flask");
+    assert_eq!(page.availability, "local");
     assert_eq!(page.page, 2);
     assert_eq!(page.results[0].source_label(), "Override");
+    assert!(page.results[0].available);
     assert_eq!(page.results[0].summary.as_deref(), Some("web framework"));
+    // A result missing the flag reads as not locally available rather than failing to parse.
+    assert!(!page.results[1].available);
 }
 
 #[rstest]

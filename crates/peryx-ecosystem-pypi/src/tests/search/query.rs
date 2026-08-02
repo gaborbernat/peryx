@@ -13,6 +13,7 @@ async fn test_search_handles_empty_queries_and_fallback_params() {
         serde_json::json!({
             "query": "",
             "type": "all",
+            "availability": "all",
             "page": 1,
             "page_size": 25,
             "total": 0,

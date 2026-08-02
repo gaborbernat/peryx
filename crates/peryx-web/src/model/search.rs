@@ -6,6 +6,7 @@ use super::{string_at, usize_from};
 pub struct UiSearchPage {
     pub query: String,
     pub source_type: String,
+    pub availability: String,
     pub page: usize,
     pub page_size: usize,
     pub total: usize,
@@ -22,6 +23,8 @@ pub struct UiSearchResult {
     /// This ecosystem's word for the result (`package`, `image`), filled server-side from the lexicon.
     pub type_label: String,
     pub source_type: String,
+    /// Whether this package's bytes can be served from local storage right now.
+    pub available: bool,
     pub summary: Option<String>,
 }
 
@@ -31,6 +34,7 @@ impl UiSearchPage {
         Self {
             query: string_at(value, "query"),
             source_type: string_at(value, "type"),
+            availability: string_at(value, "availability"),
             page: usize_from(value["page"].as_u64(), 1),
             page_size: usize_from(value["page_size"].as_u64(), 25),
             total: usize_from(value["total"].as_u64(), 0),
@@ -46,6 +50,7 @@ impl UiSearchPage {
                     ecosystem: string_at(result, "ecosystem"),
                     type_label: string_at(result, "type_label"),
                     source_type: string_at(result, "type"),
+                    available: result["available"].as_bool().unwrap_or(false),
                     summary: result["summary"].as_str().map(str::to_owned),
                 })
                 .collect(),

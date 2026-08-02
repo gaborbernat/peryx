@@ -26,6 +26,13 @@ pub fn Search() -> impl IntoView {
             .filter(|value| matches!(value.as_str(), "uploaded" | "cached" | "override"))
             .unwrap_or_else(|| "all".to_owned())
     });
+    let availability = Memo::new(move |_| {
+        query_map
+            .read()
+            .get("availability")
+            .filter(|value| value == "local")
+            .unwrap_or_else(|| "all".to_owned())
+    });
     let page = Memo::new(move |_| {
         query_map
             .read()
@@ -42,20 +49,39 @@ pub fn Search() -> impl IntoView {
         size.filter(|size| matches!(size, 25 | 50 | 100)).unwrap_or(25)
     });
     let results = Resource::new(
-        move || (query.get(), source_type.get(), page.get(), page_size.get()),
-        |(query, source_type, page, page_size)| load_search(query, source_type, page, page_size),
+        move || {
+            (
+                query.get(),
+                source_type.get(),
+                availability.get(),
+                page.get(),
+                page_size.get(),
+            )
+        },
+        |(query, source_type, availability, page, page_size)| {
+            load_search(query, source_type, availability, page, page_size)
+        },
     );
     view! {
         <section class="page search-page">
             <h1>"Search"</h1>
-            <SearchForm query=query.get() source_type=source_type.get() page_size=page_size.get() />
+            <SearchForm
+                query=query.get()
+                source_type=source_type.get()
+                availability=availability.get()
+                page_size=page_size.get()
+            />
             <Suspense fallback=|| view! { <p class="dim">"loading"</p> }>
                 {move || {
                     let query = query.get();
                     let source_type = source_type.get();
+                    let availability = availability.get();
                     Suspend::new(async move {
                         match results.await {
-                            Ok(page) => view! { <SearchResults query source_type page_data=page /> }.into_any(),
+                            Ok(page) => {
+                                view! { <SearchResults query source_type availability page_data=page /> }
+                                    .into_any()
+                            }
                             Err(message) => view! { <ErrorMessage message /> }.into_any(),
                         }
                     })
@@ -66,7 +92,7 @@ pub fn Search() -> impl IntoView {
 }
 
 #[component]
-fn SearchForm(query: String, source_type: String, page_size: usize) -> impl IntoView {
+fn SearchForm(query: String, source_type: String, availability: String, page_size: usize) -> impl IntoView {
     view! {
         <form class="search-controls" method="get" action="/search">
             <input class="search" type="search" name="q" value=query placeholder="Search packages and images" />
@@ -75,6 +101,10 @@ fn SearchForm(query: String, source_type: String, page_size: usize) -> impl Into
                 <option value="uploaded" selected=source_type == "uploaded">"Uploaded"</option>
                 <option value="cached" selected=source_type == "cached">"Cached"</option>
                 <option value="override" selected=source_type == "override">"Override"</option>
+            </select>
+            <select name="availability" aria-label="Availability">
+                <option value="all" selected=availability == "all">"Any availability"</option>
+                <option value="local" selected=availability == "local">"Local only"</option>
             </select>
             <select
                 name="page_size"
@@ -87,6 +117,24 @@ fn SearchForm(query: String, source_type: String, page_size: usize) -> impl Into
             </select>
             <button type="submit">"Search"</button>
         </form>
+    }
+}
+
+/// The badge class, label, and hover text for a result's local availability, so a row shows whether
+/// its bytes can be served now the same way the file view flags each artifact.
+fn availability_badge(available: bool) -> (&'static str, &'static str, &'static str) {
+    if available {
+        (
+            "badge available-local",
+            "local",
+            "Bytes are held locally and served without an upstream fetch",
+        )
+    } else {
+        (
+            "badge available-remote",
+            "remote",
+            "No local bytes; a request fetches from upstream if it can",
+        )
     }
 }
 
@@ -106,7 +154,7 @@ fn store_search_page_size(value: &str) {
 }
 
 #[component]
-fn SearchResults(query: String, source_type: String, page_data: UiSearchPage) -> impl IntoView {
+fn SearchResults(query: String, source_type: String, availability: String, page_data: UiSearchPage) -> impl IntoView {
     if page_data.total == 0 {
         let message = if query.trim().is_empty() {
             "Nothing indexed yet. Cached items appear after their pages or tags are fetched."
@@ -117,10 +165,24 @@ fn SearchResults(query: String, source_type: String, page_data: UiSearchPage) ->
     }
     let start = page_data.page.saturating_sub(1).saturating_mul(page_data.page_size) + 1;
     let end = page_data.total.min(start + page_data.results.len().saturating_sub(1));
-    let previous =
-        (page_data.page > 1).then(|| search_page_url(&query, &source_type, page_data.page - 1, page_data.page_size));
-    let next =
-        (end < page_data.total).then(|| search_page_url(&query, &source_type, page_data.page + 1, page_data.page_size));
+    let previous = (page_data.page > 1).then(|| {
+        search_page_url(
+            &query,
+            &source_type,
+            &availability,
+            page_data.page - 1,
+            page_data.page_size,
+        )
+    });
+    let next = (end < page_data.total).then(|| {
+        search_page_url(
+            &query,
+            &source_type,
+            &availability,
+            page_data.page + 1,
+            page_data.page_size,
+        )
+    });
     view! {
         <p class="result-count">"Showing "{start}"-"{end}" of "{page_data.total}</p>
         <div class="table-scroll">
@@ -131,6 +193,7 @@ fn SearchResults(query: String, source_type: String, page_data: UiSearchPage) ->
                         <th>"Type"</th>
                         <th>"Normalized"</th>
                         <th>"Source"</th>
+                        <th>"Availability"</th>
                         <th>"Index"</th>
                         <th>"Summary"</th>
                     </tr>
@@ -144,12 +207,14 @@ fn SearchResults(query: String, source_type: String, page_data: UiSearchPage) ->
                             let source_class = format!("badge source-{}", result.source_type);
                             let source_title = (result.source_type == "override")
                                 .then_some("Hosted files or hosted overrides affect this upstream package");
+                            let (available_class, available_label, available_title) = availability_badge(result.available);
                             view! {
                                 <tr>
                                     <td><a href=href>{result.display_name}</a></td>
                                     <td><span class="badge">{result.type_label}</span></td>
                                     <td><code>{result.normalized_name}</code></td>
                                     <td><span class=source_class title=source_title>{source_label(&result.source_type)}</span></td>
+                                    <td><span class=available_class title=available_title>{available_label}</span></td>
                                     <td><code>{result.index}</code></td>
                                     <td>{result.summary.unwrap_or_default()}</td>
                                 </tr>

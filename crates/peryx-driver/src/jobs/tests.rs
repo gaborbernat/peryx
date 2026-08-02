@@ -1363,6 +1363,7 @@ impl PackageIndexer for CountedDocs {
                 index: "root".to_owned(),
                 ecosystem: "pypi".to_owned(),
                 source: PackageSource::Cached,
+                available_locally: false,
                 summary: None,
                 text: format!("pkg{serial}"),
             })

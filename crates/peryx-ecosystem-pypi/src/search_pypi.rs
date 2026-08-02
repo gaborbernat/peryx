@@ -13,6 +13,7 @@ use crate::store::PypiStore as _;
 use crate::{CoreMetadata, CoreMetadataDoc, File, Meta, ProjectDetail, ProjectStatus, parse_detail, parse_metadata};
 use peryx_policy::PolicyAction;
 use peryx_storage::blob::Digest;
+use peryx_storage::meta::ArtifactSource;
 
 use crate::upload::Uploaded;
 use peryx_core::path::local_file_url;
@@ -78,6 +79,7 @@ fn package_document(
         return Ok(None);
     }
     let source = package_source(ctx, index, normalized)?;
+    let available_locally = available_locally(ctx, index, normalized, &detail)?;
     let metadata = metadata_doc(ctx, &detail)?;
     let display_name = metadata
         .as_ref()
@@ -98,8 +100,74 @@ fn package_document(
         index: index.name.clone(),
         ecosystem: index.ecosystem.as_str().to_owned(),
         source,
+        available_locally,
         summary,
     }))
+}
+
+/// Whether any of the project's distributions can be served from local storage right now, decided
+/// from the #441 placement projection so search agrees with the file view [`apply_placement`] renders
+/// without a per-result content-store probe.
+///
+/// A hosted upload's bytes are local unless a hosted-source placement marks them evicted; the upload
+/// path records no placement for a still-present file, so hosted-layer membership stands in for one. A
+/// mirrored file is local only when its placement projects [`ByteAvailability::Local`]: a never-fetched
+/// upstream catalog entry has none and stays remote.
+///
+/// [`apply_placement`]: crate::serving::web
+fn available_locally(
+    ctx: &IndexerCtx<'_>,
+    index: &Index,
+    normalized: &str,
+    detail: &ProjectDetail,
+) -> Result<bool, SearchError> {
+    let mut hosted = BTreeSet::new();
+    collect_hosted_filenames(ctx, index, normalized, &mut hosted)?;
+    for file in &detail.files {
+        let Some(sha256) = file.hashes.get("sha256") else {
+            continue;
+        };
+        let placement = ctx.meta.get_artifact_placement(sha256)?;
+        let local = if hosted.contains(&file.filename) {
+            // A hosted upload's bytes are local unless its own hosted-source placement marks them
+            // gone; a stale proxied row left by a same-digest mirror never overrides the upload.
+            match placement {
+                Some(placement) if placement.source == ArtifactSource::Hosted => placement.availability.is_local(),
+                _ => true,
+            }
+        } else {
+            placement.is_some_and(|placement| placement.availability.is_local())
+        };
+        if local {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The filenames the index's hosted (upload) layers published for `normalized`, unioned across a
+/// virtual index's layers, mirroring the serving path so a merged project agrees on which files are
+/// uploaded rather than mirrored.
+fn collect_hosted_filenames(
+    ctx: &IndexerCtx<'_>,
+    index: &Index,
+    normalized: &str,
+    names: &mut BTreeSet<String>,
+) -> Result<(), SearchError> {
+    match &index.kind {
+        IndexKind::Hosted { .. } => {
+            for (filename, _record) in ctx.meta.list_upload_entries(&index.name, normalized)? {
+                names.insert(filename);
+            }
+        }
+        IndexKind::Virtual { layers, .. } => {
+            for &position in layers {
+                collect_hosted_filenames(ctx, ctx.index_at(position), normalized, names)?;
+            }
+        }
+        IndexKind::Cached { .. } => {}
+    }
+    Ok(())
 }
 
 fn cached_detail(

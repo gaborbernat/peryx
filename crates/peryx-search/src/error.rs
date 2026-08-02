@@ -21,6 +21,8 @@ pub enum SearchError {
     Indexer(String),
     #[error("invalid package source type {0:?}")]
     InvalidSource(String),
+    #[error("invalid availability filter {0:?}")]
+    InvalidAvailability(String),
 }
 
 impl SearchError {
@@ -31,7 +33,9 @@ impl SearchError {
     pub const fn is_bad_request(&self) -> bool {
         matches!(
             self,
-            Self::InvalidSource(_) | Self::Tantivy(tantivy::TantivyError::InvalidArgument(_))
+            Self::InvalidSource(_)
+                | Self::InvalidAvailability(_)
+                | Self::Tantivy(tantivy::TantivyError::InvalidArgument(_))
         )
     }
 }

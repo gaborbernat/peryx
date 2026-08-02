@@ -310,6 +310,153 @@ async fn test_search_indexes_import_names_without_markers() {
         assert_eq!(value["results"][0]["normalized_name"], "importable");
     }
 }
+#[tokio::test]
+async fn test_search_availability_filter_keeps_locally_available_projects() {
+    use peryx_storage::meta::ArtifactSource;
+
+    let h = harness().await;
+    // A mirrored project whose file was never fetched stays remote-only.
+    put_cached_package(
+        &h.state,
+        "pypi/remote-dist",
+        "pypi",
+        "remote-dist",
+        &ProjectDetail {
+            meta: Meta::default(),
+            name: "remote-dist".to_owned(),
+            versions: vec!["1.0".to_owned()],
+            files: vec![file_with_hash(
+                "remote-dist-1.0-py3-none-any.whl",
+                Digest::of(b"remote-dist").as_str(),
+                None,
+            )],
+        },
+    );
+    // A mirrored project whose file's verified bytes are held locally.
+    put_cached_package(
+        &h.state,
+        "pypi/local-dist",
+        "pypi",
+        "local-dist",
+        &ProjectDetail {
+            meta: Meta::default(),
+            name: "local-dist".to_owned(),
+            versions: vec!["1.0".to_owned()],
+            files: vec![file_with_hash(
+                "local-dist-1.0-py3-none-any.whl",
+                Digest::of(b"local-dist").as_str(),
+                None,
+            )],
+        },
+    );
+    h.state
+        .meta
+        .record_artifact_placement(Digest::of(b"local-dist").as_str(), ArtifactSource::Proxy, true)
+        .unwrap();
+    h.state.bump_search_epoch();
+
+    let (status, _headers, body) = get(
+        &h.state,
+        "/pypi/+search?q=dist&type=cached&availability=all&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let all: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(all["availability"], "all");
+    assert_eq!(all["total"], 2);
+    let available: BTreeMap<&str, bool> = all["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| {
+            (
+                result["normalized_name"].as_str().unwrap(),
+                result["available"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(available["local-dist"]);
+    assert!(!available["remote-dist"]);
+
+    let (status, _headers, body) = get(
+        &h.state,
+        "/pypi/+search?q=dist&type=cached&availability=local&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let local: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(local["availability"], "local");
+    assert_eq!(local["total"], 1);
+    assert_eq!(local["results"][0]["normalized_name"], "local-dist");
+    assert_eq!(local["results"][0]["available"], true);
+}
+
+#[tokio::test]
+async fn test_search_availability_local_includes_hosted_uploads() {
+    let h = harness().await;
+    put_uploaded_package(&h.state, "HostedPkg", "hosted-pkg", "A hosted upload");
+
+    // An upload's bytes are local, so it survives the local-availability filter without a placement row.
+    let (status, _headers, body) = get(
+        &h.state,
+        "/hosted/+search?q=hosted-pkg&type=uploaded&availability=local&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["results"][0]["normalized_name"], "hosted-pkg");
+    assert_eq!(value["results"][0]["available"], true);
+}
+
+#[tokio::test]
+async fn test_search_availability_excludes_an_evicted_hosted_upload() {
+    use peryx_storage::meta::ArtifactSource;
+
+    let h = harness().await;
+    put_uploaded_package(&h.state, "EvictedPkg", "evicted-pkg", "A hosted upload since evicted");
+    // The upload's own hosted-source placement records its bytes as gone, so the file view and search
+    // both stop calling it locally available even though it is a hosted file.
+    let digest = Digest::of(b"evicted-pkg-1.0-py3-none-any.whl");
+    h.state
+        .meta
+        .record_artifact_placement(digest.as_str(), ArtifactSource::Hosted, false)
+        .unwrap();
+    h.state.bump_search_epoch();
+
+    let (status, _headers, body) = get(
+        &h.state,
+        "/hosted/+search?q=evicted-pkg&type=uploaded&availability=all&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let all: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(all["total"], 1);
+    assert_eq!(all["results"][0]["available"], false);
+
+    let (status, _headers, body) = get(
+        &h.state,
+        "/hosted/+search?q=evicted-pkg&type=uploaded&availability=local&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"], 0);
+}
+
+#[tokio::test]
+async fn test_search_rejects_an_unknown_availability_filter() {
+    let h = harness().await;
+    let (status, _headers, body) = get(&h.state, "/pypi/+search?availability=maybe", Some("application/json")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["error"], "invalid availability filter \"maybe\"");
+}
+
 #[test]
 fn test_search_public_filter_labels_and_scan_errors() {
     let dir = tempfile::tempdir().unwrap();

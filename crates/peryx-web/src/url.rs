@@ -218,9 +218,15 @@ pub(crate) fn browse_archive_member_url(
 }
 
 #[must_use]
-pub(crate) fn search_page_url(query: &str, source_type: &str, page: usize, page_size: usize) -> String {
+pub(crate) fn search_page_url(
+    query: &str,
+    source_type: &str,
+    availability: &str,
+    page: usize,
+    page_size: usize,
+) -> String {
     let mut url = "/search".to_owned();
-    append_search_query(&mut url, None, query, source_type, page, page_size);
+    append_search_query(&mut url, None, query, source_type, availability, page, page_size);
     url
 }
 
@@ -230,11 +236,12 @@ pub(crate) fn search_api_url(
     route: Option<&str>,
     query: &str,
     source_type: &str,
+    availability: &str,
     page: usize,
     page_size: usize,
 ) -> String {
     let mut url = "/+search".to_owned();
-    append_search_query(&mut url, route, query, source_type, page, page_size);
+    append_search_query(&mut url, route, query, source_type, availability, page, page_size);
     url
 }
 
@@ -243,6 +250,7 @@ fn append_search_query(
     route: Option<&str>,
     query: &str,
     source_type: &str,
+    availability: &str,
     page: usize,
     page_size: usize,
 ) {
@@ -255,6 +263,9 @@ fn append_search_query(
     }
     if !source_type.is_empty() && source_type != "all" {
         appender.push("type", source_type);
+    }
+    if !availability.is_empty() && availability != "all" {
+        appender.push("availability", availability);
     }
     if page > 1 {
         appender.push("page", &page.to_string());
@@ -479,11 +490,11 @@ mod tests {
     #[test]
     fn test_stats_and_admin_urls_encode_arguments() {
         assert_eq!(
-            search_page_url("flask cache", "override", 2, 50),
-            "/search?q=flask%20cache&type=override&page=2&page_size=50"
+            search_page_url("flask cache", "override", "local", 2, 50),
+            "/search?q=flask%20cache&type=override&availability=local&page=2&page_size=50"
         );
         assert_eq!(
-            search_api_url(Some("root/pypi"), "flask", "all", 1, 25),
+            search_api_url(Some("root/pypi"), "flask", "all", "all", 1, 25),
             "/+search?route=root%2Fpypi&q=flask&page_size=25"
         );
         assert_eq!(stats_index_url("root/pypi"), "/stats?index=root%2Fpypi");

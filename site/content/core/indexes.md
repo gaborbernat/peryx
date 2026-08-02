@@ -55,8 +55,8 @@ one URL where your own content wins over upstream. peryx names these cached, hos
 
 A cached index rides out transient upstream failures: server errors, request timeouts, and `429` rate limits retry with
 bounded jittered backoff. When a rate-limited or overloaded upstream answers with a `Retry-After` hint, peryx waits the
-interval the server asks for, in either the delay-seconds or HTTP-date form and capped at 30 seconds, rather than
-its own backoff, so a recovering mirror is not hammered while it catches up.
+interval the server asks for, in either the delay-seconds or HTTP-date form and capped at 30 seconds, rather than its
+own backoff, so a recovering mirror is not hammered while it catches up.
 
 {% mermaid() %}
 flowchart LR

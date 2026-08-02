@@ -19,16 +19,16 @@ use std::collections::HashSet;
 use super::ConfigError;
 use super::model::{
     AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode,
-    CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, IndexConfig, IndexKind,
-    JobsConfig, LdapBindConfig, LdapProviderConfig, LogConfig, OidcProviderConfig, ReplicationConfig, S3StorageConfig,
-    SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig,
-    UpstreamTlsConfig, WebhookConfig, WebhookSecret,
+    CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, DcMember, DcMembership,
+    DcRole, IndexConfig, IndexKind, JobsConfig, LdapBindConfig, LdapProviderConfig, LogConfig, OidcProviderConfig,
+    ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig,
+    UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
 };
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawAvailability, RawBlobStorage, RawCredentialExec, RawExternalGroupGrant, RawIndex, RawJobSchedule,
-    RawLdapMode, RawLdapProvider, RawOidcProvider, RawReplication, RawScheduledJob, RawTls, RawToken, RawUpstream,
-    RawWebhook,
+    RawAcme, RawAvailability, RawBlobStorage, RawCredentialExec, RawDcMember, RawExternalGroupGrant, RawIndex,
+    RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawReplication, RawScheduledJob, RawTls, RawToken,
+    RawUpstream, RawWebhook,
 };
 
 impl Config {
@@ -80,8 +80,11 @@ impl Config {
         self.log = self.log.apply(partial.log);
         self.rate_limit = apply_rate_limit(self.rate_limit, partial.rate_limit);
         self.auth = self.auth.apply(partial.auth)?;
-        if let Some(availability) = partial.availability {
+        if let Some(mut availability) = partial.availability {
+            let group = availability.group.take();
+            let members = availability.members.take();
             self.availability = classify_availability(availability)?;
+            self.dc_membership = classify_membership(self.availability.mode(), group, members)?;
         }
         if let Some(blob) = partial.blob {
             self.blob = classify_blob(blob)?;
@@ -347,6 +350,97 @@ fn classify_replication(raw: RawReplication) -> Result<ReplicationConfig, Config
             })
         }
     }
+}
+
+/// Resolve a `[[availability.member]]` roster into a validated [`DcMembership`], or `None` when no
+/// roster is configured. A roster is meaningful only under `dc` or `ha` mode; the runtime never probes
+/// a member's reachability here, so an unreachable configured peer is a valid topology, not an error.
+fn classify_membership(
+    mode: AvailabilityMode,
+    group: Option<String>,
+    members: Option<Vec<RawDcMember>>,
+) -> Result<Option<DcMembership>, ConfigError> {
+    let Some(members) = members else {
+        return match group {
+            Some(_) => Err(membership_error("`group` needs at least one `[[availability.member]]`")),
+            None => Ok(None),
+        };
+    };
+    if !matches!(mode, AvailabilityMode::Dc | AvailabilityMode::Ha) {
+        return Err(membership_error("a member roster requires `dc` or `ha` mode"));
+    }
+    let group = non_blank(
+        group.ok_or_else(|| membership_error("a member roster needs a `group` identity"))?,
+        "group",
+    )?;
+    Ok(Some(DcMembership {
+        members: resolve_members(&group, members)?,
+        group,
+    }))
+}
+
+/// Validate a group's members: non-blank identities, a distinct group identity, unique node,
+/// datacenter, and address identities, exactly one writer, and at least one replica.
+fn resolve_members(group: &str, raw: Vec<RawDcMember>) -> Result<Vec<DcMember>, ConfigError> {
+    let mut members = Vec::with_capacity(raw.len());
+    let (mut writers, mut replicas) = (0usize, 0usize);
+    for member in raw {
+        let node = non_blank(member.node, "member `node`")?;
+        if node == group {
+            return Err(membership_error(format!(
+                "node identity {node:?} collides with the group identity"
+            )));
+        }
+        match member.role {
+            DcRole::Writer => writers += 1,
+            DcRole::Replica => replicas += 1,
+        }
+        members.push(DcMember {
+            node,
+            dc: non_blank(member.dc, "member `dc`")?,
+            address: non_blank(member.address, "member `address`")?,
+            role: member.role,
+        });
+    }
+    reject_duplicate(members.iter().map(|member| member.node.as_str()), "node identity")?;
+    reject_duplicate(members.iter().map(|member| member.dc.as_str()), "datacenter identity")?;
+    reject_duplicate(
+        members.iter().map(|member| member.address.as_str()),
+        "advertised address",
+    )?;
+    if writers == 0 {
+        return Err(membership_error("a datacenter group needs exactly one writer"));
+    }
+    if writers > 1 {
+        return Err(membership_error("a datacenter group allows only one writer"));
+    }
+    if replicas == 0 {
+        return Err(membership_error(
+            "a datacenter group needs at least one configured replica",
+        ));
+    }
+    Ok(members)
+}
+
+fn reject_duplicate<'a>(values: impl Iterator<Item = &'a str>, kind: &str) -> Result<(), ConfigError> {
+    let mut seen = HashSet::new();
+    for value in values {
+        if !seen.insert(value) {
+            return Err(membership_error(format!("duplicate {kind} {value:?}")));
+        }
+    }
+    Ok(())
+}
+
+fn non_blank(value: String, field: &str) -> Result<String, ConfigError> {
+    if value.trim().is_empty() {
+        return Err(membership_error(format!("{field} must not be empty")));
+    }
+    Ok(value)
+}
+
+fn membership_error(reason: impl Into<String>) -> ConfigError {
+    ConfigError::DcMembership { reason: reason.into() }
 }
 
 /// Turn a raw `[[index]]` table into a classified [`IndexConfig`]: `layers` makes a virtual index, else

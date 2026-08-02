@@ -10,7 +10,7 @@ use serde::Deserialize;
 use toml::Table;
 
 use super::model::{
-    AvailabilityMode, CredentialFailureMode, JobsMode, LogFormat, LogSink, PrefetchConfig, PrefetchMode,
+    AvailabilityMode, CredentialFailureMode, DcRole, JobsMode, LogFormat, LogSink, PrefetchConfig, PrefetchMode,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
@@ -114,6 +114,21 @@ pub enum RawBlobStorage {
 pub struct RawAvailability {
     pub mode: Option<AvailabilityMode>,
     pub replication: Option<RawReplication>,
+    /// The `group` identity a `[[availability.member]]` roster belongs to.
+    pub group: Option<String>,
+    /// The `[[availability.member]]` array: the static datacenter group roster.
+    #[serde(rename = "member")]
+    pub members: Option<Vec<RawDcMember>>,
+}
+
+/// One `[[availability.member]]` table before identity and role validation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawDcMember {
+    pub node: String,
+    pub dc: String,
+    pub address: String,
+    pub role: DcRole,
 }
 
 /// The `[jobs]` half of [`PartialConfig`].

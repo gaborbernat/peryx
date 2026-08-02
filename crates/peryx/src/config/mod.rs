@@ -18,16 +18,17 @@ pub use load::{from_env, from_file, from_toml};
 pub(crate) use merge::classify_tls;
 pub use model::{
     AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode,
-    CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, IndexConfig, IndexKind,
-    JobsConfig, JobsMode, LdapBindConfig, LdapProviderConfig, LogConfig, LogFormat, LogSink, OidcProviderConfig,
-    PrefetchConfig, PrefetchMode, ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig, TokenConfig,
-    TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
+    CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE, DEFAULT_REPLICA_POLL_INTERVAL_SECS, DcMember, DcMembership,
+    DcRole, IndexConfig, IndexKind, JobsConfig, JobsMode, LdapBindConfig, LdapProviderConfig, LogConfig, LogFormat,
+    LogSink, OidcProviderConfig, PrefetchConfig, PrefetchMode, ReplicationConfig, S3StorageConfig, SecretSource,
+    TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig,
+    WebhookConfig, WebhookSecret,
 };
 pub use raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
-    RawAcme, RawAvailability, RawBlobStorage, RawCredentialExec, RawExternalGroupGrant, RawIndex, RawJobSchedule,
-    RawLdapMode, RawLdapProvider, RawOidcProvider, RawPolicy, RawPrefetchConfig, RawReplication, RawTls, RawToken,
-    RawTrustedPublisher, RawUpstream, RawWebhook,
+    RawAcme, RawAvailability, RawBlobStorage, RawCredentialExec, RawDcMember, RawExternalGroupGrant, RawIndex,
+    RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawPolicy, RawPrefetchConfig, RawReplication,
+    RawTls, RawToken, RawTrustedPublisher, RawUpstream, RawWebhook,
 };
 
 /// An error while assembling configuration.
@@ -55,6 +56,8 @@ pub enum ConfigError {
     OidcProvider { id: String, reason: &'static str },
     #[error("availability: {reason}")]
     Availability { reason: &'static str },
+    #[error("datacenter membership: {reason}")]
+    DcMembership { reason: String },
     #[error("replication: {reason}")]
     Replication { reason: &'static str },
     #[error("jobs schedule [{index}]: {reason}")]

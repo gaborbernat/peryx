@@ -123,7 +123,7 @@ pub fn release_flight(inflight: &Inflight, key: &str, guard: FlightGuard) {
 /// fallback.
 #[must_use]
 pub const fn within_stale_bound(now: i64, max_stale_secs: i64, fetched_at: i64, freshness_secs: i64) -> bool {
-    max_stale_secs == 0 || now.saturating_sub(fetched_at) < freshness_secs + max_stale_secs
+    max_stale_secs == 0 || now.saturating_sub(fetched_at) < freshness_secs.saturating_add(max_stale_secs)
 }
 
 /// The in-memory caches a cached (proxy) role serves from, and the per-project epochs that retire
@@ -308,5 +308,12 @@ mod tests {
     #[test]
     fn test_a_future_fetch_time_does_not_underflow() {
         assert!(within_stale_bound(1_000, 300, 5_000, 60));
+    }
+
+    #[test]
+    fn test_a_stale_window_at_the_i64_ceiling_does_not_overflow() {
+        // freshness_secs + max_stale_secs exceeds i64::MAX; the bound saturates rather than
+        // overflowing (a panic in debug builds, a wrap to a negative window in release).
+        assert!(within_stale_bound(1_000, 1, 0, i64::MAX));
     }
 }

@@ -94,6 +94,38 @@ fn test_begin_resumes_an_in_progress_attempt_without_opening_a_new_one() {
 }
 
 #[test]
+fn test_resume_by_a_newer_fence_fences_out_the_superseded_worker() {
+    let (_dir, store) = store();
+    let key = target(1);
+    begin(&store, &key, 1, 0);
+    store.checkpoint_transfer_attempt(&key, 300, policy(), 1, 5).unwrap();
+    let resumed = begin(&store, &key, 2, 10);
+    assert!(matches!(resumed, BeginOutcome::Resumed(_)));
+    assert_eq!(resumed.record().fence, 2);
+    assert_eq!(store.transfer_attempt(&key).unwrap().unwrap().fence, 2);
+    let error = store
+        .checkpoint_transfer_attempt(&key, 600, policy(), 1, 15)
+        .unwrap_err();
+    assert!(matches!(error, TransferAttemptError::StaleFence { .. }));
+    assert_eq!(
+        store.transfer_attempt(&key).unwrap().unwrap().state,
+        TransferAttemptState::InProgress { transferred: 300 }
+    );
+}
+
+#[test]
+fn test_resume_at_the_same_fence_leaves_the_record_untouched() {
+    let (_dir, store) = store();
+    let key = target(1);
+    begin(&store, &key, 1, 0);
+    store.checkpoint_transfer_attempt(&key, 300, policy(), 1, 5).unwrap();
+    let before = store.transfer_attempt(&key).unwrap().unwrap();
+    let resumed = begin(&store, &key, 1, 20);
+    assert!(matches!(resumed, BeginOutcome::Resumed(_)));
+    assert_eq!(store.transfer_attempt(&key).unwrap().unwrap(), before);
+}
+
+#[test]
 fn test_begin_after_a_failure_opens_the_next_sequence() {
     let (_dir, store) = store();
     let key = target(1);

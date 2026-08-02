@@ -198,9 +198,13 @@ fn placement_bounds(placement: &str) -> (String, String) {
 impl MetaStore {
     /// Open or resume the transfer attempt for one placement under a fencing epoch.
     ///
-    /// An in-progress attempt is returned as [`Resumed`](BeginOutcome::Resumed) unchanged, so a worker
-    /// that restarted picks up its last durable checkpoint. A first call, or one after a failed
-    /// attempt, opens the next [`Started`](BeginOutcome::Started) sequence.
+    /// An in-progress attempt is returned as [`Resumed`](BeginOutcome::Resumed) so a worker that
+    /// restarted picks up its last durable checkpoint. A resume that carries a newer fence than the
+    /// persisted one writes that fence in the same transaction, so the resuming worker claims authority
+    /// at once and a superseded worker's later checkpoint is fenced out instead of landing in the window
+    /// before the resuming worker's first write; a resume at the same fence leaves the record untouched.
+    /// A first call, or one after a failed attempt, opens the next [`Started`](BeginOutcome::Started)
+    /// sequence.
     ///
     /// # Errors
     /// Returns [`TransferAttemptError`] for a stale fence, a current attempt that already succeeded, or
@@ -225,8 +229,18 @@ impl MetaStore {
             });
         }
         let sequence = match &current {
-            Some((_, record)) => match record.state {
-                TransferAttemptState::InProgress { .. } => return Ok(BeginOutcome::Resumed(record.clone())),
+            Some((sequence, record)) => match record.state {
+                TransferAttemptState::InProgress { .. } => {
+                    if fence <= record.fence {
+                        return Ok(BeginOutcome::Resumed(record.clone()));
+                    }
+                    let mut resumed = record.clone();
+                    resumed.fence = fence;
+                    resumed.updated_at_unix = now;
+                    write_at(&txn, &placement, *sequence, &resumed)?;
+                    txn.commit().map_err(MetaError::from)?;
+                    return Ok(BeginOutcome::Resumed(resumed));
+                }
                 TransferAttemptState::Succeeded { .. } => return Err(TransferAttemptError::AlreadySucceeded),
                 TransferAttemptState::Failed { .. } => {
                     guard_capacity(&txn, &placement)?;

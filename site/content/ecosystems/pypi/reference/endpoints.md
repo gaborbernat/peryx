@@ -161,7 +161,9 @@ error and any other extension, such as `.tar.bz2`, is rejected as unsupported. W
 Archive inspection is broader than uploads. It can list and preview cached wheels, zips, zipped eggs, `.tar`, `.tar.gz`,
 and `.tgz` archives, including supported archives nested inside them. Other legacy compressed tar formats stay
 download-only until peryx adds decoders for them. Mirrored eggs remain downloadable when upstream lists them with a
-sha256 hash, but they do not get PEP 658 metadata.
+sha256 hash, but they do not get PEP 658 metadata. A download-only archive still lands under the right release: peryx
+reads a `.tar.bz2`, `.tar.xz`, `.tar.Z`, `.tgz`, or `.egg` version from its filename in the JSON views, rather than
+carrying the extension into the version string.
 
 ## Rate limits
 

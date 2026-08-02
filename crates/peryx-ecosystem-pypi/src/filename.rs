@@ -68,23 +68,39 @@ fn strip_ascii_suffix_ignore_case<'a>(value: &'a str, suffix: &str) -> Option<&'
         .then_some(&value[..split])
 }
 
-/// The raw version segment of a distribution filename, matching where [`parse_distribution_filename`]
-/// finds it, or `None` when no version segment is present.
+/// Sdist archive suffixes whose project name may itself keep a `-`, so the version is the segment
+/// after the *last* `-`. Current uploads are `.tar.gz`/`.zip` (all [`parse_distribution_filename`]
+/// accepts), but a mirror still serves pre-PEP 625 releases compressed as bzip2, xz, or the legacy
+/// `.tar.Z`/`.tgz` spellings, so version extraction has to recognize them too.
+const SDIST_ARCHIVE_SUFFIXES: [&str; 6] = [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.z", ".zip"];
+
+/// The raw version segment of a distribution filename, or `None` when the filename carries no
+/// recognizable version.
 ///
-/// An sdist name may itself contain `-`, so its version is the segment after the *last* `-`: splitting
-/// `python-dateutil-2.8.2.tar.gz` on the first `-` misreads the version as `dateutil`. A wheel escapes
-/// its project name (no `-` inside it), so its version is the component after the first `-`; legacy
-/// shapes (`.egg`, and anything else) escape their names too, so they follow the same first-`-` rule.
+/// Unlike [`parse_distribution_filename`], which is the strict upload identity check, this reads
+/// versions off filenames a mirror already accepted upstream, so it spans the wider set of shapes
+/// still served there. An sdist name may itself contain `-`, so for an archive suffix the version is
+/// the segment after the *last* `-`: splitting `python-dateutil-2.8.2.tar.gz` on the first `-`
+/// misreads it as `dateutil`. A wheel or egg escapes its project name (no `-` inside it), so its
+/// version is the component after the first `-`. Any other filename yields `None` rather than a
+/// segment with the extension still attached, so `foo-1.0.exe` never reports a version of `1.0.exe`.
 #[must_use]
 pub fn distribution_version_segment(filename: &str) -> Option<&str> {
-    if let Some(stem) =
-        strip_ascii_suffix_ignore_case(filename, ".tar.gz").or_else(|| strip_ascii_suffix_ignore_case(filename, ".zip"))
-    {
-        return stem.rsplit_once('-').map(|(_name, version)| version);
+    for suffix in SDIST_ARCHIVE_SUFFIXES {
+        if let Some(stem) = strip_ascii_suffix_ignore_case(filename, suffix) {
+            return stem
+                .rsplit_once('-')
+                .map(|(_name, version)| version)
+                .filter(|version| !version.is_empty());
+        }
     }
-    let stem = strip_ascii_suffix_ignore_case(filename, ".whl").unwrap_or(filename);
-    let (_name, rest) = stem.split_once('-')?;
-    Some(rest.split('-').next().unwrap_or(rest))
+    for suffix in [".whl", ".egg"] {
+        if let Some(stem) = strip_ascii_suffix_ignore_case(filename, suffix) {
+            let (_name, rest) = stem.split_once('-')?;
+            return rest.split('-').next().filter(|version| !version.is_empty());
+        }
+    }
+    None
 }
 
 fn parse_wheel_filename(stem: &str) -> Result<DistributionFilename, DistributionFilenameError> {

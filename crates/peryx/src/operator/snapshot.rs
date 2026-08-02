@@ -448,6 +448,9 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         rate_limit,
         auth,
         availability,
+        // The static datacenter roster does not yet drive the runtime, so a backup omits it and
+        // restores to the same effective behavior; snapshotting it lands with the migration work.
+        dc_membership: _,
         jobs,
         blob,
     } = config;

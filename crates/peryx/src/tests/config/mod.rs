@@ -8,6 +8,7 @@ mod blob_tests;
 mod integration_tests;
 mod jobs_tests;
 mod load_tests;
+mod membership_tests;
 mod merge_tests;
 mod model_tests;
 mod raw_tests;

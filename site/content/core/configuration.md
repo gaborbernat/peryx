@@ -904,6 +904,54 @@ the config file with `token_file`, the path to a mounted Docker or Kubernetes se
 peryx reads at startup and never logs. A configuration snapshot (`peryx backup`) preserves a `token_file` as its path
 and never resolves the secret behind it into the manifest.
 
+### Static datacenter membership
+
+A `dc` or `ha` node may also declare the static replication group it belongs to. The group names one writer and its read
+replicas explicitly; peryx never infers a member from a network broadcast, and no liveness timeout ever promotes a
+replica. Losing the writer stops new writes until the configured writer returns or an operator performs the later fenced
+transfer procedure, so a replacement is an explicit configuration edit, reviewed like any other, rather than an
+automatic election.
+
+```toml
+[availability]
+mode = "dc"
+group = "east"
+
+[availability.replication]
+role = "primary"
+source = "writer-a"
+token_file = "/run/secrets/replication-token"
+
+[[availability.member]]
+node = "writer-a"
+dc = "dc-east-1"
+address = "https://a.internal:8443"
+role = "writer"
+
+[[availability.member]]
+node = "replica-b"
+dc = "dc-east-2"
+address = "https://b.internal:8443"
+role = "replica"
+```
+
+The roster is validated alongside the `[availability.replication]` role during the migration window; a later release
+maps the legacy role onto the group and retires it. Each `[[availability.member]]` table declares one member.
+
+| Key       | Meaning                                                        | Default                  |
+| --------- | -------------------------------------------------------------- | ------------------------ |
+| `group`   | The group identity the roster belongs to                       | (required with a roster) |
+| `node`    | The member's stable identity, unique within the group          | (required)               |
+| `dc`      | The datacenter the member runs in, unique within the group     | (required)               |
+| `address` | The address peers reach the member on, unique within the group | (required)               |
+| `role`    | `writer` or `replica`                                          | (required)               |
+
+peryx validates the group at startup and refuses to serve on any violation: a blank or duplicated `group`, `node`, `dc`,
+or `address`; a `node` that reuses the `group` identity; anything other than exactly one `writer`; or a group with no
+configured replica. It never probes a member's `address`, so an unreachable configured peer is a valid topology, not a
+configuration error. A roster requires `dc` or `ha` mode; declaring one under `none` is rejected, naming the
+`availability` field.
+
 ## `[auth]`
 
 The `[auth]` table holds the access settings every index shares: the signing key of peryx's token realm, the lifetime of

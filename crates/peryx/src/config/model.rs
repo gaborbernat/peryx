@@ -53,6 +53,9 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub auth: AuthConfig,
     pub availability: AvailabilityConfig,
+    /// The static datacenter replication group, when one is configured. Absent under single-node
+    /// `none` mode and whenever no `[[availability.member]]` roster is given.
+    pub dc_membership: Option<DcMembership>,
     pub jobs: JobsConfig,
     /// Where blobs are stored: the local filesystem (default) or an S3-compatible object store.
     pub blob: BlobStorageConfig,
@@ -214,6 +217,43 @@ pub enum ReplicationConfig {
         poll_interval: Duration,
         page_size: NonZeroUsize,
     },
+}
+
+/// A node's role in a static datacenter replication group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DcRole {
+    /// The single node that accepts authoritative writes. A group has exactly one, chosen by
+    /// configuration; losing it stops writes rather than promoting a replica.
+    Writer,
+    /// A read replica that applies the writer's changes and may serve reads under the staleness
+    /// contract. No timeout ever turns it into the writer.
+    Replica,
+}
+
+/// One configured member of a datacenter replication group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DcMember {
+    /// The member's stable identity, unique within the group.
+    pub node: String,
+    /// The datacenter the member runs in, unique within the group.
+    pub dc: String,
+    /// The address peers reach this member on, unique within the group.
+    pub address: String,
+    pub role: DcRole,
+}
+
+/// A static datacenter replication group: one writer and its read replicas, fixed by configuration.
+///
+/// Membership never changes from a network broadcast or a liveness timeout; only an operator editing
+/// this configuration adds, removes, or replaces a member. Validation guarantees the roster the runtime
+/// consumes can never hold two writers or omit the writer, so a replacement is an explicit, reviewed
+/// edit rather than an automatic promotion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DcMembership {
+    /// The group's identity, distinct from every member identity within it.
+    pub group: String,
+    pub members: Vec<DcMember>,
 }
 
 impl Config {
@@ -761,6 +801,7 @@ impl Default for Config {
             rate_limit: RateLimitConfig::default(),
             auth: AuthConfig::default(),
             availability: AvailabilityConfig::None,
+            dc_membership: None,
             jobs: JobsConfig::default(),
             blob: BlobStorageConfig::Filesystem,
         }

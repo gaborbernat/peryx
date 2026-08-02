@@ -17,13 +17,16 @@ use peryx_http::handlers::status_authorization;
 use peryx_http::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
 };
-use peryx_replication::{HttpPrimary, Replica, SyncError, SyncOutcome, primary_router};
+use peryx_replication::{
+    DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpPrimary, LivenessTracker, Replica, SyncError, SyncOutcome,
+    liveness_router, primary_router,
+};
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
 use peryx_upstream::redact_url;
 use serde_json::{Value, json};
 
-use crate::config::{AvailabilityConfig, Config, ReplicationConfig};
+use crate::config::{AvailabilityConfig, Config, DcRole, ReplicationConfig};
 use crate::replication::availability_metrics::AvailabilityMetrics;
 
 #[derive(Clone, Copy)]
@@ -206,6 +209,9 @@ struct AvailabilityNode {
     mode: &'static str,
     role: AvailabilityRole,
     replica: Option<ReplicaView>,
+    /// The writer's view of replica liveness, present only when a `dc`/`ha` primary follows a
+    /// configured member roster. It informs routing hints and never gates this node's own readiness.
+    liveness: Option<Arc<LivenessTracker>>,
 }
 
 impl AvailabilityNode {
@@ -268,6 +274,13 @@ impl AvailabilityNode {
                 FieldClassification::Operator,
                 json!(serial),
             ));
+            if let Some(liveness) = &self.liveness {
+                fields.push(ClassifiedField::new(
+                    "peers",
+                    FieldClassification::Operator,
+                    json!(liveness.summary(Instant::now())),
+                ));
+            }
         }
         let body = filter_fields(authorization, fields).expect("public and allowed scopes classify");
         (ready, body)
@@ -357,6 +370,26 @@ impl ReplicaLoop {
     }
 }
 
+/// Track the configured replica members so the writer can age their beacons into routing hints. A
+/// process without a member roster, or a roster naming no replica, tracks nothing.
+fn primary_liveness(config: &Config) -> Option<Arc<LivenessTracker>> {
+    let replicas: Vec<String> = config
+        .dc_membership
+        .as_ref()?
+        .members
+        .iter()
+        .filter(|member| member.role == DcRole::Replica)
+        .map(|member| member.node.clone())
+        .collect();
+    (!replicas.is_empty()).then(|| {
+        Arc::new(LivenessTracker::new(
+            replicas,
+            DEFAULT_SUSPECT_AFTER,
+            DEFAULT_DEAD_AFTER,
+        ))
+    })
+}
+
 /// Replication routes and follower work prepared from one resolved configuration.
 pub struct ReplicationRuntime {
     primary: Option<Router>,
@@ -382,16 +415,24 @@ impl ReplicationRuntime {
                 let token = token.read().context("read the primary replication token")?;
                 let router = primary_router(
                     source.clone(),
-                    token,
+                    token.clone(),
                     state.serving.meta.clone(),
                     state.serving.blobs.clone(),
                 )
                 .context("build primary replication routes")?;
+                let liveness = primary_liveness(config);
+                let router = match &liveness {
+                    Some(tracker) => {
+                        router.merge(liveness_router(token, tracker.clone()).context("build liveness ingest routes")?)
+                    }
+                    None => router,
+                };
                 let node = AvailabilityNode {
                     app: state.clone(),
                     mode,
                     role: AvailabilityRole::Primary,
                     replica: None,
+                    liveness,
                 };
                 (Some(router), None, Some(node))
             }
@@ -417,6 +458,7 @@ impl ReplicationRuntime {
                         monitor: monitor.clone(),
                         upstream: redact_url(upstream),
                     }),
+                    liveness: None,
                 };
                 (
                     None,

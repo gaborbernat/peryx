@@ -5103,6 +5103,7 @@ dependencies = [
  "fs4",
  "futures-util",
  "hex",
+ "http 1.4.2",
  "mockall",
  "peryx-identity",
  "peryx-policy",

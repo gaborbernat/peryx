@@ -182,14 +182,20 @@ impl S3Client {
         let body = ByteStream::from_path(path)
             .await
             .map_err(|error| S3Error::Request(error.to_string()))?;
-        self.client()
+        let mut request = self
+            .client()
             .await
             .put_object()
             .bucket(&self.config.bucket)
             .key(key)
             .body(body)
-            .checksum_sha256(checksum)
-            .if_none_match("*")
+            .checksum_sha256(checksum);
+        // Some S3-compatible endpoints reject the `*` precondition, so the operator disables it per
+        // instance; sending it anyway would fail every write against such an endpoint.
+        if self.config.conditional_writes {
+            request = request.if_none_match("*");
+        }
+        request
             .send()
             .await
             .map_err(aws_sdk_s3::Error::from)
@@ -297,14 +303,20 @@ impl S3Client {
                     .build()
             })
             .collect();
-        self.client()
+        let mut request = self
+            .client()
             .await
             .complete_multipart_upload()
             .bucket(&self.config.bucket)
             .key(key)
             .upload_id(upload_id)
-            .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(parts)).build())
-            .if_none_match("*")
+            .multipart_upload(CompletedMultipartUpload::builder().set_parts(Some(parts)).build());
+        // Some S3-compatible endpoints reject the `*` precondition, so the operator disables it per
+        // instance; sending it anyway would fail every write against such an endpoint.
+        if self.config.conditional_writes {
+            request = request.if_none_match("*");
+        }
+        request
             .send()
             .await
             .map_err(aws_sdk_s3::Error::from)
@@ -369,12 +381,53 @@ mod tests {
     use std::time::Duration;
 
     use aws_sdk_s3::config::Credentials;
-    use aws_smithy_http_client::test_util::capture_request;
+    use aws_sdk_s3::primitives::SdkBody;
+    use aws_smithy_http_client::test_util::{CaptureRequestReceiver, capture_request};
+    use rstest::rstest;
     use tokio::sync::OnceCell;
     use url::Url;
 
     use super::super::config::S3Settings;
-    use super::{BehaviorVersion, Builder, Client, Region, S3Client, S3Config, S3Error};
+    use super::{BehaviorVersion, Builder, Client, Region, S3Client, S3Config, S3Error, S3Part};
+
+    const CHECKSUM: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    fn base_settings() -> S3Settings {
+        S3Settings {
+            endpoint: "http://localhost:1/api".to_owned(),
+            bucket: "peryx-tests".to_owned(),
+            prefix: "cache".to_owned(),
+            region: "us-east-1".to_owned(),
+            path_style: false,
+            request_timeout: Duration::from_secs(5),
+            max_retries: 0,
+            multipart_threshold: 16 << 20,
+            part_size: 8 << 20,
+            upload_concurrency: 1,
+            conditional_writes: true,
+            checksum_writes: true,
+        }
+    }
+
+    fn capturing_client(
+        config: S3Config,
+        response: Option<http::Response<SdkBody>>,
+    ) -> (S3Client, CaptureRequestReceiver) {
+        let (http_client, request) = capture_request(response);
+        let service = S3Client::service_config(
+            &config,
+            Builder::new()
+                .behavior_version(BehaviorVersion::latest())
+                .credentials_provider(Credentials::new("id", "secret", None, None, "test"))
+                .region(Region::new("us-east-1"))
+                .http_client(http_client),
+        );
+        let client = S3Client {
+            config,
+            client: Arc::new(OnceCell::from(Client::from_conf(service))),
+        };
+        (client, request)
+    }
 
     #[test]
     fn test_error_messages_cover_every_variant() {
@@ -397,43 +450,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_virtual_host_addressing_preserves_the_endpoint_base_path() {
-        let config = S3Config::new(S3Settings {
-            endpoint: "http://localhost:1/api".to_owned(),
-            bucket: "peryx-tests".to_owned(),
-            prefix: "cache".to_owned(),
-            region: "us-east-1".to_owned(),
-            path_style: false,
-            request_timeout: Duration::from_secs(5),
-            max_retries: 0,
-            multipart_threshold: 16 << 20,
-            part_size: 8 << 20,
-            upload_concurrency: 1,
-            conditional_writes: true,
-            checksum_writes: true,
-        })
-        .unwrap();
-        let (http_client, request) = capture_request(None);
-        let service = S3Client::service_config(
-            &config,
-            Builder::new()
-                .behavior_version(BehaviorVersion::latest())
-                .credentials_provider(Credentials::new("id", "secret", None, None, "test"))
-                .region(Region::new("us-east-1"))
-                .http_client(http_client),
-        );
-        let client = S3Client {
-            config,
-            client: Arc::new(OnceCell::from(Client::from_conf(service))),
-        };
+        let config = S3Config::new(base_settings()).unwrap();
+        let (client, request) = capturing_client(config, None);
         let stage = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(stage.path(), b"package").unwrap();
 
         client
-            .put_file(
-                "cache/sha256/digest",
-                stage.path(),
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            )
+            .put_file("cache/sha256/digest", stage.path(), CHECKSUM)
             .await
             .unwrap();
 
@@ -446,5 +469,64 @@ mod tests {
         );
         assert_eq!(uri.host_str(), Some("peryx-tests.localhost"));
         assert_eq!(uri.port(), Some(1));
+    }
+
+    #[rstest]
+    #[case::declared(true, Some("*"))]
+    #[case::disabled(false, None)]
+    #[tokio::test]
+    async fn test_put_file_conditions_create_on_conditional_writes(
+        #[case] conditional_writes: bool,
+        #[case] precondition: Option<&str>,
+    ) {
+        let config = S3Config::new(S3Settings {
+            conditional_writes,
+            ..base_settings()
+        })
+        .unwrap();
+        let (client, request) = capturing_client(config, None);
+        let stage = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(stage.path(), b"package").unwrap();
+
+        client
+            .put_file("cache/sha256/digest", stage.path(), CHECKSUM)
+            .await
+            .unwrap();
+
+        assert_eq!(request.expect_request().headers().get("if-none-match"), precondition);
+    }
+
+    #[rstest]
+    #[case::declared(true, Some("*"))]
+    #[case::disabled(false, None)]
+    #[tokio::test]
+    async fn test_complete_multipart_conditions_create_on_conditional_writes(
+        #[case] conditional_writes: bool,
+        #[case] precondition: Option<&str>,
+    ) {
+        let config = S3Config::new(S3Settings {
+            conditional_writes,
+            ..base_settings()
+        })
+        .unwrap();
+        let response = http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<CompleteMultipartUploadResult><ETag>etag</ETag></CompleteMultipartUploadResult>",
+            ))
+            .unwrap();
+        let (client, request) = capturing_client(config, Some(response));
+        let part = S3Part {
+            number: 1,
+            etag: "part".to_owned(),
+            checksum: "checksum".to_owned(),
+        };
+
+        client
+            .complete_multipart("cache/sha256/digest", "upload-1", vec![part])
+            .await
+            .unwrap();
+
+        assert_eq!(request.expect_request().headers().get("if-none-match"), precondition);
     }
 }

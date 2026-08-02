@@ -82,3 +82,16 @@ bounded by `max_stale_secs` past the freshness window, the same bound it applies
 
 An expired upstream credential degrades in a useful order: what is cached keeps pulling, what is not cached reports the
 `401`, and the logs carry the upstream status. Only a pull with nothing in the cache to fall back on fails.
+
+## Why an upstream token realm must be https
+
+The upstream `401` names its token realm in the `WWW-Authenticate` header, and peryx follows it to trade the index's
+credentials for a bearer token. When those credentials are a `username`/`password` pair, peryx sends them as Basic
+authentication, so a realm reached over plain `http` would put the secret on the wire in cleartext. A hostile or
+compromised upstream that answers with `realm="http://attacker/token"` could harvest the mirror's credentials that way,
+even over a TLS-valid connection to the registry itself.
+
+peryx refuses to present Basic credentials to a token realm unless its scheme is `https`. The realm host is not
+constrained: Docker Hub advertises `auth.docker.io`, a different host from the registry, and that stays valid. Every
+real token server is served over `https`, so the guard costs nothing in practice; a loopback realm (`localhost`) is the
+one `http` exception, since those credentials never leave the machine.

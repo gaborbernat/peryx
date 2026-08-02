@@ -8,6 +8,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use axum::http::{HeaderValue, Method, StatusCode};
 use peryx_identity::strip_auth_scheme;
@@ -318,6 +319,15 @@ impl Upstream {
         let scope = challenge.scope.as_deref().unwrap_or(scope);
         let mut url = url::Url::parse(&challenge.realm)
             .map_err(|err| UpstreamError::Transport(format!("invalid bearer realm: {err}")))?;
+        if let Auth::Basic { .. } = auth
+            && url.scheme() != "https"
+            && !realm_host_is_loopback(&url)
+        {
+            return Err(UpstreamError::Transport(format!(
+                "insecure bearer realm {}: refusing to send Basic credentials over cleartext",
+                challenge.realm
+            )));
+        }
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("scope", scope);
@@ -338,6 +348,15 @@ impl Upstream {
             .or(body.access_token)
             .ok_or_else(|| UpstreamError::Transport("token endpoint returned no token".to_owned()))
     }
+}
+
+/// Whether the realm host is a loopback address, the one `http` case where Basic credentials stay on
+/// the machine rather than going out in cleartext. A local or dev registry served over `http` on
+/// `localhost` keeps working; only a routable `http` realm is refused.
+fn realm_host_is_loopback(url: &url::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    })
 }
 
 fn token_cache_key(base: &str, scope: &str, provider: CredentialProviderId) -> TokenCacheKey {
@@ -823,6 +842,56 @@ mod tests {
 
         assert!(
             matches!(result, Err(UpstreamError::Transport(message)) if message.starts_with("invalid bearer realm:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_token_refuses_basic_credentials_to_a_cleartext_realm() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                r#"Bearer realm="http://token.registry.example/token",service=reg"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = Upstream::new()
+            .manifest(&base, &credentials(basic("alice", "pw")), "library/nginx", "latest")
+            .await;
+
+        assert!(
+            matches!(&result, Err(UpstreamError::Transport(message)) if message.starts_with("insecure bearer realm")),
+            "expected a cleartext-realm refusal, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_token_allows_basic_credentials_to_an_https_realm_on_another_host() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .respond_with(ResponseTemplate::new(401).insert_header(
+                "www-authenticate",
+                r#"Bearer realm="https://auth.example.invalid/token",service=reg"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = Upstream::new()
+            .manifest(&base, &credentials(basic("alice", "pw")), "library/nginx", "latest")
+            .await;
+
+        // An https realm on a host other than the registry (Docker Hub's auth.docker.io works this way)
+        // clears the scheme gate, so the token fetch is attempted and fails only on the unresolvable host.
+        assert!(
+            matches!(&result, Err(UpstreamError::Transport(message)) if !message.starts_with("insecure bearer realm")),
+            "expected the realm accepted and the fetch attempted, got {result:?}"
         );
     }
 

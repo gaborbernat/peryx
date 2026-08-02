@@ -125,6 +125,26 @@ async fn test_status_reports_writer_posture_for_an_administrator() {
 }
 
 #[tokio::test]
+async fn test_status_is_never_cached() {
+    let (_dir, state) = app().await;
+
+    let (status, headers, _) = request(
+        &state,
+        dc_writer(),
+        "/availability/v1/status",
+        Some(&basic(ADMIN, PASSWORD)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::CACHE_CONTROL],
+        "no-store",
+        "an authenticated posture must not be stored by a shared cache",
+    );
+}
+
+#[tokio::test]
 async fn test_status_reports_replica_role_in_ha_mode() {
     let (_dir, state) = app().await;
 

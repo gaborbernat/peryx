@@ -334,11 +334,13 @@ async fn test_replica_readiness_reports_a_sync_error() {
         serde_json::json!({"mode": "dc", "role": "replica", "ready": false, "reasons": ["sync_error"]})
     );
     let (_, body) = get(&router, "/metrics").await;
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains("peryx_replication_sync_errors_total 1\n"), "{body}");
     assert!(
-        String::from_utf8(body)
-            .unwrap()
-            .contains("peryx_replication_sync_errors_total 1\n")
+        body.contains("peryx_availability_sync_errors_total{class=\"transport\"} 1\n"),
+        "{body}"
     );
+    assert!(body.contains("peryx_availability_sync_cycles_total 1\n"), "{body}");
 }
 
 #[tokio::test]
@@ -357,6 +359,12 @@ async fn test_replica_readiness_reports_an_incompatible_schema() {
     assert_eq!(
         ready,
         serde_json::json!({"mode": "dc", "role": "replica", "ready": false, "reasons": ["incompatible_schema"]})
+    );
+    let (_, body) = get(&router, "/metrics").await;
+    let body = String::from_utf8(body).unwrap();
+    assert!(
+        body.contains("peryx_availability_sync_errors_total{class=\"schema\"} 1\n"),
+        "{body}"
     );
 }
 
@@ -388,7 +396,11 @@ async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
         })
     );
     let (_, body) = get(&router, "/metrics").await;
-    assert!(String::from_utf8(body).unwrap().contains("peryx_replication_lag 1\n"));
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains("peryx_replication_lag 1\n"), "{body}");
+    assert!(body.contains("peryx_availability_pending_serials 1\n"), "{body}");
+    assert!(body.contains("peryx_availability_sync_cycles_total 1\n"), "{body}");
+    assert!(body.contains("peryx_availability_apply_seconds_count 1\n"), "{body}");
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
     let (status, ready) = document(&router, "/+replication/v1/ready", Some(&operator)).await;
@@ -402,7 +414,10 @@ async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
         })
     );
     let (_, body) = get(&router, "/metrics").await;
-    assert!(String::from_utf8(body).unwrap().contains("peryx_replication_lag 0\n"));
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains("peryx_replication_lag 0\n"), "{body}");
+    assert!(body.contains("peryx_availability_pending_serials 0\n"), "{body}");
+    assert!(body.contains("peryx_availability_sync_cycles_total 2\n"), "{body}");
 }
 
 #[tokio::test]

@@ -1,7 +1,9 @@
 //! Process-level replication configuration and follower scheduling.
 
+mod availability_metrics;
+
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt::Write as _, sync::Mutex};
 
 use anyhow::Context as _;
@@ -22,6 +24,7 @@ use peryx_upstream::redact_url;
 use serde_json::{Value, json};
 
 use crate::config::{AvailabilityConfig, Config, ReplicationConfig};
+use crate::replication::availability_metrics::AvailabilityMetrics;
 
 #[derive(Clone, Copy)]
 enum ReplicaHealthStatus {
@@ -307,6 +310,7 @@ struct ReplicaLoop {
     page_size: std::num::NonZeroUsize,
     poll_interval: Duration,
     monitor: Arc<ReplicaMonitor>,
+    metrics: Arc<AvailabilityMetrics>,
 }
 
 fn log_replica_page(outcome: SyncOutcome) {
@@ -329,19 +333,23 @@ impl ReplicaLoop {
     }
 
     async fn cycle(&self) -> bool {
-        match Replica::new(&self.meta, &self.blobs, self.page_size)
+        let started = Instant::now();
+        let result = Replica::new(&self.meta, &self.blobs, self.page_size)
             .sync_once(&self.primary)
-            .await
-        {
+            .await;
+        let elapsed = started.elapsed();
+        match result {
             Ok(outcome) => {
                 if outcome.changes > 0 {
                     log_replica_page(outcome);
                 }
                 self.monitor.record(outcome);
+                self.metrics.record_cycle(outcome, elapsed);
                 outcome.caught_up()
             }
             Err(error) => {
                 self.monitor.record_error(&error);
+                self.metrics.record_error(&error, elapsed);
                 tracing::error!(%error, "replica synchronization failed");
                 true
             }
@@ -398,7 +406,9 @@ impl ReplicationRuntime {
                 let monitor = Arc::new(ReplicaMonitor::new(
                     state.meta.current_serial().context("read the replica serial")?,
                 ));
+                let metrics = Arc::new(AvailabilityMetrics::default());
                 state.register_prometheus(monitor.clone());
+                state.register_prometheus(metrics.clone());
                 let node = AvailabilityNode {
                     app: state.clone(),
                     mode,
@@ -417,6 +427,7 @@ impl ReplicationRuntime {
                         page_size: *page_size,
                         poll_interval: *poll_interval,
                         monitor,
+                        metrics,
                     }),
                     Some(node),
                 )

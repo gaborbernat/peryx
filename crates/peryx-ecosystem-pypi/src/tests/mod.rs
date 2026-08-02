@@ -9,6 +9,7 @@ mod fanout_tests;
 mod filename_tests;
 mod html_tests;
 mod http;
+mod legacy_json_tests;
 mod metadata_tests;
 mod metrics_tests;
 mod name_tests;

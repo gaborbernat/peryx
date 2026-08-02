@@ -159,14 +159,25 @@ fn find_release_version(detail: &ProjectDetail, requested: &str) -> Option<Strin
     }
 }
 
+/// The release `GET /pypi/{project}/json` reports as `info.version`, ranked as the web project page's
+/// `default_version` does. Among releases that have files, an active release outranks a yanked one, a
+/// stable release outranks a pre-release, and the greatest PEP 440 version wins within a class, so a
+/// stable `1.0` beats a later `2.0rc1` and a higher yanked release does not win. When every release is
+/// pre-release or yanked the greatest of them wins; when no release carries files the greatest version
+/// wins.
 fn latest_release_version(detail: &ProjectDetail) -> Option<String> {
     let versions = release_versions(detail);
-    for version in &versions {
-        if release_files(detail, version).next().is_some() {
-            return Some(version.clone());
-        }
-    }
-    versions.into_iter().next()
+    let rank = |version: &str| {
+        let parsed = parse_version(version);
+        let stable = parsed.as_ref().is_some_and(|parsed| !parsed.any_prerelease());
+        (!release_yanked(detail, version), stable, parsed)
+    };
+    let ranked = versions
+        .iter()
+        .filter(|version| release_files(detail, version).next().is_some())
+        .max_by(|left, right| rank(left).cmp(&rank(right)).then_with(|| left.cmp(right)))
+        .cloned();
+    ranked.map_or_else(|| versions.into_iter().next(), Some)
 }
 
 fn release_versions(detail: &ProjectDetail) -> Vec<String> {

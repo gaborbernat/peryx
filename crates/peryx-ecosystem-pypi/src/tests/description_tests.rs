@@ -11,6 +11,33 @@ fn test_render_markdown_escapes_inline_html() {
     assert!(html.contains("&lt;script&gt;"));
 }
 
+#[rstest]
+#[case::mixed_case("Text/Markdown")]
+#[case::upper_case("TEXT/MARKDOWN")]
+#[case::with_parameters("text/markdown; charset=UTF-8; variant=GFM")]
+#[case::mixed_case_with_parameters("Text/Markdown; charset=UTF-8")]
+fn test_render_markdown_content_type_ignores_case_and_parameters(#[case] content_type: &str) {
+    let html = render("# Hi", Some(content_type)).html;
+    assert_eq!(html, "<h1>Hi</h1>\n");
+}
+
+#[rstest]
+#[case::mixed_case("Text/X-RST")]
+#[case::upper_case("TEXT/X-RST")]
+#[case::with_parameters("text/x-rst; charset=UTF-8")]
+fn test_render_rst_content_type_ignores_case_and_parameters(#[case] content_type: &str) {
+    let html = render("*emphasis*", Some(content_type)).html;
+    assert!(html.contains("<em>emphasis</em>"));
+}
+
+#[test]
+fn test_render_markdown_lookalike_media_type_is_plain_text() {
+    let rendered = render("# Hi", Some("text/markdownx"));
+    assert!(rendered.html.starts_with("<pre class=\"description-plain\">"));
+    assert!(rendered.html.contains("# Hi"));
+    assert!(rendered.notice.is_none());
+}
+
 #[test]
 fn test_render_absent_content_type_renders_rst() {
     let html = render("Title\n=====\n\n*emphasis*", None).html;

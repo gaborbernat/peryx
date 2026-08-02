@@ -60,6 +60,24 @@ pub fn build_router(config: &Config) -> anyhow::Result<Router> {
     Ok(replication.mount(router_for(state)))
 }
 
+/// Validate a fully resolved configuration the way `serve` would accept it.
+///
+/// It opens no metadata store, binds no socket, and reaches no upstream: it runs the cross-field
+/// [`Config::validate`] rules, the logging-sink check, and the full index assembly — topology,
+/// policy compilation, secret reads, and upstream-client construction — so an operator can confirm a
+/// config before a restart the way `nginx -t` confirms a server block.
+///
+/// # Errors
+/// Returns the first configuration error the server would hit while assembling its state.
+pub fn check_config(config: &Config) -> anyhow::Result<()> {
+    config.validate().context("validate configuration")?;
+    crate::logging::validate(&config.log).context("validate logging configuration")?;
+    build_indexes(&config.indexes, &config.auth, config.offline)?;
+    build_index_settings(&config.indexes)?;
+    build_webhooks(&config.indexes)?;
+    Ok(())
+}
+
 /// Open the stores and resolve the configured indexes into the shared application state, without
 /// building routes, so the serve entrypoint can reach the upstream clients before traffic.
 ///

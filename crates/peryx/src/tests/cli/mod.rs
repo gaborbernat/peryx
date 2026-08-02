@@ -3,6 +3,7 @@ use clap::Parser as _;
 use crate::cli::Cli;
 
 mod cache_tests;
+mod config_tests;
 mod index_tests;
 mod job_tests;
 mod maintenance_tests;

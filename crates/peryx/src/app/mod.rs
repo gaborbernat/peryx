@@ -8,6 +8,7 @@ use crate::config::Config;
 
 mod bootstrap;
 mod cache;
+mod config;
 mod fsck;
 mod indexes;
 mod jobs;
@@ -20,6 +21,7 @@ mod secret;
 
 pub use bootstrap::bootstrap_administrator;
 pub use cache::cache;
+pub use config::config_check;
 pub use indexes::{config_snippet, index, init, init_data_dir};
 pub use jobs::job;
 pub use policy::policy;

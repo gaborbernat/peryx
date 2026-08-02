@@ -281,6 +281,10 @@ fn main() -> anyhow::Result<()> {
         peryx::cli::Command::Revocation(command) => {
             app::revocation(&command, &mut std::io::stdin(), &mut std::io::stdout())
         }
+        peryx::cli::Command::Config(command) => {
+            let config = resolve_config(command.runtime_args())?;
+            app::config_check(&config, &mut std::io::stdout())
+        }
         peryx::cli::Command::ConfigSnippet(args) => print_config_snippet(&args),
         peryx::cli::Command::Index(command) => {
             let config = resolve_config(command.runtime_args())?;

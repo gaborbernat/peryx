@@ -205,6 +205,12 @@ jobs:
       - run: >
           cargo llvm-cov nextest --workspace --ignore-filename-regex '(main\.rs|crates/peryx-web/|crates/peryx-bench/)' --fail-under-functions 100 --lcov --output-path lcov.info
       - run: .github/scripts/check-lcov-lines.awk lcov.info
+      # Retain lcov.info even when a gate fails so the regressed function or line can be diagnosed.
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-lcov
+          path: lcov.info
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: lcov.info

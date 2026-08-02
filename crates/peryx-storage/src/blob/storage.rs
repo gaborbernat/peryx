@@ -58,6 +58,13 @@ impl BlobStorage {
         }
     }
 
+    /// This backend's identity for a blob placement key, so a placement records where bytes actually
+    /// live rather than a free-form label.
+    #[must_use]
+    pub fn backend_id(&self) -> crate::meta::BackendId {
+        crate::meta::BackendId::from_static(self.name())
+    }
+
     /// The effective configured backend contract.
     #[must_use]
     pub fn capabilities(&self) -> BlobCapabilities {

@@ -183,6 +183,44 @@ async fn test_mirror_by_digest_rejects_bytes_that_hash_to_something_else() {
 }
 
 #[tokio::test]
+async fn test_mirror_by_digest_accepts_a_non_sha256_algorithm() {
+    let server = MockServer::start().await;
+    let config = b"{}";
+    let layer = b"a-layer-of-bytes";
+    let manifest = image_manifest(config, layer);
+    // A sha512-addressed manifest is legal to pull, but peryx cannot recompute sha512, so it must
+    // trust the upstream bytes instead of comparing them against a recomputed sha256.
+    let requested = format!("sha512:{}", "a".repeat(128));
+    mount_manifest(&server, "library/app", &requested, &manifest, MANIFEST_TYPE).await;
+    mount_blob(&server, "library/app", config).await;
+    mount_blob(&server, "library/app", layer).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let by_digest = format!("library/app@{requested}");
+    let rows = mirror(
+        &state.serving,
+        &state.indexes[0],
+        std::slice::from_ref(&by_digest),
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    let row = rows
+        .iter()
+        .find(|row| row.kind == "manifest")
+        .expect("a manifest row is reported");
+    assert_eq!(row.status, "synced", "{}", row.reason);
+    // The bytes are stored under their computed sha256, the identity the serving path would key them by.
+    assert!(
+        crate::store::get_manifest(&state.meta, &oci_digest(&manifest))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn test_mirror_follows_a_manifest_list() {
     let server = MockServer::start().await;
     let config = b"{}";

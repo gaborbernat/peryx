@@ -104,7 +104,7 @@ pub struct BlobPlacementKey {
 }
 
 impl BlobPlacementKey {
-    fn encode(&self) -> String {
+    pub(crate) fn encode(&self) -> String {
         format!(
             "{}\0{}\0{}\0{}",
             self.digest.canonical(),
@@ -114,14 +114,14 @@ impl BlobPlacementKey {
         )
     }
 
-    fn digest_bounds(digest: &ArtifactDigest) -> (String, String) {
+    pub(crate) fn digest_bounds(digest: &ArtifactDigest) -> (String, String) {
         let canonical = digest.canonical();
         (format!("{canonical}\0"), format!("{canonical}\u{1}"))
     }
 }
 
 /// A classified transfer failure, kept as low-cardinality evidence rather than a raw error string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlobPlacementFailure {
     /// The source backend or peer could not be reached; retry or reselect a source.

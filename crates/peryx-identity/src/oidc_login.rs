@@ -22,6 +22,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 
+use crate::oidc::Audience;
 use crate::{
     ExternalGroup, ExternalGroupGrant, ExternalIdentity, ExternalIdentityLinker, ExternalIdentityResolution,
     ExternalIdentityStore, ExternalLogin, ExternalSubject, ProviderId, UserName,
@@ -260,6 +261,12 @@ impl OidcLoginProvider {
             return Err(OidcProviderError::InvalidToken);
         }
         if !crate::secrets_match(&claims.nonce, nonce) {
+            return Err(OidcProviderError::InvalidToken);
+        }
+        // `set_audience` accepts any token that lists the client among its audiences; OIDC Core §3.1.3.7
+        // additionally requires an `azp` claim once the token names more than one, and that it name this
+        // client. Without this a token minted for another relying party that also lists us is accepted.
+        if claims.aud.is_multiple() && claims.azp.is_none() {
             return Err(OidcProviderError::InvalidToken);
         }
         if claims.azp.as_ref().is_some_and(|azp| azp != &self.client_id) {
@@ -580,6 +587,7 @@ struct TokenResponse {
 
 #[derive(Deserialize)]
 struct IdTokenClaims {
+    aud: Audience,
     exp: i64,
     iat: i64,
     nonce: String,
@@ -1002,6 +1010,49 @@ mod tests {
         let (server, provider) = ready().await;
         let mut claims = base_claims(&server);
         claims["azp"] = "peryx-web".into();
+        mount_token(
+            &server,
+            json!({"id_token": mint("key-1", &claims), "token_type": "Bearer"}),
+        )
+        .await;
+        assert!(provider.callback(&response(), &pending(), NOW).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_audiences_without_authorized_party_are_rejected() {
+        let (server, provider) = ready().await;
+        let mut claims = base_claims(&server);
+        claims["aud"] = json!(["peryx-web", "other-client"]);
+        mount_token(
+            &server,
+            json!({"id_token": mint("key-1", &claims), "token_type": "Bearer"}),
+        )
+        .await;
+        assert!(matches!(
+            provider.callback(&response(), &pending(), NOW).await,
+            Err(OidcProviderError::InvalidToken)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_audiences_with_matching_authorized_party_are_accepted() {
+        let (server, provider) = ready().await;
+        let mut claims = base_claims(&server);
+        claims["aud"] = json!(["peryx-web", "other-client"]);
+        claims["azp"] = "peryx-web".into();
+        mount_token(
+            &server,
+            json!({"id_token": mint("key-1", &claims), "token_type": "Bearer"}),
+        )
+        .await;
+        assert!(provider.callback(&response(), &pending(), NOW).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_single_audience_array_is_accepted() {
+        let (server, provider) = ready().await;
+        let mut claims = base_claims(&server);
+        claims["aud"] = json!(["peryx-web"]);
         mount_token(
             &server,
             json!({"id_token": mint("key-1", &claims), "token_type": "Bearer"}),

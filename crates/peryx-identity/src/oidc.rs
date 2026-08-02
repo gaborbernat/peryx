@@ -421,7 +421,7 @@ struct ExternalClaims {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum Audience {
+pub enum Audience {
     One(String),
     Many(Vec<String>),
 }
@@ -433,6 +433,11 @@ impl Audience {
             Self::Many(values) if values.len() == 1 => values.first().map(String::as_str),
             Self::Many(_) => None,
         }
+    }
+
+    /// Whether the token names more than one audience, so OIDC Core §3.1.3.7 requires an `azp` claim.
+    pub const fn is_multiple(&self) -> bool {
+        matches!(self, Self::Many(values) if values.len() > 1)
     }
 }
 

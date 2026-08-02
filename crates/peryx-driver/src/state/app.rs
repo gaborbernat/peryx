@@ -61,6 +61,11 @@ pub struct ServingState {
     pub requests: AtomicU64,
     /// Whether this process serves as a replica and rejects client mutations.
     pub read_only: bool,
+    /// The authority role this node holds, derived from its configured replication role rather than its
+    /// read-only posture. A configured primary is a [`Writer`](peryx_core::NodeRole::Writer) even when it
+    /// serves read-only, so the topology snapshot agrees with the replication and control surfaces on
+    /// which node writes. Single-node `none` mode is a lone writer.
+    pub(super) availability_role: peryx_core::NodeRole,
     /// The fixed availability topology this process was configured with, projected per request into a
     /// role-filtered snapshot. Single-node `none` mode holds an empty roster.
     pub(super) availability_topology: peryx_core::TopologyConfig,
@@ -185,6 +190,13 @@ impl ServingState {
     #[must_use]
     pub const fn availability_topology(&self) -> &peryx_core::TopologyConfig {
         &self.availability_topology
+    }
+
+    /// The authority role this node was configured with, from its replication role rather than its
+    /// read-only posture, so a read-only primary still reports itself as the writer.
+    #[must_use]
+    pub const fn availability_role(&self) -> peryx_core::NodeRole {
+        self.availability_role
     }
 
     /// Find the index whose route is the longest segment-aligned prefix of `path` (which has no

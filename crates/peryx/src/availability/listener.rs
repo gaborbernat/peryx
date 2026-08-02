@@ -134,7 +134,7 @@ async fn status(State(state): State<ListenerState>) -> Response {
         "role": state.posture.role,
         "read_only": state.app.read_only,
     });
-    (StatusCode::OK, Json(body)).into_response()
+    (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
 
 fn unauthorized() -> Response {

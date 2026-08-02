@@ -7,8 +7,11 @@
 //! stamps it with the observation time, so a stale render shows as age rather than passing for health.
 //!
 //! A peer's liveness and frontier are [`NodeLiveness::Unknown`] here: this node observes only itself
-//! until a consensus layer reports peers, and an unknown peer must never read as healthy. The models are
-//! pure serde with no I/O or authority logic, so they cross the server/browser boundary and pull no
+//! until a consensus layer reports peers, and an unknown peer must never read as healthy. This
+//! placeholder is not the writer's beacon view of its replicas: a `dc`/`ha` writer already ages replica
+//! heartbeats into `alive`/`suspect`/`dead` on the `peers` field of its `/+replication/v1/ready`
+//! document, which is the authoritative peer-liveness source until the consensus layer lands. The models
+//! are pure serde with no I/O or authority logic, so they cross the server/browser boundary and pull no
 //! auth or storage type into a renderer.
 
 use serde::{Deserialize, Serialize};

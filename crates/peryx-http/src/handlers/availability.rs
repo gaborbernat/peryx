@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse as _, Response};
-use peryx_core::{LocalStatus, NodeLiveness, NodeRole, TopologyView};
+use peryx_core::{LocalStatus, NodeLiveness, TopologyView};
 use peryx_driver::state::AppState;
 
 use super::status::status_authorization;
@@ -39,16 +39,13 @@ const fn topology_view(authorization: ResponseAuthorization) -> TopologyView {
 }
 
 /// This node's own live self-observation: its role, whether its local stores can serve, and the metadata
-/// frontier it has committed.
+/// frontier it has committed. The role is the configured authority role, so a read-only primary reports
+/// itself as the writer rather than reading its read-only posture as a replica.
 async fn local_status(state: &AppState) -> LocalStatus {
     let serial = state.meta.current_serial();
     let serving = serial.is_ok() && state.blobs.health().await.is_ok();
     LocalStatus {
-        role: if state.read_only {
-            NodeRole::Replica
-        } else {
-            NodeRole::Writer
-        },
+        role: state.availability_role(),
         liveness: if serving {
             NodeLiveness::Live
         } else {

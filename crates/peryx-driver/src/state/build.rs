@@ -312,6 +312,7 @@ impl AppState {
                 clock,
                 requests: AtomicU64::new(0),
                 read_only: false,
+                availability_role: peryx_core::NodeRole::Writer,
                 availability_topology: peryx_core::TopologyConfig::default(),
                 route_resolver: peryx_index::RouteResolver::new(&indexes),
                 indexes,

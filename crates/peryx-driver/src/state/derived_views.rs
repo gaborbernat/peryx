@@ -2,11 +2,16 @@
 //!
 //! A replica applies authoritative metadata ahead of the views it derives from it — the search
 //! index, the rendered-page cache, the protocol responses. Serving a record before every required
-//! view reflects it would mix new metadata with a stale view, so a replica exposes metadata only up
+//! view reflects it would mix new metadata with a stale view, so a replica must expose metadata only up
 //! to the *readable frontier*: the lowest serial every required view has applied. Each view records
 //! how far it has caught up through [`set_view_frontier`](peryx_storage::meta::MetaStore::set_view_frontier);
 //! this module folds those durable frontiers and the authoritative serial into one readable serial
 //! and names the view holding it back.
+//!
+//! This module computes the frontier and the replica loop exports it as
+//! `peryx_replication_readable_serial`. The per-ecosystem read gating that holds a `PyPI` page or an
+//! `OCI` tag response to it lands with #510 and #511, so today the frontier is observable but not yet
+//! enforced on the serving path.
 //!
 //! The registry is ecosystem-neutral: a view is a stable name, and an ecosystem crate wires its own
 //! invalidation and rebuild into the frontier it advances without this module learning its format.

@@ -146,9 +146,12 @@ node's own live self-observation, which the process always knows: its `role`, it
 size when the `nodes` list is capped, so a stale or truncated render is visible rather than passing for a healthy,
 complete one.
 
-A peer's `liveness` is always `unknown`, with no frontier, because a node observes only itself until a consensus layer
-reports its peers; an operator reads a peer's health from that peer's own probes, and a snapshot never lets stale peer
-data read as `live`. The local node reports `live` when its metadata and blob stores can serve and `unready` otherwise.
+A peer's `liveness` in this snapshot is always `unknown`, with no frontier, because a node observes only itself until a
+consensus layer reports its peers, and a snapshot never lets stale peer data read as `live`. This placeholder is not the
+writer's beacon view: until that layer lands, a `dc` or `ha` writer already ages each replica's heartbeats into `alive`,
+`suspect`, or `dead` on the `peers` field of its own `/+replication/v1/ready` and `/+replication/v1/health` documents
+(see [Node liveness](@/core/availability-liveness.md)), so read peer liveness there rather than from the topology
+snapshot. The local node reports `live` when its metadata and blob stores can serve and `unready` otherwise.
 
 Fields are filtered to the caller's class, like `/+status`. Any caller reads `mode`, `group`, `captured_at`,
 `node_count`, and each node's `node`, `dc`, `role`, and `local` flag. `operator:read` adds the `liveness` of every node

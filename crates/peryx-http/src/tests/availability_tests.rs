@@ -36,7 +36,7 @@ fn topology(local_node: Option<&str>) -> TopologyConfig {
     }
 }
 
-async fn app(read_only: bool, healthy: bool) -> (tempfile::TempDir, Arc<AppState>) {
+async fn app(read_only: bool, healthy: bool, role: NodeRole) -> (tempfile::TempDir, Arc<AppState>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");
     let meta = MetaStore::open(&path).unwrap();
@@ -70,6 +70,7 @@ async fn app(read_only: bool, healthy: bool) -> (tempfile::TempDir, Arc<AppState
     let mut state = AppState::new(meta.clone(), blobs, 60, Vec::new());
     state.users = UserService::with_password_settings(meta, PasswordPolicy::new(8, 1, 1).unwrap(), 2);
     state.read_only = read_only;
+    state.set_availability_role(role);
     state.set_availability_topology(topology((!read_only).then_some("writer-a")));
     (dir, Arc::new(state))
 }
@@ -110,7 +111,7 @@ fn node_keys(body: &serde_json::Value, identity: &str) -> BTreeSet<String> {
 
 #[tokio::test]
 async fn test_topology_public_reveals_only_the_static_roster() {
-    let (_dir, state) = app(false, true).await;
+    let (_dir, state) = app(false, true, NodeRole::Writer).await;
 
     let (status, headers, body) = get(&state, None).await;
 
@@ -138,7 +139,7 @@ async fn test_topology_public_reveals_only_the_static_roster() {
 
 #[tokio::test]
 async fn test_topology_repository_token_reads_the_public_roster() {
-    let (_dir, state) = app(false, true).await;
+    let (_dir, state) = app(false, true, NodeRole::Writer).await;
 
     let (status, _, body) = get(&state, Some(("Rita", USER_PASSWORD))).await;
 
@@ -148,7 +149,7 @@ async fn test_topology_repository_token_reads_the_public_roster() {
 
 #[tokio::test]
 async fn test_topology_operator_sees_liveness_and_the_local_frontier_only() {
-    let (_dir, state) = app(false, true).await;
+    let (_dir, state) = app(false, true, NodeRole::Writer).await;
 
     let (status, _, body) = get(&state, Some(("Olivia", USER_PASSWORD))).await;
 
@@ -166,7 +167,7 @@ async fn test_topology_operator_sees_liveness_and_the_local_frontier_only() {
 
 #[tokio::test]
 async fn test_topology_administrator_sees_the_advertised_addresses() {
-    let (_dir, state) = app(false, true).await;
+    let (_dir, state) = app(false, true, NodeRole::Writer).await;
 
     let (status, _, body) = get(&state, Some(("Alice", USER_PASSWORD))).await;
 
@@ -177,7 +178,7 @@ async fn test_topology_administrator_sees_the_advertised_addresses() {
 
 #[tokio::test]
 async fn test_topology_reports_unready_when_the_blob_store_is_unhealthy() {
-    let (_dir, state) = app(false, false).await;
+    let (_dir, state) = app(false, false, NodeRole::Writer).await;
 
     let (status, _, body) = get(&state, Some(("Olivia", USER_PASSWORD))).await;
 
@@ -188,7 +189,7 @@ async fn test_topology_reports_unready_when_the_blob_store_is_unhealthy() {
 
 #[tokio::test]
 async fn test_topology_replica_marks_no_local_roster_member() {
-    let (_dir, state) = app(true, true).await;
+    let (_dir, state) = app(true, true, NodeRole::Replica).await;
 
     let (status, _, body) = get(&state, Some(("Alice", USER_PASSWORD))).await;
 
@@ -201,5 +202,18 @@ async fn test_topology_replica_marks_no_local_roster_member() {
             .iter()
             .all(|node| node["local"] == false),
         "a replica does not know its roster identity: {body}",
+    );
+}
+
+#[tokio::test]
+async fn test_topology_read_only_primary_reports_the_writer_role() {
+    let (_dir, state) = app(true, true, NodeRole::Writer).await;
+
+    let (status, _, body) = get(&state, Some(("Olivia", USER_PASSWORD))).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["local"]["role"], "writer",
+        "a read-only primary writes, so it is the writer: {body}",
     );
 }

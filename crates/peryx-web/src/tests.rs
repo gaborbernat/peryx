@@ -2,8 +2,8 @@ use rstest::rstest;
 
 use crate::markdown::external_link_rel;
 use crate::model::{
-    PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage, UiSearchPage, UiSnapshot, members_from_listing,
-    projects_from_list,
+    PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage, UiSearchPage, UiShadowPage, UiSnapshot,
+    members_from_listing, projects_from_list,
 };
 
 fn policy_decision(state: &str, fresh: bool) -> UiPolicyDecision {
@@ -95,6 +95,32 @@ fn test_policy_decision_page_deserializes_api_response() {
     .unwrap();
     assert_eq!(page.decisions[0].status(), "Allowed");
     assert_eq!(page.next_cursor.as_deref(), Some("next"));
+}
+
+#[test]
+fn test_shadow_page_deserializes_api_response_and_defaults_absent_fields() {
+    let page: UiShadowPage = serde_json::from_value(serde_json::json!({
+        "candidates": [
+            {"member": "hosted", "source": "hosted", "filename": "example-1.0.whl", "digest": "sha256:1", "selected": true},
+            {"member": "pypi", "source": "cached", "filename": "example-1.0.whl", "selected": false, "reason": "precedence"}
+        ],
+        "next_cursor": null
+    }))
+    .unwrap();
+    let (selected, shadowed) = (&page.candidates[0], &page.candidates[1]);
+    assert_eq!(
+        (selected.outcome(), selected.digest_text().as_str()),
+        ("Selected", "sha256:1")
+    );
+    assert_eq!(
+        (
+            shadowed.outcome(),
+            shadowed.reason_text().as_str(),
+            shadowed.digest_text().as_str()
+        ),
+        ("Shadowed", "Higher-precedence member", "—")
+    );
+    assert!(page.next_cursor.is_none());
 }
 
 #[test]

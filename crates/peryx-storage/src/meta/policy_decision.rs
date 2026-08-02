@@ -67,6 +67,7 @@ pub struct PolicyDecisionItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyDecisionQuery {
     pub repository: Option<String>,
+    pub project: Option<String>,
     pub state: Option<PolicyDecisionState>,
     pub rule: Option<String>,
     pub source: Option<String>,
@@ -80,6 +81,7 @@ impl Default for PolicyDecisionQuery {
     fn default() -> Self {
         Self {
             repository: None,
+            project: None,
             state: None,
             rule: None,
             source: None,
@@ -107,6 +109,7 @@ impl PolicyDecisionQuery {
         }
         for (field, value) in [
             ("repository", self.repository.as_deref()),
+            ("project", self.project.as_deref()),
             ("rule", self.rule.as_deref()),
             ("source", self.source.as_deref()),
         ] {
@@ -463,6 +466,7 @@ fn matches_query(record: &PolicyDecisionRecord, query: &PolicyDecisionQuery) -> 
         .repository
         .as_deref()
         .is_none_or(|repository| record.repository == repository)
+        && query.project.as_deref().is_none_or(|project| record.project == project)
         && query.state.is_none_or(|state| record.state == state)
         && query
             .rule

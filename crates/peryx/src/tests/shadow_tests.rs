@@ -1,6 +1,7 @@
 //! End-to-end shadowed-candidate inspection over a virtual index with mixed hosted and cached members.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -12,6 +13,8 @@ use peryx_ecosystem_pypi::store::{CachedIndex, PypiStore as _};
 use peryx_ecosystem_pypi::upload::Uploaded;
 use peryx_ecosystem_pypi::{CoreMetadata, File, Provenance, Yanked};
 use peryx_identity::{GrantScope, Role};
+use peryx_policy::{PolicyAction, PolicyDecisionState};
+use peryx_storage::meta::NewPolicyDecision;
 use tower::ServiceExt as _;
 
 use crate::config::{Config, IndexConfig, IndexKind, SecretSource};
@@ -158,14 +161,63 @@ fn seed_cached(state: &AppState) {
     state.meta.put_index("pypi/acme-pkg", &record).unwrap();
 }
 
-async fn app() -> (tempfile::TempDir, axum::Router) {
+async fn seeded_state() -> (tempfile::TempDir, Arc<AppState>) {
     let dir = tempfile::tempdir().unwrap();
     let state = build_state(&config(&dir)).unwrap();
     provision_admin(&state).await;
     seed_hosted(&state);
     seed_cached(&state);
-    let router = router_for(state);
-    (dir, router)
+    (dir, state)
+}
+
+/// A seeded virtual repository under a caller-chosen name, so a test can drive resolution against a
+/// name the decision store rejects as a filter.
+async fn seeded_state_named(repository: &str) -> (tempfile::TempDir, Arc<AppState>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut root = virtual_root();
+    root.name = repository.to_owned();
+    root.route = repository.to_owned();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        indexes: vec![cached_pypi(), hosted(), root],
+        ..Config::default()
+    };
+    let state = build_state(&config).unwrap();
+    provision_admin(&state).await;
+    seed_hosted(&state);
+    seed_cached(&state);
+    (dir, state)
+}
+
+async fn app() -> (tempfile::TempDir, axum::Router) {
+    let (dir, state) = seeded_state().await;
+    (dir, router_for(state))
+}
+
+fn record_decision(
+    state: &AppState,
+    filename: Option<&str>,
+    action: PolicyAction,
+    decision: PolicyDecisionState,
+    rule: &str,
+    next_eligible_at_unix: Option<i64>,
+) {
+    state
+        .meta
+        .record_policy_decision(NewPolicyDecision {
+            repository: "root/pypi",
+            project: "acme-pkg",
+            version: None,
+            filename,
+            source: Some("pypi"),
+            action,
+            state: decision,
+            rule: Some(rule),
+            reason: Some("policy note"),
+            evaluated_at_unix: 0,
+            next_eligible_at_unix,
+        })
+        .unwrap();
 }
 
 async fn get(
@@ -231,6 +283,113 @@ async fn test_mixed_members_report_the_selected_and_shadowed_candidates() {
     assert_eq!(document["candidates"][1]["source"], "cached");
     assert_eq!(document["candidates"][1]["digest"], format!("sha256:{UPSTREAM_DIGEST}"));
     assert_eq!(document["next_cursor"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn test_a_denied_filename_carries_its_decision_on_every_member_row() {
+    let (_dir, state) = seeded_state().await;
+    // An upload-time outcome and an unrelated file must not attach to the served candidate; a
+    // subject with no filename must be skipped rather than matched by mistake.
+    record_decision(
+        &state,
+        Some(HOSTED_FILE),
+        PolicyAction::Upload,
+        PolicyDecisionState::Allow,
+        "upload-ok",
+        None,
+    );
+    record_decision(
+        &state,
+        Some("acme_pkg-9.9-py3-none-any.whl"),
+        PolicyAction::Serve,
+        PolicyDecisionState::Deny,
+        "other",
+        None,
+    );
+    record_decision(
+        &state,
+        None,
+        PolicyAction::Serve,
+        PolicyDecisionState::Deny,
+        "project-wide",
+        None,
+    );
+    record_decision(
+        &state,
+        Some(HOSTED_FILE),
+        PolicyAction::Serve,
+        PolicyDecisionState::Deny,
+        "blocked-project",
+        None,
+    );
+    let router = router_for(state);
+
+    let document = candidates(&router, "/+shadow/candidates?repository=root/pypi&project=acme-pkg").await;
+    let rows = document["candidates"].as_array().unwrap();
+
+    for member in ["hosted", "pypi"] {
+        let row = rows
+            .iter()
+            .find(|row| row["filename"] == HOSTED_FILE && row["member"] == member)
+            .unwrap_or_else(|| panic!("{member} row present"));
+        assert_eq!(
+            row["decision"]["state"], "deny",
+            "the serve decision governs the {member} row"
+        );
+        assert_eq!(row["decision"]["rule"], "blocked-project");
+        assert_eq!(row["decision"]["reason"], "policy note");
+        assert_eq!(row["decision"]["fresh"], true);
+    }
+    let cached = rows.iter().find(|row| row["filename"] == CACHED_FILE).unwrap();
+    assert!(
+        cached.get("decision").is_none(),
+        "an unevaluated filename carries no decision: {cached}"
+    );
+}
+
+#[tokio::test]
+async fn test_a_failed_decision_read_surfaces_as_a_server_error() {
+    // Resolution succeeds, but a repository name past the decision store's filter bound makes the
+    // joined decision read fail; the endpoint reports it rather than dropping decisions silently.
+    let repository = "r".repeat(513);
+    let (_dir, state) = seeded_state_named(&repository).await;
+    let router = router_for(state);
+
+    let (status, _headers, body) = get(
+        &router,
+        &format!("/+shadow/candidates?repository={repository}&project=acme-pkg"),
+        Some(("Alice", PASSWORD)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let document: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(document["error"], "shadow query failed");
+}
+
+#[tokio::test]
+async fn test_a_waiting_filename_reports_its_retry_window() {
+    let (_dir, state) = seeded_state().await;
+    record_decision(
+        &state,
+        Some(CACHED_FILE),
+        PolicyAction::Serve,
+        PolicyDecisionState::Wait,
+        "cooldown",
+        Some(120),
+    );
+    let router = router_for(state);
+
+    let document = candidates(&router, "/+shadow/candidates?repository=root/pypi&project=acme-pkg").await;
+    let cached = document["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["filename"] == CACHED_FILE)
+        .unwrap();
+
+    assert_eq!(cached["decision"]["state"], "wait");
+    assert_eq!(cached["decision"]["next_eligible_at_unix"], 120);
 }
 
 #[tokio::test]

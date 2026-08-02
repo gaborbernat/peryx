@@ -35,7 +35,9 @@ pub mod ssr;
 pub mod style;
 pub mod url;
 
-use pages::{AdminStatus, Browse, Dashboard, PolicyDecisions, Search, Stats, Trash, Upload, UsageAnalytics};
+use pages::{
+    AdminStatus, Browse, Dashboard, PolicyDecisions, Search, ShadowInspection, Stats, Trash, Upload, UsageAnalytics,
+};
 
 /// The HTML document shell used by server rendering: head, hydration scripts, and the app.
 #[must_use]
@@ -81,6 +83,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/") view=Dashboard ssr=SsrMode::Async />
                     <Route path=path!("/admin/status") view=AdminStatus ssr=SsrMode::Async />
                     <Route path=path!("/admin/policy-decisions") view=PolicyDecisions />
+                    <Route path=path!("/admin/shadow") view=ShadowInspection />
                     <Route path=path!("/admin/trash") view=Trash />
                     <Route path=path!("/admin/analytics") view=UsageAnalytics />
                     <Route path=path!("/browse") view=Browse ssr=SsrMode::Async />
@@ -111,6 +114,7 @@ fn Header() -> impl IntoView {
                     <a href="/search?page_size=25">"Search"</a>
                     <a href="/admin/status">"Status"</a>
                     <a href="/admin/policy-decisions">"Policy"</a>
+                    <a href="/admin/shadow">"Shadowing"</a>
                     <a href="/admin/trash">"Trash"</a>
                     <a href="/admin/analytics">"Usage"</a>
                     <a href="/upload">"Upload"</a>

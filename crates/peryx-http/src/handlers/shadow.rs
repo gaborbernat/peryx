@@ -12,11 +12,13 @@ use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, Request, StatusCode, Uri, header};
 use axum::response::{IntoResponse as _, Response};
-use peryx_core::{ShadowCandidate, ShadowReason};
+use peryx_core::ShadowReason;
 use peryx_driver::authz::{Decision, DenyReason, ScopedDecision};
-use peryx_driver::shadow::{ShadowPage, ShadowQuery, ShadowQueryError};
+use peryx_driver::shadow::{ShadowQuery, ShadowQueryError};
+use peryx_driver::shadow_inspect::{InspectedCandidate, ShadowInspection};
 use peryx_driver::state::AppState;
 use peryx_identity::{Action, Denial, Resource, Scope, UserId, authorize_all, parse_basic};
+use peryx_policy::PolicyDecisionState;
 
 use crate::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
@@ -57,7 +59,7 @@ async fn shadow_candidates_response(state: &AppState, headers: &HeaderMap, uri: 
         cursor: params.cursor,
         limit: params.limit.unwrap_or(25),
     };
-    match state.query_shadowed(&query) {
+    match state.inspect_shadowed(&query) {
         Ok(page) => shadow_page(page, authorization.response),
         Err(error) => shadow_error_response(&error),
     }
@@ -190,10 +192,28 @@ struct ShadowCandidateResponse {
     selected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<ShadowDecisionResponse>,
 }
 
-impl From<ShadowCandidate> for ShadowCandidateResponse {
-    fn from(candidate: ShadowCandidate) -> Self {
+/// The recorded allow, deny, or wait outcome that governs a candidate's filename. Present only when
+/// policy evaluated the filename; the stored reason is already free of any upstream URL or credential.
+#[derive(serde::Serialize)]
+struct ShadowDecisionResponse {
+    state: PolicyDecisionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    evaluated_at_unix: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_eligible_at_unix: Option<i64>,
+    fresh: bool,
+}
+
+impl From<InspectedCandidate> for ShadowCandidateResponse {
+    fn from(inspected: InspectedCandidate) -> Self {
+        let candidate = inspected.candidate;
         Self {
             member: candidate.member,
             source: candidate.source.as_str(),
@@ -201,11 +221,19 @@ impl From<ShadowCandidate> for ShadowCandidateResponse {
             digest: candidate.digest,
             selected: candidate.selected,
             reason: candidate.reason.map(ShadowReason::as_str),
+            decision: inspected.decision.map(|decision| ShadowDecisionResponse {
+                state: decision.state,
+                rule: decision.rule,
+                reason: decision.reason,
+                evaluated_at_unix: decision.evaluated_at_unix,
+                next_eligible_at_unix: decision.next_eligible_at_unix,
+                fresh: decision.fresh,
+            }),
         }
     }
 }
 
-fn shadow_page(page: ShadowPage, authorization: ResponseAuthorization) -> Response {
+fn shadow_page(page: ShadowInspection, authorization: ResponseAuthorization) -> Response {
     let candidates = page
         .candidates
         .into_iter()

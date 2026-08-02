@@ -287,6 +287,10 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .decision-allow { color: var(--ok); }
 .decision-deny { color: var(--bad); }
 .decision-wait { color: var(--warn); }
+.shadow-inspection-table { min-width: 82rem; }
+.shadow-inspection-table caption { text-align: left; padding: 0 0 0.6rem; color: var(--text-soft); }
+.badge.outcome-selected { color: var(--ok); border-color: var(--ok); }
+.badge.outcome-shadowed { color: var(--text-soft); border-color: var(--border-strong); }
 .trash-table { min-width: 88rem; }
 .trash-table caption { text-align: left; padding: 0 0 0.6rem; color: var(--text-soft); }
 .badge.trash-restorable { color: var(--ok); border-color: var(--ok); }

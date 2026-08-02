@@ -5,9 +5,7 @@ use bytes::Bytes;
 use peryx_storage::meta::MetaError;
 
 use super::app::ServingState;
-use super::derived_views::{
-    REQUIRED_VIEWS, ReadableFrontier, SEARCH_VIEW, readable_frontier as compute_readable_frontier,
-};
+use super::derived_views::{REQUIRED_VIEWS, ReadableFrontier, readable_frontier as compute_readable_frontier};
 
 impl ServingState {
     /// A hot-cache entry that is still within its freshness window; expired entries miss.
@@ -48,27 +46,6 @@ impl ServingState {
     /// Preserve rendered page caches across `OCI` tag mutations.
     pub fn bump_search_epoch(&self) {
         self.search.bump_epoch();
-    }
-
-    /// Persist the durable frontier a required derived `view` has applied, reporting the resulting
-    /// frontier, which never moves backward.
-    ///
-    /// A replica's apply path calls it once a view has rebuilt to `serial`, so the readable frontier
-    /// advances only behind proven, crash-safe view state — never after merely enqueueing the work.
-    ///
-    /// # Errors
-    /// Returns a store error if the write fails.
-    pub fn advance_view_frontier(&self, view: &str, serial: u64) -> Result<u64, MetaError> {
-        self.meta.set_view_frontier(view, serial)
-    }
-
-    /// Persist the search index's applied frontier from the live engine, so a restart proves how far
-    /// the on-disk index reflects the store. Returns the durable frontier.
-    ///
-    /// # Errors
-    /// Returns a store error if the write fails.
-    pub fn persist_search_frontier(&self) -> Result<u64, MetaError> {
-        self.advance_view_frontier(SEARCH_VIEW, self.search.indexed_frontier().unwrap_or(0))
     }
 
     /// The highest metadata serial a replica may expose and the view holding it back, from the

@@ -7,7 +7,7 @@ use peryx_core::LexiconRegistry;
 use super::Stores;
 use crate::context::IndexerCtx;
 use crate::engine::RebuildProgress;
-use crate::{PackageDocument, PackageIndexer, PackageSearch, PackageSource, SearchError, SearchParams};
+use crate::{PackageDocument, PackageIndexer, PackageSearch, PackageSource, SEARCH_VIEW, SearchError, SearchParams};
 
 struct OneDoc;
 
@@ -26,7 +26,7 @@ impl PackageIndexer for OneDoc {
     }
 }
 
-/// Raise the store's journal serial by `count` so a refresh has a higher frontier to record.
+/// Raise the store's journal serial by `count` so a refresh has a higher frontier to persist.
 fn advance_serial(stores: &Stores, count: usize) {
     stores
         .meta
@@ -40,7 +40,7 @@ fn advance_serial(stores: &Stores, count: usize) {
 }
 
 #[test]
-fn test_lazy_refresh_records_the_store_frontier_it_indexed() {
+fn test_lazy_refresh_persists_the_store_frontier_it_indexed() {
     let dir = tempfile::tempdir().unwrap();
     let stores = Stores::open(&dir);
     let lexicons = LexiconRegistry::default();
@@ -48,14 +48,14 @@ fn test_lazy_refresh_records_the_store_frontier_it_indexed() {
     search.add_indexer(Arc::new(OneDoc));
     advance_serial(&stores, 2);
 
-    assert_eq!(search.indexed_frontier(), None);
+    assert_eq!(stores.meta.view_frontier(SEARCH_VIEW).unwrap(), None);
     search.search(&stores.ctx(&lexicons), SearchParams::default()).unwrap();
 
-    assert_eq!(search.indexed_frontier(), Some(2));
+    assert_eq!(stores.meta.view_frontier(SEARCH_VIEW).unwrap(), Some(2));
 }
 
 #[test]
-fn test_rebuild_records_the_store_frontier_it_indexed() {
+fn test_rebuild_persists_the_store_frontier_it_indexed() {
     let dir = tempfile::tempdir().unwrap();
     let stores = Stores::open(&dir);
     let mut search = PackageSearch::in_memory();
@@ -70,5 +70,5 @@ fn test_rebuild_records_the_store_frontier_it_indexed() {
         )
         .unwrap();
 
-    assert_eq!(search.indexed_frontier(), Some(3));
+    assert_eq!(stores.meta.view_frontier(SEARCH_VIEW).unwrap(), Some(3));
 }

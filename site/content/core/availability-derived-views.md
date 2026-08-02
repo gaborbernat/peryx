@@ -23,9 +23,9 @@ already reached, never an optimistic target. Frontiers are durable and monotonic
 backward, so a replayed or reordered catch-up cannot un-apply proven work, and a restart reads the last frontier a
 rebuild actually reached rather than one a crash left unfinished.
 
-The search index is the first required view every deployment runs. It stamps its frontier when a refresh or a rebuild
-publishes, so its frontier tracks the serial the served index reflects. An ecosystem adds its own views — PyPI simple
-pages and serials, OCI tags and manifests — each advancing its own frontier as it rebuilds.
+The search index is the first required view every deployment runs. It persists its frontier when a refresh or a rebuild
+publishes, so the frontier tracks the serial the served index reflects. Ecosystems add their own views under #510 and
+#511, each advancing its own frontier as it rebuilds: PyPI simple pages and serials, OCI tags and manifests.
 
 ## The readable frontier
 
@@ -37,6 +37,10 @@ an operator sees which view pins the read side rather than an unexplained lag.
 A view that fails to rebuild keeps its prior frontier instead of advancing, so a failed required view holds the readable
 frontier at the last consistent serial and reports itself as the blocker. Readability resumes only once the view
 rebuilds and advances its frontier.
+
+When a replica applies a page, it invalidates the search view so readability holds below the applied serial until the
+index refreshes to it. The replica exports the readable serial as `peryx_replication_readable_serial`, so a scrape shows
+how far derived views trail the metadata the replica has committed.
 
 ## Restart behavior
 

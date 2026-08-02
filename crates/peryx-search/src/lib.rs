@@ -13,6 +13,10 @@ mod params;
 mod response;
 
 pub use access::{SearchAccess, SearchAccessPattern};
+
+/// The derived-view name the search index records its applied metadata frontier under, so a replica's
+/// readable-frontier calculation waits on the index before it exposes newer metadata.
+pub const SEARCH_VIEW: &str = "search";
 pub use context::{IndexerCtx, SearchCtx};
 pub use engine::{PackageSearch, RebuildOutcome, RebuildProgress, truncate_to_chars};
 pub use error::SearchError;

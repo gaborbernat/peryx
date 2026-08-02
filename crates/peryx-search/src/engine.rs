@@ -15,6 +15,7 @@ use tantivy::schema::{FAST, Field, IndexRecordOption, STORED, STRING, Schema, Te
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer, TokenizerManager};
 use tantivy::{Index as TantivyIndex, IndexReader, Order, Term};
 
+use crate::SEARCH_VIEW;
 use crate::access::{SearchAccess, SearchAccessPattern};
 use crate::context::{IndexerCtx, SearchCtx};
 use crate::error::SearchError;
@@ -36,10 +37,6 @@ pub struct PackageSearch {
     indexer: Arc<dyn PackageIndexer>,
     epoch: AtomicU64,
     indexed_epoch: Mutex<Option<u64>>,
-    /// The authoritative metadata serial the served index reflects, read at each refresh before the
-    /// documents it derives, so it is a lower bound the index has provably caught up to. A replica
-    /// gates readable metadata on it so a search never answers from an index behind the store.
-    indexed_frontier: Mutex<Option<u64>>,
     rebuild_lock: Mutex<()>,
     /// The on-disk index directory, or `None` for an in-memory index. An eager rebuild uses it to
     /// mark an in-flight rebuild so a restart that interrupts one discards the partial index.
@@ -127,7 +124,6 @@ impl PackageSearch {
             indexer: default_indexer(),
             epoch: AtomicU64::new(0),
             indexed_epoch: Mutex::new(None),
-            indexed_frontier: Mutex::new(None),
             rebuild_lock: Mutex::new(()),
             home,
         })
@@ -202,7 +198,7 @@ impl PackageSearch {
         self.reader.reload()?;
         self.clear_rebuilding();
         *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
-        self.note_indexed_frontier(frontier);
+        ctx.meta.set_view_frontier(SEARCH_VIEW, frontier)?;
         Ok(RebuildOutcome::Published {
             documents: indexed,
             commits,
@@ -300,28 +296,9 @@ impl PackageSearch {
             let frontier = ctx.indexer.meta.current_serial()?;
             self.write(&self.indexer.documents(&ctx.indexer)?)?;
             *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
-            self.note_indexed_frontier(frontier);
+            ctx.indexer.meta.set_view_frontier(SEARCH_VIEW, frontier)?;
         }
         Ok(())
-    }
-
-    /// Record the authoritative serial the served index now reflects. Reads always take the two
-    /// stamps under the same locks that advance them, so the served index and this frontier move
-    /// together and a reader never pairs one epoch's documents with another's serial.
-    fn note_indexed_frontier(&self, serial: u64) {
-        *self.indexed_frontier.lock().expect("search frontier lock") = Some(serial);
-    }
-
-    /// The authoritative metadata serial the served index reflects, or `None` before any refresh.
-    ///
-    /// A replica persists this as the search view's frontier and gates readable metadata on it, so it
-    /// never serves a record the derived index has not yet indexed.
-    ///
-    /// # Panics
-    /// Panics if the frontier lock was poisoned by a prior panic while stamping it.
-    #[must_use]
-    pub fn indexed_frontier(&self) -> Option<u64> {
-        *self.indexed_frontier.lock().expect("search frontier lock")
     }
 
     /// Replace the whole index with `documents`, then make them searchable.

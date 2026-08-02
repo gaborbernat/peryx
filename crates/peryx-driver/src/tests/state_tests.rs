@@ -8,6 +8,8 @@ use peryx_policy::Policy;
 use rstest::rstest;
 
 use crate::rate_limit::RateLimitConfig;
+use peryx_search::SearchParams;
+
 use crate::state::{AppState, DEFAULT_HOT_CACHE_BYTES, ReadableFrontier, RuntimeOptions, SEARCH_VIEW};
 use peryx_events::webhook::WebhookRuntime;
 
@@ -179,11 +181,11 @@ fn test_a_lagging_search_view_holds_readability_below_the_authority() {
 }
 
 #[test]
-fn test_advancing_the_search_view_lifts_readability_and_never_regresses() {
+fn test_a_caught_up_search_view_exposes_the_whole_authority_frontier() {
     let (_dir, state) = replica_state();
     advance_authority(&state, 2);
+    state.meta.set_view_frontier(SEARCH_VIEW, 2).unwrap();
 
-    assert_eq!(state.advance_view_frontier(SEARCH_VIEW, 2).unwrap(), 2);
     assert_eq!(
         state.readable_frontier().unwrap(),
         ReadableFrontier {
@@ -191,15 +193,30 @@ fn test_advancing_the_search_view_lifts_readability_and_never_regresses() {
             blocking: None,
         }
     );
-
-    assert_eq!(state.advance_view_frontier(SEARCH_VIEW, 1).unwrap(), 2);
-    assert_eq!(state.readable_frontier().unwrap().serial, 2);
 }
 
 #[test]
-fn test_persist_search_frontier_records_the_live_engine_frontier() {
+fn test_running_a_search_persists_the_view_frontier_and_lifts_readability() {
     let (_dir, state) = replica_state();
+    advance_authority(&state, 2);
+    assert_eq!(
+        state.readable_frontier().unwrap(),
+        ReadableFrontier {
+            serial: 0,
+            blocking: Some(SEARCH_VIEW.to_owned()),
+        }
+    );
 
-    assert_eq!(state.persist_search_frontier().unwrap(), 0);
-    assert_eq!(state.meta.view_frontier(SEARCH_VIEW).unwrap(), None);
+    state
+        .search
+        .search(&state.search_ctx(), SearchParams::default())
+        .unwrap();
+
+    assert_eq!(
+        state.readable_frontier().unwrap(),
+        ReadableFrontier {
+            serial: 2,
+            blocking: None,
+        }
+    );
 }

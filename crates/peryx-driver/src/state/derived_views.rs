@@ -13,8 +13,7 @@
 
 use std::collections::BTreeMap;
 
-/// The derived search index, the first required view every deployment runs.
-pub const SEARCH_VIEW: &str = "search";
+pub use peryx_search::SEARCH_VIEW;
 
 /// The views a replica must have caught up before it exposes a serial.
 ///
@@ -23,7 +22,7 @@ pub const SEARCH_VIEW: &str = "search";
 pub const REQUIRED_VIEWS: &[&str] = &[SEARCH_VIEW];
 
 /// The highest metadata serial a replica may expose, and the view holding it back.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadableFrontier {
     /// The serial safe to serve: metadata at or below it is reflected by every required view.
     pub serial: u64,

@@ -27,10 +27,24 @@ pub enum PathSafetyError {
     InvalidEncoding(String),
 }
 
-// `_` is peryx's machine-endpoint namespace (the `/_/oidc/*` trusted-publishing routes); unlike the
-// `+` prefix, `_` is a valid route segment, so a route claiming it would shadow those endpoints.
+/// Top-level path prefixes peryx's own router owns — the neutral API surface, the web UI's pages, and
+/// its static assets — that an index route would otherwise be shadowed by. Kept in step with the axum
+/// router and the web UI's page table; a served path missing here lets an index route resolve to a
+/// built-in page instead. `_` is the machine-endpoint namespace (the `/_/oidc/*` trusted-publishing
+/// routes): a valid route segment, so a route claiming it would shadow those endpoints.
 const RESERVED_ROUTE_PREFIXES: &[&str] = &[
-    "+stats", "+status", "_", "admin", "api-docs", "browse", "metrics", "pkg", "stats",
+    "+stats",
+    "+status",
+    "_",
+    "admin",
+    "api-docs",
+    "browse",
+    "favicon.svg",
+    "metrics",
+    "pkg",
+    "search",
+    "stats",
+    "upload",
 ];
 
 #[must_use]
@@ -270,18 +284,19 @@ mod tests {
                 Err(PathSafetyError::InvalidRoute(route.to_owned()))
             );
         }
-        assert_eq!(
-            validate_route("browse/private"),
-            Err(PathSafetyError::ReservedRoute("browse/private".to_owned()))
-        );
-        assert_eq!(
-            validate_route("admin/status"),
-            Err(PathSafetyError::ReservedRoute("admin/status".to_owned()))
-        );
-        for route in ["_", "_/oidc"] {
+        for route in [
+            "browse/private",
+            "admin/status",
+            "search",
+            "upload/mine",
+            "favicon.svg",
+            "_",
+            "_/oidc",
+        ] {
             assert_eq!(
                 validate_route(route),
-                Err(PathSafetyError::ReservedRoute(route.to_owned()))
+                Err(PathSafetyError::ReservedRoute(route.to_owned())),
+                "{route:?}"
             );
         }
     }

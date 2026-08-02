@@ -136,7 +136,7 @@ fn HeaderSearch() -> impl IntoView {
             if query.trim().chars().count() < 2 {
                 return Ok(Vec::new());
             }
-            load_search(query, "all".to_owned(), 1, 25)
+            load_search(query, "all".to_owned(), "all".to_owned(), 1, 25)
                 .await
                 .map(|page| page.results.into_iter().take(6).collect::<Vec<_>>())
         },
@@ -177,7 +177,7 @@ fn HeaderSearch() -> impl IntoView {
                                     view! { <Suggestion result href /> }
                                 })
                                 .collect_view()}
-                            <a class="suggestion all-results" href=search_page_url(&query, "all", 1, 25)>"All results"</a>
+                            <a class="suggestion all-results" href=search_page_url(&query, "all", "all", 1, 25)>"All results"</a>
                         </div>
                     })
             }}

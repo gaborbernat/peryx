@@ -12,25 +12,33 @@ use crate::model::UiSearchPage;
 pub async fn load_search(
     query: String,
     source_type: String,
+    availability: String,
     page: usize,
     page_size: usize,
 ) -> Result<UiSearchPage, String> {
     #[cfg(feature = "ssr")]
     {
-        crate::ssr::search(&query, &source_type, page, page_size).await
+        crate::ssr::search(&query, &source_type, &availability, page, page_size).await
     }
     #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
     {
         send_wrapper::SendWrapper::new(async move {
-            super::fetch_json_required(&crate::url::search_api_url(None, &query, &source_type, page, page_size))
-                .await
-                .map(|value| UiSearchPage::from_search(&value))
+            super::fetch_json_required(&crate::url::search_api_url(
+                None,
+                &query,
+                &source_type,
+                &availability,
+                page,
+                page_size,
+            ))
+            .await
+            .map(|value| UiSearchPage::from_search(&value))
         })
         .await
     }
     #[cfg(all(not(feature = "ssr"), not(feature = "hydrate")))]
     {
-        let _ = (query, source_type, page, page_size);
+        let _ = (query, source_type, availability, page, page_size);
         Ok(UiSearchPage::default())
     }
 }

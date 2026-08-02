@@ -28,6 +28,7 @@ impl PackageIndexer for NamedDocs {
                 index: "root".to_owned(),
                 ecosystem: "pypi".to_owned(),
                 source: PackageSource::Cached,
+                available_locally: false,
                 summary: None,
                 text: name.clone(),
             })

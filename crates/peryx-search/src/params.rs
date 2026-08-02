@@ -12,6 +12,7 @@ pub struct SearchParams {
     pub query: String,
     pub route: Option<String>,
     pub source: SourceFilter,
+    pub availability: AvailabilityFilter,
     pub page: usize,
     pub page_size: usize,
 }
@@ -22,6 +23,7 @@ impl Default for SearchParams {
             query: String::new(),
             route: None,
             source: SourceFilter::All,
+            availability: AvailabilityFilter::All,
             page: 1,
             page_size: DEFAULT_PAGE_SIZE,
         }
@@ -32,7 +34,7 @@ impl SearchParams {
     /// Parse `/+search` query parameters.
     ///
     /// # Errors
-    /// Returns an error for an unknown `type` filter.
+    /// Returns an error for an unknown `type` or `availability` filter.
     pub fn from_query(query: Option<&str>) -> Result<Self, SearchError> {
         let mut params = Self::default();
         let Some(query) = query else {
@@ -46,6 +48,13 @@ impl SearchParams {
                 "type" => {
                     params.source = SourceFilter::from_value(&value)
                         .ok_or_else(|| SearchError::InvalidSource(value.into_owned()))?;
+                }
+                "availability" if value.is_empty() || value == "all" => {
+                    params.availability = AvailabilityFilter::All;
+                }
+                "availability" => {
+                    params.availability = AvailabilityFilter::from_value(&value)
+                        .ok_or_else(|| SearchError::InvalidAvailability(value.into_owned()))?;
                 }
                 "page" => params.page = value.parse::<usize>().unwrap_or(1).max(1),
                 "page_size" => {
@@ -106,6 +115,42 @@ impl SourceFilter {
             Self::Cached => Some(PackageSource::Cached),
             Self::Override => Some(PackageSource::Override),
         }
+    }
+}
+
+/// Whether a search returns every indexed package or only the locally available ones.
+///
+/// A package is locally available when its bytes can be served from this instance's storage right now.
+/// Each ecosystem indexer decides that from stored placement metadata, so this neutral filter matches
+/// on an already-computed flag rather than probing the content store per result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AvailabilityFilter {
+    All,
+    Local,
+}
+
+impl AvailabilityFilter {
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "local" => Some(Self::Local),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Local => "local",
+        }
+    }
+
+    /// Whether the filter restricts results to locally available packages.
+    pub(super) const fn local_only(self) -> bool {
+        matches!(self, Self::Local)
     }
 }
 

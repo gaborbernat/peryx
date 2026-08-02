@@ -62,6 +62,10 @@ pub struct PackageDocument {
     /// The lowercase ecosystem identifier of the owning index (`pypi`, `oci`).
     pub ecosystem: String,
     pub source: PackageSource,
+    /// Whether at least one of this package's artifacts can be served from local storage right now,
+    /// computed by the indexer from stored placement metadata so a search filters on it without a
+    /// per-result backend probe.
+    pub available_locally: bool,
     pub summary: Option<String>,
     pub text: String,
 }

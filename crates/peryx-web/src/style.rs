@@ -154,6 +154,8 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .badge.source-uploaded { color: var(--ok); border-color: var(--ok); }
 .badge.source-cached { color: #2f81f7; border-color: #2f81f7; }
 .badge.source-override { color: #8b5cf6; border-color: #8b5cf6; }
+.badge.available-local { color: var(--ok); border-color: var(--ok); }
+.badge.available-remote { color: var(--text-soft); border-color: var(--border); }
 .badge.uploads { background: linear-gradient(115deg, var(--brand-a), var(--brand-b)); color: #fff; border: none; }
 .badge.yanked-badge { color: var(--bad); border-color: var(--bad); }
 .badge.meta-badge { color: var(--ok); border-color: var(--ok); }
@@ -280,7 +282,7 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .search-controls button { cursor: pointer; color: var(--accent); font-weight: 600; }
 .search-controls button:hover { border-color: var(--accent); }
 .result-count { color: var(--text-soft); margin: 0 0 0.6rem; }
-.search-results { min-width: 58rem; }
+.search-results { min-width: 64rem; }
 .search-results td:last-child { color: var(--text-soft); min-width: 16rem; }
 .pagination { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
 .pagination button, .policy-filters button {

@@ -1,6 +1,6 @@
 //! The OCI indexer turns stored repositories and their tags into neutral search documents.
 
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 use peryx_core::Ecosystem;
 use peryx_identity::IndexAcl;
 use peryx_index::{Index, IndexKind};
@@ -109,15 +109,19 @@ async fn test_oci_indexer_walks_a_virtual_index() {
     let (state, _app) = virtual_stack(&dir, "http://127.0.0.1:1/");
     // Seed a tag on the hosted member `images`; the virtual `reg` unions its members.
     store::put_tag(&state.meta, "images", "team/app", "1.0", DIGEST).unwrap();
+    // The manifest's bytes are local, so both the member and the virtual aggregation report it.
+    store::record_content_placement(&state.meta, DIGEST, store::OciArtifactOrigin::Pushed, true).unwrap();
 
     let documents = OciIndexer.documents(&state.indexer_ctx()).unwrap();
     // The hosted member surfaces it as uploaded, the virtual index as a cached aggregation.
     let hosted = documents.iter().find(|doc| doc.index == "images").unwrap();
     assert_eq!(hosted.source, PackageSource::Uploaded);
+    assert!(hosted.available_locally);
     let virtual_doc = documents.iter().find(|doc| doc.index == "reg").unwrap();
     assert_eq!(virtual_doc.display_name, "team/app");
     assert_eq!(virtual_doc.route, "reg");
     assert_eq!(virtual_doc.source, PackageSource::Cached);
+    assert!(virtual_doc.available_locally);
     assert!(virtual_doc.text.contains("1.0"));
 }
 
@@ -168,6 +172,35 @@ async fn test_oci_indexer_skips_non_oci_indexes() {
     // Only the OCI index yields documents; the PyPI index is skipped, not misread.
     assert!(documents.iter().all(|doc| doc.index == "store"));
     assert!(documents.iter().any(|doc| doc.display_name == "library/app"));
+}
+
+#[tokio::test]
+async fn test_oci_search_availability_filter_uses_manifest_placement() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    // A tag whose manifest was recorded but whose bytes are not held locally: remote-only.
+    store::put_tag(&state.meta, "store", "team/remote", "1.0", DIGEST).unwrap();
+    // A pushed manifest records a local placement for its canonical digest.
+    push_tag(&app, "team/local", "latest").await;
+
+    let documents = OciIndexer.documents(&state.indexer_ctx()).unwrap();
+    let remote = documents.iter().find(|doc| doc.display_name == "team/remote").unwrap();
+    let local = documents.iter().find(|doc| doc.display_name == "team/local").unwrap();
+    assert!(!remote.available_locally);
+    assert!(local.available_locally);
+
+    let response = send(&app, Method::GET, "/+search?q=team&availability=local&page_size=25").await;
+    assert_eq!(response.0, StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_slice(&response.2).unwrap();
+    assert_eq!(value["availability"], "local");
+    let names: Vec<&str> = value["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["normalized_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["team/local"]);
+    assert_eq!(value["results"][0]["available"], true);
 }
 
 async fn push_tag(app: &axum::Router, repo: &str, tag: &str) -> String {

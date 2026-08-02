@@ -68,6 +68,12 @@ pub fn package_search(scoped: bool) -> OperationBuilder {
             "`uploaded`, `cached`, or `override`; omit for all sources.",
             json!("override"),
         ))
+        .parameter(query_param(
+            "availability",
+            "`local` returns only packages whose bytes are available from local storage now; omit or \
+             `all` returns every indexed package.",
+            json!("local"),
+        ))
         .parameter(query_param("page", "One-based page number.", json!(1)))
         .parameter(query_param("page_size", "Page size: 25, 50, or 100.", json!(25)))
         .response(
@@ -77,6 +83,7 @@ pub fn package_search(scoped: bool) -> OperationBuilder {
                 json!({
                     "query": "flask",
                     "type": "all",
+                    "availability": "all",
                     "page": 1,
                     "page_size": 25,
                     "total": 1,
@@ -86,6 +93,7 @@ pub fn package_search(scoped: bool) -> OperationBuilder {
                         "route": "root/pypi",
                         "index": "root/pypi",
                         "type": "cached",
+                        "available": true,
                         "summary": "A simple framework for building complex web applications.",
                     }],
                 }),

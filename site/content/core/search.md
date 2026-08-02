@@ -1,6 +1,6 @@
 +++
 title = "Package search"
-description = "Query the derived package index over /+search: substring and regex matching, source filters, and ACL-scoped results."
+description = "Query the derived package index over /+search: substring and regex matching, source and local-availability filters, and ACL-scoped results."
 weight = 8
 +++
 
@@ -31,6 +31,8 @@ The [PyPI endpoint reference](@/ecosystems/pypi/reference/endpoints.md) lists th
 - `route`: restrict a global search to one index route. The per-index endpoint sets it for you and ignores a `route` a
   caller passes.
 - `type`: the source filter, one of `all` (the default), `uploaded`, `cached`, or `override`.
+- `availability`: the local-availability filter, either `all` (the default) or `local`. `local` returns only records
+  whose bytes this instance can serve now. An unknown value returns `400 Bad Request`.
 - `page`: the 1-based page number. A value below `1`, or one that does not parse, falls back to `1`.
 - `page_size`: results per page, one of `25` (the default), `50`, or `100`. Any other value falls back to `25`.
 
@@ -55,6 +57,20 @@ Every result carries the class of the record it matched, and `type` narrows a se
   This is the [dependency-confusion](@/core/indexes.md) case made visible: a search can show which names a private
   upload is answering in place of a public one.
 
+## Availability filter
+
+A cached index knows a name from its upstream catalog before it holds any of the distribution's bytes, and a hosted
+file's bytes can be evicted after the fact, so a searchable record and a locally servable one diverge. Each result
+carries an `available` flag, and `availability=local` keeps only the records it is true for.
+
+The flag reuses the [placement projection](@/core/artifact-source.md) the index already maintains, so the filter stays
+an indexed lookup rather than a per-result probe of the content store. Peryx computes it when it indexes a project and
+applies it before paging, so `total` and the cursors reflect the filtered set. A record counts as locally available when
+at least one of its artifacts holds verified bytes here, whether a hosted upload or a mirrored file already fetched. A
+name a cached index only learned from an upstream catalog, and never fetched, is remote-only and drops out under
+`local`. The filter changes neither policy visibility nor the source classes above; a blocked, hidden, trashed, or
+revoked artifact stays excluded either way.
+
 ## Response
 
 The response is a JSON object echoing the query and paging back, with the matched records:
@@ -64,6 +80,7 @@ The response is a JSON object echoing the query and paging back, with the matche
   "query": "flask",
   "route": "root/pypi",
   "type": "all",
+  "availability": "all",
   "page": 1,
   "page_size": 25,
   "total": 3,
@@ -76,6 +93,7 @@ The response is a JSON object echoing the query and paging back, with the matche
       "ecosystem": "pypi",
       "type_label": "package",
       "type": "cached",
+      "available": true,
       "summary": "A simple framework for building complex web applications."
     }
   ]
@@ -83,10 +101,12 @@ The response is a JSON object echoing the query and paging back, with the matche
 ```
 
 `total` is the count of every readable match, not the size of the returned page, so a client pages through it with
-`page` and `page_size`. `type_label` is the ecosystem's own word for a searchable record, filled in on the server so a
-browser renders it without an ecosystem lookup of its own. `route` is omitted when the search was not scoped to one, and
-`summary` is absent when the record carries none. Results follow a fixed order: display name, then route, then
-normalized name. Repeating a query returns the same page in the same order, and search does not rank by relevance.
+`page` and `page_size`. `type` and `availability` echo the active source and local-availability filters. `type_label` is
+the ecosystem's own word for a searchable record, filled in on the server so a browser renders it without an ecosystem
+lookup of its own. `available` is true when this instance can serve the record's bytes now. `route` is omitted when the
+search was not scoped to one, and `summary` is absent when the record carries none. Results follow a fixed order:
+display name, then route, then normalized name. Repeating a query returns the same page in the same order, and search
+does not rank by relevance.
 
 ## Access control
 

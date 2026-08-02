@@ -21,7 +21,7 @@ pub use context::{IndexerCtx, SearchCtx};
 pub use engine::{PackageSearch, RebuildOutcome, RebuildProgress, truncate_to_chars};
 pub use error::SearchError;
 pub use indexer::{EmptyIndexer, INDEXED_TEXT_BYTES, PackageDocument, PackageIndexer};
-pub use params::{PackageSource, SearchParams, SourceFilter};
+pub use params::{AvailabilityFilter, PackageSource, SearchParams, SourceFilter};
 pub use response::{SearchResponse, SearchResult};
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::params::{PackageSource, SourceFilter};
+use crate::params::{AvailabilityFilter, PackageSource, SourceFilter};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchResponse {
@@ -11,6 +11,7 @@ pub struct SearchResponse {
     pub route: Option<String>,
     #[serde(rename = "type")]
     pub source_type: SourceFilter,
+    pub availability: AvailabilityFilter,
     pub page: usize,
     pub page_size: usize,
     pub total: usize,
@@ -30,5 +31,9 @@ pub struct SearchResult {
     pub type_label: String,
     #[serde(rename = "type")]
     pub source_type: PackageSource,
+    /// Whether this package can be served from local storage right now, so a surface can flag it
+    /// without a second lookup.
+    #[serde(rename = "available")]
+    pub available_locally: bool,
     pub summary: Option<String>,
 }

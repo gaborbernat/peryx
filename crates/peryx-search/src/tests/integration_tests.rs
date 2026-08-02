@@ -5,8 +5,8 @@ use peryx_core::{Ecosystem, LexiconRegistry};
 use super::{OCI_WORDS, Stores};
 use crate::context::IndexerCtx;
 use crate::{
-    PackageDocument, PackageIndexer, PackageSearch, PackageSource, SearchAccess, SearchAccessPattern, SearchError,
-    SearchParams,
+    AvailabilityFilter, PackageDocument, PackageIndexer, PackageSearch, PackageSource, SearchAccess,
+    SearchAccessPattern, SearchError, SearchParams,
 };
 
 /// A stand-in ecosystem indexer that yields one document of a given ecosystem regardless of context.
@@ -24,6 +24,7 @@ impl PackageIndexer for OneDoc {
             index: "root".to_owned(),
             ecosystem: self.ecosystem.to_owned(),
             source: PackageSource::Cached,
+            available_locally: false,
             summary: None,
             text: self.name.to_owned(),
         }])
@@ -182,6 +183,106 @@ fn test_authorized_search_filters_before_counting_and_pagination() {
     }
 }
 
+#[test]
+fn test_from_query_parses_and_validates_the_availability_filter() {
+    for (query, expected) in [
+        (None, AvailabilityFilter::All),
+        (Some("availability=all"), AvailabilityFilter::All),
+        (Some("availability="), AvailabilityFilter::All),
+        (Some("availability=local"), AvailabilityFilter::Local),
+    ] {
+        assert_eq!(
+            SearchParams::from_query(query).unwrap().availability,
+            expected,
+            "{query:?}"
+        );
+    }
+
+    let err = SearchParams::from_query(Some("availability=maybe")).unwrap_err();
+    assert!(matches!(&err, SearchError::InvalidAvailability(value) if value == "maybe"));
+    assert!(err.is_bad_request());
+    assert_eq!(err.to_string(), "invalid availability filter \"maybe\"");
+
+    assert_eq!(AvailabilityFilter::from_value("local"), Some(AvailabilityFilter::Local));
+    assert_eq!(AvailabilityFilter::from_value("unknown"), None);
+    assert_eq!(
+        [AvailabilityFilter::All.as_str(), AvailabilityFilter::Local.as_str()],
+        ["all", "local"]
+    );
+}
+
+/// Two documents differing only in local availability, so the availability filter can be shown to
+/// keep the local one and drop the remote-only one while the response echoes the active filter.
+struct AvailabilityDocs;
+
+impl PackageIndexer for AvailabilityDocs {
+    fn documents(&self, _ctx: &IndexerCtx<'_>) -> Result<Vec<PackageDocument>, SearchError> {
+        Ok([("here", true), ("elsewhere", false)]
+            .into_iter()
+            .map(|(name, available_locally)| PackageDocument {
+                display_name: name.to_owned(),
+                normalized_name: name.to_owned(),
+                route: "root".to_owned(),
+                index: "root".to_owned(),
+                ecosystem: "pypi".to_owned(),
+                source: PackageSource::Cached,
+                available_locally,
+                summary: None,
+                text: name.to_owned(),
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn test_availability_filter_keeps_local_and_echoes_the_active_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(AvailabilityDocs));
+
+    let all = search.search(&stores.ctx(&lexicons), SearchParams::default()).unwrap();
+    assert_eq!(all.availability, AvailabilityFilter::All);
+    assert_eq!(all.total, 2);
+    assert!(
+        all.results
+            .iter()
+            .find(|result| result.display_name == "here")
+            .unwrap()
+            .available_locally
+    );
+    assert!(
+        !all.results
+            .iter()
+            .find(|result| result.display_name == "elsewhere")
+            .unwrap()
+            .available_locally
+    );
+
+    let local = search
+        .search(
+            &stores.ctx(&lexicons),
+            SearchParams {
+                availability: AvailabilityFilter::Local,
+                ..SearchParams::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(local.availability, AvailabilityFilter::Local);
+    assert_eq!(
+        (
+            local.total,
+            local
+                .results
+                .iter()
+                .map(|result| result.display_name.as_str())
+                .collect::<Vec<_>>()
+        ),
+        (1, vec!["here"])
+    );
+}
+
 struct AccessDocs;
 
 impl PackageIndexer for AccessDocs {
@@ -195,6 +296,7 @@ impl PackageIndexer for AccessDocs {
                 index: route.to_owned(),
                 ecosystem: "pypi".to_owned(),
                 source: PackageSource::Cached,
+                available_locally: false,
                 summary: None,
                 text: name.to_owned(),
             })

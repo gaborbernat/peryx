@@ -835,6 +835,51 @@ fn test_nonempty_upload_token_is_hosted() {
     ));
 }
 
+#[rstest]
+#[case::virtual_token(
+    "[[index]]\nname = \"team\"\nlayers = [\"hosted\"]\nupload = \"hosted\"\nupload_token = \"s\"\n",
+    "`upload_token` is not honored on a virtual index; set it on the hosted layer named by `upload`"
+)]
+#[case::virtual_token_file(
+    "[[index]]\nname = \"team\"\nlayers = [\"hosted\"]\nupload = \"hosted\"\nupload_token_file = \"t.txt\"\n",
+    "`upload_token` is not honored on a virtual index; set it on the hosted layer named by `upload`"
+)]
+#[case::cached_token(
+    "[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\nupload_token = \"s\"\n",
+    "`upload_token` is not honored on a cached index, which does not accept uploads"
+)]
+#[case::routed_token(
+    "[[index]]\nname = \"pypi\"\nupload_token = \"s\"\n\
+     [[index.upstream]]\nname = \"mirror\"\nurl = \"https://mirror.example/simple/\"\n",
+    "`upload_token` is not honored on a cached index, which does not accept uploads"
+)]
+fn test_upload_token_rejected_when_kind_ignores_it(#[case] text: &str, #[case] expected: &str) {
+    assert!(toml_error(text).to_string().contains(expected));
+}
+
+#[test]
+fn test_upload_target_requires_layers() {
+    assert!(
+        toml_error("[[index]]\nname = \"hosted\"\nhosted = true\nupload = \"other\"\n")
+            .to_string()
+            .contains("`upload` names the layer that receives uploads and requires `layers`")
+    );
+}
+
+#[rstest]
+#[case::layers_and_cached("[[index]]\nname = \"team\"\nlayers = [\"a\"]\ncached = \"https://pypi.org/simple/\"\n")]
+#[case::layers_and_upstreams(
+    "[[index]]\nname = \"team\"\nlayers = [\"a\"]\n\
+     [[index.upstream]]\nname = \"mirror\"\nurl = \"https://mirror.example/simple/\"\n"
+)]
+fn test_layers_excludes_cached_and_upstreams(#[case] text: &str) {
+    assert!(
+        toml_error(text)
+            .to_string()
+            .contains("`layers` and `cached`/`[[index.upstream]]` are mutually exclusive")
+    );
+}
+
 #[test]
 fn test_index_ecosystem_parses_and_defaults() {
     let c = toml_config("[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\necosystem = \"pypi\"\n");

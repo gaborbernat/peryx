@@ -515,6 +515,33 @@ fn validate_index_kind(raw: &RawIndex) -> Result<(), ConfigError> {
             reason: "`upload_token` must not be empty",
         });
     }
+    let has_upload_token = raw.upload_token.is_some() || raw.upload_token_file.is_some();
+    if has_upload_token && raw.layers.is_some() {
+        // Only the hosted branch consumes `upload_token`; a virtual index wins first and would drop
+        // the credential, leaving uploads on the target layer's ACL. Reject rather than fail open.
+        return Err(ConfigError::Index {
+            name: raw.name.clone(),
+            reason: "`upload_token` is not honored on a virtual index; set it on the hosted layer named by `upload`",
+        });
+    }
+    if has_upload_token && (raw.cached.is_some() || !raw.upstreams.is_empty()) {
+        return Err(ConfigError::Index {
+            name: raw.name.clone(),
+            reason: "`upload_token` is not honored on a cached index, which does not accept uploads",
+        });
+    }
+    if raw.upload.is_some() && raw.layers.is_none() {
+        return Err(ConfigError::Index {
+            name: raw.name.clone(),
+            reason: "`upload` names the layer that receives uploads and requires `layers`",
+        });
+    }
+    if raw.layers.is_some() && (raw.cached.is_some() || !raw.upstreams.is_empty()) {
+        return Err(ConfigError::Index {
+            name: raw.name.clone(),
+            reason: "`layers` and `cached`/`[[index.upstream]]` are mutually exclusive",
+        });
+    }
     if raw.cached.is_some() && !raw.upstreams.is_empty() {
         return Err(ConfigError::Index {
             name: raw.name.clone(),

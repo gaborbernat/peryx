@@ -235,10 +235,13 @@ impl Mirror<'_> {
             .await
             .map_err(|err| anyhow::anyhow!(String::from(err)))?;
         let digest = format!("sha256:{}", Digest::of(&bytes).as_str());
-        // A reference that is itself a digest (no tag) pins the exact bytes; if the upstream, or a proxy
+        // A by-sha256-digest reference (no tag) pins the exact bytes; if the upstream, or a proxy
         // between, returns something else, storing it under the computed digest would report `synced`
-        // while the requested manifest was never mirrored. The serving path makes the same check.
-        if tag.is_none() && reference != digest {
+        // while the requested manifest was never mirrored. A digest in another algorithm the spec
+        // permits, peryx cannot recompute, so it trusts the upstream bytes rather than reject a valid
+        // pull, the same guard the serving path keeps.
+        let sha256_mismatch = reference.starts_with("sha256:") && reference != digest;
+        if tag.is_none() && sha256_mismatch {
             rows.push(MirrorRow::error(
                 "manifest",
                 repo,

@@ -266,7 +266,7 @@ pub fn authorized(headers: &HeaderMap, expected: &str) -> bool {
         .is_some_and(|presented| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len()
         && left
             .iter()

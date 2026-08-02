@@ -9,6 +9,7 @@ mod envelope;
 mod error;
 mod http;
 mod liveness;
+mod peer;
 mod protocol;
 mod replica;
 pub mod sim;
@@ -27,6 +28,10 @@ pub use liveness::{
     DEFAULT_DEAD_AFTER, DEFAULT_MAX_HEARTBEAT_BYTES, DEFAULT_SUSPECT_AFTER, HeartbeatReport, LivenessRejection,
     LivenessTracker, PeerHealth, Suspicion, liveness_router,
 };
+pub use peer::{
+    BatchFrame, BatchRequest, DEFAULT_TRANSFER_LIMITS, FrontierSync, LoopbackPeer, LoopbackTransport, PeerFault,
+    PeerTransport, TransferLimits, TransportError, drain_to_frontier,
+};
 pub use protocol::{
     BlobReference, Change, ChangePage, MetadataMutation, PROTOCOL_VERSION, PlacementAvailability, PlacementDescriptor,
     Primary,
@@ -41,6 +46,8 @@ mod envelope_tests;
 mod http_tests;
 #[cfg(test)]
 mod liveness_tests;
+#[cfg(test)]
+mod peer_tests;
 #[cfg(test)]
 mod protocol_tests;
 #[cfg(test)]

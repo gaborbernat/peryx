@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
-use axum::routing::{any, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use axum::{Extension, Router};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
@@ -49,6 +49,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(handlers::inspect_revocation).merge(put(handlers::put_revocation)),
         )
         .route("/+revocations/{digest}/lift", post(handlers::lift_revocation))
+        .route(
+            "/+grants",
+            get(handlers::list_grants).merge(post(handlers::create_grant)),
+        )
+        .route(
+            "/+grants/{id}",
+            get(handlers::inspect_grant).merge(delete(handlers::revoke_grant)),
+        )
         .route("/+ui/projects", get(handlers::ui_projects))
         .route("/+ui/project", get(handlers::ui_project))
         .route("/+ui/manifest", get(handlers::ui_manifest))

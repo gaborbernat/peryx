@@ -1,6 +1,6 @@
 use rstest::rstest;
 
-use crate::{GrantScope, Resource, Role, RoleGrant, Scope, UserId, grants_permit};
+use crate::{GrantScope, Resource, Role, RoleGrant, Scope, UserId, can_manage_grants, grants_permit};
 
 fn repository(name: &str) -> Resource {
     Resource::Repository(name.to_owned())
@@ -272,4 +272,72 @@ fn test_role_grant_round_trips_through_json(#[case] role: Role, #[case] scope: G
     let grant = RoleGrant::new(UserId::random(), role, scope);
     let encoded = serde_json::to_string(&grant).unwrap();
     assert_eq!(serde_json::from_str::<RoleGrant>(&encoded).unwrap(), grant);
+}
+
+fn repository_reach(name: &str) -> GrantScope {
+    GrantScope::Repository { name: name.to_owned() }
+}
+
+#[rstest]
+#[case::server_admin_manages_a_repository(
+    vec![server_grant(Role::Administrator)],
+    repository_reach("team/api"),
+    true
+)]
+#[case::server_admin_manages_server_grants(vec![server_grant(Role::Administrator)], GrantScope::Server, true)]
+#[case::repository_admin_manages_its_repository(
+    vec![repository_grant(Role::Administrator, "team/api")],
+    repository_reach("team/api"),
+    true
+)]
+#[case::repository_admin_cannot_manage_a_sibling(
+    vec![repository_grant(Role::Administrator, "team/api")],
+    repository_reach("team/web"),
+    false
+)]
+#[case::repository_admin_cannot_manage_server_grants(
+    vec![repository_grant(Role::Administrator, "team/api")],
+    GrantScope::Server,
+    false
+)]
+#[case::a_publisher_manages_nothing(
+    vec![repository_grant(Role::RepositoryPublisher, "team/api")],
+    repository_reach("team/api"),
+    false
+)]
+#[case::a_server_operator_manages_nothing(vec![server_grant(Role::Operator)], GrantScope::Server, false)]
+#[case::no_grant_manages_nothing(Vec::new(), repository_reach("team/api"), false)]
+fn test_only_an_administrator_delegates_within_its_reach(
+    #[case] caller: Vec<RoleGrant>,
+    #[case] reach: GrantScope,
+    #[case] expected: bool,
+) {
+    assert_eq!(can_manage_grants(&caller, &reach), expected);
+}
+
+#[rstest]
+#[case::administrator_over_the_server(Role::Administrator, GrantScope::Server, true)]
+#[case::operator_over_the_server(Role::Operator, GrantScope::Server, true)]
+#[case::reader_over_the_server(Role::RepositoryReader, GrantScope::Server, true)]
+#[case::reader_over_a_repository(
+    Role::RepositoryReader,
+    GrantScope::Repository { name: "team/api".to_owned() },
+    true
+)]
+#[case::administrator_over_a_repository(
+    Role::Administrator,
+    GrantScope::Repository { name: "team/api".to_owned() },
+    true
+)]
+#[case::operator_over_a_repository_is_inert(
+    Role::Operator,
+    GrantScope::Repository { name: "team/api".to_owned() },
+    false
+)]
+fn test_a_binding_is_effective_only_when_it_confers_authority(
+    #[case] role: Role,
+    #[case] scope: GrantScope,
+    #[case] expected: bool,
+) {
+    assert_eq!(RoleGrant::new(UserId::random(), role, scope).is_effective(), expected);
 }

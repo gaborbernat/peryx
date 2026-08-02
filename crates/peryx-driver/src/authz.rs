@@ -14,7 +14,10 @@
 
 use peryx_events::security::{AuthorizationDenial, authorization_denied};
 use peryx_identity::{GrantScope, Resource, Role, RoleGrant, Scope, UserId, grants_permit};
-use peryx_storage::meta::{MetaError, MetaStore, RoleGrantStoreError};
+use peryx_storage::meta::{
+    CreateGrantOutcome, DeleteGrantOutcome, MetaError, MetaStore, RoleGrantPage, RoleGrantQuery, RoleGrantQueryError,
+    RoleGrantStoreError, StoredRoleGrant,
+};
 
 /// Role-based authorization over persistent server users.
 #[derive(Debug, Clone)]
@@ -94,6 +97,43 @@ impl AuthorizationService {
     /// Returns a store error when the grants cannot be read.
     pub fn grants(&self, user: &UserId) -> Result<Vec<RoleGrant>, MetaError> {
         self.store.user_role_grants(user)
+    }
+
+    /// Grant a role through the management API, recording the granter, the time, and a fresh version.
+    ///
+    /// # Errors
+    /// Returns [`RoleGrantStoreError`] for a missing or disabled user, or a store fault.
+    pub fn create_managed_grant(
+        &self,
+        grant: &RoleGrant,
+        granted_by: &UserId,
+        now: i64,
+    ) -> Result<CreateGrantOutcome, RoleGrantStoreError> {
+        self.store.create_managed_grant(grant, granted_by, now)
+    }
+
+    /// Read one managed binding by its opaque identifier.
+    ///
+    /// # Errors
+    /// Returns a store error when the record cannot be read or decoded.
+    pub fn managed_grant(&self, id: &str) -> Result<Option<StoredRoleGrant>, MetaError> {
+        self.store.managed_grant(id)
+    }
+
+    /// Conditionally revoke a managed binding, honoring the version precondition.
+    ///
+    /// # Errors
+    /// Returns a store error when the transaction cannot commit.
+    pub fn delete_managed_grant(&self, id: &str, expected_version: u64) -> Result<DeleteGrantOutcome, MetaError> {
+        self.store.delete_managed_grant(id, expected_version)
+    }
+
+    /// List managed bindings, one bounded page at a time.
+    ///
+    /// # Errors
+    /// Returns [`RoleGrantQueryError`] for an out-of-range limit or a store fault.
+    pub fn list_managed_grants(&self, query: &RoleGrantQuery) -> Result<RoleGrantPage, RoleGrantQueryError> {
+        self.store.list_managed_grants(query)
     }
 
     /// Decide whether `user` may take `scope` on `resource`, failing closed on a storage fault and

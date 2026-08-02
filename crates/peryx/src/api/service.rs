@@ -60,8 +60,27 @@ fn quota_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+/// Register the `/+grants` role-grant family, kept apart so the service path list stays short.
+fn grant_paths(paths: PathsBuilder) -> PathsBuilder {
+    paths
+        .path(
+            "/+grants",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, list_grants())
+                .operation(HttpMethod::Post, create_grant())
+                .build(),
+        )
+        .path(
+            "/+grants/{id}",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, inspect_grant())
+                .operation(HttpMethod::Delete, revoke_grant())
+                .build(),
+        )
+}
+
 pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
-    quota_paths(analytics_paths(paths))
+    grant_paths(quota_paths(analytics_paths(paths)))
         .path(
             "/+status",
             PathItemBuilder::new().operation(HttpMethod::Get, status()).build(),
@@ -1024,6 +1043,182 @@ fn quota_repository() -> OperationBuilder {
                 json!({"error": "quota service unavailable"}),
             ),
         )
+}
+
+fn grant_example() -> serde_json::Value {
+    json!({
+        "id": "rg_7573725f31322f7265706f7369746f72795f726561646572",
+        "user": "usr_550e8400e29b41d4a716446655440000",
+        "role": "repository_reader",
+        "scope": {"kind": "repository", "name": "root/pypi"},
+        "version": 1,
+        "granted_by": "usr_98b2271831d647c09a1e6f630cc48ef7",
+        "granted_at_unix": 1_800_000_000
+    })
+}
+
+fn grant_id_parameter() -> utoipa::openapi::path::Parameter {
+    ParameterBuilder::new()
+        .name("id")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Opaque, stable grant identifier from a create or list response"))
+        .example(Some(json!("rg_7573725f31322f7265706f7369746f72795f726561646572")))
+        .build()
+}
+
+fn list_grants() -> OperationBuilder {
+    let mut operation = administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("List role grants"))
+            .description(Some(
+                "Returns a bounded page of role grants in stable identifier order. A `user` filter reads one \
+                 user's grants and a `resource` filter one reach's; both need administration authority over what \
+                 they select, so a repository administrator may list its own repository but not the whole server.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .response(
+                "200",
+                api_json_response(
+                    "The matching grants and the cursor that resumes the next page",
+                    json!({"grants": [grant_example()], "next_cursor": null}),
+                ),
+            )
+            .response(
+                "403",
+                ResponseBuilder::new().description("The caller holds no administration authority over the selection"),
+            ),
+    );
+    for (name, description, example) in [
+        (
+            "user",
+            "Filter to one user's grants",
+            json!("usr_550e8400e29b41d4a716446655440000"),
+        ),
+        (
+            "resource",
+            "Filter to one reach: `server` or `repository/<name>`",
+            json!("repository/root/pypi"),
+        ),
+        (
+            "cursor",
+            "Opaque identifier from the prior page",
+            json!("rg_7573725f31322f7265706f7369746f72795f726561646572"),
+        ),
+        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
+    ] {
+        operation = operation.parameter(
+            ParameterBuilder::new()
+                .name(name)
+                .parameter_in(ParameterIn::Query)
+                .description(Some(description))
+                .example(Some(example)),
+        );
+    }
+    operation.response(
+        "400",
+        api_json_response(
+            "A filter or limit is invalid",
+            json!({"error": "invalid resource filter"}),
+        ),
+    )
+}
+
+fn create_grant() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Grant a role to a user"))
+            .description(Some(
+                "Binds a user to a fixed role over a reach. Idempotent: re-asserting an existing binding refreshes \
+                 its audit fields and advances its version rather than conflicting. The caller may bind only a reach \
+                 it administers and never one it lacks, so a grant cannot escalate the caller's own authority. The \
+                 response carries the binding, an `ETag` a later revoke matches against, and a `Location`.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .request_body(Some(
+                RequestBodyBuilder::new()
+                    .required(Some(Required::True))
+                    .content(
+                        "application/json",
+                        ContentBuilder::new()
+                            .example(Some(json!({
+                                "user": "usr_550e8400e29b41d4a716446655440000",
+                                "role": "repository_reader",
+                                "scope": {"kind": "repository", "name": "root/pypi"}
+                            })))
+                            .build(),
+                    )
+                    .build(),
+            ))
+            .response("200", api_json_response("The re-asserted binding", grant_example()))
+            .response("201", api_json_response("The newly created binding", grant_example()))
+            .response(
+                "403",
+                ResponseBuilder::new().description("The caller cannot administer the target reach"),
+            )
+            .response("415", ResponseBuilder::new().description("The request is not JSON"))
+            .response(
+                "422",
+                api_json_response(
+                    "The body is invalid, the user is unknown or disabled, or the role does not apply to the scope",
+                    json!({"error": "user does not exist"}),
+                ),
+            ),
+    )
+}
+
+fn inspect_grant() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Inspect a role grant"))
+            .description(Some(
+                "Returns one binding and the `ETag` that its revocation precondition matches. A caller that cannot \
+                 administer the binding's reach cannot tell it apart from one that does not exist.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .parameter(grant_id_parameter())
+            .response("200", api_json_response("The current binding", grant_example())),
+    )
+}
+
+fn revoke_grant() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Revoke a role grant"))
+            .description(Some(
+                "Removes a binding, conditional on an `If-Match` naming the version the caller observed. A revoke \
+                 that raced a re-assertion fails the precondition rather than dropping the newer grant. The removal \
+                 is reflected by the next authorization decision without a restart.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .parameter(grant_id_parameter())
+            .response("204", ResponseBuilder::new().description("The binding was removed"))
+            .response(
+                "400",
+                api_json_response(
+                    "The `If-Match` precondition is malformed",
+                    json!({"error": "invalid If-Match precondition"}),
+                ),
+            )
+            .response(
+                "412",
+                api_json_response(
+                    "The binding is at a different version than the precondition named",
+                    json!({"error": "grant version precondition failed"}),
+                ),
+            )
+            .response(
+                "428",
+                api_json_response(
+                    "The request carried no `If-Match` precondition",
+                    json!({"error": "revocation requires an If-Match precondition"}),
+                ),
+            ),
+    )
 }
 
 fn retention_request_body() -> utoipa::openapi::request_body::RequestBody {

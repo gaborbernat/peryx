@@ -2,8 +2,10 @@
 //! clock supplied.
 
 use bytes::Bytes;
+use peryx_storage::meta::MetaError;
 
 use super::app::ServingState;
+use super::derived_views::{REQUIRED_VIEWS, ReadableFrontier, readable_frontier as compute_readable_frontier};
 
 impl ServingState {
     /// A hot-cache entry that is still within its freshness window; expired entries miss.
@@ -44,5 +46,17 @@ impl ServingState {
     /// Preserve rendered page caches across `OCI` tag mutations.
     pub fn bump_search_epoch(&self) {
         self.search.bump_epoch();
+    }
+
+    /// The highest metadata serial a replica may expose and the view holding it back, from the
+    /// authoritative serial and every required view's durable frontier. Metadata above it stays
+    /// hidden until the lagging view catches up, so a read never mixes new metadata with a stale view.
+    ///
+    /// # Errors
+    /// Returns a store error if either read fails.
+    pub fn readable_frontier(&self) -> Result<ReadableFrontier, MetaError> {
+        let authority = self.meta.current_serial()?;
+        let frontiers = self.meta.view_frontiers()?;
+        Ok(compute_readable_frontier(authority, &frontiers, REQUIRED_VIEWS))
     }
 }

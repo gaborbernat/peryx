@@ -55,6 +55,7 @@ struct ReplicaObservation {
     changes: u64,
     blobs: u64,
     errors: u64,
+    readable_serial: u64,
 }
 
 struct ReplicaMonitor {
@@ -72,6 +73,7 @@ impl ReplicaMonitor {
                 changes: 0,
                 blobs: 0,
                 errors: 0,
+                readable_serial: 0,
             }),
         }
     }
@@ -95,6 +97,17 @@ impl ReplicaMonitor {
         observation.blobs = observation
             .blobs
             .saturating_add(u64::try_from(outcome.blobs).unwrap_or(u64::MAX));
+    }
+
+    /// Record the serial a reader may safely serve, the lowest frontier every required derived view
+    /// has applied. It trails the committed serial while the search index catches up, so a scrape
+    /// shows how far derived views lag the applied metadata.
+    fn record_readable(&self, serial: u64) {
+        let mut observation = self
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        observation.readable_serial = serial;
     }
 
     fn record_error(&self, error: &SyncError) {
@@ -160,6 +173,13 @@ impl PrometheusSource for ReplicaMonitor {
              # TYPE peryx_replication_sync_errors_total counter\n\
              peryx_replication_sync_errors_total {}\n",
             observation.serial, observation.changes, observation.blobs, observation.errors
+        );
+        let _ = write!(
+            body,
+            "# HELP peryx_replication_readable_serial Highest serial every required derived view has applied.\n\
+             # TYPE peryx_replication_readable_serial gauge\n\
+             peryx_replication_readable_serial {}\n",
+            observation.readable_serial
         );
         if let Some(primary_serial) = observation.primary_serial {
             let _ = write!(
@@ -317,6 +337,7 @@ fn availability_response(status: StatusCode, body: serde_json::Map<String, Value
 }
 
 struct ReplicaLoop {
+    app: Arc<AppState>,
     primary: HttpPrimary,
     meta: MetaStore,
     blobs: BlobStorage,
@@ -355,8 +376,11 @@ impl ReplicaLoop {
             Ok(outcome) => {
                 if outcome.changes > 0 {
                     log_replica_page(outcome);
+                    self.app.bump_search_epoch();
                 }
                 self.monitor.record(outcome);
+                let readable = self.app.readable_frontier().map_or(0, |frontier| frontier.serial);
+                self.monitor.record_readable(readable);
                 self.metrics.record_cycle(outcome, elapsed);
                 outcome.caught_up()
             }
@@ -463,6 +487,7 @@ impl ReplicationRuntime {
                 (
                     None,
                     Some(ReplicaLoop {
+                        app: state.clone(),
                         primary,
                         meta: state.serving.meta.clone(),
                         blobs: state.serving.blobs.clone(),

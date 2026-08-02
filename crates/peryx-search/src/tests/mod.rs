@@ -2,6 +2,7 @@
 //! rather than replacing the first.
 
 mod engine_tests;
+mod frontier_tests;
 mod integration_tests;
 
 use peryx_core::{Lexicon, LexiconRegistry};

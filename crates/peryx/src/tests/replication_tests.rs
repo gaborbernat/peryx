@@ -463,6 +463,9 @@ async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
     let (_, body) = get(&router, "/metrics").await;
     let body = String::from_utf8(body).unwrap();
     assert!(body.contains("peryx_replication_lag 0\n"), "{body}");
+    // Caught up to the primary at serial 3, yet readability holds at 0: applying the metadata
+    // invalidated the search view, so no read is served ahead of it until the index refreshes.
+    assert!(body.contains("peryx_replication_readable_serial 0\n"), "{body}");
     assert!(body.contains("peryx_availability_pending_serials 0\n"), "{body}");
     assert!(body.contains("peryx_availability_sync_cycles_total 2\n"), "{body}");
 }

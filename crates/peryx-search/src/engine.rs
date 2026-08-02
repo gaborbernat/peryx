@@ -15,6 +15,7 @@ use tantivy::schema::{FAST, Field, IndexRecordOption, STORED, STRING, Schema, Te
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer, TokenizerManager};
 use tantivy::{Index as TantivyIndex, IndexReader, Order, Term};
 
+use crate::SEARCH_VIEW;
 use crate::access::{SearchAccess, SearchAccessPattern};
 use crate::context::{IndexerCtx, SearchCtx};
 use crate::error::SearchError;
@@ -168,6 +169,7 @@ impl PackageSearch {
     ) -> Result<RebuildOutcome, SearchError> {
         let _guard = self.rebuild_lock.lock().expect("search rebuild lock");
         let epoch = self.epoch.load(Ordering::Relaxed);
+        let frontier = ctx.meta.current_serial()?;
         let documents = self.indexer.documents(ctx)?;
         let total = documents.len() as u64;
         self.mark_rebuilding()?;
@@ -196,6 +198,7 @@ impl PackageSearch {
         self.reader.reload()?;
         self.clear_rebuilding();
         *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
+        ctx.meta.set_view_frontier(SEARCH_VIEW, frontier)?;
         Ok(RebuildOutcome::Published {
             documents: indexed,
             commits,
@@ -290,8 +293,10 @@ impl PackageSearch {
             .expect("search epoch lock")
             .is_none_or(|indexed| indexed != epoch)
         {
+            let frontier = ctx.indexer.meta.current_serial()?;
             self.write(&self.indexer.documents(&ctx.indexer)?)?;
             *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
+            ctx.indexer.meta.set_view_frontier(SEARCH_VIEW, frontier)?;
         }
         Ok(())
     }

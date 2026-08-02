@@ -168,6 +168,12 @@ impl AppState {
         self.serving_mut().availability_topology = topology;
     }
 
+    /// Install the authority role the binary resolved from the configured replication role, so the
+    /// topology snapshot reports a configured primary as the writer even when it serves read-only.
+    pub fn set_availability_role(&mut self, role: peryx_core::NodeRole) {
+        self.serving_mut().availability_role = role;
+    }
+
     /// Install named LDAP login services after their secrets and trust files resolve at startup.
     pub fn set_ldap_logins(
         &mut self,

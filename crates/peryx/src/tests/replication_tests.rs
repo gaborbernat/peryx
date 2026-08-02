@@ -132,6 +132,42 @@ async fn test_build_state_projects_the_configured_dc_topology() {
     assert_eq!(topology.members[0].address, "10.0.0.1:8080");
 }
 
+#[tokio::test]
+async fn test_build_state_derives_the_writer_role_for_a_read_only_primary() {
+    let dir = tempfile::tempdir().unwrap();
+    MetaStore::open(dir.path().join("peryx.redb"))
+        .unwrap()
+        .claim_writer_identity(WRITER_IDENTITY)
+        .unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        writer_identity: Some(WRITER_IDENTITY.to_owned()),
+        availability: AvailabilityConfig::Dc(primary_config()),
+        read_only: true,
+        ..Config::default()
+    };
+
+    let state = build_state(&config).unwrap();
+
+    assert!(state.read_only, "the primary is configured read-only");
+    assert_eq!(
+        state.availability_role(),
+        peryx_core::NodeRole::Writer,
+        "a read-only primary holds write authority, so the topology self-role agrees with the \
+         listener and replication surfaces that read it as the writer",
+    );
+}
+
+#[tokio::test]
+async fn test_build_state_derives_the_replica_role_for_a_configured_replica() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, Some(replica_config("http://primary-a/", 16)));
+
+    let state = build_state(&config).unwrap();
+
+    assert_eq!(state.availability_role(), peryx_core::NodeRole::Replica);
+}
+
 fn primary_stores() -> (tempfile::TempDir, MetaStore, BlobStore) {
     let dir = tempfile::tempdir().unwrap();
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();

@@ -165,6 +165,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let oidc_logins = oidc_logins(&config.auth.oidc_providers, &state.meta)?;
     state.set_oidc_logins(oidc_logins);
     state.read_only = read_only;
+    state.set_availability_role(availability_role(config));
     state.set_availability_topology(availability_topology(config, read_only));
     if let Some(source) = &config.auth.signing_key {
         let key = source.read().context("read the token realm signing key")?;
@@ -183,6 +184,18 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         peryx_events::webhook::kick(state.serving.clone());
     }
     Ok(state)
+}
+
+/// The authority role this node holds, from its configured replication role rather than its read-only
+/// posture. A configured primary writes even when it serves read-only, and a `none` node is a lone
+/// writer, so only a configured replica reports [`Replica`](peryx_core::NodeRole::Replica). This keeps
+/// the topology snapshot's self-role aligned with the replication and control surfaces, which read the
+/// same configured role.
+const fn availability_role(config: &Config) -> peryx_core::NodeRole {
+    match config.availability.replication() {
+        Some(ReplicationConfig::Replica { .. }) => peryx_core::NodeRole::Replica,
+        Some(ReplicationConfig::Primary { .. }) | None => peryx_core::NodeRole::Writer,
+    }
 }
 
 /// Project the resolved configuration into the fixed availability topology the snapshot endpoint serves.

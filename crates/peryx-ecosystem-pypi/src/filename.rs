@@ -103,6 +103,35 @@ pub fn distribution_version_segment(filename: &str) -> Option<&str> {
     None
 }
 
+/// The project-name segment of a distribution filename, or `None` when the filename carries no
+/// recognizable name/version boundary.
+///
+/// The name-side counterpart of [`distribution_version_segment`], split at the same boundary. An
+/// sdist name may itself contain `-`, so for an archive suffix the name is everything before the
+/// *last* `-`: splitting `python-dateutil-2.8.2.tar.gz` on the first `-` misreads its project as
+/// `python`. A wheel or egg escapes its project name, so its name is the component before the first
+/// `-`. Any other filename yields `None`.
+#[must_use]
+pub fn distribution_name_segment(filename: &str) -> Option<&str> {
+    for suffix in SDIST_ARCHIVE_SUFFIXES {
+        if let Some(stem) = strip_ascii_suffix_ignore_case(filename, suffix) {
+            return stem
+                .rsplit_once('-')
+                .map(|(name, _version)| name)
+                .filter(|name| !name.is_empty());
+        }
+    }
+    for suffix in [".whl", ".egg"] {
+        if let Some(stem) = strip_ascii_suffix_ignore_case(filename, suffix) {
+            return stem
+                .split_once('-')
+                .map(|(name, _rest)| name)
+                .filter(|name| !name.is_empty());
+        }
+    }
+    None
+}
+
 fn parse_wheel_filename(stem: &str) -> Result<DistributionFilename, DistributionFilenameError> {
     let parts: Vec<&str> = stem.split('-').collect();
     let [name, version, python, abi, platform] = parts.as_slice() else {

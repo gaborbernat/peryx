@@ -79,8 +79,8 @@ pub use changelog::{
     parse_changelog_request, render_changelog_fault, render_changelog_response, render_last_serial_response,
 };
 pub use filename::{
-    DistributionFilename, DistributionFilenameError, DistributionKind, distribution_version_segment,
-    parse_distribution_filename,
+    DistributionFilename, DistributionFilenameError, DistributionKind, distribution_name_segment,
+    distribution_version_segment, parse_distribution_filename,
 };
 pub use html::{parse_detail_html, parse_index_html};
 pub use legacy_json::render_legacy_json;

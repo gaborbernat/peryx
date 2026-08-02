@@ -48,11 +48,18 @@ fn is_normalized(name: &str) -> bool {
     true
 }
 
-/// The project a distribution filename belongs to: the escaped name before the first `-`, normalized
-/// per PEP 503. Used to key usage aggregation by project when only the filename is at hand.
+/// The project a distribution filename belongs to, normalized per PEP 503. Used to key usage
+/// aggregation by project when only the filename is at hand.
+///
+/// The name is read with [`distribution_name_segment`], which puts the name/version boundary at the
+/// last `-` for an sdist archive and the first `-` for a wheel, so a hyphenated legacy sdist like
+/// `python-dateutil-2.8.2.tar.gz` keys `python-dateutil` rather than `python`. A filename with no
+/// recognized extension falls back to the segment before the first `-`.
 #[must_use]
 pub fn project_of_filename(filename: &str) -> String {
-    normalize_name(filename.split('-').next().unwrap_or(filename))
+    let segment =
+        super::distribution_name_segment(filename).unwrap_or_else(|| filename.split('-').next().unwrap_or(filename));
+    normalize_name(segment)
 }
 
 /// Whether `name` matches the `PyPA` project-name grammar before normalization.

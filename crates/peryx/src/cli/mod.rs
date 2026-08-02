@@ -223,6 +223,7 @@ impl RuntimeArgs {
             rate_limit: PartialRateLimitConfig::default(),
             auth: PartialAuthConfig::default(),
             availability: None,
+            legacy_replication: None,
             jobs: PartialJobsConfig::default(),
             blob: None,
         }

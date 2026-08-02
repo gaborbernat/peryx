@@ -52,6 +52,7 @@ pub fn from_env_source(get: impl Fn(&str) -> Option<String>) -> Result<PartialCo
         rate_limit: PartialRateLimitConfig::default(),
         auth: PartialAuthConfig::default(),
         availability: None,
+        legacy_replication: None,
         jobs: PartialJobsConfig::default(),
         blob: None,
     })

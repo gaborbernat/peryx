@@ -9,6 +9,7 @@ mod external_identity_tests;
 mod integration_tests;
 mod job_tests;
 mod journal_tests;
+mod placement_tests;
 mod policy_decision_tests;
 mod quota_tests;
 mod replica_tests;

@@ -19,8 +19,9 @@ your own schedule.
 
 `backup create` writes a directory with four parts:
 
-- `manifest.json`: the format version, a creation timestamp, and the SHA-256 and byte size of every other file. It is
-  the root of trust the verifier checks everything against.
+- `manifest.json`: the format version, a creation timestamp, the SHA-256 and byte size of every other file, and the
+  [availability recovery point](#availability-state) the copy belongs to. It is the root of trust the verifier checks
+  everything against.
 - `config.toml`: an effective configuration snapshot, the merged result of the config file and any runtime overrides
   rather than a copy of the source file. Restoring it reproduces the settings the node ran with.
 - `metadata/peryx.redb`: a copy of the metadata store.
@@ -36,6 +37,32 @@ The configuration snapshot never contains a secret. It records S3 credentials, u
 webhook secrets sourced from the environment as references (the path or environment variable name), not values. Even so,
 the snapshot names your indexes, upstreams, and routes, so treat a backup directory as sensitive and store it with the
 same care as the node.
+
+## Availability state
+
+A backup is one coherent recovery point, and the manifest names which one. `metadata_frontier` records the metadata
+store's control-plane serial at the instant the copy was taken: the store advances it on every committed write, so the
+number is the recovery point's identity. `placements` records how many artifacts the store projects a local or remote
+availability for, sizing the availability state the metadata carries. `mode` records whether the node ran in `none`,
+`dc`, or `ha`, and when a static datacenter roster is configured, `membership` records its group and every member's
+node, datacenter, address, and role. The configuration snapshot omits that roster, so the manifest is the backup's only
+durable record of the topology the recovery point belongs to.
+
+`backup create` reads the frontier and placement count from the copied metadata store, not the live one, so both
+describe exactly the bytes the backup holds rather than a moving target. That is what makes the recovery point coherent:
+the metadata copy, the frontier that names it, and the placement count that sizes it all come from the same snapshot.
+
+`backup verify` re-derives the frontier and placement count from the copied store and rejects a manifest that disagrees,
+which catches a metadata file swapped for one taken at a different point or edited after the fact. It also rejects a
+roster the runtime could never consume: an empty group or member set, a duplicated node, datacenter, or address, or a
+member count of writers other than one. A `dc` or `ha` backup and a `none` backup verify the same way; the availability
+block is present in every format-2 manifest, empty of a roster when none was configured.
+
+The recovery point objective is the frontier: a restore rebuilds the node as of that serial and loses any write that
+landed after the copy, so size the backup interval to how much recent state you can afford to replay from upstream or
+re-publish. Because the copy is offline, take it against a quiescent writer or a `read_only` node as
+[above](#create-a-backup), so the frontier the manifest records matches a metadata file that is not still moving under
+it.
 
 ## Create a backup
 
@@ -69,7 +96,8 @@ ok
 Verification rehashes the config snapshot and the blob index against the manifest, rehashes every blob against its own
 digest, and confirms the recorded blob count and total bytes match what the index lists. It then opens the copied
 metadata store and checks that every digest the metadata references is present in the backup, the property that makes a
-restore complete rather than dangling. Any mismatch prints a `problem` line naming the file and the discrepancy, and the
+restore complete rather than dangling, and confirms the [availability recovery point](#availability-state) the manifest
+records still matches the store. Any mismatch prints a `problem` line naming the file and the discrepancy, and the
 command exits non-zero:
 
 ```console

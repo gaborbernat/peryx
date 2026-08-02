@@ -94,3 +94,25 @@ pub(super) fn blob_relpath(digest: &Digest) -> String {
     let hex = digest.as_str();
     format!("blobs/sha256/{}/{}/{}", &hex[0..2], &hex[2..4], hex)
 }
+
+/// A report sink that fails the write carrying `needle` and records everything written up to it, so a
+/// test can drive one report line's `?` error path and assert which line was being emitted.
+#[derive(Default)]
+pub(super) struct FailOnLine {
+    pub(super) needle: &'static str,
+    pub(super) seen: String,
+}
+
+impl std::io::Write for FailOnLine {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.seen.push_str(&String::from_utf8_lossy(buf));
+        if self.seen.contains(self.needle) {
+            return Err(std::io::Error::other("report sink closed"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

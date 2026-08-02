@@ -5,6 +5,7 @@
 //! copied journal entries, and its resume cursor in one transaction.
 
 mod consensus;
+mod election;
 mod envelope;
 mod error;
 mod http;
@@ -18,6 +19,7 @@ pub use consensus::{
     AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
     RaftLogError, Term,
 };
+pub use election::{ElectionError, NodeId, PersistentState, VoteDecision, VoteReason, VoteRequest};
 pub use envelope::{
     AuthorityEpoch, CURRENT_SCHEMA_VERSION, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, MIN_SCHEMA_VERSION,
     OperationEnvelope, OperationId, OperationKind, SUPPORTED_SCHEMA_VERSIONS, SchemaVersion, TraceContext,
@@ -40,6 +42,8 @@ pub use replica::{Replica, ReplicaState, SyncOutcome};
 
 #[cfg(test)]
 mod consensus_tests;
+#[cfg(test)]
+mod election_tests;
 #[cfg(test)]
 mod envelope_tests;
 #[cfg(test)]

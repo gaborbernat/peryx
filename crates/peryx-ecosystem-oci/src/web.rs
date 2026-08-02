@@ -18,7 +18,7 @@ fn manifest_from_json(value: &serde_json::Value) -> UiManifest {
     let media_type = string_at(value, "mediaType");
     if let Some(children) = value["manifests"].as_array() {
         let entries: Vec<UiArtifactRef> = children.iter().map(artifact_ref).collect();
-        let total_size = entries.iter().map(|entry| entry.size).sum();
+        let total_size = saturating_total(entries.iter().map(|entry| entry.size));
         return UiManifest {
             media_type,
             is_index: true,
@@ -34,7 +34,13 @@ fn manifest_from_json(value: &serde_json::Value) -> UiManifest {
         .flatten()
         .map(artifact_ref)
         .collect();
-    let total_size = config.as_ref().map_or(0, |blob| blob.size) + entries.iter().map(|entry| entry.size).sum::<u64>();
+    let total_size = saturating_total(
+        config
+            .as_ref()
+            .map(|blob| blob.size)
+            .into_iter()
+            .chain(entries.iter().map(|entry| entry.size)),
+    );
     UiManifest {
         media_type,
         is_index: false,
@@ -42,6 +48,13 @@ fn manifest_from_json(value: &serde_json::Value) -> UiManifest {
         entries,
         total_size,
     }
+}
+
+/// Sum descriptor sizes for the view total. The sizes come from an untrusted manifest, so a document
+/// whose declared sizes total past `u64::MAX` saturates here. A plain sum would wrap and misreport the
+/// total, and it would panic the render under the overflow checks the dev and test profiles enable.
+fn saturating_total(sizes: impl Iterator<Item = u64>) -> u64 {
+    sizes.fold(0, u64::saturating_add)
 }
 
 /// One referenced blob or child manifest as a neutral view item. `browsable` is decided here — a tar
@@ -101,7 +114,9 @@ fn string_at(value: &serde_json::Value, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::members_from_bytes;
+    use rstest::rstest;
+
+    use super::{manifest_from_bytes, members_from_bytes};
 
     #[test]
     fn test_members_from_bytes_parses_a_listing() {
@@ -118,6 +133,28 @@ mod tests {
 
     #[test]
     fn test_manifest_from_bytes_rejects_invalid_json() {
-        assert!(super::manifest_from_bytes(b"not json").is_err());
+        assert!(manifest_from_bytes(b"not json").is_err());
+    }
+
+    #[rstest]
+    #[case::image(br#"{"config":{"size":10},"layers":[{"size":3},{"size":4}]}"#, false, 17)]
+    #[case::index(br#"{"manifests":[{"size":5},{"size":6}]}"#, true, 11)]
+    #[case::image_saturates(
+        br#"{"config":{"size":18446744073709551615},"layers":[{"size":1}]}"#,
+        false,
+        u64::MAX
+    )]
+    #[case::index_saturates(
+        br#"{"manifests":[{"size":18446744073709551615},{"size":18446744073709551615}]}"#,
+        true,
+        u64::MAX
+    )]
+    fn test_manifest_from_bytes_totals_sizes_and_saturates_overflow(
+        #[case] bytes: &[u8],
+        #[case] is_index: bool,
+        #[case] total_size: u64,
+    ) {
+        let manifest = manifest_from_bytes(bytes).unwrap();
+        assert_eq!((manifest.is_index, manifest.total_size), (is_index, total_size));
     }
 }

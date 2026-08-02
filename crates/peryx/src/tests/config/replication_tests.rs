@@ -108,6 +108,10 @@ fn test_legacy_replication_primary_migrates_to_dc() {
             token: SecretSource::File(PathBuf::from("/run/secrets/replica")),
         })
     );
+    assert!(
+        config.availability_listener.is_none(),
+        "legacy config has no control listener"
+    );
 }
 
 #[test]

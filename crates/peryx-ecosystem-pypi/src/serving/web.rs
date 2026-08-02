@@ -4,10 +4,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use peryx_core::{UiAvailability, UiMeta, UiProject};
+use peryx_core::{UiArtifactSource, UiByteAvailability, UiMeta, UiProject};
 use peryx_driver::ServingState;
 use peryx_index::{Index, IndexKind};
 use peryx_storage::blob::{BlobLease, Digest};
+use peryx_storage::meta::{ArtifactSource, ByteAvailability};
 
 use crate::cache::{self, CacheError};
 use crate::store::PypiStore as _;
@@ -45,7 +46,7 @@ pub(super) async fn project_page(
     // `to_json` serializes the detail, so parsing it straight back cannot fail.
     let value = serde_json::from_str(&to_json(&detail)).expect("to_json emits JSON that round-trips");
     let mut ui = ui_project_from_detail(&value);
-    apply_availability(&state, &hosted, &mut ui).await?;
+    apply_placement(&state, &hosted, &mut ui);
     let default = default_version(&ui);
     // A pre-PEP 700 upstream names no versions, so no release owns a file and the newest sibling stands in.
     let sibling = match default.as_deref() {
@@ -100,41 +101,67 @@ fn collect_hosted_filenames(
     Ok(())
 }
 
-/// Mark each file with where its artifact lives: `Hosted` when a hosted layer published it, `Cached`
-/// when the blob is in local storage, else `RemoteOnly`. This is the axis the page badges and its
-/// `Local only` filter cut on. Hosted outranks cached because a hosted upload shadows a same-named
-/// upstream file, the dependency-confusion order [`cache::resolve_detail`] merged the page by.
-async fn apply_availability(state: &ServingState, hosted: &BTreeSet<String>, ui: &mut UiProject) -> Result<(), String> {
-    let present = match state
-        .blobs
-        .present(
-            ui.files
-                .iter()
-                .filter_map(|file| Digest::from_hex(&file.sha256))
-                .collect(),
-        )
-        .await
-    {
-        Ok(present) => present,
-        Err(error) => return Err(format!("blob availability: {error}")),
-    };
+/// Resolve each file's #441 placement (its source and its projected byte availability) from one
+/// indexed lookup per file, without probing the content store. A hosted upload shadows a same-named
+/// upstream file, the dependency-confusion order [`cache::resolve_detail`] merged the page by, so
+/// hosted-layer membership forces the `Hosted` source over any stale proxied placement.
+///
+/// The availability comes straight from the stored projection, which a repair pass keeps in step with
+/// the content store; a listing therefore never reads a blob per row. A file the placement store has
+/// not recorded — an upstream catalog entry never fetched — stays proxied and remote-only. A store
+/// read that fails falls back to that same default: the page was built from earlier reads of the same
+/// store, so a failure here is a torn database the caller cannot recover a truer answer from.
+fn apply_placement(state: &ServingState, hosted: &BTreeSet<String>, ui: &mut UiProject) {
     for file in &mut ui.files {
-        let hosted = hosted.contains(&file.filename);
-        let source = if hosted {
+        let is_hosted = hosted.contains(&file.filename);
+        file.upstream = if is_hosted {
             None
         } else {
-            state.meta.get_file_url(&file.sha256).ok().flatten()
+            state
+                .meta
+                .get_file_url(&file.sha256)
+                .ok()
+                .flatten()
+                .and_then(|source| source.upstream)
         };
-        file.upstream = source.as_ref().and_then(|source| source.upstream.clone());
-        file.availability = if hosted {
-            UiAvailability::Hosted
-        } else if Digest::from_hex(&file.sha256).is_some_and(|digest| present.contains(&digest)) {
-            UiAvailability::Cached
+        let placement = state.meta.get_artifact_placement(&file.sha256).ok().flatten();
+        if is_hosted {
+            file.source = UiArtifactSource::Hosted;
+            // The upload is authoritative and its bytes are local. Only a hosted-source placement,
+            // which the upload path records and eviction or repair can move, marks it unavailable; a
+            // stale proxied row left by a same-digest mirror is ignored.
+            file.availability = match placement {
+                Some(placement) if matches!(placement.source, ArtifactSource::Hosted) => {
+                    ui_availability(placement.availability)
+                }
+                _ => UiByteAvailability::Local,
+            };
+        } else if let Some(placement) = placement {
+            file.source = ui_source(placement.source);
+            file.availability = ui_availability(placement.availability);
         } else {
-            UiAvailability::RemoteOnly
-        };
+            file.source = UiArtifactSource::Proxy;
+            file.availability = UiByteAvailability::RemoteOnly;
+        }
     }
-    Ok(())
+}
+
+/// Map the neutral storage source onto its view-model twin.
+const fn ui_source(source: ArtifactSource) -> UiArtifactSource {
+    match source {
+        ArtifactSource::Hosted => UiArtifactSource::Hosted,
+        ArtifactSource::Proxy => UiArtifactSource::Proxy,
+        ArtifactSource::Generated => UiArtifactSource::Generated,
+    }
+}
+
+/// Map the neutral storage availability projection onto its view-model twin.
+const fn ui_availability(availability: ByteAvailability) -> UiByteAvailability {
+    match availability {
+        ByteAvailability::Local => UiByteAvailability::Local,
+        ByteAvailability::RemoteOnly => UiByteAvailability::RemoteOnly,
+        ByteAvailability::Unavailable => UiByteAvailability::Unavailable,
+    }
 }
 
 /// The release the project page defaults to. An active release (one the publisher has not yanked

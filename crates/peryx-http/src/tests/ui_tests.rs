@@ -11,7 +11,10 @@ use tower::ServiceExt as _;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use peryx_core::{Ecosystem, UiBlock, UiManifest, UiMember, UiMemberChunk, UiMeta, UiProject, UiProjectView};
+use peryx_core::{
+    Ecosystem, UiArtifactSource, UiBlock, UiByteAvailability, UiFile, UiManifest, UiMember, UiMemberChunk, UiMeta,
+    UiProject, UiProjectView,
+};
 use peryx_driver::state::{AppState, Index, IndexKind, ServingState};
 use peryx_driver::users::UserService;
 use peryx_identity::{GrantScope, IndexAcl, PasswordPolicy, Role};
@@ -57,6 +60,21 @@ impl peryx_driver::serving::EcosystemDriver for UiStub {
         match project.as_str() {
             "boom" => Err("project unreadable".to_owned()),
             "missing" => Ok(None),
+            "placement" => Ok(Some(UiProjectView::Files {
+                project: UiProject {
+                    name: "placement".to_owned(),
+                    files: vec![
+                        placement_file("held-1.0.whl", UiArtifactSource::Hosted, UiByteAvailability::Local),
+                        placement_file(
+                            "cached-1.0.whl",
+                            UiArtifactSource::Proxy,
+                            UiByteAvailability::RemoteOnly,
+                        ),
+                    ],
+                    ..UiProject::default()
+                },
+                meta: UiMeta::default(),
+            })),
             "contacts" => Ok(Some(UiProjectView::Files {
                 project: UiProject {
                     name: "contacts".to_owned(),
@@ -129,6 +147,24 @@ impl peryx_driver::serving::EcosystemDriver for UiStub {
             text: "hello".to_owned(),
             ..UiMemberChunk::default()
         })
+    }
+}
+
+fn placement_file(filename: &str, source: UiArtifactSource, availability: UiByteAvailability) -> UiFile {
+    UiFile {
+        filename: filename.to_owned(),
+        release: Some("1.0".to_owned()),
+        url: format!("/good/files/aa/{filename}"),
+        sha256: "aa".repeat(32),
+        size: None,
+        upload_time: None,
+        yanked: false,
+        yanked_reason: None,
+        has_metadata: false,
+        upstream: None,
+        provenance: None,
+        source,
+        availability,
     }
 }
 
@@ -449,6 +485,19 @@ async fn test_ui_project_page_exposes_contact_names_and_addresses_separately() {
             {"kind": "KeyValue", "label": "Maintainer Email", "value": "joe@example.test"},
         ])
     );
+}
+
+#[tokio::test]
+async fn test_ui_project_page_exposes_each_files_source_and_availability() {
+    let (_dir, app) = ui_app();
+    let (status, document) = get_json(&app, "/+ui/project?index=good&project=placement").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(document["kind"], "files");
+    let files = &document["project"]["files"];
+    assert_eq!(files[0]["source"], "hosted");
+    assert_eq!(files[0]["availability"], "local");
+    assert_eq!(files[1]["source"], "proxy");
+    assert_eq!(files[1]["availability"], "remote_only");
 }
 
 #[tokio::test]

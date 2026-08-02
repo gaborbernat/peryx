@@ -106,10 +106,11 @@ stores the last selected size for the next search.
 An index card links to its project list, filterable as you type. For a PyPI index, a project page shows everything an
 index page carries: the rendered long description, summary, install command with a copy button, versions, dependencies,
 keywords, license, author, project links, grouped classifiers, and release-grouped file tables with sizes, upload dates,
-sha256 digests, and yank/metadata badges. Release groups follow the page's existing newest-first
-[PEP 440](https://packaging.python.org/en/latest/specifications/version-specifiers/) order. When matching a file's
-version does not identify exactly one declared release, peryx keeps it visible in **Legacy or unassociated files**; this
-includes malformed filenames, undeclared versions, and ambiguous PEP 440-equivalent declarations.
+sha256 digests, and per-file badges for yank state, metadata siblings, and
+[artifact source and availability](#artifact-source-and-availability). Release groups follow the page's existing
+newest-first [PEP 440](https://packaging.python.org/en/latest/specifications/version-specifiers/) order. When matching a
+file's version does not identify exactly one declared release, peryx keeps it visible in **Legacy or unassociated
+files**; this includes malformed filenames, undeclared versions, and ambiguous PEP 440-equivalent declarations.
 
 The version links select one exact displayed release through the `version` query parameter. A declared release with no
 files has a different empty state from an unknown release, which helps distinguish an empty publication from a stale
@@ -120,6 +121,41 @@ The release list uses native links in document order and adds `aria-current` to 
 release section and its data table. At narrow widths the table scrolls inside its wrapper instead of widening the page.
 These choices follow [WCAG 2.2](https://www.w3.org/TR/WCAG22/) requirements for structure, focus order, link purpose,
 visible focus, and reflow.
+
+### Artifact source and availability
+
+Each file row carries two chips drawn from the [artifact source and availability](@/core/artifact-source.md) record, so
+a reader distinguishes an upload from a mirror, and a locally-stored blob from an upstream-only catalog entry. The first
+chip is the **source**, the second is the **byte availability**, and the two vary independently.
+
+| Chip                       | Meaning                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------- |
+| source `hosted`            | Published into this instance. No upstream can resupply the bytes once lost.  |
+| source `proxy`             | Cached from an upstream index. A local miss re-fetches from upstream.        |
+| source `generated`         | Produced by this instance, such as a derived sibling.                        |
+| availability `local`       | The configured storage holds verified bytes; a read needs no upstream fetch. |
+| availability `remote-only` | No local bytes, but a known upstream can supply them.                        |
+| availability `unavailable` | No local bytes and no upstream to supply them.                               |
+
+A `proxy` + `local` pair is the familiar "cached" state; `hosted` + `unavailable` is a published file whose bytes were
+lost. Wording carries the meaning. Each chip states its dimension and value in text, names that dimension for a screen
+reader with `aria-label`, and never relies on colour, so the states stay distinguishable under the
+[WCAG rule against colour-only meaning](https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html) and the
+[WAI-ARIA Authoring Practices](https://www.w3.org/WAI/ARIA/apg/).
+
+**Precedence.** The chips compose with the other per-file states rather than replacing them. A yanked file keeps both
+its yank badge and reason alongside its source and availability; a file blocked or revoked by policy is still labelled
+for what it is, since the page reports state and never makes the access decision. Hidden and trashed files are already
+filtered out of the served listing upstream of the UI, so they do not reach a row to label. The page issues no fetch,
+eviction, repair, or prefetch, and shows neither an upstream credential nor a signed URL.
+
+**Stale projection.** Availability is a projection the storage layer keeps in step with the content store; the page
+reads it in one indexed lookup per file and never probes a blob per row. If a blob is removed out of band, or a cache
+fill crashes between writing bytes and recording them, the chip can lag the real bytes until the next
+[repair pass](@/core/artifact-source.md#repair) reconciles it, showing `remote-only` on a file whose bytes are in fact
+present, or the reverse. The source chip cannot drift this way, since it is intrinsic and only a different artifact
+taking the digest's place rewrites it. If a file's availability looks wrong, trigger a repair pass rather than
+re-uploading.
 
 {{ screen(alt="A project page: description and files on the left, metadata panel on the right", name="project") }}
 

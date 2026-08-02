@@ -157,6 +157,14 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .badge.uploads { background: linear-gradient(115deg, var(--brand-a), var(--brand-b)); color: #fff; border: none; }
 .badge.yanked-badge { color: var(--bad); border-color: var(--bad); }
 .badge.meta-badge { color: var(--ok); border-color: var(--ok); }
+/* #441 placement chips: source (where the bytes came from) and byte availability (whether this
+   instance can serve them now). Colour only reinforces the word each chip already spells out. */
+.badge.src-hosted { color: var(--ok); border-color: var(--ok); }
+.badge.src-proxy { color: #2f81f7; border-color: #2f81f7; }
+.badge.src-generated { color: var(--text-soft); border-color: var(--border-strong); }
+.badge.avail-local { color: var(--ok); border-color: var(--ok); }
+.badge.avail-remote-only { color: var(--warn); border-color: var(--warn); }
+.badge.avail-unavailable { color: var(--bad); border-color: var(--bad); }
 .badge.status-archived { color: var(--text-soft); border-color: var(--border-strong); }
 .badge.status-quarantined { color: var(--bad); border-color: var(--bad); }
 .badge.status-deprecated { color: var(--warn); border-color: var(--warn); }

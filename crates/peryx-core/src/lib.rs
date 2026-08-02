@@ -24,6 +24,6 @@ pub use lifecycle::{TRASH_GRACE_SECS, TrashInfo, TrashRecord, TrashState, Unknow
 pub use role::Role;
 pub use shadow::{ShadowCandidate, ShadowReason, ShadowSource};
 pub use view::{
-    RenderedDescription, UiArtifactRef, UiAvailability, UiBlock, UiFile, UiManifest, UiMember, UiMemberChunk, UiMeta,
-    UiProject, UiProjectStatus, UiProjectView, UiRelease,
+    RenderedDescription, UiArtifactRef, UiArtifactSource, UiBlock, UiByteAvailability, UiFile, UiManifest, UiMember,
+    UiMemberChunk, UiMeta, UiProject, UiProjectStatus, UiProjectView, UiRelease,
 };

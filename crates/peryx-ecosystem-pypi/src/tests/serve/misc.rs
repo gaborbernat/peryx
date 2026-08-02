@@ -442,12 +442,20 @@ async fn test_project_page_is_absent_for_an_unknown_hosted_project() {
 }
 
 #[tokio::test]
-async fn test_project_page_marks_cached_and_remote_only_files() {
-    use peryx_core::UiAvailability;
+async fn test_project_page_reads_cached_and_remote_only_placements() {
+    use peryx_core::{UiArtifactSource, UiByteAvailability};
     use peryx_driver::serving::EcosystemDriver as _;
+    use peryx_storage::meta::ArtifactSource;
 
     let h = harness().await;
-    let cached = h.state.blobs.put_bytes(b"cached wheel bytes").await.unwrap();
+    let cached = Digest::of(b"cached wheel bytes");
+    // A proxied artifact whose bytes were fetched and verified projects as local; the second file
+    // has no placement row, so it stays the default proxied remote-only catalog entry.
+    h.state
+        .meta
+        .record_artifact_placement(cached.as_str(), ArtifactSource::Proxy, true)
+        .unwrap();
+    let remote = Digest::of(b"a wheel this proxy has never downloaded");
     let page = crate::to_json(&serde_json::json!({
         "meta": {"api-version": "1.1"},
         "name": "flask",
@@ -461,7 +469,7 @@ async fn test_project_page_marks_cached_and_remote_only_files() {
             {
                 "filename": "flask-2.0-py3-none-any.whl",
                 "url": "https://files.example/flask-2.0-py3-none-any.whl",
-                "hashes": {"sha256": Digest::of(b"a wheel this proxy has never downloaded").as_str()},
+                "hashes": {"sha256": remote.as_str()},
             },
         ],
     }));
@@ -473,60 +481,139 @@ async fn test_project_page_marks_cached_and_remote_only_files() {
         .unwrap()
         .unwrap();
 
-    let availability = |filename: &str| {
+    let file = |filename: &str| {
         project
             .files
             .iter()
             .find(|file| file.filename == filename)
             .unwrap_or_else(|| panic!("no file {filename:?}"))
-            .availability
     };
-    assert_eq!(availability("flask-1.0-py3-none-any.whl"), UiAvailability::Cached);
-    assert_eq!(availability("flask-2.0-py3-none-any.whl"), UiAvailability::RemoteOnly);
+    assert_eq!(file("flask-1.0-py3-none-any.whl").source, UiArtifactSource::Proxy);
+    assert_eq!(
+        file("flask-1.0-py3-none-any.whl").availability,
+        UiByteAvailability::Local
+    );
+    assert_eq!(file("flask-2.0-py3-none-any.whl").source, UiArtifactSource::Proxy);
+    assert_eq!(
+        file("flask-2.0-py3-none-any.whl").availability,
+        UiByteAvailability::RemoteOnly
+    );
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn test_project_page_reports_a_blob_presence_error() {
+async fn test_project_page_maps_each_placement_source_and_availability() {
+    use peryx_core::{UiArtifactSource, UiByteAvailability};
     use peryx_driver::serving::EcosystemDriver as _;
+    use peryx_storage::meta::ArtifactSource;
 
     let h = harness().await;
-    let digest = Digest::of(b"loop");
+    let generated = Digest::of(b"a generated sibling");
+    let remote = Digest::of(b"a proxied catalog entry");
+    let orphan = Digest::of(b"a hosted digest with lost bytes");
+    for (digest, source, present) in [
+        (&generated, ArtifactSource::Generated, true),
+        (&remote, ArtifactSource::Proxy, false),
+        (&orphan, ArtifactSource::Hosted, false),
+    ] {
+        h.state
+            .meta
+            .record_artifact_placement(digest.as_str(), source, present)
+            .unwrap();
+    }
     let page = crate::to_json(&serde_json::json!({
         "meta": {"api-version": "1.1"},
         "name": "flask",
         "versions": ["1.0"],
-        "files": [{
-            "filename": "flask-1.0-py3-none-any.whl",
-            "url": "https://files.example/flask-1.0-py3-none-any.whl",
-            "hashes": {"sha256": digest.as_str()},
-        }],
+        "files": [
+            {"filename": "flask-1.0.tar.gz", "url": "https://files.example/flask-1.0.tar.gz", "hashes": {"sha256": generated.as_str()}},
+            {"filename": "flask-1.0-py3-none-any.whl", "url": "https://files.example/flask-1.0-py3-none-any.whl", "hashes": {"sha256": remote.as_str()}},
+            {"filename": "flask-1.0-py2-none-any.whl", "url": "https://files.example/flask-1.0-py2-none-any.whl", "hashes": {"sha256": orphan.as_str()}},
+        ],
     }));
     mount_json_page(&h.server, &page).await;
-    let hex = digest.as_str();
-    let path = h
-        .dir
-        .path()
-        .join(format!("blobs/sha256/{}/{}/{}", &hex[..2], &hex[2..4], hex));
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(&path, &path).unwrap();
 
-    let error = crate::serving::PypiServing
+    let (project, _) = crate::serving::PypiServing
         .project_page(h.state.serving.clone(), 0, "flask".to_owned())
         .await
-        .unwrap_err();
-    assert!(error.starts_with("blob availability: filesystem blob backend head"));
+        .unwrap()
+        .unwrap();
+
+    let file = |filename: &str| {
+        project
+            .files
+            .iter()
+            .find(|file| file.filename == filename)
+            .unwrap_or_else(|| panic!("no file {filename:?}"))
+    };
+    assert_eq!(file("flask-1.0.tar.gz").source, UiArtifactSource::Generated);
+    assert_eq!(file("flask-1.0.tar.gz").availability, UiByteAvailability::Local);
+    assert_eq!(file("flask-1.0-py3-none-any.whl").source, UiArtifactSource::Proxy);
+    assert_eq!(
+        file("flask-1.0-py3-none-any.whl").availability,
+        UiByteAvailability::RemoteOnly
+    );
+    assert_eq!(file("flask-1.0-py2-none-any.whl").source, UiArtifactSource::Hosted);
+    assert_eq!(
+        file("flask-1.0-py2-none-any.whl").availability,
+        UiByteAvailability::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn test_project_page_reads_a_hosted_upload_with_lost_bytes_as_unavailable() {
+    use peryx_core::{UiArtifactSource, UiByteAvailability};
+    use peryx_driver::serving::EcosystemDriver as _;
+    use peryx_storage::meta::ArtifactSource;
+
+    let h = harness().await;
+    let filename = "flask-1.0-py3-none-any.whl";
+    let digest = Digest::of(b"a hosted upload whose bytes were lost");
+    let uploaded = serde_json::json!({
+        "version": "1.0",
+        "file": {
+            "filename": filename,
+            "url": format!("/hosted/files/{}/{filename}", digest.as_str()),
+            "hashes": {"sha256": digest.as_str()},
+        },
+    });
+    h.state
+        .meta
+        .put_upload("hosted", "flask", filename, crate::to_json(&uploaded).as_bytes())
+        .unwrap();
+    // A hosted-source placement whose bytes were evicted marks the upload unavailable.
+    h.state
+        .meta
+        .record_artifact_placement(digest.as_str(), ArtifactSource::Hosted, false)
+        .unwrap();
+
+    let (project, _) = crate::serving::PypiServing
+        .project_page(h.state.serving.clone(), 2, "flask".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(project.files.len(), 1);
+    assert_eq!(project.files[0].source, UiArtifactSource::Hosted);
+    assert_eq!(project.files[0].availability, UiByteAvailability::Unavailable);
 }
 
 #[tokio::test]
 async fn test_project_page_marks_a_hosted_upload_over_its_cached_blob() {
-    use peryx_core::UiAvailability;
+    use peryx_core::{UiArtifactSource, UiByteAvailability};
     use peryx_driver::serving::EcosystemDriver as _;
+
+    use peryx_storage::meta::ArtifactSource;
 
     let h = harness().await;
     let filename = "flask-1.0-py3-none-any.whl";
-    // The blob is present, so a name-blind check would read `Cached`; the hosted upload must win.
+    // A same-named upstream file could carry a proxied placement; hosted-layer membership must win
+    // and read the upload as hosted and locally served.
     let digest = h.state.blobs.put_bytes(b"hosted wheel bytes").await.unwrap();
+    // A stale proxied placement on the shared digest must not override the hosted-layer verdict.
+    h.state
+        .meta
+        .record_artifact_placement(digest.as_str(), ArtifactSource::Proxy, false)
+        .unwrap();
     let uploaded = serde_json::json!({
         "version": "1.0",
         "file": {
@@ -549,7 +636,8 @@ async fn test_project_page_marks_a_hosted_upload_over_its_cached_blob() {
         .unwrap();
 
     assert_eq!(project.files.len(), 1);
-    assert_eq!(project.files[0].availability, UiAvailability::Hosted);
+    assert_eq!(project.files[0].source, UiArtifactSource::Hosted);
+    assert_eq!(project.files[0].availability, UiByteAvailability::Local);
 }
 
 #[tokio::test]

@@ -102,20 +102,61 @@ pub struct UiRelease {
     pub yanked_reasons: Vec<String>,
 }
 
-/// Where the artifact a file names lives, relative to this instance.
+/// Where a file's artifact bytes came from, mirroring the storage placement source.
 ///
-/// The badge a package page shows for a file, and the axis its `Local only` filter cuts on. `Hosted`
-/// and `Cached` are both served from local storage; `RemoteOnly` is an upstream catalog entry whose
-/// blob this instance has not downloaded, so a `Local only` view drops it.
+/// Intrinsic: caching or evicting the bytes never changes it, only a different artifact taking the
+/// digest's place. The package page pairs it with a [`UiByteAvailability`] so a reader distinguishes
+/// an upload from a proxied mirror even when both are served from local storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum UiAvailability {
-    /// Uploaded into this instance.
+pub enum UiArtifactSource {
+    /// Published into this instance. No upstream can resupply the bytes once they are lost.
     Hosted,
-    /// Mirrored from upstream: the artifact blob is in local storage.
-    Cached,
-    /// Present in the upstream catalog, but the blob is not stored locally.
+    /// Cached from an upstream index. A local miss can be answered by re-fetching from upstream.
+    Proxy,
+    /// Produced by this instance, such as a rendered index page or a derived metadata sibling.
+    Generated,
+}
+
+impl UiArtifactSource {
+    /// The lowercase word a badge shows and its stable `snake_case` wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hosted => "hosted",
+            Self::Proxy => "proxy",
+            Self::Generated => "generated",
+        }
+    }
+}
+
+/// Whether this instance can serve a file's bytes right now, mirroring the storage placement
+/// projection.
+///
+/// Orthogonal to [`UiArtifactSource`]: a proxied file can be locally cached or not, and a hosted file
+/// is local until its bytes are lost. Neither says anything about yank, policy, trash, or revocation,
+/// which the page composes on top rather than folds in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiByteAvailability {
+    /// The configured storage holds verified bytes; a read serves them without an upstream fetch.
+    Local,
+    /// No local bytes, but a known upstream can supply them.
     RemoteOnly,
+    /// No local bytes and no upstream to supply them.
+    Unavailable,
+}
+
+impl UiByteAvailability {
+    /// The stable `snake_case` wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::RemoteOnly => "remote_only",
+            Self::Unavailable => "unavailable",
+        }
+    }
 }
 
 /// One downloadable file as the project page shows it.
@@ -146,8 +187,10 @@ pub struct UiFile {
     /// before it becomes a link, so an unsafe value is dropped without hiding the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<String>,
-    /// Whether the artifact is served from local storage (hosted or cached) or remains upstream-only.
-    pub availability: UiAvailability,
+    /// Where the file's bytes came from: an upload, a proxied mirror, or a generated sibling.
+    pub source: UiArtifactSource,
+    /// Whether this instance can serve the file's bytes now, independent of its source.
+    pub availability: UiByteAvailability,
 }
 
 /// What a project-level browse request renders as.
@@ -216,22 +259,32 @@ pub struct UiMemberChunk {
 
 #[cfg(test)]
 mod tests {
-    use super::{UiAvailability, UiFile};
+    use super::{UiArtifactSource, UiByteAvailability, UiFile};
 
     #[test]
-    fn test_ui_availability_round_trips_snake_case() {
+    fn test_source_and_availability_round_trip_snake_case() {
+        for (source, wire) in [
+            (UiArtifactSource::Hosted, "\"hosted\""),
+            (UiArtifactSource::Proxy, "\"proxy\""),
+            (UiArtifactSource::Generated, "\"generated\""),
+        ] {
+            assert_eq!(serde_json::to_string(&source).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<UiArtifactSource>(wire).unwrap(), source);
+            assert_eq!(format!("\"{}\"", source.as_str()), wire);
+        }
         for (availability, wire) in [
-            (UiAvailability::Hosted, "\"hosted\""),
-            (UiAvailability::Cached, "\"cached\""),
-            (UiAvailability::RemoteOnly, "\"remote_only\""),
+            (UiByteAvailability::Local, "\"local\""),
+            (UiByteAvailability::RemoteOnly, "\"remote_only\""),
+            (UiByteAvailability::Unavailable, "\"unavailable\""),
         ] {
             assert_eq!(serde_json::to_string(&availability).unwrap(), wire);
-            assert_eq!(serde_json::from_str::<UiAvailability>(wire).unwrap(), availability);
+            assert_eq!(serde_json::from_str::<UiByteAvailability>(wire).unwrap(), availability);
+            assert_eq!(format!("\"{}\"", availability.as_str()), wire);
         }
     }
 
     #[test]
-    fn test_ui_file_carries_availability_on_the_wire() {
+    fn test_ui_file_carries_source_and_availability_on_the_wire() {
         let file = UiFile {
             filename: "pkg-1.0-py3-none-any.whl".to_owned(),
             release: Some("1.0".to_owned()),
@@ -244,9 +297,11 @@ mod tests {
             has_metadata: false,
             upstream: Some("mirror".to_owned()),
             provenance: Some("https://pypi.example/files/aa/pkg-1.0-py3-none-any.whl.provenance".to_owned()),
-            availability: UiAvailability::RemoteOnly,
+            source: UiArtifactSource::Proxy,
+            availability: UiByteAvailability::RemoteOnly,
         };
         let json = serde_json::to_string(&file).unwrap();
+        assert!(json.contains("\"source\":\"proxy\""), "{json}");
         assert!(json.contains("\"availability\":\"remote_only\""), "{json}");
         assert!(json.contains("\"upstream\":\"mirror\""), "{json}");
         assert!(json.contains("\"release\":\"1.0\""), "{json}");
@@ -271,7 +326,8 @@ mod tests {
             has_metadata: false,
             upstream: None,
             provenance: None,
-            availability: UiAvailability::RemoteOnly,
+            source: UiArtifactSource::Hosted,
+            availability: UiByteAvailability::Unavailable,
         };
         let json = serde_json::to_string(&file).unwrap();
         assert!(!json.contains("provenance"), "{json}");
@@ -289,6 +345,7 @@ mod tests {
             "yanked": false,
             "yanked_reason": null,
             "has_metadata": false,
+            "source": "proxy",
             "availability": "remote_only",
         }))
         .unwrap();

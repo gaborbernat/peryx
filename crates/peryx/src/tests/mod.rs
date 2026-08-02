@@ -4,6 +4,7 @@ mod availability_listener_tests;
 mod cli;
 mod config;
 mod logging_tests;
+mod none_mode_tests;
 mod operator;
 mod prefetch;
 mod replication_liveness_tests;

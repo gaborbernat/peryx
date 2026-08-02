@@ -11,6 +11,28 @@ fn files_before_meta_page(file_url: &str, digest: &str, meta: &str) -> String {
     )
 }
 
+/// A quarantined page whose `versions` array runs past the 64 KiB streaming preflight byte cap before
+/// `files`, with `meta` emitted last. A cold stream then leaves preflight with the project status
+/// unknown, the exact case where the byte cap used to stream a quarantined project's files.
+fn versions_outrun_preflight_page(file_url: &str, digest: &str) -> String {
+    use std::fmt::Write as _;
+    let mut versions = String::new();
+    let mut version = 0u32;
+    while versions.len() < 70 * 1024 {
+        if version > 0 {
+            versions.push(',');
+        }
+        write!(versions, "\"1.0.{version}\"").unwrap();
+        version += 1;
+    }
+    format!(
+        "{{\"name\":\"flask\",\"versions\":[{versions}],\
+         \"files\":[{{\"filename\":\"flask-1.0-py3-none-any.whl\",\"url\":\"{file_url}\",\
+         \"hashes\":{{\"sha256\":\"{digest}\"}}}}],\
+         \"meta\":{{\"api-version\":\"1.4\",\"project-status\":\"quarantined\"}}}}"
+    )
+}
+
 #[tokio::test]
 async fn test_stream_detail_offline_cold_miss_falls_back() {
     let dir = tempfile::tempdir().unwrap();
@@ -301,6 +323,27 @@ async fn test_live_stream_buffers_quarantined_files_before_meta() {
         panic!("expected a ready outcome, got {}", matches_name(&outcome));
     };
     let detail = crate::parse_detail(&bytes).unwrap();
+    assert_eq!(detail.meta.status(), crate::ProjectStatus::Quarantined);
+    assert!(detail.files.is_empty());
+}
+#[tokio::test]
+async fn test_live_stream_withholds_quarantined_files_when_versions_outrun_the_preflight_cap() {
+    let h = harness().await;
+    let digest = Digest::of(b"wheel");
+    let page = versions_outrun_preflight_page(&format!("{}/files/flask.whl", h.server.uri()), digest.as_str());
+    mount_json_page(&h.server, &page).await;
+
+    // The versions array runs past the 64 KiB preflight byte cap before `files`, so the cold stream
+    // reaches preflight with neither `meta` nor `files` seen. The whole page is then buffered and
+    // served Ready with the quarantined files withheld; without the fix it streams and leaks them.
+    let outcome = cache::stream_detail(h.state.serving.clone(), 0, "flask".to_owned())
+        .await
+        .unwrap();
+    let PageOutcome::Ready(bytes, _) = outcome else {
+        panic!("expected a ready outcome, got {}", matches_name(&outcome));
+    };
+    let detail = crate::parse_detail(&bytes).unwrap();
+
     assert_eq!(detail.meta.status(), crate::ProjectStatus::Quarantined);
     assert!(detail.files.is_empty());
 }

@@ -125,6 +125,15 @@ impl PageTransformer {
         self.files_before_meta
     }
 
+    /// Whether the streaming preflight resolved the project status. Only `meta` carries the status,
+    /// so until it is parsed the caller cannot know whether a project is quarantined and must not
+    /// emit any file: a preflight that hit its byte cap before either `meta` or `files` leaves the
+    /// status unknown just as `files`-before-`meta` does, and both take the buffer-whole-page path.
+    #[must_use]
+    pub const fn project_status_known(&self) -> bool {
+        self.meta_seen
+    }
+
     /// Seed the project status before a whole-page pass so a quarantined page withholds its files
     /// even when `files` precedes `meta` in the document.
     pub fn seed_project_status(&mut self, status: Option<String>) {

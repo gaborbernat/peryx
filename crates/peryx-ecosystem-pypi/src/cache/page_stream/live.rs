@@ -55,13 +55,15 @@ impl FreshJsonStream {
                     return Err(err);
                 }
             };
-        // `files` streamed ahead of `meta`, so the project status is not yet known: buffer the rest
-        // of the page and transform it whole with the status seeded, then finish it on the buffered
-        // path. Otherwise a quarantined project's files would stream out before `meta` was read.
+        // Preflight left the streaming loop without resolving the project status, either because
+        // `files` opened ahead of `meta` or because the byte cap fired before either was seen: buffer
+        // the rest of the page and transform it whole with the status seeded, then finish it on the
+        // buffered path. Otherwise a quarantined project's files would stream out before `meta` was
+        // read, since a live transformer withholds files only once `meta` marks the project.
         let preflight = match preflight {
             JsonPreflight::Streaming {
                 body, transformer, raw, ..
-            } if transformer.files_precede_meta() => match buffer_whole_page(body, raw, buffered_context).await {
+            } if !transformer.project_status_known() => match buffer_whole_page(body, raw, buffered_context).await {
                 Ok((raw, served, summary)) => JsonPreflight::Complete { raw, served, summary },
                 Err(err) => {
                     release_flight(&self.state, &self.key, self.guard);

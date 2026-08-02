@@ -167,6 +167,36 @@ pub(super) async fn provenance_requests(harness: &Harness) -> usize {
 }
 
 #[tokio::test]
+async fn test_project_page_flags_a_mirrored_provenance_claim() {
+    use peryx_driver::serving::EcosystemDriver as _;
+
+    let harness = upstream_harness(RemoteMetadataMode::Proxy).await;
+    let digest = "2".repeat(64);
+    mount_upstream_attestation_page(&harness, &digest).await;
+    // Cache the upstream detail so the browse view resolves the claim from stored metadata.
+    get(&harness.state, "/pypi/simple/peryxpkg/", Some("application/json")).await;
+
+    let view = crate::serving::PypiServing
+        .browse_project(harness.state.serving.clone(), 0, "peryxpkg".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    let peryx_core::UiProjectView::Files { project, .. } = view else {
+        panic!("expected a file listing view");
+    };
+    let detail = project
+        .files
+        .into_iter()
+        .find(|file| file.filename == FILENAME)
+        .and_then(|file| file.provenance_detail)
+        .expect("the mirrored file carries a provenance panel");
+
+    assert_eq!(detail.source, peryx_core::UiProvenanceSource::Mirrored);
+    assert!(!detail.malformed);
+    assert!(detail.attestations.is_empty());
+}
+
+#[tokio::test]
 async fn test_upstream_attestation_direct_mode_preserves_the_source_url() {
     let harness = upstream_harness(RemoteMetadataMode::Direct).await;
     let digest = "1".repeat(64);

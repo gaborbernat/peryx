@@ -104,6 +104,74 @@ async fn test_upload_with_attestation_publishes_and_serves_provenance() {
 }
 
 #[tokio::test]
+async fn test_project_page_summarizes_a_hosted_files_provenance() {
+    let harness = harness().await;
+    let wheel = fixture_wheel();
+    let sha256 = Digest::of(&wheel).as_str().to_owned();
+    assert_eq!(
+        upload_with_attestations(&harness.state, &wheel, &attestations_field(FILENAME, &sha256)).await,
+        StatusCode::OK
+    );
+
+    let detail = browse_provenance(&harness, FILENAME).await;
+
+    assert_eq!(detail.source, peryx_core::UiProvenanceSource::Hosted);
+    assert!(!detail.malformed);
+    assert_eq!(detail.attestations.len(), 1);
+    assert_eq!(detail.attestations[0].subject, peryx_core::UiSubjectMatch::Matched);
+    assert_eq!(
+        detail.attestations[0].predicate_type.as_deref(),
+        Some(PUBLISH_PREDICATE)
+    );
+}
+
+#[tokio::test]
+async fn test_project_page_flags_an_unreadable_hosted_provenance() {
+    let harness = harness().await;
+    let wheel = fixture_wheel();
+    let sha256 = Digest::of(&wheel).as_str().to_owned();
+    assert_eq!(
+        upload_with_attestations(&harness.state, &wheel, &attestations_field(FILENAME, &sha256)).await,
+        StatusCode::OK
+    );
+    let provenance = harness.state.meta.get_provenance(&sha256).unwrap().unwrap().0;
+    assert!(
+        harness
+            .state
+            .blobs
+            .delete(&Digest::from_hex(&provenance).unwrap())
+            .await
+            .unwrap()
+    );
+
+    let detail = browse_provenance(&harness, FILENAME).await;
+
+    assert_eq!(detail.source, peryx_core::UiProvenanceSource::Hosted);
+    assert!(detail.malformed);
+    assert!(detail.attestations.is_empty());
+}
+
+/// Browse the virtual `root/pypi` index and return the provenance panel resolved for `filename`.
+async fn browse_provenance(harness: &Harness, filename: &str) -> peryx_core::UiProvenance {
+    use peryx_driver::serving::EcosystemDriver as _;
+
+    let view = crate::serving::PypiServing
+        .browse_project(harness.state.serving.clone(), 2, "peryxpkg".to_owned())
+        .await
+        .unwrap()
+        .unwrap();
+    let peryx_core::UiProjectView::Files { project, .. } = view else {
+        panic!("expected a file listing view");
+    };
+    project
+        .files
+        .into_iter()
+        .find(|file| file.filename == filename)
+        .and_then(|file| file.provenance_detail)
+        .expect("the hosted file carries a resolved provenance panel")
+}
+
+#[tokio::test]
 async fn test_upload_without_attestation_serves_no_provenance() {
     let harness = harness().await;
     let wheel = fixture_wheel();

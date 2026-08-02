@@ -171,6 +171,23 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .yank-reason { color: var(--text-soft); font-size: 0.85rem; margin-left: 0.35rem; }
 .project-head .badge { margin-left: 0.5rem; vertical-align: middle; }
 .status-reason { color: var(--text-soft); font-size: 0.9rem; margin-left: 0.4rem; }
+/* PEP 740 provenance panel: a keyboard-operable disclosure per file. Colour reinforces the word each
+   chip already spells out, so the states stay distinguishable without it. */
+.provenance-panel { margin-top: 0.35rem; font-size: 0.85rem; }
+.provenance-panel > summary { cursor: pointer; }
+.provenance-tag { color: var(--text-soft); margin-right: 0.35rem; }
+.provenance-body { margin: 0.4rem 0 0.2rem 0.9rem; }
+.badge.src-mirrored { color: #2f81f7; border-color: #2f81f7; }
+.badge.val-verified-binding { color: var(--ok); border-color: var(--ok); }
+.badge.val-unverified { color: var(--warn); border-color: var(--warn); }
+.badge.val-unreadable { color: var(--bad); border-color: var(--bad); }
+.attestations { list-style: none; margin: 0.3rem 0; padding: 0; }
+.attestation { display: flex; align-items: center; gap: 0.5rem; margin: 0.2rem 0; }
+.attestation .predicate-type { font-size: 0.8rem; word-break: break-all; }
+.badge.subject-matched { color: var(--ok); border-color: var(--ok); }
+.badge.subject-mismatched { color: var(--bad); border-color: var(--bad); }
+.badge.subject-unknown { color: var(--text-soft); border-color: var(--border-strong); }
+.provenance-doc { display: inline-block; margin-top: 0.25rem; }
 .layers code { margin-right: 0.3rem; }
 .virtual-card { grid-column: span 2; }
 .layer-stack {
@@ -385,7 +402,6 @@ tr.yanked td a { text-decoration: line-through; color: var(--text-soft); }
 }
 .button-link:hover { border-color: var(--accent); text-decoration: none; }
 .inspect { font-size: 0.85rem; }
-.provenance { font-size: 0.85rem; }
 .links-list { list-style: none; padding: 0; }
 .admin { margin-top: 2rem; border: 1px solid var(--border); border-radius: 12px; padding: 0.8rem 1.2rem; }
 .admin summary { cursor: pointer; font-weight: 600; }

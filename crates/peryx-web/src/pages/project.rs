@@ -20,8 +20,9 @@ use super::{ErrorMessage, copy_to_clipboard, human_size};
 use crate::data::load_project_view;
 use crate::markdown::{external_link_rel, is_safe_artifact_link, is_safe_link};
 use crate::model::{
-    UiArtifactSource, UiByteAvailability, UiFile, UiProject, UiProjectStatus, UiProjectView, UiRelease,
-    byte_availability_label, file_source_label,
+    UiArtifactSource, UiAttestation, UiByteAvailability, UiFile, UiProject, UiProjectStatus, UiProjectView,
+    UiProvenance, UiProvenanceSource, UiRelease, byte_availability_label, file_source_label, provenance_source_label,
+    provenance_validation_label, subject_match_label,
 };
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 use crate::url::browser_http_origin;
@@ -545,19 +546,7 @@ fn file_row(route: &str, project: &str, file: &UiFile) -> impl IntoView {
     };
     let inspect = (supports_archive_browser(&file.filename) && is_sha256_hex(&file.sha256))
         .then(|| browse_archive_url(route, project, &file.sha256, &file.filename));
-    // A labelled link to the advertised PEP 740 document. peryx shows where provenance lives; it does
-    // not fetch or verify it, so an unsafe scheme is dropped and the file stays listed regardless.
-    let provenance = file
-        .provenance
-        .clone()
-        .filter(|url| is_safe_artifact_link(url))
-        .map(|url| {
-            let rel = external_link_rel(&url);
-            view! {
-                " · "
-                <a class="provenance" href=url rel=rel>"provenance"</a>
-            }
-        });
+    let provenance = provenance_panel(file);
     let short_hash = file.sha256.get(..12).unwrap_or_default().to_owned();
     view! {
         <tr class=class>
@@ -583,6 +572,102 @@ fn file_row(route: &str, project: &str, file: &UiFile) -> impl IntoView {
             </td>
         </tr>
     }
+}
+
+/// The provenance panel for one file, when it advertises PEP 740 provenance. A keyboard-operable
+/// `<details>` states the source and validation result in its summary and, when expanded, lists each
+/// attestation's predicate type and subject binding. Everything is plain, escaped data derived from
+/// stored metadata: peryx never verifies a Sigstore signature, and the full document is reachable
+/// only through the download route the summary links, never inlined here.
+fn provenance_panel(file: &UiFile) -> Option<AnyView> {
+    let detail = file.provenance_detail.clone()?;
+    let source = provenance_source_label(detail.source);
+    let validation = provenance_validation_label(detail.source, detail.malformed);
+    // The document link vets the scheme first, so a hostile advertised URL is dropped without hiding
+    // the panel; the file, and the panel's summary, stay listed regardless.
+    let document = file
+        .provenance
+        .clone()
+        .filter(|url| is_safe_artifact_link(url))
+        .map(|url| {
+            let rel = external_link_rel(&url);
+            view! { <a class="provenance-doc" href=url rel=rel>"provenance document"</a> }
+        });
+    let body = provenance_body(&detail);
+    Some(
+        view! {
+            <details class="provenance-panel">
+                <summary>
+                    <span class="provenance-tag">"provenance"</span>
+                    <span
+                        class=format!("badge prov-source src-{}", source.key)
+                        title=source.hint
+                        aria-label=format!("provenance source: {}", source.text)
+                    >{source.text}</span>
+                    <span
+                        class=format!("badge prov-validation val-{}", validation.key)
+                        title=validation.hint
+                        aria-label=format!("provenance validation: {}", validation.text)
+                    >{validation.text}</span>
+                </summary>
+                <div class="provenance-body">
+                    {body}
+                    {document}
+                </div>
+            </details>
+        }
+        .into_any(),
+    )
+}
+
+/// The expanded provenance body: the per-attestation list for a readable hosted document, or a note
+/// for a mirrored claim or an unreadable document.
+fn provenance_body(detail: &UiProvenance) -> AnyView {
+    if detail.malformed {
+        return view! {
+            <p class="dim">"peryx could not read the stored provenance document for this file."</p>
+        }
+        .into_any();
+    }
+    if detail.source == UiProvenanceSource::Mirrored {
+        return view! {
+            <p class="dim">"An upstream index advertises provenance for this file. peryx relays the claim and has neither fetched nor verified it."</p>
+        }
+        .into_any();
+    }
+    // A hosted panel reaches here only with a summarized document, which always carries at least one
+    // attestation: `serving::web` reports an empty or unreadable document as `malformed` above.
+    let count = detail.attestations.len();
+    let rows = detail.attestations.iter().cloned().map(attestation_row).collect_view();
+    view! {
+        <p class="dim">{format!("{count} {}", attestation_label(count))}</p>
+        <ul class="attestations">{rows}</ul>
+    }
+    .into_any()
+}
+
+/// One attestation row: its declared in-toto predicate type and how its subject binds this file. The
+/// predicate type comes from the bundle, so it renders as escaped text, never as markup.
+fn attestation_row(attestation: UiAttestation) -> impl IntoView {
+    let subject = subject_match_label(attestation.subject);
+    let predicate = attestation.predicate_type.map_or_else(
+        || view! { <span class="dim predicate-type">"no predicate type"</span> }.into_any(),
+        |value| view! { <code class="predicate-type">{value}</code> }.into_any(),
+    );
+    view! {
+        <li class="attestation">
+            {predicate}
+            <span
+                class=format!("badge subject-{}", subject.key)
+                title=subject.hint
+                aria-label=format!("subject binding: {}", subject.text)
+            >{subject.text}</span>
+        </li>
+    }
+}
+
+fn attestation_label(count: usize) -> &'static str {
+    if count == 1 { "attestation" } else { "attestations" }
 }
 
 /// The two #441 placement chips a file carries: its source and its byte availability. Each names its
@@ -896,9 +981,14 @@ mod tests {
     use leptos::prelude::*;
     use rstest::rstest;
 
-    use peryx_core::{UiArtifactSource, UiByteAvailability, UiFile};
+    use peryx_core::{
+        UiArtifactSource, UiAttestation, UiByteAvailability, UiFile, UiProvenance, UiProvenanceSource, UiSubjectMatch,
+    };
 
-    use super::{UiProjectStatus, file_row, install_command, placement_badges, project_status_badge, shell_quote};
+    use super::{
+        UiProjectStatus, file_row, install_command, placement_badges, project_status_badge, provenance_panel,
+        shell_quote,
+    };
 
     fn file(filename: &str) -> UiFile {
         UiFile {
@@ -913,8 +1003,20 @@ mod tests {
             has_metadata: false,
             upstream: None,
             provenance: None,
+            provenance_detail: None,
             source: UiArtifactSource::Hosted,
             availability: UiByteAvailability::Local,
+        }
+    }
+
+    fn hosted_provenance(predicate_type: Option<&str>, subject: UiSubjectMatch) -> UiProvenance {
+        UiProvenance {
+            source: UiProvenanceSource::Hosted,
+            attestations: vec![UiAttestation {
+                predicate_type: predicate_type.map(str::to_owned),
+                subject,
+            }],
+            malformed: false,
         }
     }
 
@@ -1048,50 +1150,128 @@ mod tests {
     }
 
     #[test]
-    fn test_file_row_links_an_upstream_provenance_document_as_external() {
+    fn test_provenance_panel_summarizes_a_hosted_document() {
         let mut file = file("flask-1.0.whl");
-        file.provenance = Some("https://pypi.example/flask-1.0.whl.provenance".to_owned());
-        let html = file_row("pypi", "flask", &file).to_html();
+        file.provenance = Some("/pypi/files/aa/flask-1.0.whl.provenance".to_owned());
+        file.provenance_detail = Some(UiProvenance {
+            source: UiProvenanceSource::Hosted,
+            attestations: vec![
+                UiAttestation {
+                    predicate_type: Some("https://docs.pypi.org/attestations/publish/v1".to_owned()),
+                    subject: UiSubjectMatch::Matched,
+                },
+                UiAttestation {
+                    predicate_type: Some("https://slsa.dev/provenance/v1".to_owned()),
+                    subject: UiSubjectMatch::Matched,
+                },
+            ],
+            malformed: false,
+        });
+        let html = provenance_panel(&file).unwrap().to_html();
+        assert!(html.contains("<details class=\"provenance-panel\">"), "{html}");
+        assert!(html.contains(r#"aria-label="provenance source: hosted""#), "{html}");
+        assert!(html.contains(">binding verified</span>"), "{html}");
+        assert!(html.contains(">subject matched</span>"), "{html}");
+        assert!(html.contains(">2 attestations</p>"), "{html}");
         assert!(
-            html.contains(r#"<a href="https://pypi.example/flask-1.0.whl.provenance" rel="external nofollow noopener noreferrer" class="provenance">provenance</a>"#),
+            html.contains(">https://docs.pypi.org/attestations/publish/v1</code>"),
             "{html}"
         );
+        assert!(html.contains(">https://slsa.dev/provenance/v1</code>"), "{html}");
     }
 
     #[test]
-    fn test_file_row_links_a_hosted_provenance_route_without_the_external_relationship() {
+    fn test_provenance_panel_links_a_hosted_document_without_the_external_relationship() {
         let mut file = file("flask-1.0.whl");
         file.provenance = Some("/pypi/files/aa/flask-1.0.whl.provenance".to_owned());
-        let html = file_row("pypi", "flask", &file).to_html();
+        file.provenance_detail = Some(hosted_provenance(None, UiSubjectMatch::Matched));
+        let html = provenance_panel(&file).unwrap().to_html();
         assert!(
-            html.contains(r#"<a href="/pypi/files/aa/flask-1.0.whl.provenance" class="provenance">provenance</a>"#),
+            html.contains(
+                r#"<a href="/pypi/files/aa/flask-1.0.whl.provenance" class="provenance-doc">provenance document</a>"#
+            ),
             "{html}"
         );
         assert!(!html.contains("nofollow"), "{html}");
-    }
-
-    #[rstest]
-    #[case::absent(None)]
-    #[case::javascript("javascript:alert(1)")]
-    #[case::data("data:text/html,evil")]
-    fn test_file_row_renders_no_link_for_absent_or_unsafe_provenance(
-        #[case] provenance: impl Into<Option<&'static str>>,
-    ) {
-        let mut file = file("flask-1.0.whl");
-        file.provenance = provenance.into().map(str::to_owned);
-        let html = file_row("pypi", "flask", &file).to_html();
-        assert!(!html.contains("class=\"provenance\""), "{html}");
-        assert!(!html.contains("javascript:") && !html.contains("data:text"), "{html}");
-        assert!(html.contains("flask-1.0.whl"), "{html}");
+        assert!(html.contains(">no predicate type</span>"), "{html}");
     }
 
     #[test]
-    fn test_file_row_escapes_an_untrusted_provenance_url() {
+    fn test_provenance_panel_reports_a_mirrored_claim_as_unverified() {
         let mut file = file("flask-1.0.whl");
-        file.provenance = Some("https://evil.example/\"><script>pwn()</script>".to_owned());
-        let html = file_row("pypi", "flask", &file).to_html();
+        file.source = UiArtifactSource::Proxy;
+        file.provenance = Some("https://pypi.example/flask-1.0.whl.provenance".to_owned());
+        file.provenance_detail = Some(UiProvenance {
+            source: UiProvenanceSource::Mirrored,
+            attestations: Vec::new(),
+            malformed: false,
+        });
+        let html = provenance_panel(&file).unwrap().to_html();
+        assert!(html.contains(r#"aria-label="provenance source: mirrored""#), "{html}");
+        assert!(html.contains(">unverified claim</span>"), "{html}");
+        assert!(html.contains("neither fetched nor verified"), "{html}");
+        assert!(
+            html.contains(r#"rel="external nofollow noopener noreferrer" class="provenance-doc""#),
+            "{html}"
+        );
+        assert!(!html.contains("<li class=\"attestation\">"), "{html}");
+    }
+
+    #[test]
+    fn test_provenance_panel_reports_an_unreadable_document() {
+        let mut file = file("flask-1.0.whl");
+        file.provenance = Some("/pypi/files/aa/flask-1.0.whl.provenance".to_owned());
+        file.provenance_detail = Some(UiProvenance {
+            source: UiProvenanceSource::Hosted,
+            attestations: Vec::new(),
+            malformed: true,
+        });
+        let html = provenance_panel(&file).unwrap().to_html();
+        assert!(html.contains(">unreadable</span>"), "{html}");
+        assert!(html.contains("could not read the stored provenance document"), "{html}");
+    }
+
+    #[rstest]
+    #[case::mismatched(UiSubjectMatch::Mismatched, ">subject mismatch</span>")]
+    #[case::unknown(UiSubjectMatch::Unknown, ">subject unknown</span>")]
+    fn test_provenance_panel_labels_each_subject_binding(#[case] subject: UiSubjectMatch, #[case] expected: &str) {
+        let mut file = file("flask-1.0.whl");
+        file.provenance = Some("/pypi/files/aa/flask-1.0.whl.provenance".to_owned());
+        file.provenance_detail = Some(hosted_provenance(Some("https://slsa.dev/provenance/v1"), subject));
+        let html = provenance_panel(&file).unwrap().to_html();
+        assert!(html.contains(expected), "{html}");
+        assert!(html.contains(r#"aria-label="subject binding:"#), "{html}");
+    }
+
+    #[test]
+    fn test_provenance_panel_escapes_an_untrusted_predicate_type() {
+        let mut file = file("flask-1.0.whl");
+        file.provenance = Some("/pypi/files/aa/flask-1.0.whl.provenance".to_owned());
+        file.provenance_detail = Some(hosted_provenance(
+            Some(r"<script>pwn()</script>"),
+            UiSubjectMatch::Matched,
+        ));
+        let html = provenance_panel(&file).unwrap().to_html();
         assert!(!html.contains("<script>"), "{html}");
-        assert!(!html.contains("\"><script"), "{html}");
+        assert!(html.contains("&lt;script&gt;pwn()&lt;/script&gt;"), "{html}");
+    }
+
+    #[test]
+    fn test_provenance_panel_drops_an_unsafe_document_url_but_keeps_the_panel() {
+        let mut file = file("flask-1.0.whl");
+        file.provenance = Some("javascript:alert(1)".to_owned());
+        file.provenance_detail = Some(hosted_provenance(None, UiSubjectMatch::Matched));
+        let html = provenance_panel(&file).unwrap().to_html();
+        assert!(html.contains("provenance-panel"), "{html}");
+        assert!(!html.contains("provenance-doc"), "{html}");
+        assert!(!html.contains("javascript:"), "{html}");
+    }
+
+    #[test]
+    fn test_file_row_renders_no_provenance_panel_without_a_detail() {
+        let file = file("flask-1.0.whl");
+        let html = file_row("pypi", "flask", &file).to_html();
+        assert!(!html.contains("provenance-panel"), "{html}");
         assert!(html.contains("flask-1.0.whl"), "{html}");
     }
 }

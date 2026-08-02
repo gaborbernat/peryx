@@ -157,6 +157,40 @@ present, or the reverse. The source chip cannot drift this way, since it is intr
 taking the digest's place rewrites it. If a file's availability looks wrong, trigger a repair pass rather than
 re-uploading.
 
+### Provenance and attestations
+
+A file that advertises [PEP 740](https://peps.python.org/pep-0740/) provenance carries a provenance panel: a
+keyboard-operable disclosure whose summary states two things in words, and whose body lists what the document claims.
+The panel is built from digest-indexed metadata peryx already holds. It fetches nothing and verifies no signature while
+rendering, so it reports what a bundle claims and how peryx obtained it, never that any attestation is trustworthy.
+
+The summary carries a **source** chip and a **validation** chip:
+
+| Chip                          | Meaning                                                                            |
+| ----------------------------- | ---------------------------------------------------------------------------------- |
+| source `hosted`               | Uploaded here; peryx bound each attestation to this distribution at upload.        |
+| source `mirrored`             | Advertised by an upstream index; peryx relays the claim without reading it.        |
+| validation `binding verified` | peryx enforced the subject binding at upload. Sigstore signatures are not checked. |
+| validation `unverified claim` | Upstream advertises provenance; peryx neither fetched nor verified the document.   |
+| validation `unreadable`       | Provenance is advertised but its stored document could not be read.                |
+
+Expanding a hosted panel lists one row per attestation: its in-toto `predicateType`, named under the
+[SLSA provenance model](https://slsa.dev/spec/v1.0/provenance), and how its subject binds. A subject row reads
+`subject matched` when an attestation names this file's sha256, `subject mismatch` when none does, and `subject unknown`
+when the statement carries no readable subject. A mirrored panel states only that upstream advertises a claim, since
+peryx does not read a document it did not store.
+
+**Security.** A valid envelope proves a publisher issued an attestation for this file, not that the file is safe or that
+its signature is genuine — peryx checks the subject binding, never the Sigstore signature, certificate, or
+transparency-log inclusion. Predicate types and any other bundle-supplied text render as escaped text and are bounded,
+never as markup. The panel never inlines a full bundle: the summary links the provenance document, which is reachable
+only through the same download route, and its authorization, that serves the file itself.
+
+**Accessibility.** Every chip and subject row states its value in text and names its dimension for a screen reader with
+`aria-label`, so the states stay distinguishable without colour under the
+[WCAG rule against colour-only meaning](https://www.w3.org/WAI/WCAG22/Understanding/use-of-color.html). A file that
+advertises no provenance shows no panel.
+
 {{ screen(alt="A project page: description and files on the left, metadata panel on the right", name="project") }}
 
 An OCI index browses the same way: its card opens the list of repositories it holds, a repository page lists its tags,

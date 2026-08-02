@@ -416,6 +416,9 @@ pub fn ui_project_from_detail(value: &serde_json::Value) -> peryx_core::UiProjec
                     .as_str()
                     .filter(|url| !url.is_empty())
                     .map(str::to_owned),
+                // The panel is resolved from stored metadata in `serving::web::project_page`; a file
+                // parsed straight from the wire document carries none yet.
+                provenance_detail: None,
                 upstream: None,
                 // The wire document names an upstream catalog entry, so a file starts proxied and not
                 // yet local; `serving::web::project_page` resolves both against the placement store.

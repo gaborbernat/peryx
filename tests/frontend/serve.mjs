@@ -164,6 +164,26 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
 }
 
 const wheel = readFileSync(join(here, "fixtures", "veloxdemo-1.0.0-py3-none-any.whl"));
+// A PEP 740 attestation bound to the uploaded wheel, so its hosted file shows a summarized provenance
+// panel. peryx stores and echoes the untrusted material; it verifies no signature.
+function attestationsField(filename) {
+  const sha256 = createHash("sha256").update(wheel).digest("hex");
+  const statement = Buffer.from(
+    JSON.stringify({
+      _type: "https://in-toto.io/Statement/v1",
+      subject: [{ name: filename, digest: { sha256 } }],
+      predicateType: "https://docs.pypi.org/attestations/publish/v1",
+      predicate: {},
+    }),
+  ).toString("base64");
+  return JSON.stringify([
+    {
+      version: 1,
+      verification_material: { certificate: "Zm9v", transparency_entries: [] },
+      envelope: { statement, signature: "YmFy" },
+    },
+  ]);
+}
 for (let attempt = 0; attempt < 600; attempt += 1) {
   try {
     const form = new FormData();
@@ -171,6 +191,7 @@ for (let attempt = 0; attempt < 600; attempt += 1) {
     form.set("name", "veloxdemo");
     form.set("version", "1.0.0");
     form.set("filetype", "bdist_wheel");
+    form.set("attestations", attestationsField("veloxdemo-1.0.0-py3-none-any.whl"));
     form.set("content", new Blob([wheel]), "veloxdemo-1.0.0-py3-none-any.whl");
     const response = await fetch(`${base}/root/pypi/`, {
       method: "POST",

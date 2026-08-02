@@ -257,6 +257,36 @@ test("project page downloads artifacts", async ({ page }) => {
   expect(download.status()).toBe(200);
 });
 
+test("project page summarizes hosted provenance and flags a mirrored claim", async ({ page }) => {
+  await goto(page, PROJECT_URL);
+  // The uploaded 1.0.0 wheel carries a hosted, subject-bound attestation.
+  const hosted = page
+    .locator("table.files tbody tr", { hasText: "veloxdemo-1.0.0-py3-none-any.whl" })
+    .locator(".provenance-panel");
+  await expect(hosted.locator(".prov-source")).toHaveText("hosted");
+  await expect(hosted.locator(".prov-validation")).toHaveText("binding verified");
+  // The disclosure is keyboard-operable; opening it reveals each attestation's predicate type and subject.
+  await hosted.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(hosted.locator(".attestation code.predicate-type")).toContainText("attestations/publish/v1");
+  await expect(hosted.locator(".attestation .badge[class*='subject-']")).toHaveText("subject matched");
+  await expect(hosted.locator("a.provenance-doc")).toBeVisible();
+
+  // The mirrored 0.9 file advertises a claim peryx neither fetched nor verified; the summary links the
+  // upstream document as an external resource without listing any attestation.
+  const mirrored = page
+    .locator("table.files tbody tr", { hasText: "veloxdemo-0.9-py3-none-any.whl" })
+    .locator(".provenance-panel");
+  await expect(mirrored.locator(".prov-source")).toHaveText("mirrored");
+  await expect(mirrored.locator(".prov-validation")).toHaveText("unverified claim");
+  await expect(mirrored.locator("a.provenance-doc")).toHaveAttribute(
+    "href",
+    /veloxdemo-0\.9-py3-none-any\.whl\.provenance$/,
+  );
+  await expect(mirrored.locator("a.provenance-doc")).toHaveAttribute("rel", /noopener/);
+  await expect(mirrored.locator(".attestation")).toHaveCount(0);
+});
+
 test("unknown routes render the not-found fallback", async ({ page }) => {
   // An unmatched path never reaches the SPA shell — peryx answers with its own 404 body — so this
   // one skips the hydration wait the other tests rely on.
@@ -593,20 +623,6 @@ test("project page groups hosted and upstream releases", async ({ page }) => {
   const upstream = groups.nth(1).locator("tr", { hasText: "veloxdemo-0.9" });
   await expect(upstream).toHaveCount(1);
   await expect(upstream.getByTitle("Upstream source")).toHaveText("fixture");
-});
-
-test("project page links a file's advertised provenance without hiding files that lack it", async ({ page }) => {
-  await goto(page, PROJECT_URL);
-  const groups = page.locator("section.release-files");
-  // The mirrored 0.9 file advertises PEP 740 provenance, so its row carries a labelled external link.
-  const upstream = groups.nth(1).locator("tr", { hasText: "veloxdemo-0.9" });
-  const link = upstream.getByRole("link", { name: "provenance" });
-  await expect(link).toHaveAttribute("href", /veloxdemo-0\.9-py3-none-any\.whl\.provenance$/);
-  await expect(link).toHaveAttribute("rel", /noopener/);
-  // The uploaded 1.0.0 file carries none, yet its row still lists the artifact.
-  const hosted = groups.nth(0).locator("tr", { hasText: "veloxdemo-1.0.0" });
-  await expect(hosted).toBeVisible();
-  await expect(hosted.getByRole("link", { name: "provenance" })).toHaveCount(0);
 });
 
 test("release links retain filename filters and select one exact group", async ({ page }) => {

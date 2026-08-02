@@ -159,6 +159,93 @@ impl UiByteAvailability {
     }
 }
 
+/// How peryx came by a file's PEP 740 provenance, which bounds what it can say about it.
+///
+/// `Hosted` provenance was uploaded here, so peryx bound every attestation to this exact
+/// distribution (filename and sha256) before publishing and can summarize the stored document.
+/// `Mirrored` provenance is a claim an upstream index advertised: peryx relays that the claim exists
+/// without fetching or reading the document, so it carries no per-attestation records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiProvenanceSource {
+    /// Uploaded into this instance; peryx enforced the subject binding at upload.
+    Hosted,
+    /// Advertised by an upstream index; peryx relays the claim and never verified or read it.
+    Mirrored,
+}
+
+impl UiProvenanceSource {
+    /// The stable `snake_case` wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hosted => "hosted",
+            Self::Mirrored => "mirrored",
+        }
+    }
+}
+
+/// Whether an attestation's in-toto subject binds to the distribution it rides on.
+///
+/// The binding, not any signature, is what peryx checks: a `Matched` subject names this file's
+/// sha256 (and, when it gives one, its filename). `Mismatched` names a different artifact, and
+/// `Unknown` covers a statement peryx could not read a subject from. peryx never verifies the
+/// Sigstore signature, so a match says the bundle was issued for this file, not that it is genuine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiSubjectMatch {
+    /// A subject digest equals this file's sha256 and any named filename matches.
+    Matched,
+    /// A subject digest equals this file's sha256 but names a different filename, or no subject
+    /// digest matches at all.
+    Mismatched,
+    /// The statement carried no readable subject to compare.
+    Unknown,
+}
+
+impl UiSubjectMatch {
+    /// The stable `snake_case` wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Mismatched => "mismatched",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One attestation as the provenance panel shows it: plain, escaped data derived from stored
+/// metadata, never from a live signature check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiAttestation {
+    /// The in-toto `predicateType` the statement declares, when it names one. Untrusted text the
+    /// renderer escapes and bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate_type: Option<String>,
+    /// Whether the attestation's subject binds to this distribution.
+    pub subject: UiSubjectMatch,
+}
+
+/// A file's PEP 740 provenance as the package page renders it.
+///
+/// Derived from digest-indexed metadata read from local storage: the panel neither fetches an
+/// upstream document nor verifies a signature, so it states what the bundle claims and how peryx
+/// obtained it, never that any attestation is trustworthy. `attestations` is filled only for hosted
+/// provenance peryx read locally; it stays empty for a mirrored claim and for a hosted document that
+/// could not be read (`malformed`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiProvenance {
+    /// How peryx obtained the provenance, hosted or mirrored.
+    pub source: UiProvenanceSource,
+    /// The per-attestation records, or empty for a mirrored claim or an unreadable document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attestations: Vec<UiAttestation>,
+    /// Whether a hosted document was present but could not be summarized.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub malformed: bool,
+}
+
 /// One downloadable file as the project page shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiFile {
@@ -187,6 +274,12 @@ pub struct UiFile {
     /// before it becomes a link, so an unsafe value is dropped without hiding the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<String>,
+    /// The rendered provenance panel for this file, when it advertises PEP 740 provenance. The
+    /// driver fills it from digest-indexed metadata read locally, so it summarizes hosted
+    /// attestations and flags a mirrored claim without fetching or verifying anything. `None` when
+    /// the file advertises no provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance_detail: Option<UiProvenance>,
     /// Where the file's bytes came from: an upload, a proxied mirror, or a generated sibling.
     pub source: UiArtifactSource,
     /// Whether this instance can serve the file's bytes now, independent of its source.
@@ -259,7 +352,70 @@ pub struct UiMemberChunk {
 
 #[cfg(test)]
 mod tests {
-    use super::{UiArtifactSource, UiByteAvailability, UiFile};
+    use super::{
+        UiArtifactSource, UiAttestation, UiByteAvailability, UiFile, UiProvenance, UiProvenanceSource, UiSubjectMatch,
+    };
+
+    #[test]
+    fn test_provenance_source_and_subject_match_round_trip_snake_case() {
+        for (source, wire) in [
+            (UiProvenanceSource::Hosted, "\"hosted\""),
+            (UiProvenanceSource::Mirrored, "\"mirrored\""),
+        ] {
+            assert_eq!(serde_json::to_string(&source).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<UiProvenanceSource>(wire).unwrap(), source);
+            assert_eq!(format!("\"{}\"", source.as_str()), wire);
+        }
+        for (subject, wire) in [
+            (UiSubjectMatch::Matched, "\"matched\""),
+            (UiSubjectMatch::Mismatched, "\"mismatched\""),
+            (UiSubjectMatch::Unknown, "\"unknown\""),
+        ] {
+            assert_eq!(serde_json::to_string(&subject).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<UiSubjectMatch>(wire).unwrap(), subject);
+            assert_eq!(format!("\"{}\"", subject.as_str()), wire);
+        }
+    }
+
+    #[test]
+    fn test_provenance_omits_empty_attestations_and_absent_malformed() {
+        let provenance = UiProvenance {
+            source: UiProvenanceSource::Mirrored,
+            attestations: Vec::new(),
+            malformed: false,
+        };
+        let json = serde_json::to_string(&provenance).unwrap();
+        assert_eq!(json, r#"{"source":"mirrored"}"#);
+        assert_eq!(serde_json::from_str::<UiProvenance>(&json).unwrap(), provenance);
+    }
+
+    #[test]
+    fn test_provenance_carries_attestations_and_malformed_on_the_wire() {
+        let provenance = UiProvenance {
+            source: UiProvenanceSource::Hosted,
+            attestations: vec![UiAttestation {
+                predicate_type: Some("https://docs.pypi.org/attestations/publish/v1".to_owned()),
+                subject: UiSubjectMatch::Matched,
+            }],
+            malformed: true,
+        };
+        let json = serde_json::to_string(&provenance).unwrap();
+        assert!(json.contains(r#""source":"hosted""#), "{json}");
+        assert!(json.contains(r#""subject":"matched""#), "{json}");
+        assert!(json.contains(r#""malformed":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<UiProvenance>(&json).unwrap(), provenance);
+    }
+
+    #[test]
+    fn test_attestation_omits_an_absent_predicate_type() {
+        let attestation = UiAttestation {
+            predicate_type: None,
+            subject: UiSubjectMatch::Unknown,
+        };
+        let json = serde_json::to_string(&attestation).unwrap();
+        assert!(!json.contains("predicate_type"), "{json}");
+        assert_eq!(serde_json::from_str::<UiAttestation>(&json).unwrap(), attestation);
+    }
 
     #[test]
     fn test_source_and_availability_round_trip_snake_case() {
@@ -297,6 +453,11 @@ mod tests {
             has_metadata: false,
             upstream: Some("mirror".to_owned()),
             provenance: Some("https://pypi.example/files/aa/pkg-1.0-py3-none-any.whl.provenance".to_owned()),
+            provenance_detail: Some(UiProvenance {
+                source: UiProvenanceSource::Mirrored,
+                attestations: Vec::new(),
+                malformed: false,
+            }),
             source: UiArtifactSource::Proxy,
             availability: UiByteAvailability::RemoteOnly,
         };
@@ -326,6 +487,7 @@ mod tests {
             has_metadata: false,
             upstream: None,
             provenance: None,
+            provenance_detail: None,
             source: UiArtifactSource::Hosted,
             availability: UiByteAvailability::Unavailable,
         };

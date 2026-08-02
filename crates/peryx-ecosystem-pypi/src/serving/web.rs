@@ -4,7 +4,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use peryx_core::{UiArtifactSource, UiByteAvailability, UiMeta, UiProject};
+use peryx_core::{
+    UiArtifactSource, UiAttestation, UiByteAvailability, UiMeta, UiProject, UiProvenance, UiProvenanceSource,
+};
 use peryx_driver::ServingState;
 use peryx_index::{Index, IndexKind};
 use peryx_storage::blob::{BlobLease, Digest};
@@ -47,6 +49,7 @@ pub(super) async fn project_page(
     let value = serde_json::from_str(&to_json(&detail)).expect("to_json emits JSON that round-trips");
     let mut ui = ui_project_from_detail(&value);
     apply_placement(&state, &hosted, &mut ui);
+    apply_provenance(&state, &mut ui).await;
     let default = default_version(&ui);
     // A pre-PEP 700 upstream names no versions, so no release owns a file and the newest sibling stands in.
     let sibling = match default.as_deref() {
@@ -162,6 +165,51 @@ const fn ui_availability(availability: ByteAvailability) -> UiByteAvailability {
         ByteAvailability::RemoteOnly => UiByteAvailability::RemoteOnly,
         ByteAvailability::Unavailable => UiByteAvailability::Unavailable,
     }
+}
+
+/// The largest stored provenance document the panel summarizer reads. A distribution's provenance
+/// object stays well under this, which bounds the read regardless.
+const MAX_PROVENANCE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Fill each file's provenance panel from digest-indexed metadata read locally.
+///
+/// A hosted file's stored provenance document is summarized into per-attestation records; a mirrored
+/// file is flagged as an upstream claim without reading or fetching its document. This reads only
+/// local storage — it never calls upstream and never verifies a signature — so a listing stays a
+/// projection of what peryx already holds.
+async fn apply_provenance(state: &Arc<ServingState>, ui: &mut UiProject) {
+    for file in &mut ui.files {
+        file.provenance_detail = provenance_detail(state, file).await;
+    }
+}
+
+/// The provenance panel for one file, or `None` when it advertises no provenance. A hosted document
+/// that cannot be read is reported as `malformed` rather than hidden, so the page never implies an
+/// advertised attestation is absent.
+async fn provenance_detail(state: &Arc<ServingState>, file: &peryx_core::UiFile) -> Option<UiProvenance> {
+    file.provenance.as_ref()?;
+    if file.source != UiArtifactSource::Hosted {
+        return Some(UiProvenance {
+            source: UiProvenanceSource::Mirrored,
+            attestations: Vec::new(),
+            malformed: false,
+        });
+    }
+    let attestations = hosted_attestations(state, file).await;
+    Some(UiProvenance {
+        source: UiProvenanceSource::Hosted,
+        malformed: attestations.is_none(),
+        attestations: attestations.unwrap_or_default(),
+    })
+}
+
+/// Summarize a hosted file's stored provenance document, or `None` when no record exists, its blob is
+/// gone, or the document does not parse as a provenance object.
+async fn hosted_attestations(state: &Arc<ServingState>, file: &peryx_core::UiFile) -> Option<Vec<UiAttestation>> {
+    let (provenance_hex, _size) = state.meta.get_provenance(&file.sha256).ok()??;
+    let digest = Digest::from_hex(&provenance_hex)?;
+    let bytes = state.blobs.read_bytes(&digest, MAX_PROVENANCE_BYTES).await.ok()?;
+    crate::attestation::summarize_provenance(&bytes, &file.sha256, &file.filename)
 }
 
 /// The release the project page defaults to. An active release (one the publisher has not yanked

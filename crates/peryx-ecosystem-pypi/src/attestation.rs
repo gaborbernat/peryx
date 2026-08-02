@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use peryx_core::{UiAttestation, UiSubjectMatch};
 use serde_json::{Value, json};
 
 /// The media type PEP 740 assigns the served provenance object.
@@ -140,6 +141,82 @@ pub fn build_provenance(raw: &str, sha256: &str, filename: &str) -> Result<Built
         document: provenance_document(&attestations),
         predicate_types,
     })
+}
+
+/// The longest predicate-type text a summary carries. A real in-toto `predicateType` is a short URL;
+/// the cap keeps a hostile document from bloating the response and the rendered page.
+const MAX_PREDICATE_TYPE_CHARS: usize = 256;
+
+/// Summarize a stored PEP 740 provenance document into the neutral per-attestation view the package
+/// page renders, one record per attestation across every bundle.
+///
+/// This reads the document peryx already stored — it fetches nothing and verifies no signature. It
+/// decodes each DSSE statement only far enough to read its `predicateType` and check that a subject
+/// digest binds to `sha256`, mirroring the binding [`build_provenance`] enforced at upload.
+///
+/// Returns `None` when the document does not parse as a version-1 provenance object or carries no
+/// attestation, so a caller renders it as an unreadable record rather than an empty panel.
+#[must_use]
+pub fn summarize_provenance(document: &[u8], sha256: &str, filename: &str) -> Option<Vec<UiAttestation>> {
+    let stored: StoredProvenance = serde_json::from_slice(document).ok()?;
+    if stored.version != SUPPORTED_VERSION {
+        return None;
+    }
+    let summaries: Vec<UiAttestation> = stored
+        .attestation_bundles
+        .into_iter()
+        .flat_map(|bundle| bundle.attestations)
+        .take(MAX_ATTESTATIONS)
+        .map(|attestation| summarize_attestation(&attestation, sha256, filename))
+        .collect();
+    (!summaries.is_empty()).then_some(summaries)
+}
+
+fn summarize_attestation(attestation: &Value, sha256: &str, filename: &str) -> UiAttestation {
+    let Some(statement) = attestation["envelope"]["statement"]
+        .as_str()
+        .and_then(|encoded| STANDARD.decode(encoded).ok())
+        .filter(|decoded| decoded.len() <= MAX_STATEMENT_BYTES)
+        .and_then(|decoded| serde_json::from_slice::<Statement>(&decoded).ok())
+    else {
+        return UiAttestation {
+            predicate_type: None,
+            subject: UiSubjectMatch::Unknown,
+        };
+    };
+    UiAttestation {
+        predicate_type: statement
+            .predicate_type
+            .map(|predicate| predicate.chars().take(MAX_PREDICATE_TYPE_CHARS).collect()),
+        subject: subject_match(&statement.subject, sha256, filename),
+    }
+}
+
+fn subject_match(subjects: &[Subject], sha256: &str, filename: &str) -> UiSubjectMatch {
+    if subjects.is_empty() {
+        return UiSubjectMatch::Unknown;
+    }
+    subjects
+        .iter()
+        .find(|subject| subject.digest.get("sha256").is_some_and(|digest| digest == sha256))
+        .map_or(UiSubjectMatch::Mismatched, |subject| match &subject.name {
+            Some(name) if name != filename => UiSubjectMatch::Mismatched,
+            _ => UiSubjectMatch::Matched,
+        })
+}
+
+#[derive(serde::Deserialize)]
+struct StoredProvenance {
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    attestation_bundles: Vec<StoredBundle>,
+}
+
+#[derive(serde::Deserialize)]
+struct StoredBundle {
+    #[serde(default)]
+    attestations: Vec<Value>,
 }
 
 fn provenance_document(attestations: &[Value]) -> Vec<u8> {
@@ -466,6 +543,129 @@ mod tests {
         assert_eq!(
             build_provenance(&raw, SHA, FILENAME).unwrap_err(),
             AttestationError::MalformedStatement(0)
+        );
+    }
+
+    #[test]
+    fn test_summarize_provenance_reads_a_bound_attestation() {
+        let document = build_provenance(&field(&[attestation(FILENAME, SHA)]), SHA, FILENAME)
+            .unwrap()
+            .document;
+
+        let summaries = summarize_provenance(&document, SHA, FILENAME).unwrap();
+
+        assert_eq!(
+            summaries,
+            vec![UiAttestation {
+                predicate_type: Some("https://docs.pypi.org/attestations/publish/v1".to_owned()),
+                subject: UiSubjectMatch::Matched,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_summarize_provenance_records_every_attestation() {
+        let document = provenance_document(&[attestation(FILENAME, SHA), attestation(FILENAME, SHA)]);
+
+        let summaries = summarize_provenance(&document, SHA, FILENAME).unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.subject == UiSubjectMatch::Matched)
+        );
+    }
+
+    #[test]
+    fn test_summarize_provenance_flags_a_name_mismatch() {
+        let document = provenance_document(&[attestation("other-1.0-py3-none-any.whl", SHA)]);
+
+        let summaries = summarize_provenance(&document, SHA, FILENAME).unwrap();
+
+        assert_eq!(summaries[0].subject, UiSubjectMatch::Mismatched);
+    }
+
+    #[test]
+    fn test_summarize_provenance_flags_a_digest_mismatch() {
+        let other = "2222222222222222222222222222222222222222222222222222222222222222";
+        let document = provenance_document(&[attestation(FILENAME, other)]);
+
+        let summaries = summarize_provenance(&document, SHA, FILENAME).unwrap();
+
+        assert_eq!(summaries[0].subject, UiSubjectMatch::Mismatched);
+    }
+
+    #[test]
+    fn test_summarize_provenance_reports_unknown_for_an_unreadable_statement() {
+        let mut missing = attestation(FILENAME, SHA);
+        missing["envelope"] = json!({"signature": "YmFy"});
+        let document = provenance_document(&[missing]);
+
+        let summaries = summarize_provenance(&document, SHA, FILENAME).unwrap();
+
+        assert_eq!(
+            summaries,
+            vec![UiAttestation {
+                predicate_type: None,
+                subject: UiSubjectMatch::Unknown,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_summarize_provenance_reports_unknown_for_an_empty_subject() {
+        let mut empty = attestation(FILENAME, SHA);
+        empty["envelope"]["statement"] = json!(STANDARD.encode(json!({"subject": []}).to_string()));
+        let document = provenance_document(&[empty]);
+
+        let summaries = summarize_provenance(&document, SHA, FILENAME).unwrap();
+
+        assert_eq!(summaries[0].subject, UiSubjectMatch::Unknown);
+    }
+
+    #[test]
+    fn test_summarize_provenance_omits_an_absent_predicate_type() {
+        let mut anonymous = attestation(FILENAME, SHA);
+        anonymous["envelope"]["statement"] =
+            json!(STANDARD.encode(json!({"subject": [{"name": FILENAME, "digest": {"sha256": SHA}}]}).to_string()));
+        let document = provenance_document(&[anonymous]);
+
+        let summaries = summarize_provenance(&document, SHA, FILENAME).unwrap();
+
+        assert_eq!(summaries[0].predicate_type, None);
+        assert_eq!(summaries[0].subject, UiSubjectMatch::Matched);
+    }
+
+    #[test]
+    fn test_summarize_provenance_bounds_a_hostile_predicate_type() {
+        let mut hostile = attestation(FILENAME, SHA);
+        hostile["envelope"]["statement"] = json!(
+            STANDARD.encode(
+                json!({
+                    "subject": [{"name": FILENAME, "digest": {"sha256": SHA}}],
+                    "predicateType": "x".repeat(MAX_PREDICATE_TYPE_CHARS + 50),
+                })
+                .to_string()
+            )
+        );
+        let document = provenance_document(&[hostile]);
+
+        let predicate = summarize_provenance(&document, SHA, FILENAME).unwrap()[0]
+            .predicate_type
+            .clone()
+            .unwrap();
+
+        assert_eq!(predicate.chars().count(), MAX_PREDICATE_TYPE_CHARS);
+    }
+
+    #[test]
+    fn test_summarize_provenance_rejects_a_non_provenance_document() {
+        assert_eq!(summarize_provenance(b"not json", SHA, FILENAME), None);
+        assert_eq!(summarize_provenance(b"{\"version\":2}", SHA, FILENAME), None);
+        assert_eq!(
+            summarize_provenance(br#"{"version":1,"attestation_bundles":[]}"#, SHA, FILENAME),
+            None
         );
     }
 

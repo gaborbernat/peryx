@@ -47,8 +47,9 @@ export AWS_SECRET_ACCESS_KEY=...
 
 A completed write proves two guarantees, `conditional_writes` and `checksum_writes`, both `true` by default. AWS S3
 honors an `If-None-Match: *` create-if-absent write and validates the SHA-256 checksum sent with each object; some
-S3-compatible gateways reject the `*` precondition or skip checksum validation. If yours does, set the missing one to
-`false`:
+S3-compatible gateways reject the `*` precondition or the checksum header. Setting a guarantee to `false` stops peryx
+from sending its header, so a node keeps writing against an endpoint that rejects it. If yours does, set the missing one
+to `false`:
 
 ```toml
 conditional_writes = false

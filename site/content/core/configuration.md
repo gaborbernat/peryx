@@ -859,9 +859,9 @@ startup. The filesystem backend commits within a single host's failure domain be
 clobber an existing blob and publishes only bytes that hash to the expected digest. An S3-compatible backend commits
 within its object store's failure domain, and what it can prove there depends on the endpoint, not the provider brand:
 AWS S3 honors `If-None-Match` create-if-absent writes and validates the SHA-256 checksum on every write, while some
-S3-compatible gateways reject the `*` precondition or skip checksum validation. The operator declares each guarantee per
+S3-compatible gateways reject the `*` precondition or the checksum header. The operator declares each guarantee per
 instance with `conditional_writes` and `checksum_writes`, both `true` by default; set the one your endpoint lacks to
-`false`.
+`false`, and peryx stops sending that header so writes keep succeeding.
 
 `[availability]` modes that replicate their acknowledgement read these capabilities before serving traffic, because a
 mode that acknowledges a write across nodes cannot treat a bare storage success as proof. `none` acknowledges from local

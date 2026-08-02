@@ -6,19 +6,24 @@ use std::{fmt::Write as _, sync::Mutex};
 
 use anyhow::Context as _;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use peryx_driver::{AppState, PrometheusSource};
-use peryx_replication::{HttpPrimary, Replica, SyncOutcome, primary_router};
+use peryx_http::handlers::status_authorization;
+use peryx_http::response_security::{
+    ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
+};
+use peryx_replication::{HttpPrimary, Replica, SyncError, SyncOutcome, primary_router};
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
+use peryx_upstream::redact_url;
+use serde_json::{Value, json};
 
-use crate::config::{Config, ReplicationConfig};
+use crate::config::{AvailabilityConfig, Config, ReplicationConfig};
 
-#[derive(Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy)]
 enum ReplicaHealthStatus {
     Starting,
     CatchingUp,
@@ -26,22 +31,24 @@ enum ReplicaHealthStatus {
     Error,
 }
 
+/// Why a replica is unready, kept apart from the transient status so a schema mismatch a restart
+/// cannot resolve reads differently from a page a later poll will drain.
+#[derive(Clone, Copy)]
+enum ReplicaFault {
+    None,
+    Sync,
+    IncompatibleSchema,
+}
+
 #[derive(Clone, Copy)]
 struct ReplicaObservation {
     status: ReplicaHealthStatus,
+    fault: ReplicaFault,
     serial: u64,
     primary_serial: Option<u64>,
     changes: u64,
     blobs: u64,
     errors: u64,
-}
-
-#[derive(serde::Serialize)]
-struct ReplicaHealth {
-    status: ReplicaHealthStatus,
-    serial: u64,
-    primary_serial: Option<u64>,
-    lag: Option<u64>,
 }
 
 struct ReplicaMonitor {
@@ -53,6 +60,7 @@ impl ReplicaMonitor {
         Self {
             observation: Mutex::new(ReplicaObservation {
                 status: ReplicaHealthStatus::Starting,
+                fault: ReplicaFault::None,
                 serial,
                 primary_serial: None,
                 changes: 0,
@@ -72,6 +80,7 @@ impl ReplicaMonitor {
         } else {
             ReplicaHealthStatus::CatchingUp
         };
+        observation.fault = ReplicaFault::None;
         observation.serial = outcome.serial;
         observation.primary_serial = Some(outcome.primary_serial);
         observation.changes = observation
@@ -82,27 +91,40 @@ impl ReplicaMonitor {
             .saturating_add(u64::try_from(outcome.blobs).unwrap_or(u64::MAX));
     }
 
-    fn record_error(&self) {
+    fn record_error(&self, error: &SyncError) {
         let mut observation = self
             .observation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         observation.status = ReplicaHealthStatus::Error;
+        observation.fault = match error {
+            SyncError::UnsupportedVersion { .. } => ReplicaFault::IncompatibleSchema,
+            _ => ReplicaFault::Sync,
+        };
         observation.errors = observation.errors.saturating_add(1);
     }
 
-    fn health(&self) -> ReplicaHealth {
-        let observation = *self
+    fn snapshot(&self) -> ReplicaObservation {
+        *self
             .observation
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ReplicaHealth {
-            status: observation.status,
-            serial: observation.serial,
-            primary_serial: observation.primary_serial,
-            lag: observation
-                .primary_serial
-                .map(|primary_serial| primary_serial.saturating_sub(observation.serial)),
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The reason this replica cannot yet serve at the primary's frontier, or `None` when it is
+    /// caught up and error-free. A persistent schema mismatch outranks a transient sync failure,
+    /// which outranks ordinary catch-up lag.
+    fn readiness_gap(&self) -> Option<&'static str> {
+        let observation = self.snapshot();
+        match observation.fault {
+            ReplicaFault::IncompatibleSchema => Some("incompatible_schema"),
+            ReplicaFault::Sync => Some("sync_error"),
+            ReplicaFault::None => match observation.status {
+                ReplicaHealthStatus::CaughtUp => None,
+                ReplicaHealthStatus::Starting | ReplicaHealthStatus::CatchingUp | ReplicaHealthStatus::Error => {
+                    Some("frontier_lag")
+                }
+            },
         }
     }
 }
@@ -148,14 +170,134 @@ impl PrometheusSource for ReplicaMonitor {
     }
 }
 
-async fn replica_health(State(monitor): State<Arc<ReplicaMonitor>>) -> Response {
-    let health = monitor.health();
-    let status = if matches!(health.status, ReplicaHealthStatus::CaughtUp) {
+/// The replication role a `dc` or `ha` process drives, reported to any caller so an operator can
+/// route probes without a credential.
+#[derive(Clone, Copy)]
+enum AvailabilityRole {
+    Primary,
+    Replica,
+}
+
+impl AvailabilityRole {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Replica => "replica",
+        }
+    }
+}
+
+/// What a replica exposes about the primary it follows: the shared monitor and the primary's origin
+/// with credentials, query, and fragment already removed.
+#[derive(Clone)]
+struct ReplicaView {
+    monitor: Arc<ReplicaMonitor>,
+    upstream: String,
+}
+
+/// The availability surface a `dc` or `ha` process serves its health and readiness resources from.
+/// A `none` process holds none of this, so it mounts neither resource.
+#[derive(Clone)]
+struct AvailabilityNode {
+    app: Arc<AppState>,
+    mode: &'static str,
+    role: AvailabilityRole,
+    replica: Option<ReplicaView>,
+}
+
+impl AvailabilityNode {
+    /// Whether this node can serve at its frontier, and every reason it cannot. The list is empty
+    /// exactly when the node is ready, so a probe reads `ready` and a human reads the causes. The
+    /// blob store carries a mount's crash and replication guarantees, so its reachability gates
+    /// readiness; a replica's metadata frontier is validated at startup and tracked below.
+    async fn readiness(&self) -> (bool, Vec<&'static str>) {
+        let mut reasons = Vec::new();
+        if self.app.blobs.health().await.is_err() {
+            reasons.push("blob_store");
+        }
+        if let Some(gap) = self
+            .replica
+            .as_ref()
+            .and_then(|replica| replica.monitor.readiness_gap())
+        {
+            reasons.push(gap);
+        }
+        (reasons.is_empty(), reasons)
+    }
+
+    /// The readiness verdict and a body already filtered to the caller's class: mode, role, and the
+    /// verdict for any caller; serials and lag for an operator; the redacted primary origin for an
+    /// administrator.
+    async fn document(&self, authorization: ResponseAuthorization) -> (bool, serde_json::Map<String, Value>) {
+        let (ready, reasons) = self.readiness().await;
+        let mut fields = vec![
+            ClassifiedField::new("mode", FieldClassification::Public, json!(self.mode)),
+            ClassifiedField::new("role", FieldClassification::Public, json!(self.role.as_str())),
+            ClassifiedField::new("ready", FieldClassification::Public, json!(ready)),
+            ClassifiedField::new("reasons", FieldClassification::Public, json!(reasons)),
+        ];
+        if let Some(replica) = &self.replica {
+            let observation = replica.monitor.snapshot();
+            let lag = observation
+                .primary_serial
+                .map(|primary_serial| primary_serial.saturating_sub(observation.serial));
+            fields.extend([
+                ClassifiedField::new("serial", FieldClassification::Operator, json!(observation.serial)),
+                ClassifiedField::new(
+                    "primary_serial",
+                    FieldClassification::Operator,
+                    json!(observation.primary_serial),
+                ),
+                ClassifiedField::new("lag", FieldClassification::Operator, json!(lag)),
+                ClassifiedField::new(
+                    "synced_changes",
+                    FieldClassification::Operator,
+                    json!(observation.changes),
+                ),
+                ClassifiedField::new("synced_blobs", FieldClassification::Operator, json!(observation.blobs)),
+                ClassifiedField::new("sync_errors", FieldClassification::Operator, json!(observation.errors)),
+                ClassifiedField::new("upstream", FieldClassification::Administrator, json!(replica.upstream)),
+            ]);
+        } else {
+            let serial = self.app.meta.current_serial().unwrap_or(0);
+            fields.push(ClassifiedField::new(
+                "serial",
+                FieldClassification::Operator,
+                json!(serial),
+            ));
+        }
+        let body = filter_fields(authorization, fields).expect("public and allowed scopes classify");
+        (ready, body)
+    }
+}
+
+/// `GET /+replication/v1/health`: availability liveness. It answers `200` whenever the process still
+/// serves the resource, so a load balancer never restarts a replica that is merely catching up. The
+/// body carries the readiness verdict for callers that want one document.
+async fn availability_health(State(node): State<AvailabilityNode>, headers: HeaderMap) -> Response {
+    let authorization = status_authorization(&node.app, &headers).await;
+    let (_ready, body) = node.document(authorization).await;
+    availability_response(StatusCode::OK, body)
+}
+
+/// `GET /+replication/v1/ready`: availability readiness. It answers `503` for a frontier gap, an
+/// incompatible primary schema, or a failed local store, so readiness removes the node from a pool
+/// without restarting it.
+async fn availability_readiness(State(node): State<AvailabilityNode>, headers: HeaderMap) -> Response {
+    let authorization = status_authorization(&node.app, &headers).await;
+    let (ready, body) = node.document(authorization).await;
+    let status = if ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(health)).into_response()
+    availability_response(status, body)
+}
+
+fn availability_response(status: StatusCode, body: serde_json::Map<String, Value>) -> Response {
+    let mut response = (status, Json(Value::Object(body))).into_response();
+    ProtectedCachePolicy::NoStore.apply(response.headers_mut());
+    response
 }
 
 struct ReplicaLoop {
@@ -199,7 +341,7 @@ impl ReplicaLoop {
                 outcome.caught_up()
             }
             Err(error) => {
-                self.monitor.record_error();
+                self.monitor.record_error(&error);
                 tracing::error!(%error, "replica synchronization failed");
                 true
             }
@@ -211,6 +353,7 @@ impl ReplicaLoop {
 pub struct ReplicationRuntime {
     primary: Option<Router>,
     replica: Option<ReplicaLoop>,
+    availability: Option<AvailabilityNode>,
 }
 
 impl ReplicationRuntime {
@@ -220,8 +363,13 @@ impl ReplicationRuntime {
     /// Returns an error if a secret cannot be read, the upstream URL is invalid, or the primary
     /// router rejects its identity or token.
     pub fn new(config: &Config, state: &Arc<AppState>) -> anyhow::Result<Self> {
-        let (primary, replica) = match config.availability.replication() {
-            None => (None, None),
+        let mode = match &config.availability {
+            AvailabilityConfig::None => "none",
+            AvailabilityConfig::Dc(_) => "dc",
+            AvailabilityConfig::Ha(_) => "ha",
+        };
+        let (primary, replica, availability) = match config.availability.replication() {
+            None => (None, None, None),
             Some(ReplicationConfig::Primary { source, token }) => {
                 let token = token.read().context("read the primary replication token")?;
                 let router = primary_router(
@@ -231,7 +379,13 @@ impl ReplicationRuntime {
                     state.serving.blobs.clone(),
                 )
                 .context("build primary replication routes")?;
-                (Some(router), None)
+                let node = AvailabilityNode {
+                    app: state.clone(),
+                    mode,
+                    role: AvailabilityRole::Primary,
+                    replica: None,
+                };
+                (Some(router), None, Some(node))
             }
             Some(ReplicationConfig::Replica {
                 upstream,
@@ -245,6 +399,15 @@ impl ReplicationRuntime {
                     state.meta.current_serial().context("read the replica serial")?,
                 ));
                 state.register_prometheus(monitor.clone());
+                let node = AvailabilityNode {
+                    app: state.clone(),
+                    mode,
+                    role: AvailabilityRole::Replica,
+                    replica: Some(ReplicaView {
+                        monitor: monitor.clone(),
+                        upstream: redact_url(upstream),
+                    }),
+                };
                 (
                     None,
                     Some(ReplicaLoop {
@@ -255,10 +418,15 @@ impl ReplicationRuntime {
                         poll_interval: *poll_interval,
                         monitor,
                     }),
+                    Some(node),
                 )
             }
         };
-        Ok(Self { primary, replica })
+        Ok(Self {
+            primary,
+            replica,
+            availability,
+        })
     }
 
     /// Whether this process follows a primary and must avoid local writers.
@@ -267,17 +435,19 @@ impl ReplicationRuntime {
         self.replica.is_some()
     }
 
-    /// Mount primary routes, when configured, on the process router.
+    /// Mount primary routes and the availability health and readiness resources, when configured, on
+    /// the process router. A `none` process has no availability surface and mounts neither resource.
     pub fn mount(&self, router: Router) -> Router {
         let router = match &self.primary {
             Some(primary) => router.merge(primary.clone()),
             None => router,
         };
-        match &self.replica {
-            Some(replica) => router.merge(
+        match &self.availability {
+            Some(node) => router.merge(
                 Router::new()
-                    .route("/+replication/v1/health", get(replica_health))
-                    .with_state(replica.monitor.clone()),
+                    .route("/+replication/v1/health", get(availability_health))
+                    .route("/+replication/v1/ready", get(availability_readiness))
+                    .with_state(node.clone()),
             ),
             None => router,
         }

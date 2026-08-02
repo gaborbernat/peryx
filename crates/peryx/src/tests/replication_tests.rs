@@ -2,12 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use axum::routing::get as route_get;
+use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use http_body_util::BodyExt as _;
 use peryx_driver::IndexKind as RuntimeIndexKind;
-use peryx_identity::Action;
+use peryx_driver::state::AppState;
+use peryx_identity::{Action, GrantScope, Role};
 use peryx_replication::{ChangePage, primary_router};
 use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::MetaStore;
@@ -74,6 +78,13 @@ fn replica_config(upstream: &str, page_size: usize) -> ReplicationConfig {
     }
 }
 
+fn primary_config() -> ReplicationConfig {
+    ReplicationConfig::Primary {
+        source: "primary-a".to_owned(),
+        token: SecretSource::Literal(TOKEN.to_owned()),
+    }
+}
+
 fn primary_stores() -> (tempfile::TempDir, MetaStore, BlobStore) {
     let dir = tempfile::tempdir().unwrap();
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
@@ -82,9 +93,17 @@ fn primary_stores() -> (tempfile::TempDir, MetaStore, BlobStore) {
 }
 
 async fn get(router: &Router, path: &str) -> (StatusCode, Vec<u8>) {
+    get_as(router, path, None).await
+}
+
+async fn get_as(router: &Router, path: &str, credentials: Option<&str>) -> (StatusCode, Vec<u8>) {
+    let mut request = Request::get(path);
+    if let Some(credentials) = credentials {
+        request = request.header(header::AUTHORIZATION, format!("Basic {}", STANDARD.encode(credentials)));
+    }
     let response = router
         .clone()
-        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -92,16 +111,41 @@ async fn get(router: &Router, path: &str) -> (StatusCode, Vec<u8>) {
     (status, body)
 }
 
+async fn document(router: &Router, path: &str, credentials: Option<&str>) -> (StatusCode, serde_json::Value) {
+    let (status, body) = get_as(router, path, credentials).await;
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+const PASSWORD: &str = "local availability password";
+
+async fn credential(state: &AppState, name: &str, role: Role) -> String {
+    let user = state.users.create(name).unwrap();
+    state.users.set_password(&user.id, PASSWORD).await.unwrap();
+    state.authorization.grant(&user.id, role, GrantScope::Server).unwrap();
+    format!("{name}:{PASSWORD}")
+}
+
+/// A stand-in primary that always answers `changes` with a page tagged an unsupported protocol
+/// version, so a replica polling it records a schema fault rather than a transport failure.
+async fn incompatible_primary() -> TestServer {
+    let page = ChangePage {
+        version: u16::MAX,
+        source: "primary-a".to_owned(),
+        after: 0,
+        current_serial: 1,
+        changes: Vec::new(),
+    };
+    let handler = route_get(move || {
+        let page = page.clone();
+        async move { Json(page) }
+    });
+    TestServer::start(Router::new().route("/+replication/v1/changes", handler)).await
+}
+
 #[tokio::test]
 async fn test_primary_runtime_mounts_authenticated_routes() {
     let dir = tempfile::tempdir().unwrap();
-    let config = config(
-        &dir,
-        Some(ReplicationConfig::Primary {
-            source: "primary-a".to_owned(),
-            token: SecretSource::Literal(TOKEN.to_owned()),
-        }),
-    );
+    let config = config(&dir, Some(primary_config()));
     let router = build_router(&config).unwrap();
 
     let response = router
@@ -145,7 +189,7 @@ async fn test_replica_runtime_drains_available_pages() {
     let deadline = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(deadline);
     loop {
-        if get(&router, "/+replication/v1/health").await.0 == StatusCode::OK {
+        if get(&router, "/+replication/v1/ready").await.0 == StatusCode::OK {
             break;
         }
         tokio::select! {
@@ -250,7 +294,27 @@ async fn test_replica_runtime_forwards_blobs_to_a_follower() {
 }
 
 #[tokio::test]
-async fn test_replica_runtime_waits_after_a_sync_error() {
+async fn test_replica_stays_live_but_unready_while_starting() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, Some(replica_config("https://primary.example/", 10)));
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let router = runtime.mount(router_for(state));
+
+    let (health_status, health) = document(&router, "/+replication/v1/health", None).await;
+    assert_eq!(health_status, StatusCode::OK);
+    assert_eq!(
+        health,
+        serde_json::json!({"mode": "dc", "role": "replica", "ready": false, "reasons": ["frontier_lag"]})
+    );
+
+    let (ready_status, ready) = document(&router, "/+replication/v1/ready", None).await;
+    assert_eq!(ready_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(ready, health);
+}
+
+#[tokio::test]
+async fn test_replica_readiness_reports_a_sync_error() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
     drop(listener);
@@ -261,10 +325,14 @@ async fn test_replica_runtime_waits_after_a_sync_error() {
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
     let router = runtime.mount(router_for(state));
-    let (status, body) = get(&router, "/+replication/v1/health").await;
-    let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(get(&router, "/+replication/v1/health").await.0, StatusCode::OK);
+    let (status, ready) = document(&router, "/+replication/v1/ready", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(health["status"], "error");
+    assert_eq!(
+        ready,
+        serde_json::json!({"mode": "dc", "role": "replica", "ready": false, "reasons": ["sync_error"]})
+    );
     let (_, body) = get(&router, "/metrics").await;
     assert!(
         String::from_utf8(body)
@@ -274,29 +342,26 @@ async fn test_replica_runtime_waits_after_a_sync_error() {
 }
 
 #[tokio::test]
-async fn test_replica_health_starts_unready() {
+async fn test_replica_readiness_reports_an_incompatible_schema() {
+    let primary = incompatible_primary().await;
     let dir = tempfile::tempdir().unwrap();
-    let config = config(&dir, Some(replica_config("https://primary.example/", 10)));
+    let config = config(&dir, Some(replica_config(&primary.url, 10)));
     let state = build_state(&config).unwrap();
     let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    assert_eq!(runtime.sync_cycle().await, Some(true));
     let router = runtime.mount(router_for(state));
 
-    let (status, body) = get(&router, "/+replication/v1/health").await;
-    let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let (status, ready) = document(&router, "/+replication/v1/ready", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        health,
-        serde_json::json!({"status": "starting", "serial": 0, "primary_serial": null, "lag": null})
+        ready,
+        serde_json::json!({"mode": "dc", "role": "replica", "ready": false, "reasons": ["incompatible_schema"]})
     );
-    let (_, body) = get(&router, "/metrics").await;
-    let metrics = String::from_utf8(body).unwrap();
-    assert!(metrics.contains("peryx_replication_caught_up 0\n"));
-    assert!(metrics.contains("peryx_replication_serial 0\n"));
-    assert!(!metrics.contains("peryx_replication_primary_serial "));
 }
 
 #[tokio::test]
-async fn test_replica_health_and_metrics_track_catch_up() {
+async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
     let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
     primary_meta
         .commit_driver_txn(|_| {
@@ -307,36 +372,105 @@ async fn test_replica_health_and_metrics_track_catch_up() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, Some(replica_config(&server.url, 2)));
     let state = build_state(&config).unwrap();
+    let operator = credential(&state, "Olivia", Role::Operator).await;
     let runtime = ReplicationRuntime::new(&config, &state).unwrap();
     let router = runtime.mount(router_for(state));
 
     assert_eq!(runtime.sync_cycle().await, Some(false));
-    let (status, body) = get(&router, "/+replication/v1/health").await;
-    let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let (status, ready) = document(&router, "/+replication/v1/ready", Some(&operator)).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        health,
-        serde_json::json!({"status": "catching_up", "serial": 2, "primary_serial": 3, "lag": 1})
+        ready,
+        serde_json::json!({
+            "mode": "dc", "role": "replica", "ready": false, "reasons": ["frontier_lag"],
+            "serial": 2, "primary_serial": 3, "lag": 1,
+            "synced_changes": 2, "synced_blobs": 0, "sync_errors": 0,
+        })
     );
     let (_, body) = get(&router, "/metrics").await;
-    let metrics = String::from_utf8(body).unwrap();
-    assert!(metrics.contains("peryx_replication_changes_total 2\n"));
-    assert!(metrics.contains("peryx_replication_primary_serial 3\n"));
-    assert!(metrics.contains("peryx_replication_lag 1\n"));
+    assert!(String::from_utf8(body).unwrap().contains("peryx_replication_lag 1\n"));
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
-    let (status, body) = get(&router, "/+replication/v1/health").await;
-    let health: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let (status, ready) = document(&router, "/+replication/v1/ready", Some(&operator)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        health,
-        serde_json::json!({"status": "caught_up", "serial": 3, "primary_serial": 3, "lag": 0})
+        ready,
+        serde_json::json!({
+            "mode": "dc", "role": "replica", "ready": true, "reasons": [],
+            "serial": 3, "primary_serial": 3, "lag": 0,
+            "synced_changes": 3, "synced_blobs": 0, "sync_errors": 0,
+        })
     );
     let (_, body) = get(&router, "/metrics").await;
-    let metrics = String::from_utf8(body).unwrap();
-    assert!(metrics.contains("peryx_replication_caught_up 1\n"));
-    assert!(metrics.contains("peryx_replication_changes_total 3\n"));
-    assert!(metrics.contains("peryx_replication_lag 0\n"));
+    assert!(String::from_utf8(body).unwrap().contains("peryx_replication_lag 0\n"));
+}
+
+#[tokio::test]
+async fn test_availability_health_filters_topology_by_caller_class() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(
+        &dir,
+        Some(replica_config("http://replica:s3cr3t@primary.example:8443/", 10)),
+    );
+    let state = build_state(&config).unwrap();
+    let operator = credential(&state, "Olivia", Role::Operator).await;
+    let administrator = credential(&state, "Alice", Role::Administrator).await;
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let router = runtime.mount(router_for(state));
+
+    let (_, public) = document(&router, "/+replication/v1/health", None).await;
+    assert_eq!(
+        public,
+        serde_json::json!({"mode": "dc", "role": "replica", "ready": false, "reasons": ["frontier_lag"]})
+    );
+
+    let (_, operator) = document(&router, "/+replication/v1/health", Some(&operator)).await;
+    assert!(operator.get("serial").is_some());
+    assert!(operator.get("lag").is_some());
+    assert!(operator.get("upstream").is_none());
+
+    let (_, administrator) = document(&router, "/+replication/v1/health", Some(&administrator)).await;
+    let upstream = administrator["upstream"].as_str().unwrap();
+    assert_eq!(upstream, "http://primary.example:8443/");
+    assert!(!upstream.contains("replica"));
+    assert!(!upstream.contains("s3cr3t"));
+}
+
+#[tokio::test]
+async fn test_primary_exposes_ready_availability() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, Some(primary_config()));
+    let state = build_state(&config).unwrap();
+    let administrator = credential(&state, "Alice", Role::Administrator).await;
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let router = runtime.mount(router_for(state));
+
+    let (status, ready) = document(&router, "/+replication/v1/ready", Some(&administrator)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        ready,
+        serde_json::json!({"mode": "dc", "role": "primary", "ready": true, "reasons": [], "serial": 0})
+    );
+    assert_eq!(get(&router, "/+replication/v1/health").await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_readiness_reports_a_failed_blob_store_in_ha_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("blobs"), b"not a directory").unwrap();
+    let mut config = config(&dir, Some(primary_config()));
+    let AvailabilityConfig::Dc(replication) = config.availability else {
+        panic!("config helper builds a dc primary");
+    };
+    config.availability = AvailabilityConfig::Ha(replication);
+    let router = build_router(&config).unwrap();
+
+    let (status, ready) = document(&router, "/+replication/v1/ready", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        ready,
+        serde_json::json!({"mode": "ha", "role": "primary", "ready": false, "reasons": ["blob_store"]})
+    );
 }
 
 #[tokio::test]
@@ -360,6 +494,8 @@ async fn test_disabled_runtime_mounts_no_routes_or_task() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(get(&router, "/+replication/v1/health").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(get(&router, "/+replication/v1/ready").await.0, StatusCode::NOT_FOUND);
     let (_, body) = get(&router, "/metrics").await;
     assert!(!String::from_utf8(body).unwrap().contains("peryx_replication_"));
 }

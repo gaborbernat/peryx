@@ -10,7 +10,7 @@ use crate::name::Reference;
 use crate::store::{self, Manifest};
 use crate::upstream::UpstreamError;
 use axum::body::Body;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use peryx_driver::ServingState;
 use peryx_events::metrics::Event;
@@ -102,16 +102,23 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 served.unwrap_or_else(|| error_response(ErrorCode::ManifestUnknown, "manifest unknown"))
             }
         };
-        let response = self
+        let mut response = self
             .negotiate_manifest(state, index, repo, accept, response, head)
             .await?;
-        // A served manifest is this ecosystem's index document, so it counts as a page like a Simple
-        // page does; a HEAD is a metadata check and carries no body, so it does not.
-        if !head && response.status() == StatusCode::OK {
-            state.metrics.record(Event::Page {
-                route: index.route.clone(),
-                project: repo.to_owned(),
-            });
+        if response.status() == StatusCode::OK {
+            // The same tag can hand back the index or its child depending on Accept, so a shared cache
+            // keyed on the URL alone would mis-serve one client the other's body.
+            response
+                .headers_mut()
+                .insert(header::VARY, HeaderValue::from_static("accept"));
+            // A served manifest is this ecosystem's index document, so it counts as a page like a Simple
+            // page does; a HEAD is a metadata check and carries no body, so it does not.
+            if !head {
+                state.metrics.record(Event::Page {
+                    route: index.route.clone(),
+                    project: repo.to_owned(),
+                });
+            }
         }
         Ok(response)
     }
@@ -450,10 +457,16 @@ fn is_list_media_type(media_type: &str) -> bool {
     let base = media_type_base(media_type);
     base == OCI_INDEX_TYPE || base == DOCKER_MANIFEST_LIST_TYPE
 }
-/// Whether the client's `Accept` names neither list type, the signal that it cannot parse an index and
-/// wants the `linux/amd64` child instead — the same explicit-accept test `distribution` applies.
+/// Whether the client's `Accept` names neither a list type nor a wildcard, the signal that it cannot
+/// parse an index and wants the `linux/amd64` child instead — the same explicit-accept test
+/// `distribution` applies. A wildcard (`*/*` or `*`) or an empty `Accept` accepts anything, the index
+/// included, so it does not force the substitution.
 fn accept_excludes_list_types(accept: &str) -> bool {
-    !accept.split(',').any(is_list_media_type)
+    let accept = accept.trim();
+    !accept.is_empty()
+        && !accept
+            .split(',')
+            .any(|entry| is_list_media_type(entry) || matches!(media_type_base(entry), "*/*" | "*"))
 }
 /// Build the response for a stored manifest, headers-only for a `HEAD`. The content length is set the
 /// same either way, so a `HEAD` reports the size a `GET` would return.

@@ -68,10 +68,12 @@ manifest list and the client's `Accept` names neither list media type, peryx ser
 image manifest, reading it from the store or fetching it by digest through a proxy member, with the child's
 `Content-Type` and `Docker-Content-Digest`. A `HEAD` returns the same headers with an empty body.
 
-Nothing else changes. An `Accept` that names a list type, or is absent, still gets the index, as does an index with no
-`linux/amd64` child; only the serve path negotiates, and a push stores what it is given. Modern docker, podman,
-containerd, and oras all send `Accept` lists that name the index types, so they receive the index and never see the
-substitution ([#114](https://github.com/tox-dev/peryx/issues/114)).
+Nothing else changes. An `Accept` that names a list type, that is absent, empty, or a wildcard (`*/*` or `*`, curl's
+default and what many HTTP clients send), still gets the index, as does an index with no `linux/amd64` child; only a
+client that names single-manifest types and no list type gets the substitution. A push stores what it is given. Modern
+docker, podman, containerd, and oras all send `Accept` lists that name the index types, so they receive the index and
+never see the substitution ([#114](https://github.com/tox-dev/peryx/issues/114)). Because the same tag can return the
+index or its child depending on `Accept`, the serve carries `Vary: Accept` so a shared cache keys on it.
 
 ## In practice
 

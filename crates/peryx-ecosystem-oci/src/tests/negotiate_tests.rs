@@ -2,6 +2,7 @@
 //! `linux/amd64` child, the negotiation `distribution` does for legacy Docker (< 17.06).
 
 use axum::http::{Method, StatusCode, header};
+use rstest::rstest;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -58,7 +59,32 @@ async fn test_get_serves_the_amd64_child_when_accept_excludes_the_index() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["docker-content-digest"], child_digest);
     assert_eq!(headers[header::CONTENT_TYPE], MANIFEST_TYPE);
+    assert_eq!(headers[header::VARY], "accept");
     assert_eq!(body, CHILD);
+}
+
+#[rstest]
+#[case::wildcard_type("*/*")]
+#[case::bare_star("*")]
+#[case::empty("")]
+#[tokio::test]
+async fn test_get_with_a_wildcard_or_empty_accept_serves_the_index(#[case] accept: &str) {
+    let (_dir, app, child_digest) = hosted_index().await;
+    let index = amd64_index(&child_digest);
+    let (status, headers, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/multi",
+        &[("accept", accept)],
+    )
+    .await;
+    // A wildcard or empty Accept accepts anything, the index included, so it is served unchanged rather
+    // than substituted down to its linux/amd64 child, the way the reference distribution registry does.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], oci_digest(&index));
+    assert_eq!(headers[header::CONTENT_TYPE], INDEX_TYPE);
+    assert_eq!(headers[header::VARY], "accept");
+    assert_eq!(body, index);
 }
 
 #[tokio::test]

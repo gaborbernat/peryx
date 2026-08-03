@@ -48,7 +48,8 @@ one URL where your own content wins over upstream. peryx names these cached, hos
 ## peryx's three roles
 
 - A **cached** index proxies and caches one upstream, with its own credentials.
-- A **hosted** index stores uploads; `upload_token` gates writes and `volatile` gates deletion.
+- A **hosted** index stores uploads; a write-granting `[[index.access_token]]` gates writes and `volatile` gates
+  deletion.
 - A **virtual** index serves an ordered list of other indexes under one route. PyPI defaults to first-match per filename
   and unioned versions; its source policy can instead select hosted candidates at project level or disable cached
   fallback. Uploads land in the virtual index's designated hosted layer. A layer can be another virtual index.

@@ -26,7 +26,10 @@ data_dir = "peryx-data"
 
 [[index]]
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]]
 name = "hosted"
@@ -107,20 +110,24 @@ Leave `trusted_proxies` unset for this local run. Named principals use their ver
 the address bucket for anonymous or invalid credentials and which peers may set the public origin. For a proxy
 deployment, follow the [reverse-proxy recipe](@/core/control-access.md#preserve-client-buckets-behind-a-reverse-proxy).
 
-## The one-token shortcut
+## The one-token setup
 
-If you want a hosted index that a single trusted token may write and delete anywhere, you do not need an
-`[[index.access_token]]` table at all. The older `upload_token` key still works and stands for exactly that, one
-credential granted write and delete over every project:
+If you want a hosted index that a single trusted token may write and delete anywhere, one `[[index.access_token]]` with
+no `projects` filter covers it, granting write and delete over every project:
 
 ```toml
 [[index]]
 name = "hosted"
-upload_token = "hosted-secret"
+hosted = true
+
+[[index.access_token]]
+name = "upload"
+secret = "hosted-secret"
+actions = ["write", "delete"]
 ```
 
-An index configured this way behaves as it did before peryx had a token model. Reach for `[[index.access_token]]` when
-one blanket credential is too much, which is the moment a scoped grant earns its keep.
+Add a `projects` filter to that grant when one blanket credential is too much, which is the moment a scoped grant earns
+its keep.
 
 ## Where next
 

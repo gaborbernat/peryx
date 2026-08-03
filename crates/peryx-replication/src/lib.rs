@@ -14,6 +14,7 @@ mod follower;
 mod http;
 mod liveness;
 mod peer;
+mod peer_http;
 mod protocol;
 mod replica;
 pub mod sim;
@@ -45,6 +46,7 @@ pub use peer::{
     BatchFrame, BatchRequest, DEFAULT_TRANSFER_LIMITS, FrontierSync, LoopbackPeer, LoopbackTransport, PeerFault,
     PeerTransport, TransferLimits, TransportError, drain_to_frontier,
 };
+pub use peer_http::{HttpPeerError, HttpPeerTransport};
 pub use protocol::{
     BlobReference, Change, ChangePage, MetadataMutation, PROTOCOL_VERSION, PlacementAvailability, PlacementDescriptor,
     Primary,
@@ -67,6 +69,8 @@ mod follower_tests;
 mod http_tests;
 #[cfg(test)]
 mod liveness_tests;
+#[cfg(test)]
+mod peer_http_tests;
 #[cfg(test)]
 mod peer_tests;
 #[cfg(test)]

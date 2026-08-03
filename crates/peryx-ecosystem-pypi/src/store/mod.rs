@@ -146,6 +146,17 @@ fn project_key(index: &str, normalized: &str) -> String {
     format!("{PROJECTS_PREFIX}{index}/{normalized}")
 }
 
+/// The normalized project a replicated authoritative key names, or `None` when the key is not a project
+/// marker. A replica maps the keys it just applied to the projects whose derived views need rebuilding
+/// through this; publish, yank, restore, and delete each write or remove a project marker, and file,
+/// metadata, and journal keys carry no project, so they yield nothing. A project name never contains a
+/// slash, so the final segment is the project and the rest is the index route.
+pub(crate) fn project_of_key(key: &str) -> Option<&str> {
+    key.strip_prefix(PROJECTS_PREFIX)?
+        .rsplit_once('/')
+        .map(|(_index, normalized)| normalized)
+}
+
 fn project_status_key(index: &str, normalized: &str) -> String {
     format!("{PROJECT_STATUS_PREFIX}{index}/{normalized}")
 }

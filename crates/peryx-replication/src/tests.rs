@@ -120,11 +120,12 @@ async fn test_sync_commits_verified_blob_metadata_journal_and_cursor() {
         vec![(&digest, vec![Ok(bytes.clone())])],
     );
 
-    let outcome = replica(&meta, &blobs).sync_once(&source).await.unwrap();
+    let (outcome, changed_keys) = replica(&meta, &blobs).sync_once(&source).await.unwrap();
 
     assert_eq!(outcome.changes, 1);
     assert_eq!(outcome.blobs, 1);
     assert!(outcome.caught_up());
+    assert_eq!(changed_keys, vec!["pypi\0upload".to_owned()]);
     assert_eq!(blobs.read_bytes(&digest, bytes.len() as u64).await.unwrap(), bytes);
     assert_eq!(
         meta.get_driver_value("pypi\0upload").unwrap().as_deref(),
@@ -154,8 +155,8 @@ async fn test_sync_resumes_from_the_committed_serial() {
     );
     let replica = replica(&meta, &blobs);
 
-    let first = replica.sync_once(&source).await.unwrap();
-    let second = replica.sync_once(&source).await.unwrap();
+    let (first, _) = replica.sync_once(&source).await.unwrap();
+    let (second, _) = replica.sync_once(&source).await.unwrap();
 
     assert!(!first.caught_up());
     assert!(second.caught_up());
@@ -318,11 +319,12 @@ async fn test_sync_accepts_an_empty_page_at_the_primary_serial() {
     let (_dir, meta, blobs) = stores();
     let source = primary(vec![page("primary-a", 0, 0, Vec::new())], Vec::new());
 
-    let outcome = replica(&meta, &blobs).sync_once(&source).await.unwrap();
+    let (outcome, changed_keys) = replica(&meta, &blobs).sync_once(&source).await.unwrap();
 
     assert_eq!(outcome.changes, 0);
     assert_eq!(outcome.serial, 0);
     assert!(outcome.caught_up());
+    assert!(changed_keys.is_empty());
 }
 
 #[tokio::test]
@@ -631,7 +633,7 @@ async fn test_sync_reuses_an_existing_verified_blob() {
         Vec::new(),
     );
 
-    let outcome = replica(&meta, &blobs).sync_once(&source).await.unwrap();
+    let (outcome, _) = replica(&meta, &blobs).sync_once(&source).await.unwrap();
 
     assert_eq!(outcome.blobs, 0);
     assert_eq!(blobs.read_bytes(&digest, 8).await.unwrap(), b"artifact");

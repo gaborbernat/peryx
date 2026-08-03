@@ -7,6 +7,7 @@ mod changelog;
 mod discovery;
 mod download;
 mod fallback;
+mod frontier;
 mod inspect;
 mod legacy_json;
 mod metadata;

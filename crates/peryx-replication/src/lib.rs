@@ -17,6 +17,7 @@ mod liveness;
 mod peer;
 mod peer_http;
 mod protocol;
+mod readiness;
 mod replica;
 pub mod sim;
 mod visibility;
@@ -54,6 +55,7 @@ pub use protocol::{
     BlobReference, Change, ChangePage, MetadataMutation, PROTOCOL_VERSION, PlacementAvailability, PlacementDescriptor,
     Primary,
 };
+pub use readiness::{DurabilityPolicy, GroupReadiness, MemberFrontier, MemberRole, ReadinessBlocker, group_readiness};
 pub use replica::{Replica, ReplicaState, SyncOutcome};
 pub use visibility::{ApplyEffect, ArtifactId, OpOrder, Visibility, VisibilityAction, VisibilityOp, VisibilityState};
 
@@ -81,6 +83,8 @@ mod peer_http_tests;
 mod peer_tests;
 #[cfg(test)]
 mod protocol_tests;
+#[cfg(test)]
+mod readiness_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

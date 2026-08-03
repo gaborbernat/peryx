@@ -232,8 +232,12 @@ fn test_identify_ignores_an_expired_token() {
 }
 
 #[test]
-fn test_upload_token_grants_writes_and_deletes_everywhere() {
-    let acl = IndexAcl::upload_token("s3cret");
+fn test_write_and_delete_grant_covers_every_project() {
+    let acl = acl(vec![token(
+        "uploader",
+        "s3cret",
+        grant(&["*"], &[Action::Write, Action::Delete]),
+    )]);
     let principal = acl.identify(Some(&basic(b"__token__:s3cret")), 0).principal;
     assert_eq!(authorize(&principal, &acl, Some("anything"), Action::Write), Ok(()));
     assert_eq!(authorize(&principal, &acl, Some("anything"), Action::Delete), Ok(()));

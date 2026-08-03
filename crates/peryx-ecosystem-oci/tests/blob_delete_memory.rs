@@ -6,7 +6,7 @@ use axum::http::{Method, Request, StatusCode};
 use base64::Engine as _;
 use peryx_core::Ecosystem;
 use peryx_driver::AppState;
-use peryx_identity::IndexAcl;
+use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::Policy;
 use peryx_storage::blob::{BlobStorage, Digest};
@@ -21,6 +21,21 @@ const TOKEN: &str = "upload-token";
 #[global_allocator]
 static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
+fn writer_acl(secret: impl Into<String>) -> IndexAcl {
+    IndexAcl {
+        anonymous_read: true,
+        tokens: vec![NamedToken {
+            name: "uploader".to_owned(),
+            secret: secret.into(),
+            grants: vec![Grant {
+                projects: vec![Glob::new("*")],
+                actions: std::collections::BTreeSet::from([Action::Write, Action::Delete]),
+            }],
+            expires_at: None,
+        }],
+    }
+}
+
 #[tokio::test]
 async fn test_blob_delete_uses_bounded_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -32,7 +47,7 @@ async fn test_blob_delete_uses_bounded_memory() {
         ecosystem: Ecosystem::Oci,
         kind: IndexKind::Hosted { volatile: true },
         policy: Policy::default(),
-        acl: IndexAcl::upload_token(TOKEN),
+        acl: writer_acl(TOKEN),
     };
     let mut state = AppState::with_clock(meta, blobs, 60, vec![index], Arc::new(|| 1000));
     peryx_ecosystem_oci::install(&mut state, std::iter::empty(), false);

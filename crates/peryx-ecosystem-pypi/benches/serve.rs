@@ -21,7 +21,7 @@ use peryx_ecosystem_pypi::store::CachedIndex;
 use peryx_ecosystem_pypi::store::PypiStore as _;
 use peryx_ecosystem_pypi::to_json;
 use peryx_http::router;
-use peryx_identity::IndexAcl;
+use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::Policy;
 use peryx_storage::blob::BlobStore;
@@ -35,6 +35,21 @@ use detail::project_detail;
 const LARGE: usize = 400;
 const JSON: &str = "application/vnd.pypi.simple.v1+json";
 const HTML: &str = "text/html";
+
+fn writer_acl(secret: impl Into<String>) -> IndexAcl {
+    IndexAcl {
+        anonymous_read: true,
+        tokens: vec![NamedToken {
+            name: "uploader".to_owned(),
+            secret: secret.into(),
+            grants: vec![Grant {
+                projects: vec![Glob::new("*")],
+                actions: std::collections::BTreeSet::from([Action::Write, Action::Delete]),
+            }],
+            expires_at: None,
+        }],
+    }
+}
 
 /// Serving cost with rate limiting off. The limiter's per-request cost is measured on its own by
 /// [`bench_rate_limit`]: driving it through this async router instead let scheduling jitter under the
@@ -122,7 +137,7 @@ fn cached(rate_limit: RateLimitConfig, detail: &ProjectDetail) -> (tempfile::Tem
                 offline: false,
             },
             policy: Policy::default(),
-            acl: IndexAcl::upload_token("secret"),
+            acl: writer_acl("secret"),
         }],
         Arc::new(|| 1000),
         rate_limit,

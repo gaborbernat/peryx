@@ -65,8 +65,8 @@ pub fn openapi() -> OpenApi {
                         HttpBuilder::new()
                             .scheme(HttpAuthScheme::Basic)
                             .description(Some(
-                                "Any username; the password is the hosted index's `upload_token` \
-                                 (the pypi.org `__token__` convention)",
+                                "Any username; the password is a write-granting access token of the \
+                                 hosted index (the pypi.org `__token__` convention)",
                             ))
                             .build(),
                     ),

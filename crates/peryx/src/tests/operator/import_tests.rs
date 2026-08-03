@@ -381,14 +381,7 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
             anonymous_read: None,
             tokens: Vec::new(),
             kind: IndexKind::Cached {
-                upstream: "https://pypi.org/simple/".to_owned(),
-                username: None,
-                password: None,
-                token: None,
-                credential_exec: None,
-                credential_refresh: None,
-                tls: crate::config::UpstreamTlsConfig::default(),
-                routing: None,
+                routing: crate::tests::single_route("https://pypi.org/simple/"),
                 upstream_concurrency: peryx_driver::rate_limit::DEFAULT_UPSTREAM_CONCURRENCY,
                 offline: false,
                 prefetch: Box::default(),
@@ -456,10 +449,7 @@ fn test_import_dir_rejects_unusable_repositories_and_paths() {
             ecosystem: peryx_core::Ecosystem::Oci,
             anonymous_read: None,
             tokens: Vec::new(),
-            kind: IndexKind::Hosted {
-                upload_token: None,
-                volatile: true,
-            },
+            kind: IndexKind::Hosted { volatile: true },
         }],
         ..Config::default()
     };

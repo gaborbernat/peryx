@@ -1379,7 +1379,7 @@ async fn test_upload_storage_failure_is_server_error() {
         name: "hosted".to_owned(),
         route: "hosted".to_owned(),
         policy: Policy::default(),
-        acl: IndexAcl::upload_token("s3cret".to_owned()),
+        acl: crate::tests::writer_acl("s3cret".to_owned()),
         ecosystem: peryx_core::Ecosystem::Pypi,
         kind: IndexKind::Hosted { volatile: true },
     }];

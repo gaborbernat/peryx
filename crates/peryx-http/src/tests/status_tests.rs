@@ -9,11 +9,26 @@ use peryx_core::Ecosystem;
 use peryx_driver::authz::AuthorizationService;
 use peryx_driver::state::{AppState, Index, IndexKind};
 use peryx_driver::users::UserService;
-use peryx_identity::{GrantScope, IndexAcl, PasswordPolicy, Role};
+use peryx_identity::{Action, Glob, Grant, GrantScope, IndexAcl, NamedToken, PasswordPolicy, Role};
 use peryx_policy::Policy;
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
 use tower::ServiceExt as _;
+
+fn writer_acl(secret: impl Into<String>) -> IndexAcl {
+    IndexAcl {
+        anonymous_read: true,
+        tokens: vec![NamedToken {
+            name: "uploader".to_owned(),
+            secret: secret.into(),
+            grants: vec![Grant {
+                projects: vec![Glob::new("*")],
+                actions: BTreeSet::from([Action::Write, Action::Delete]),
+            }],
+            expires_at: None,
+        }],
+    }
+}
 
 const UPLOAD_SECRET: &str = "upload-secret";
 const USER_PASSWORD: &str = "local password";
@@ -80,7 +95,7 @@ async fn app_with_fault(fault: StoreFault) -> (tempfile::TempDir, Arc<AppState>)
 
 fn indexes() -> Vec<Index> {
     vec![
-        index("private", IndexAcl::upload_token(UPLOAD_SECRET)),
+        index("private", writer_acl(UPLOAD_SECRET)),
         index("other", IndexAcl::default()),
     ]
 }

@@ -117,7 +117,7 @@ async fn harness_with_options(
             route: "hosted".to_owned(),
             policy: local_policy,
             acl: if token {
-                IndexAcl::upload_token("s3cret")
+                crate::tests::writer_acl("s3cret")
             } else {
                 IndexAcl::default()
             },
@@ -262,7 +262,7 @@ pub async fn promotion_harness() -> Harness {
             ecosystem: peryx_core::Ecosystem::Pypi,
             kind: IndexKind::Hosted { volatile: true },
             policy: Policy::default(),
-            acl: IndexAcl::upload_token("s3cret".to_owned()),
+            acl: crate::tests::writer_acl("s3cret".to_owned()),
         },
         Index {
             name: "prod".to_owned(),
@@ -270,7 +270,7 @@ pub async fn promotion_harness() -> Harness {
             ecosystem: peryx_core::Ecosystem::Pypi,
             kind: IndexKind::Hosted { volatile: true },
             policy: Policy::default(),
-            acl: IndexAcl::upload_token("s3cret".to_owned()),
+            acl: crate::tests::writer_acl("s3cret".to_owned()),
         },
         Index {
             name: "release".to_owned(),

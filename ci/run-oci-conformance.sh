@@ -23,7 +23,11 @@ name = "store"
 route = "store"
 ecosystem = "oci"
 hosted = true
-upload_token = "conformance"
+
+[[index.access_token]]
+name = "uploader"
+secret = "conformance"
+actions = ["write", "delete"]
 EOF
 
 "$peryx" serve --config "$work/peryx.toml" >"$work/server.log" 2>&1 &

@@ -7,7 +7,7 @@
         "type": "http"
       },
       "uploadToken": {
-        "description": "Any username; the password is the hosted index's `upload_token` (the pypi.org `__token__` convention)",
+        "description": "Any username; the password is a write-granting access token of the hosted index (the pypi.org `__token__` convention)",
         "scheme": "basic",
         "type": "http"
       }
@@ -29,7 +29,7 @@
   "paths": {
     "/+acl": {
       "get": {
-        "description": "The tokens, grants, expiry, and anonymous-read policy one index is configured with. peryx has no server-wide administrator, so the gate is the index's own: authenticate with HTTP Basic as a token holding write over every project here (the `upload_token` standing). Token secrets are never returned, only a marker that one is set.",
+        "description": "The tokens, grants, expiry, and anonymous-read policy one index is configured with. peryx has no server-wide administrator, so the gate is the index's own: authenticate with HTTP Basic as an access token that holds write over every project here. Token secrets are never returned, only a marker that one is set.",
         "parameters": [
           {
             "description": "The route of the index to describe",
@@ -61,7 +61,7 @@
                           ]
                         }
                       ],
-                      "name": "upload_token",
+                      "name": "uploader",
                       "secret": {
                         "configured": true,
                         "redacted": "<redacted>"

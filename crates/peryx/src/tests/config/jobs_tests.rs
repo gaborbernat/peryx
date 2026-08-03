@@ -174,18 +174,13 @@ fn test_schedule_rejects_invalid_kind_parameters(#[case] fields: &str, #[case] e
 #[case::hosted("corp", "[[index]]\nname = \"corp\"\nhosted = true\n", "must name a cached index")]
 #[case::oci(
     "corp",
-    "[[index]]\nname = \"corp\"\necosystem = \"oci\"\ncached = \"https://registry.example/\"\n",
+    "[[index]]\nname = \"corp\"\necosystem = \"oci\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://registry.example/\"\n",
     "needs an online PyPI repository"
 )]
 #[case::offline(
     "corp",
-    "[[index]]\nname = \"corp\"\ncached = \"https://pypi.org/simple/\"\noffline = true\n",
+    "[[index]]\nname = \"corp\"\noffline = true\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n",
     "needs an online PyPI repository"
-)]
-#[case::legacy_source(
-    "corp",
-    "[[index]]\nname = \"corp\"\ncached = \"https://pypi.org/simple/\"\n",
-    "`source` must name a repository upstream"
 )]
 #[case::unknown_source(
     "corp",

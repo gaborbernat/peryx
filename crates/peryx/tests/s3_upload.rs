@@ -8,9 +8,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use peryx::config::{BlobStorageConfig, Config, IndexConfig, IndexKind, S3StorageConfig, SecretSource};
+use peryx::config::{BlobStorageConfig, Config, IndexConfig, IndexKind, S3StorageConfig, SecretSource, TokenConfig};
 use peryx::server::build_router;
 use peryx_ecosystem_pypi::store::PypiStore as _;
+use peryx_identity::Action;
 use peryx_storage::blob::{BlobStorage, Digest, S3Config, S3Settings};
 use peryx_storage::meta::MetaStore;
 use testcontainers::ContainerAsync;
@@ -102,11 +103,14 @@ fn hosted() -> IndexConfig {
         webhooks: Vec::new(),
         ecosystem: peryx_core::Ecosystem::Pypi,
         anonymous_read: None,
-        tokens: Vec::new(),
-        kind: IndexKind::Hosted {
-            upload_token: Some(SecretSource::Literal("s3cret".to_owned())),
-            volatile: true,
-        },
+        tokens: vec![TokenConfig {
+            name: "uploader".to_owned(),
+            secret: SecretSource::Literal("s3cret".to_owned()),
+            projects: vec!["*".to_owned()],
+            actions: [Action::Write, Action::Delete].into_iter().collect(),
+            expires_at: None,
+        }],
+        kind: IndexKind::Hosted { volatile: true },
     }
 }
 

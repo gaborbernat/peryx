@@ -379,10 +379,11 @@ async fn plan_detail(state: &Arc<AppState>, target: &Target, project: &str) -> a
             .map(|record| raw_detail(project, &record))
             .transpose();
     }
-    let response = match state.upstream_routes.get(&target.cached) {
-        Some(router) => router.fetch_project(project, None).await?,
-        None => target.client.fetch_project(project, None).await?,
-    };
+    let router = state
+        .upstream_routes
+        .get(&target.cached)
+        .expect("a cached index always has an upstream route");
+    let response = router.fetch_project(project, None).await?;
     match response.status {
         200 => parse_response_detail(project, &response).map(Some),
         404 => Ok(None),

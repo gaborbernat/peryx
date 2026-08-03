@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use peryx_identity::{Action, Glob, Grant, GrantScope, Role, UPLOAD_TOKEN_NAME};
+use peryx_identity::{Action, Glob, Grant, GrantScope, Role};
 use rstest::rstest;
 
 use super::toml_config;
@@ -261,7 +261,7 @@ fn test_trusted_publisher_accepts_a_writable_virtual_repository() {
     "trusted publisher release: repository must name a writable PyPI index"
 )]
 #[case::read_only_repository(
-    "[auth]\nsigning_key = \"key\"\n[[auth.trusted_publisher]]\nid = \"release\"\nissuer = \"https://issuer.example\"\nrepository = \"cache\"\nsubject = \"*\"\nprojects = [\"app\"]\n[[index]]\nname = \"cache\"\ncached = \"https://pypi.org/simple/\"\n",
+    "[auth]\nsigning_key = \"key\"\n[[auth.trusted_publisher]]\nid = \"release\"\nissuer = \"https://issuer.example\"\nrepository = \"cache\"\nsubject = \"*\"\nprojects = [\"app\"]\n[[index]]\nname = \"cache\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n",
     "trusted publisher release: repository must name a writable PyPI index"
 )]
 fn test_trusted_publisher_relationship_is_rejected(#[case] text: &str, #[case] expected: &str) {
@@ -314,56 +314,14 @@ fn test_auth_table_is_rejected(#[case] text: &str, #[case] expected: &str) {
 }
 
 #[test]
-fn test_upload_token_becomes_a_write_and_delete_token() {
-    let index = hosted("upload_token = \"s3cret\"\n");
-    let acl = index.acl(&AuthConfig::default()).unwrap();
-
-    assert!(acl.anonymous_read);
-    assert_eq!(acl.tokens.len(), 1);
-    assert_eq!(acl.tokens[0].name, UPLOAD_TOKEN_NAME);
-    assert_eq!(acl.tokens[0].secret, "s3cret");
-    assert_eq!(
-        acl.tokens[0].grants,
-        [write_grant(&["*"], &[Action::Write, Action::Delete])]
-    );
-    assert_eq!(acl.tokens[0].expires_at, None);
-}
-
-#[test]
-fn test_upload_token_file_holds_the_secret() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("token");
-    std::fs::write(&path, "file-s3cret\n").unwrap();
-    let index = hosted(&format!("upload_token_file = {:?}\n", path.display().to_string()));
-
-    let acl = index.acl(&AuthConfig::default()).unwrap();
-    assert_eq!(acl.tokens[0].secret, "file-s3cret");
-}
-
-#[test]
-fn test_upload_token_file_alone_makes_the_index_hosted() {
-    let config = toml_config("[[index]]\nname = \"store\"\nupload_token_file = \"/run/secrets/token\"\n");
-    assert!(matches!(
-        &config.indexes[0].kind,
-        crate::config::IndexKind::Hosted { volatile: true, .. }
-    ));
-}
-
-#[test]
-fn test_an_upload_token_may_not_have_two_sources() {
-    let text = "[[index]]\nname = \"store\"\nupload_token = \"s3cret\"\nupload_token_file = \"/run/secrets/token\"\n";
-    assert_eq!(
-        toml_error(text),
-        "index store: set at most one of a secret and its `_file` sibling"
-    );
-}
-
-#[test]
 fn test_an_empty_secret_file_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("token");
     std::fs::write(&path, "\n").unwrap();
-    let index = hosted(&format!("upload_token_file = {:?}\n", path.display().to_string()));
+    let index = hosted(&format!(
+        "[[index.access_token]]\nname = \"ci\"\nsecret_file = {:?}\nactions = [\"write\"]\n",
+        path.display().to_string()
+    ));
 
     let err = index.acl(&AuthConfig::default()).unwrap_err();
     assert!(matches!(err, ConfigError::EmptySecret { .. }), "{err}");
@@ -371,7 +329,9 @@ fn test_an_empty_secret_file_is_refused() {
 
 #[test]
 fn test_a_missing_secret_file_is_refused() {
-    let index = hosted("upload_token_file = \"/nonexistent/peryx/token\"\n");
+    let index = hosted(
+        "[[index.access_token]]\nname = \"ci\"\nsecret_file = \"/nonexistent/peryx/token\"\nactions = [\"write\"]\n",
+    );
     let err = index.acl(&AuthConfig::default()).unwrap_err();
     assert!(matches!(err, ConfigError::Read { .. }), "{err}");
 }
@@ -416,25 +376,21 @@ fn test_a_named_token_reads_its_secret_from_a_file() {
 }
 
 #[test]
-fn test_the_upload_token_and_named_tokens_live_side_by_side() {
+fn test_named_tokens_stack_on_one_index() {
     let index = hosted(
-        "upload_token = \"s3cret\"\n\
+        "[[index.access_token]]\nname = \"deploy\"\nsecret = \"s3cret\"\nactions = [\"write\", \"delete\"]\n\
          [[index.access_token]]\nname = \"ci\"\nsecret = \"ci-s3cret\"\nactions = [\"write\"]\n",
     );
 
     let acl = index.acl(&AuthConfig::default()).unwrap();
     let names: Vec<&str> = acl.tokens.iter().map(|token| token.name.as_str()).collect();
-    assert_eq!(names, [UPLOAD_TOKEN_NAME, "ci"]);
+    assert_eq!(names, ["deploy", "ci"]);
 }
 
 #[rstest]
 #[case::unnamed(
     "name = \"\"\nsecret = \"s3cret\"\nactions = [\"write\"]\n",
     "token : token name is required"
-)]
-#[case::reserved(
-    "name = \"upload_token\"\nsecret = \"s3cret\"\nactions = [\"write\"]\n",
-    "token upload_token: token name is reserved for the `upload_token` shorthand"
 )]
 #[case::no_secret(
     "name = \"ci\"\nactions = [\"write\"]\n",

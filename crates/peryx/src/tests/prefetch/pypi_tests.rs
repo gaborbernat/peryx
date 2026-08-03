@@ -84,7 +84,7 @@ fn routed_config(dir: &Path, first: &MockServer, second: &MockServer, artifacts:
     let IndexKind::Cached { routing, .. } = &mut config.indexes[0].kind else {
         panic!("expected cached index");
     };
-    *routing = Some(Box::new(UpstreamRoutingConfig {
+    *routing = UpstreamRoutingConfig {
         upstreams: vec![
             UpstreamConfig {
                 name: "first".to_owned(),
@@ -112,7 +112,7 @@ fn routed_config(dir: &Path, first: &MockServer, second: &MockServer, artifacts:
         fallback: true,
         protected: Vec::new(),
         pins: BTreeMap::default(),
-    }));
+    };
     config
 }
 
@@ -383,10 +383,7 @@ async fn test_mirror_plan_honors_routed_project_pin() {
         .mount(&second)
         .await;
     let mut config = routed_config(dir.path(), &first, &second, &second);
-    let IndexKind::Cached {
-        routing: Some(routing), ..
-    } = &mut config.indexes[0].kind
-    else {
+    let IndexKind::Cached { routing, .. } = &mut config.indexes[0].kind else {
         panic!("expected routed index");
     };
     routing.pins.insert("flask".to_owned(), "second".to_owned());

@@ -22,7 +22,7 @@
 //! [`grants_permit`] is the second access model, for persistent users rather than per-index tokens: a
 //! [`UserId`] holds one of the fixed [`Role`]s over a [`GrantScope`], and a decision asks whether that
 //! user's [`RoleGrant`]s permit a [`Scope`] on a [`Resource`]. It is deny-by-default and independent of
-//! the token ACL, so a legacy `upload_token` keeps resolving through [`authorize`] untouched.
+//! the token ACL, whose named-token grants resolve through [`authorize`].
 
 mod acl;
 mod external;
@@ -41,8 +41,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 pub use acl::{
-    Action, Denial, Glob, Grant, Identity, IndexAcl, NamedToken, Principal, UPLOAD_TOKEN_NAME, authorize,
-    authorize_all, authorize_exact_grants, authorize_grants,
+    Action, Denial, Glob, Grant, Identity, IndexAcl, NamedToken, Principal, authorize, authorize_all,
+    authorize_exact_grants, authorize_grants,
 };
 pub use external::{
     ExternalGroup, ExternalGroupGrant, ExternalIdentity, ExternalIdentityError, ExternalIdentityLinker,

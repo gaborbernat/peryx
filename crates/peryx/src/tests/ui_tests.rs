@@ -57,14 +57,7 @@ fn ui_config(dir: &tempfile::TempDir) -> Config {
                 anonymous_read: None,
                 tokens: Vec::new(),
                 kind: IndexKind::Cached {
-                    upstream: "http://127.0.0.1:9/simple/".to_owned(),
-                    username: None,
-                    password: None,
-                    token: None,
-                    credential_exec: None,
-                    credential_refresh: None,
-                    tls: crate::config::UpstreamTlsConfig::default(),
-                    routing: None,
+                    routing: crate::tests::single_route("http://127.0.0.1:9/simple/"),
                     upstream_concurrency: peryx_driver::rate_limit::DEFAULT_UPSTREAM_CONCURRENCY,
                     offline: false,
                     prefetch: Box::default(),
@@ -79,11 +72,8 @@ fn ui_config(dir: &tempfile::TempDir) -> Config {
                 webhooks: Vec::new(),
                 ecosystem: peryx_core::Ecosystem::Pypi,
                 anonymous_read: None,
-                tokens: Vec::new(),
-                kind: IndexKind::Hosted {
-                    upload_token: Some(SecretSource::Literal("s3cret".to_owned())),
-                    volatile: true,
-                },
+                tokens: vec![crate::tests::writer_token(SecretSource::Literal("s3cret".to_owned()))],
+                kind: IndexKind::Hosted { volatile: true },
             },
             IndexConfig {
                 name: "root/pypi".to_owned(),
@@ -125,11 +115,8 @@ fn oci_ui_config(dir: &tempfile::TempDir) -> Config {
             webhooks: Vec::new(),
             ecosystem: peryx_core::Ecosystem::Oci,
             anonymous_read: None,
-            tokens: Vec::new(),
-            kind: IndexKind::Hosted {
-                upload_token: Some(SecretSource::Literal("s3cret".to_owned())),
-                volatile: true,
-            },
+            tokens: vec![crate::tests::writer_token(SecretSource::Literal("s3cret".to_owned()))],
+            kind: IndexKind::Hosted { volatile: true },
         }],
         ..Config::default()
     }

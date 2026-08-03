@@ -606,11 +606,10 @@ async fn test_disabled_runtime_mounts_no_routes_or_task() {
 fn test_replica_runtime_disables_local_writers() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(&dir, Some(replica_config("https://primary.example/", 10)));
-    let IndexKind::Cached { password, routing, .. } = &mut config.indexes[0].kind else {
+    let IndexKind::Cached { routing, .. } = &mut config.indexes[0].kind else {
         panic!("expected the default cached index");
     };
-    *password = Some(SecretSource::File("missing-upstream-password".into()));
-    *routing = Some(Box::new(UpstreamRoutingConfig {
+    *routing = UpstreamRoutingConfig {
         upstreams: vec![UpstreamConfig {
             name: "primary".to_owned(),
             url: "https://packages.example/simple/".to_owned(),
@@ -625,11 +624,7 @@ fn test_replica_runtime_disables_local_writers() {
         fallback: true,
         protected: Vec::new(),
         pins: BTreeMap::default(),
-    }));
-    let IndexKind::Hosted { upload_token, .. } = &mut config.indexes[1].kind else {
-        panic!("expected the default hosted index");
     };
-    *upload_token = Some(SecretSource::File("missing-upload-token".into()));
     config.indexes[1].tokens.extend([
         TokenConfig {
             name: "reader".to_owned(),

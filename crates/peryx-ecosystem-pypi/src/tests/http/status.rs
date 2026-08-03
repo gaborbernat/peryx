@@ -101,7 +101,7 @@ async fn test_status_redacts_upstream_and_upload_secrets() {
             name: "hosted".to_owned(),
             route: "hosted".to_owned(),
             policy: Policy::default(),
-            acl: IndexAcl::upload_token("upload-secret".to_owned()),
+            acl: crate::tests::writer_acl("upload-secret".to_owned()),
             ecosystem: peryx_core::Ecosystem::Pypi,
             kind: IndexKind::Hosted { volatile: false },
         },

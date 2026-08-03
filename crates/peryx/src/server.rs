@@ -107,13 +107,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             .with_context(|| format!("claim writer identity {identity:?}"))?;
     }
     let blobs = build_blob_storage(config)?;
-    let configs = if configured_replica {
-        let mut configs = config.indexes.clone();
-        make_replica_configs(&mut configs);
-        Cow::Owned(configs)
-    } else {
-        Cow::Borrowed(config.indexes.as_slice())
-    };
+    let configs = replica_adjusted_configs(config, configured_replica);
     let netrc = config
         .netrc
         .as_deref()
@@ -121,7 +115,12 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         .transpose()
         .context("load upstream netrc")?;
     let credential_providers = build_credential_providers(&configs, netrc.as_ref())?;
-    let upstream_routes = build_upstream_routes(&configs, &credential_providers, netrc.as_ref())?;
+    // A replica serves only its replicated cache, so it builds no upstream routes to fetch through.
+    let upstream_routes = if configured_replica {
+        Vec::new()
+    } else {
+        build_upstream_routes(&configs, &credential_providers, netrc.as_ref())?
+    };
     let mut indexes = build_indexes_with_providers(
         &configs,
         &config.auth,
@@ -415,25 +414,31 @@ fn attach_policy_decision_recorders(meta: &MetaStore, indexes: &mut [Index]) -> 
     Ok(())
 }
 
+fn replica_adjusted_configs(config: &Config, configured_replica: bool) -> Cow<'_, [IndexConfig]> {
+    if configured_replica {
+        let mut configs = config.indexes.clone();
+        make_replica_configs(&mut configs);
+        Cow::Owned(configs)
+    } else {
+        Cow::Borrowed(config.indexes.as_slice())
+    }
+}
+
 fn make_replica_configs(configs: &mut [IndexConfig]) {
     for index in configs {
         match &mut index.kind {
-            ConfigKind::Cached {
-                password,
-                token,
-                tls,
-                routing,
-                offline,
-                ..
-            } => {
-                *password = None;
-                *token = None;
-                *tls = UpstreamTlsConfig::default();
-                *routing = None;
+            ConfigKind::Cached { routing, offline, .. } => {
+                for upstream in &mut routing.upstreams {
+                    upstream.username = None;
+                    upstream.password = None;
+                    upstream.token = None;
+                    upstream.credential_exec = None;
+                    upstream.credential_refresh = None;
+                    upstream.tls = UpstreamTlsConfig::default();
+                }
                 *offline = true;
             }
-            ConfigKind::Hosted { upload_token, .. } => *upload_token = None,
-            ConfigKind::Virtual { .. } => {}
+            ConfigKind::Hosted { .. } | ConfigKind::Virtual { .. } => {}
         }
         index.tokens.retain_mut(|token| {
             token.actions.retain(|action| *action == Action::Read);
@@ -582,28 +587,19 @@ fn build_kind(
     credential_providers: &CredentialProviders,
 ) -> anyhow::Result<IndexKind> {
     match &index.kind {
-        ConfigKind::Cached {
-            upstream,
-            tls,
-            routing,
-            offline,
-            ..
-        } => Ok(IndexKind::Cached {
-            client: build_upstream_client(
-                &index.name,
-                upstream,
-                credential_provider(
-                    credential_providers,
+        ConfigKind::Cached { routing, offline, .. } => {
+            let primary = &routing.upstreams[0];
+            Ok(IndexKind::Cached {
+                client: build_upstream_client(
                     &index.name,
-                    routing
-                        .as_ref()
-                        .map_or("", |routing| routing.upstreams[0].name.as_str()),
-                ),
-                &load_upstream_tls(&index.name, tls)?,
-                upstream,
-            )?,
-            offline: global_offline || *offline,
-        }),
+                    &primary.url,
+                    credential_provider(credential_providers, &index.name, &primary.name),
+                    &load_upstream_tls(&index.name, &primary.tls)?,
+                    &primary.url,
+                )?,
+                offline: global_offline || *offline,
+            })
+        }
         ConfigKind::Hosted { volatile, .. } => Ok(IndexKind::Hosted { volatile: *volatile }),
         ConfigKind::Virtual { layers, upload } => {
             let layer_positions = layers
@@ -622,55 +618,25 @@ fn build_kind(
 fn build_credential_providers(configs: &[IndexConfig], netrc: Option<&Netrc>) -> anyhow::Result<CredentialProviders> {
     let mut providers = HashMap::new();
     for index in configs {
-        match &index.kind {
-            ConfigKind::Cached {
-                upstream,
-                username,
-                password,
-                token,
-                credential_exec,
-                credential_refresh,
-                routing: None,
-                ..
-            } => {
-                providers.insert(
-                    (index.name.clone(), String::new()),
-                    build_credential_provider(
-                        &index.name,
-                        upstream,
-                        UpstreamCredentials {
-                            username: username.clone(),
-                            password: password.clone(),
-                            token: token.clone(),
-                            exec: credential_exec.clone(),
-                            refresh: *credential_refresh,
-                        },
-                        netrc,
-                    )?,
-                );
-            }
-            ConfigKind::Cached {
-                routing: Some(routing), ..
-            } => {
-                for upstream in &routing.upstreams {
-                    providers.insert(
-                        (index.name.clone(), upstream.name.clone()),
-                        build_credential_provider(
-                            &index.name,
-                            &upstream.url,
-                            UpstreamCredentials {
-                                username: upstream.username.clone(),
-                                password: upstream.password.clone(),
-                                token: upstream.token.clone(),
-                                exec: upstream.credential_exec.clone(),
-                                refresh: upstream.credential_refresh,
-                            },
-                            netrc,
-                        )?,
-                    );
-                }
-            }
-            ConfigKind::Hosted { .. } | ConfigKind::Virtual { .. } => {}
+        let ConfigKind::Cached { routing, .. } = &index.kind else {
+            continue;
+        };
+        for upstream in &routing.upstreams {
+            providers.insert(
+                (index.name.clone(), upstream.name.clone()),
+                build_credential_provider(
+                    &index.name,
+                    &upstream.url,
+                    UpstreamCredentials {
+                        username: upstream.username.clone(),
+                        password: upstream.password.clone(),
+                        token: upstream.token.clone(),
+                        exec: upstream.credential_exec.clone(),
+                        refresh: upstream.credential_refresh,
+                    },
+                    netrc,
+                )?,
+            );
         }
     }
     Ok(providers)
@@ -748,10 +714,8 @@ fn build_upstream_routes(
     configs
         .iter()
         .filter_map(|index| match &index.kind {
-            ConfigKind::Cached {
-                routing: Some(routing), ..
-            } => Some((index, routing)),
-            ConfigKind::Cached { routing: None, .. } | ConfigKind::Hosted { .. } | ConfigKind::Virtual { .. } => None,
+            ConfigKind::Cached { routing, .. } => Some((index, routing)),
+            ConfigKind::Hosted { .. } | ConfigKind::Virtual { .. } => None,
         })
         .map(|(index, routing)| {
             let upstreams = routing

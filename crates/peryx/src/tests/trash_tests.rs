@@ -40,11 +40,10 @@ fn hosted(name: &str, ecosystem: peryx_core::Ecosystem) -> IndexConfig {
         webhooks: Vec::new(),
         ecosystem,
         anonymous_read: None,
-        tokens: Vec::new(),
-        kind: IndexKind::Hosted {
-            upload_token: Some(SecretSource::Literal(UPLOAD_TOKEN.to_owned())),
-            volatile: true,
-        },
+        tokens: vec![crate::tests::writer_token(SecretSource::Literal(
+            UPLOAD_TOKEN.to_owned(),
+        ))],
+        kind: IndexKind::Hosted { volatile: true },
     }
 }
 

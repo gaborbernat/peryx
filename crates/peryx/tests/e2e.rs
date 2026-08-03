@@ -333,8 +333,10 @@ impl Peryx {
         let config = data.path().join("peryx.toml");
         // A cache of the given upstream with a hosted store, combined by a virtual index at root/pypi.
         let config_toml = format!(
-            "[[index]]\nname = \"upstream\"\nroute = \"upstream\"\ncached = \"{upstream_url}\"\n\
-             [[index]]\nname = \"hosted\"\nhosted = true\nupload_token = \"{UPLOAD_TOKEN}\"\n\
+            "[[index]]\nname = \"upstream\"\nroute = \"upstream\"\n\
+             [[index.upstream]]\nname = \"primary\"\nurl = \"{upstream_url}\"\n\
+             [[index]]\nname = \"hosted\"\nhosted = true\n\
+             [[index.access_token]]\nname = \"uploader\"\nsecret = \"{UPLOAD_TOKEN}\"\nactions = [\"write\", \"delete\"]\n\
              [[index]]\nname = \"root/pypi\"\nroute = \"root/pypi\"\nlayers = [\"hosted\", \"upstream\"]\nupload = \"hosted\"\n\
              [index.policy]\n{policy_toml}"
         );

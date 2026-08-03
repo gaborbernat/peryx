@@ -118,36 +118,6 @@ struct SnapshotIndex<'a> {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum SnapshotIndexKind<'a> {
-    Cached {
-        cached: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        username: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        password: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        password_file: Option<&'a Path>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        password_env: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        token: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        token_file: Option<&'a Path>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        token_env: Option<&'a str>,
-        #[serde(flatten)]
-        credential_refresh: Option<SnapshotCredentialRefresh>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        credential_exec: Option<Box<SnapshotCredentialExec<'a>>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        ca_file: Option<&'a Path>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        client_cert_file: Option<&'a Path>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        client_key_file: Option<&'a Path>,
-        upstream_concurrency: usize,
-        offline: bool,
-        prefetch: SnapshotPrefetch<'a>,
-    },
     Routed {
         #[serde(rename = "upstream")]
         upstreams: Vec<SnapshotUpstream<'a>>,
@@ -160,10 +130,6 @@ enum SnapshotIndexKind<'a> {
     },
     Hosted {
         hosted: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        upload_token: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        upload_token_file: Option<&'a Path>,
         volatile: bool,
     },
     Virtual {
@@ -707,61 +673,23 @@ fn snapshot_index(index: &IndexConfig) -> anyhow::Result<SnapshotIndex<'_>> {
     } = index;
     let kind = match kind {
         IndexKind::Cached {
-            upstream,
-            username,
-            password,
-            token,
-            credential_exec,
-            credential_refresh,
-            tls,
             routing,
             upstream_concurrency,
             offline,
             prefetch,
-        } => routing.as_ref().map_or_else(
-            || {
-                let (password, password_file, password_env) = secret_parts(password.as_ref());
-                let (token, token_file, token_env) = secret_parts(token.as_ref());
-                SnapshotIndexKind::Cached {
-                    cached: upstream,
-                    username: username.as_deref(),
-                    password,
-                    password_file,
-                    password_env,
-                    token,
-                    token_file,
-                    token_env,
-                    credential_refresh: credential_refresh.map(snapshot_credential_refresh),
-                    credential_exec: credential_exec
-                        .as_ref()
-                        .map(|config| Box::new(snapshot_credential_exec(config))),
-                    ca_file: tls.ca_file.as_deref(),
-                    client_cert_file: tls.client_cert_file.as_deref(),
-                    client_key_file: tls.client_key_file.as_deref(),
-                    upstream_concurrency: *upstream_concurrency,
-                    offline: *offline,
-                    prefetch: snapshot_prefetch(prefetch),
-                }
-            },
-            |routing| SnapshotIndexKind::Routed {
-                upstreams: routing.upstreams.iter().map(snapshot_upstream).collect(),
-                fallback: routing.fallback,
-                protected: &routing.protected,
-                pins: &routing.pins,
-                upstream_concurrency: *upstream_concurrency,
-                offline: *offline,
-                prefetch: snapshot_prefetch(prefetch),
-            },
-        ),
-        IndexKind::Hosted { upload_token, volatile } => {
-            let (upload_token, upload_token_file, _) = secret_parts(upload_token.as_ref());
-            SnapshotIndexKind::Hosted {
-                hosted: true,
-                upload_token,
-                upload_token_file,
-                volatile: *volatile,
-            }
-        }
+        } => SnapshotIndexKind::Routed {
+            upstreams: routing.upstreams.iter().map(snapshot_upstream).collect(),
+            fallback: routing.fallback,
+            protected: &routing.protected,
+            pins: &routing.pins,
+            upstream_concurrency: *upstream_concurrency,
+            offline: *offline,
+            prefetch: snapshot_prefetch(prefetch),
+        },
+        IndexKind::Hosted { volatile } => SnapshotIndexKind::Hosted {
+            hosted: true,
+            volatile: *volatile,
+        },
         IndexKind::Virtual { layers, upload } => SnapshotIndexKind::Virtual {
             layers,
             upload: upload.as_deref(),

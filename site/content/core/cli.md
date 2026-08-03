@@ -130,8 +130,7 @@ peryx config-snippet --base-url https://packages.example --index root/pypi .pypi
 ```
 
 `pip.conf` and `uv.toml` are available for read-only and writable indexes. `.pypirc` is available only when the route
-has a configured hosted upload target with an `upload_token`; the output uses `<upload-token>` instead of the configured
-secret.
+has a hosted upload target that accepts uploads; the output uses `<upload-token>` instead of the configured secret.
 
 The three output formats are PyPI client configuration, so this command targets PyPI indexes. OCI clients take no
 equivalent file: `docker`, `podman`, and `crane` point at the index route on the command line and authenticate with

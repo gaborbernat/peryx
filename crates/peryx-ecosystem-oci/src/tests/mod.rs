@@ -42,6 +42,23 @@ use tower::ServiceExt as _;
 
 use crate::IndexSettings;
 
+/// An ACL whose one named token writes and deletes across every project, for tests that need a
+/// hosted index that accepts uploads.
+fn writer_acl(secret: impl Into<String>) -> IndexAcl {
+    IndexAcl {
+        anonymous_read: true,
+        tokens: vec![NamedToken {
+            name: "uploader".to_owned(),
+            secret: secret.into(),
+            grants: vec![Grant {
+                projects: vec![Glob::new("*")],
+                actions: std::collections::BTreeSet::from([Action::Write, Action::Delete]),
+            }],
+            expires_at: None,
+        }],
+    }
+}
+
 /// Build an app over a single OCI index at route `route`, wiring the real driver.
 fn app_with(dir: &TempDir, index: Index) -> (Arc<AppState>, axum::Router) {
     app_with_indexes(dir, vec![index])
@@ -77,7 +94,7 @@ fn oci_index(name: &str, route: &str, kind: IndexKind) -> Index {
 /// A hosted OCI index whose one credential is the upload token `token`.
 fn writable_index(name: &str, route: &str, volatile: bool, token: &str) -> Index {
     Index {
-        acl: IndexAcl::upload_token(token),
+        acl: writer_acl(token),
         ..oci_index(name, route, IndexKind::Hosted { volatile })
     }
 }

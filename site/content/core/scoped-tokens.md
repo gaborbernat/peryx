@@ -64,7 +64,7 @@ its verifier.
 
 ## Migrating a configured upload token
 
-A hosted index's `upload_token` and its `[[index.token]]` entries keep working unchanged. To move one to a managed
-token, mint a scoped token for that repository with the same actions, distribute its one-time secret to the client, then
-remove the configured entry. Because a managed token is revoked and rotated through the API, an operator no longer edits
+A hosted index's `[[index.access_token]]` entries keep working unchanged. To move one to a managed token, mint a scoped
+token for that repository with the same actions, distribute its one-time secret to the client, then remove the
+configured entry. Because a managed token is revoked and rotated through the API, an operator no longer edits
 configuration or restarts the server to retire a credential.

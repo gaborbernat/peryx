@@ -23,8 +23,10 @@ offline = true
 read_only = true
 [[index]]
 name = \"pypi\"
-cached = \"https://pypi.org/simple/\"
 offline = true
+[[index.upstream]]
+name = \"primary\"
+url = \"https://pypi.org/simple/\"
 
 [index.prefetch]
 mode = \"metadata-only\"
@@ -65,7 +67,7 @@ fn test_index_settings_pass_through_to_the_ecosystem(#[case] settings: &str, #[c
     // The neutral config claims no key of `[index.settings]`: the table reaches the index's ecosystem
     // as the operator wrote it, and only there is a value known to be valid.
     let text = format!(
-        "[[index]]\nname = \"hub\"\necosystem = \"oci\"\ncached = \"https://registry-1.docker.io/\"\n{settings}"
+        "[[index]]\nname = \"hub\"\necosystem = \"oci\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://registry-1.docker.io/\"\n{settings}"
     );
     let settings = &toml_config(&text).indexes[0].ecosystem_settings;
     assert_eq!(settings.get("library_prefix").cloned(), expected);
@@ -74,7 +76,7 @@ fn test_index_settings_pass_through_to_the_ecosystem(#[case] settings: &str, #[c
 #[test]
 fn test_index_policy_from_toml() {
     let text = "\
-[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\n\
+[[index]]\nname = \"pypi\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n\
 [index.policy]\nallow_projects = [\"Flask\"]\nblock_projects = [\"bad-pkg\"]\nallow_versions = \">=1,<2\"\n\
 allow_package_types = [\"wheel\"]\nblock_package_types = [\"sdist\"]\n\
 allow_wheel_pythons = [\"py3\"]\nblock_wheel_pythons = [\"py2\"]\n\
@@ -107,11 +109,7 @@ max_file_size_bytes = 1048576\nmax_project_size_bytes = 10485760\n";
 #[rstest]
 #[case::unknown_key("bad.toml", "bogus = 1", Some("bad.toml"))]
 #[case::unknown_index_key("x.toml", "[[index]]\nname = \"a\"\nbogus = 1\n", None)]
-#[case::non_table_policy(
-    "x.toml",
-    "[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\npolicy = 5\n",
-    Some("table")
-)]
+#[case::non_table_policy("x.toml", "[[index]]\nname = \"pypi\"\npolicy = 5\n", Some("table"))]
 #[case::unknown_log_key("x.toml", "[log]\nbogus = 1\n", None)]
 #[case::unknown_rate_limit_key("x.toml", "[rate_limit]\nbogus = 1\n", None)]
 #[case::unknown_availability_key("x.toml", "[availability]\nmode = \"none\"\nbogus = 1\n", None)]

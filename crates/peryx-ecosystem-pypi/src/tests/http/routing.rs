@@ -77,7 +77,7 @@ async fn test_longest_prefix_wins() {
             name: "ab".to_owned(),
             route: "a/b".to_owned(),
             policy: Policy::default(),
-            acl: IndexAcl::upload_token("s3cret".to_owned()),
+            acl: crate::tests::writer_acl("s3cret".to_owned()),
             ecosystem: peryx_core::Ecosystem::Pypi,
             kind: IndexKind::Hosted { volatile: true },
         },

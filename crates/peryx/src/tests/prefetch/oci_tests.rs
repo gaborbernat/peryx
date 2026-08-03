@@ -25,14 +25,7 @@ fn oci_config(data_dir: &Path, upstream: &str) -> Config {
             anonymous_read: None,
             tokens: Vec::new(),
             kind: IndexKind::Cached {
-                upstream: upstream.to_owned(),
-                username: None,
-                password: None,
-                token: None,
-                credential_exec: None,
-                credential_refresh: None,
-                tls: crate::config::UpstreamTlsConfig::default(),
-                routing: None,
+                routing: crate::tests::single_route(upstream),
                 upstream_concurrency: DEFAULT_UPSTREAM_CONCURRENCY,
                 offline: false,
                 prefetch: Box::default(),
@@ -128,10 +121,7 @@ async fn test_oci_mirror_plan_on_a_non_cached_index_uses_only_cli_images() {
     // the plan, the non-cached branch of the image resolver.
     let dir = tempfile::tempdir().unwrap();
     let mut config = oci_config(dir.path(), "http://127.0.0.1:1/");
-    config.indexes[0].kind = IndexKind::Hosted {
-        upload_token: None,
-        volatile: false,
-    };
+    config.indexes[0].kind = IndexKind::Hosted { volatile: false };
     let plan = PrefetchCommand::Plan(PrefetchPlanArgs {
         options: oci_options(dir.path(), vec!["library/app:latest".to_owned()]),
     });

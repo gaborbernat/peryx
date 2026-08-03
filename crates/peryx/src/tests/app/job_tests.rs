@@ -205,13 +205,10 @@ fn test_job_show_propagates_write_failure() {
 fn test_job_run_executes_the_registered_catalog_job_and_prints_progress() {
     let (upstream, server) = catalog_server();
     let (_dir, meta, mut config) = store_and_config();
-    let crate::config::IndexKind::Cached {
-        upstream: configured, ..
-    } = &mut config.indexes[0].kind
-    else {
+    let crate::config::IndexKind::Cached { routing, .. } = &mut config.indexes[0].kind else {
         panic!("default pypi index is cached");
     };
-    *configured = upstream;
+    routing.upstreams[0].url = upstream;
     drop(meta);
     let mut out = Vec::new();
 

@@ -371,8 +371,8 @@ impl<'de> serde::Deserialize<'de> for RawPolicy {
     }
 }
 
-/// A raw `[[index]]` table before classification. `cached` or `[[index.upstream]]`, `hosted`, or
-/// `layers` selects the kind; [`classify_index`](super::classify_index) enforces that.
+/// A raw `[[index]]` table before classification. `[[index.upstream]]`, `hosted`, or `layers` selects
+/// the kind; [`classify_index`](super::classify_index) enforces that.
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawIndex {
@@ -385,7 +385,6 @@ pub struct RawIndex {
     /// driver to compile. Which keys are valid depends on the ecosystem, so this layer claims none.
     #[serde(default)]
     pub settings: Table,
-    pub cached: Option<String>,
     #[serde(default, rename = "upstream")]
     pub upstreams: Vec<RawUpstream>,
     pub fallback: Option<bool>,
@@ -393,32 +392,16 @@ pub struct RawIndex {
     pub protected: Vec<String>,
     #[serde(default)]
     pub pins: BTreeMap<String, String>,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub password_file: Option<PathBuf>,
-    pub password_env: Option<String>,
-    pub token: Option<String>,
-    pub token_file: Option<PathBuf>,
-    pub token_env: Option<String>,
-    pub credential_exec: Option<RawCredentialExec>,
-    pub credential_refresh_secs: Option<u64>,
-    pub credential_refresh_on_unauthorized: Option<bool>,
-    pub credential_failure: Option<CredentialFailureMode>,
-    pub ca_file: Option<PathBuf>,
-    pub client_cert_file: Option<PathBuf>,
-    pub client_key_file: Option<PathBuf>,
     pub upstream_concurrency: Option<usize>,
     pub offline: Option<bool>,
     pub prefetch: Option<RawPrefetchConfig>,
     pub hosted: Option<bool>,
-    pub upload_token: Option<String>,
-    pub upload_token_file: Option<PathBuf>,
     pub volatile: Option<bool>,
     pub layers: Option<Vec<String>>,
     pub upload: Option<String>,
     pub anonymous_read: Option<bool>,
-    /// The `[[index.access_token]]` tables: credentials clients present to peryx, as opposed to
-    /// `token`, the credential peryx presents to this index's upstream.
+    /// The `[[index.access_token]]` tables: credentials clients present to peryx. The credentials peryx
+    /// presents to an upstream live on each `[[index.upstream]]` source.
     #[serde(default, rename = "access_token")]
     pub tokens: Vec<RawToken>,
     #[serde(default, rename = "webhook")]

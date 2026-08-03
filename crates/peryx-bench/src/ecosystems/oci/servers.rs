@@ -287,7 +287,9 @@ fn peryx() -> Server {
                  name = \"dockerhub\"\n\
                  route = \"dockerhub\"\n\
                  ecosystem = \"oci\"\n\
-                 cached = \"{cached}\"\n\
+                 [[index.upstream]]\n\
+                 name = \"primary\"\n\
+                 url = \"{cached}\"\n\
                  {auth}",
                 data = toml_string(&state.join("data")),
                 cached = upstream_for(UPSTREAM),

@@ -6,10 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{parse_basic, secrets_match};
 
-/// The subject the `upload_token` shorthand authenticates as, and the name a configured token may not
-/// take.
-pub const UPLOAD_TOKEN_NAME: &str = "upload_token";
-
 /// Whether `principal` may take `action` on `project` in the index `acl` describes.
 ///
 /// `project` is `None` when the caller must decide before it knows the name — a `PyPI` upload is
@@ -130,16 +126,6 @@ impl Default for IndexAcl {
 }
 
 impl IndexAcl {
-    /// The ACL of an index configured with nothing but the legacy `upload_token`: one token that writes
-    /// and deletes everywhere, and open reads.
-    #[must_use]
-    pub fn upload_token(secret: impl Into<String>) -> Self {
-        Self {
-            anonymous_read: true,
-            tokens: vec![NamedToken::upload(secret)],
-        }
-    }
-
     /// Resolve an `Authorization` header against this ACL at `now` (unix seconds). A header that is
     /// absent, unparsable, or carries a password matching no live token yields [`Principal::Anonymous`].
     #[must_use]
@@ -209,20 +195,6 @@ pub struct NamedToken {
 }
 
 impl NamedToken {
-    /// The token a legacy `upload_token` stands for: write and delete on every project, forever.
-    #[must_use]
-    pub fn upload(secret: impl Into<String>) -> Self {
-        Self {
-            name: UPLOAD_TOKEN_NAME.to_owned(),
-            secret: secret.into(),
-            grants: vec![Grant {
-                projects: vec![Glob::new("*")],
-                actions: BTreeSet::from([Action::Write, Action::Delete]),
-            }],
-            expires_at: None,
-        }
-    }
-
     fn live(&self, now: i64) -> bool {
         self.expires_at.is_none_or(|expiry| now < expiry)
     }

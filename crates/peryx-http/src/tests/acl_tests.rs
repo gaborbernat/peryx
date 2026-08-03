@@ -31,7 +31,7 @@ fn acl_app() -> (tempfile::TempDir, axum::Router) {
             anonymous_read: true,
             tokens: vec![
                 NamedToken {
-                    name: "upload_token".to_owned(),
+                    name: "uploader".to_owned(),
                     secret: ADMIN_SECRET.to_owned(),
                     grants: vec![Grant {
                         projects: vec![Glob::new("*")],
@@ -79,7 +79,7 @@ async fn test_acl_lists_tokens_and_read_policy_for_an_administering_token() {
     assert_eq!(
         document["tokens"],
         serde_json::json!([
-            {"name": "upload_token", "secret": {"configured": true, "redacted": "<redacted>"},
+            {"name": "uploader", "secret": {"configured": true, "redacted": "<redacted>"},
              "expires_at": null, "grants": [{"projects": ["*"], "actions": ["write", "delete"]}]},
             {"name": "ci", "secret": {"configured": true, "redacted": "<redacted>"},
              "expires_at": 1_800_000_000, "grants": [{"projects": ["team/*"], "actions": ["read"]}]},

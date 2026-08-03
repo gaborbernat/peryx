@@ -191,20 +191,16 @@ project-presentation paths; the public paths listed above stay open. An index th
 
 These keys sit in an `[[index]]` table and are also listed under [configuration](@/core/configuration.md).
 
-| Key                 | Role   | Meaning                                                         | Default                         |
-| ------------------- | ------ | --------------------------------------------------------------- | ------------------------------- |
-| `anonymous_read`    | all    | Whether a request with no credential may read this index        | `[auth].default_anonymous_read` |
-| `upload_token`      | hosted | Sugar for one token granted write and delete over every project | (none)                          |
-| `upload_token_file` | hosted | Path to read `upload_token` from instead of inlining it         | (none)                          |
+| Key              | Role | Meaning                                                  | Default                         |
+| ---------------- | ---- | -------------------------------------------------------- | ------------------------------- |
+| `anonymous_read` | all  | Whether a request with no credential may read this index | `[auth].default_anonymous_read` |
 
-`upload_token = "secret"` is shorthand for a single token named `upload_token` whose grant is write and delete over `*`,
-which is the whole of peryx's access model before this release. It keeps working unchanged, so an existing config
-behaves as it did. Set at most one of `upload_token` and `upload_token_file`.
+A hosted index accepts uploads through the `[[index.access_token]]` grants that permit writes.
 
 ## `[[index.access_token]]`
 
-Each `[[index.access_token]]` table adds one named credential the index accepts, beyond the `upload_token` shorthand.
-Put these under the hosted index that stores the writes.
+Each `[[index.access_token]]` table adds one named credential the index accepts. Put these under the hosted index that
+stores the writes.
 
 ```toml
 [[index]]
@@ -228,16 +224,15 @@ expires_at = "2027-01-01T00:00:00Z"
 | `actions`     | Any of `read`, `write`, `delete`; at least one                                       | (required) |
 | `expires_at`  | [RFC 3339](https://www.rfc-editor.org/rfc/rfc3339) time after which it stops working | never      |
 
-A token needs exactly one of `secret` and `secret_file`. `name` may not be `upload_token`, which is reserved for the
-shorthand. Once `expires_at` passes, the token authenticates nothing: a request presenting it becomes anonymous, exactly
-as if the password were wrong.
+A token needs exactly one of `secret` and `secret_file`. Once `expires_at` passes, the token authenticates nothing: a
+request presenting it becomes anonymous, exactly as if the password were wrong.
 
 ## Secret files
 
-Every secret key (`signing_key`, `upload_token`, an access token's `secret`, and an LDAP `bind_password`) has a `_file`
-sibling naming a path to read the value from, so no plaintext lives in the config file. peryx reads each file once at
-startup and trims surrounding whitespace; an empty file is a startup error. The rationale and the tools it composes with
-are in [client auth versus upstream credentials](@/core/access-explained.md).
+Every secret key (`signing_key`, an access token's `secret`, and an LDAP `bind_password`) has a `_file` sibling naming a
+path to read the value from, so no plaintext lives in the config file. peryx reads each file once at startup and trims
+surrounding whitespace; an empty file is a startup error. The rationale and the tools it composes with are in
+[client auth versus upstream credentials](@/core/access-explained.md).
 
 ## Server-user records
 
@@ -260,8 +255,8 @@ cached package records, and access policy remain in their current tables. If tab
 does not leave a partial user schema, and the prior metadata remains available to the existing recovery procedure.
 
 Server users do not yet authorize package requests: mapping an authenticated user to grants waits on the role model.
-Existing `upload_token` and `[[index.access_token]]` credentials keep their current subjects and behavior when a server
-user is renamed or disabled.
+Existing `[[index.access_token]]` credentials keep their current subjects and behavior when a server user is renamed or
+disabled.
 
 ## External identity links
 

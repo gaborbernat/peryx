@@ -93,14 +93,7 @@ fn cached(name: &str, upstream: &str) -> IndexConfig {
         anonymous_read: None,
         tokens: Vec::new(),
         kind: IndexKind::Cached {
-            upstream: upstream.to_owned(),
-            username: None,
-            password: None,
-            token: None,
-            credential_exec: None,
-            credential_refresh: None,
-            tls: crate::config::UpstreamTlsConfig::default(),
-            routing: None,
+            routing: super::single_route(upstream),
             upstream_concurrency: peryx_driver::rate_limit::DEFAULT_UPSTREAM_CONCURRENCY,
             offline: false,
             prefetch: Box::default(),
@@ -119,10 +112,7 @@ fn hosted(name: &str) -> IndexConfig {
         ecosystem: peryx_core::Ecosystem::Pypi,
         anonymous_read: None,
         tokens: Vec::new(),
-        kind: IndexKind::Hosted {
-            upload_token: None,
-            volatile: true,
-        },
+        kind: IndexKind::Hosted { volatile: true },
     }
 }
 
@@ -190,7 +180,7 @@ fn routed(metadata: &str, artifact: Option<&str>) -> IndexConfig {
     let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected a cached index");
     };
-    *routing = Some(Box::new(UpstreamRoutingConfig {
+    *routing = UpstreamRoutingConfig {
         upstreams: vec![UpstreamConfig {
             name: "primary".to_owned(),
             url: metadata.to_owned(),
@@ -205,7 +195,7 @@ fn routed(metadata: &str, artifact: Option<&str>) -> IndexConfig {
         fallback: true,
         protected: Vec::new(),
         pins: std::collections::BTreeMap::new(),
-    }));
+    };
     index
 }
 
@@ -518,10 +508,7 @@ async fn test_routed_metadata_and_artifacts_share_credential_refresh() {
         &format!("{}/simple/", metadata.uri()),
         Some(&format!("{}/packages/", artifacts.uri())),
     );
-    let IndexKind::Cached {
-        routing: Some(routing), ..
-    } = &mut index.kind
-    else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected a routed cached index");
     };
     routing.upstreams[0].token = Some(SecretSource::File(token.clone()));
@@ -576,10 +563,10 @@ async fn test_exec_credential_authenticates_a_cached_upstream() {
         .await;
     let (exec, executions, requests) = exec_credential_helper(&dir);
     let mut index = cached("corp", &format!("{}/simple/", upstream.uri()));
-    let IndexKind::Cached { credential_exec, .. } = &mut index.kind else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected a cached index");
     };
-    *credential_exec = Some(exec);
+    routing.upstreams[0].credential_exec = Some(exec);
     let state = build_state(&Config {
         data_dir: dir.path().join("data"),
         indexes: vec![index],
@@ -630,10 +617,7 @@ async fn test_routed_metadata_and_artifacts_share_an_exec_credential() {
         &format!("{}/simple/", metadata.uri()),
         Some(&format!("{}/packages/", artifacts.uri())),
     );
-    let IndexKind::Cached {
-        routing: Some(routing), ..
-    } = &mut index.kind
-    else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected a routed cached index");
     };
     routing.upstreams[0].credential_exec = Some(exec);
@@ -693,16 +677,11 @@ async fn test_refresh_failure_can_fall_back_to_anonymous() {
     let token = dir.path().join("token");
     std::fs::write(&token, "old\n").unwrap();
     let mut index = cached("corp", &format!("{}/simple/", upstream.uri()));
-    let IndexKind::Cached {
-        token: configured_token,
-        credential_refresh,
-        ..
-    } = &mut index.kind
-    else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected a cached index");
     };
-    *configured_token = Some(SecretSource::File(token.clone()));
-    *credential_refresh = Some(CredentialRefreshConfig {
+    routing.upstreams[0].token = Some(SecretSource::File(token.clone()));
+    routing.upstreams[0].credential_refresh = Some(CredentialRefreshConfig {
         interval: Duration::from_hours(1),
         on_unauthorized: true,
         failure: CredentialFailureMode::Anonymous,
@@ -752,18 +731,12 @@ fn test_build_state_prefers_explicit_upstream_credentials(
         "machine https://corp.example:443 login netrc-reader password netrc-secret\n",
     );
     let mut index = cached("corp", "https://corp.example/simple/");
-    let IndexKind::Cached {
-        username: configured_username,
-        password: configured_password,
-        token: configured_token,
-        ..
-    } = &mut index.kind
-    else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected cached index");
     };
-    *configured_username = username.map(str::to_owned);
-    *configured_password = password;
-    *configured_token = token;
+    routing.upstreams[0].username = username.map(str::to_owned);
+    routing.upstreams[0].password = password;
+    routing.upstreams[0].token = token;
     let state = build_state(&Config {
         data_dir: dir.path().join("data"),
         netrc: Some(netrc),
@@ -782,10 +755,10 @@ fn test_build_state_prefers_explicit_upstream_credentials(
 fn test_build_state_reads_an_upstream_token_from_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let mut index = cached("corp", "https://corp.example/simple/");
-    let IndexKind::Cached { token, .. } = &mut index.kind else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected cached index");
     };
-    *token = Some(SecretSource::Env("PATH".to_owned()));
+    routing.upstreams[0].token = Some(SecretSource::Env("PATH".to_owned()));
     let state = build_state(&Config {
         data_dir: dir.path().join("data"),
         indexes: vec![index],
@@ -806,10 +779,10 @@ fn test_build_state_reads_an_upstream_token_from_the_environment() {
 fn test_build_state_reports_a_missing_upstream_credential_environment_variable() {
     let dir = tempfile::tempdir().unwrap();
     let mut index = cached("corp", "https://corp.example/simple/");
-    let IndexKind::Cached { token, .. } = &mut index.kind else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected cached index");
     };
-    *token = Some(SecretSource::Env("PERYX_TEST_ABSENT_CREDENTIAL".to_owned()));
+    routing.upstreams[0].token = Some(SecretSource::Env("PERYX_TEST_ABSENT_CREDENTIAL".to_owned()));
     let Err(error) = build_state(&Config {
         data_dir: dir.path().join("data"),
         indexes: vec![index],
@@ -824,6 +797,20 @@ fn test_build_state_reports_a_missing_upstream_credential_environment_variable()
         ),
         "{chain}"
     );
+}
+
+#[test]
+fn test_build_state_rejects_a_virtual_index_naming_an_unknown_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let Err(error) = build_state(&Config {
+        data_dir: dir.path().join("data"),
+        indexes: vec![hosted("store"), virtual_index(&["ghost"], None)],
+        ..Config::default()
+    }) else {
+        panic!("expected an unresolved virtual layer to fail startup");
+    };
+
+    assert!(error.to_string().contains("unknown index ghost"), "{error}");
 }
 
 #[test]
@@ -1805,10 +1792,9 @@ fn test_build_index_settings_rejects(
 #[test]
 fn test_build_indexes_reports_an_unreadable_secret_file() {
     let mut index = hosted("store");
-    index.kind = IndexKind::Hosted {
-        upload_token: Some(SecretSource::File(PathBuf::from("/nonexistent/peryx/token"))),
-        volatile: true,
-    };
+    index.tokens = vec![crate::tests::writer_token(SecretSource::File(PathBuf::from(
+        "/nonexistent/peryx/token",
+    )))];
 
     let err = build_indexes(&[index], &AuthConfig::default(), false).unwrap_err();
 
@@ -1826,16 +1812,11 @@ fn test_build_indexes_reads_upstream_credentials_from_files() {
     std::fs::write(&password, "mirror-secret\n").unwrap();
     std::fs::write(&token, "upstream-token\n").unwrap();
     let mut index = cached("corp", "https://corp/simple/");
-    let IndexKind::Cached {
-        password: pw,
-        token: tk,
-        ..
-    } = &mut index.kind
-    else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected a cached index");
     };
-    *pw = Some(SecretSource::File(password));
-    *tk = Some(SecretSource::File(token));
+    routing.upstreams[0].password = Some(SecretSource::File(password));
+    routing.upstreams[0].token = Some(SecretSource::File(token));
 
     let indexes = build_indexes(&[index], &AuthConfig::default(), false).unwrap();
 
@@ -1892,10 +1873,10 @@ url = "https://pypi.org/simple/"
 #[test]
 fn test_build_indexes_reports_unreadable_upstream_credentials() {
     let mut index = cached("corp", "https://corp/simple/");
-    let IndexKind::Cached { password, .. } = &mut index.kind else {
+    let IndexKind::Cached { routing, .. } = &mut index.kind else {
         panic!("expected a cached index");
     };
-    *password = Some(SecretSource::File(PathBuf::from("/nonexistent/peryx/password")));
+    routing.upstreams[0].password = Some(SecretSource::File(PathBuf::from("/nonexistent/peryx/password")));
 
     let err = build_indexes(&[index], &AuthConfig::default(), false).unwrap_err();
 

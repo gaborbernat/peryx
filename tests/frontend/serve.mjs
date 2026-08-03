@@ -102,11 +102,21 @@ url = "${upstreamBase}/simple/"
 
 [[index]]
 name = "hosted"
-upload_token = "playwright-secret"
+hosted = true
+
+[[index.access_token]]
+name = "uploader"
+secret = "playwright-secret"
+actions = ["write", "delete"]
 
 [[index]]
 name = "internal"
-upload_token = "playwright-secret"
+hosted = true
+
+[[index.access_token]]
+name = "uploader"
+secret = "playwright-secret"
+actions = ["write", "delete"]
 
 [[index.access_token]]
 name = "reader"
@@ -115,14 +125,24 @@ actions = ["read"]
 
 [[index]]
 name = "limited"
-upload_token = "playwright-secret"
+hosted = true
 
 [index.policy]
 max_file_size_bytes = 512
 
+[[index.access_token]]
+name = "uploader"
+secret = "playwright-secret"
+actions = ["write", "delete"]
+
 [[index]]
 name = "zz-browser-upload"
-upload_token = "playwright-secret"
+hosted = true
+
+[[index.access_token]]
+name = "uploader"
+secret = "playwright-secret"
+actions = ["write", "delete"]
 
 [[index]]
 name = "root/pypi"
@@ -132,7 +152,12 @@ upload = "hosted"
 [[index]]
 name = "images"
 ecosystem = "oci"
-upload_token = "playwright-secret"
+hosted = true
+
+[[index.access_token]]
+name = "uploader"
+secret = "playwright-secret"
+actions = ["write", "delete"]
 `,
 );
 

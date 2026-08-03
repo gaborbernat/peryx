@@ -168,28 +168,30 @@ fn test_log_config_apply_empty_keeps_defaults() {
 #[test]
 fn test_indexes_from_toml_classify_all_kinds() {
     let text = "\
-[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\ntoken = \"bear\"\nupstream_concurrency = 3\n\
-[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\nusername = \"u\"\npassword = \"p\"\n\
-[[index]]\nname = \"team-hosted\"\nhosted = true\nupload_token = \"s\"\nvolatile = false\n\
+[[index]]\nname = \"pypi\"\nupstream_concurrency = 3\n\
+[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\ntoken = \"bear\"\n\
+[[index]]\nname = \"corp\"\n\
+[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\nusername = \"u\"\npassword = \"p\"\n\
+[[index]]\nname = \"team-hosted\"\nhosted = true\nvolatile = false\n\
 [[index.webhook]]\nname = \"ci\"\nurl = \"https://ci.example/hook\"\nsecret_env = \"PERYX_WEBHOOK_SECRET\"\nevents = [\"upload\", \"delete\"]\n\
-[[index]]\nname = \"secret\"\nupload_token = \"z\"\n\
+[[index]]\nname = \"secret\"\nhosted = true\n\
 [[index]]\nname = \"team\"\nroute = \"team/dev\"\nlayers = [\"team-hosted\", \"pypi\"]\nupload = \"team-hosted\"\n";
     let c = toml_config(text);
     assert_eq!(c.indexes.len(), 5);
     assert_eq!(c.indexes[0].route, "pypi"); // route defaults to name
-    assert!(
-        matches!(&c.indexes[0].kind, IndexKind::Cached { token: Some(SecretSource::Literal(token)), upstream_concurrency: 3, .. } if token == "bear")
-    );
+    assert!(matches!(
+        &c.indexes[0].kind,
+        IndexKind::Cached { upstream_concurrency: 3, routing, .. }
+            if matches!(&routing.upstreams[0].token, Some(SecretSource::Literal(token)) if token == "bear")
+    ));
     assert!(matches!(
         &c.indexes[1].kind,
-        IndexKind::Cached {
-            username: Some(_),
-            password: Some(_),
-            token: None,
-            ..
-        }
+        IndexKind::Cached { routing, .. }
+            if routing.upstreams[0].username.is_some()
+                && routing.upstreams[0].password.is_some()
+                && routing.upstreams[0].token.is_none()
     ));
-    assert!(matches!(&c.indexes[2].kind, IndexKind::Hosted { volatile: false, .. })); // explicit hosted, non-volatile
+    assert!(matches!(&c.indexes[2].kind, IndexKind::Hosted { volatile: false })); // explicit hosted, non-volatile
     assert_eq!(c.indexes[2].webhooks.len(), 1);
     assert_eq!(c.indexes[2].webhooks[0].name, "ci");
     assert_eq!(c.indexes[2].webhooks[0].url, "https://ci.example/hook");
@@ -198,7 +200,7 @@ fn test_indexes_from_toml_classify_all_kinds() {
         WebhookSecret::Env("PERYX_WEBHOOK_SECRET".to_owned())
     );
     assert_eq!(c.indexes[2].webhooks[0].events, ["upload", "delete"]);
-    assert!(matches!(&c.indexes[3].kind, IndexKind::Hosted { volatile: true, .. })); // upload_token implies hosted, default volatile
+    assert!(matches!(&c.indexes[3].kind, IndexKind::Hosted { volatile: true })); // hosted defaults to volatile
     assert_eq!(c.indexes[4].route, "team/dev");
     assert!(
         matches!(&c.indexes[4].kind, IndexKind::Virtual { layers, upload: Some(upload) }
@@ -238,7 +240,9 @@ fn test_rate_limits_from_toml_overlay_defaults() {
 
 #[test]
 fn test_mirror_upstream_concurrency_defaults() {
-    let c = toml_config("[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\n");
+    let c = toml_config(
+        "[[index]]\nname = \"pypi\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n",
+    );
     assert!(matches!(
         &c.indexes[0].kind,
         IndexKind::Cached {
@@ -273,18 +277,12 @@ url = "https://pypi.org/simple/"
 token = "bearer"
 "#,
     );
-    let IndexKind::Cached {
-        upstream,
-        username,
-        password,
-        routing: Some(routing),
-        ..
-    } = &c.indexes[0].kind
-    else {
+    let IndexKind::Cached { routing, .. } = &c.indexes[0].kind else {
         panic!("expected a routed cached index");
     };
+    let primary = &routing.upstreams[0];
     assert_eq!(
-        (upstream.as_str(), username.as_deref(), password),
+        (primary.url.as_str(), primary.username.as_deref(), &primary.password),
         (
             "https://packages.example/simple/",
             Some("reader"),
@@ -313,15 +311,17 @@ token = "bearer"
 }
 
 #[test]
-fn test_upstream_tls_paths_resolve_for_legacy_and_routed_sources() {
+fn test_upstream_tls_paths_resolve_for_single_and_multi_source_routes() {
     let config = toml_config(
         r#"
 [[index]]
-name = "legacy"
-cached = "https://legacy.example/simple/"
-ca_file = "/run/tls/legacy-ca.pem"
-client_cert_file = "/run/tls/legacy-cert.pem"
-client_key_file = "/run/tls/legacy-key.pem"
+name = "single"
+[[index.upstream]]
+name = "primary"
+url = "https://single.example/simple/"
+ca_file = "/run/tls/single-ca.pem"
+client_cert_file = "/run/tls/single-cert.pem"
+client_key_file = "/run/tls/single-key.pem"
 
 [[index]]
 name = "routed"
@@ -331,22 +331,20 @@ url = "https://primary.example/simple/"
 ca_file = "/run/tls/primary-ca.pem"
 "#,
     );
-    let IndexKind::Cached { tls, .. } = &config.indexes[0].kind else {
+    let IndexKind::Cached { routing, .. } = &config.indexes[0].kind else {
         panic!("expected cached index");
     };
-    assert_eq!(tls.ca_file.as_deref(), Some(Path::new("/run/tls/legacy-ca.pem")));
+    let tls = &routing.upstreams[0].tls;
+    assert_eq!(tls.ca_file.as_deref(), Some(Path::new("/run/tls/single-ca.pem")));
     assert_eq!(
         tls.client_cert_file.as_deref(),
-        Some(Path::new("/run/tls/legacy-cert.pem"))
+        Some(Path::new("/run/tls/single-cert.pem"))
     );
     assert_eq!(
         tls.client_key_file.as_deref(),
-        Some(Path::new("/run/tls/legacy-key.pem"))
+        Some(Path::new("/run/tls/single-key.pem"))
     );
-    let IndexKind::Cached {
-        routing: Some(routing), ..
-    } = &config.indexes[1].kind
-    else {
+    let IndexKind::Cached { routing, .. } = &config.indexes[1].kind else {
         panic!("expected routed cached index");
     };
     assert_eq!(
@@ -360,16 +358,10 @@ ca_file = "/run/tls/primary-ca.pem"
 }
 
 #[rstest]
-#[case::legacy_certificate_only(
-    "[[index]]\nname = \"pypi\"\ncached = \"https://example/simple/\"\nclient_cert_file = \"cert.pem\"\n"
-)]
-#[case::legacy_key_only(
-    "[[index]]\nname = \"pypi\"\ncached = \"https://example/simple/\"\nclient_key_file = \"key.pem\"\n"
-)]
-#[case::routed_certificate_only(
+#[case::certificate_only(
     "[[index]]\nname = \"pypi\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://example/simple/\"\nclient_cert_file = \"cert.pem\"\n"
 )]
-#[case::routed_key_only(
+#[case::key_only(
     "[[index]]\nname = \"pypi\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://example/simple/\"\nclient_key_file = \"key.pem\"\n"
 )]
 fn test_upstream_client_certificate_and_key_are_a_pair(#[case] text: &str) {
@@ -380,88 +372,59 @@ fn test_upstream_client_certificate_and_key_are_a_pair(#[case] text: &str) {
 }
 
 #[test]
-fn test_upstream_tls_files_require_a_cached_index() {
+fn test_routing_options_require_upstream_sources() {
     assert_eq!(
-        toml_error("[[index]]\nname = \"hosted\"\nhosted = true\nca_file = \"ca.pem\"\n").to_string(),
-        "index hosted: upstream TLS files require a cached index"
-    );
-}
-
-#[test]
-fn test_cached_url_and_ordered_upstreams_are_mutually_exclusive() {
-    let err = toml_error(
-        "[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\n\
-         [[index.upstream]]\nname = \"mirror\"\nurl = \"https://mirror.example/simple/\"\n",
-    );
-    assert_eq!(
-        err.to_string(),
-        "index pypi: `cached` and `[[index.upstream]]` are mutually exclusive"
+        toml_error("[[index]]\nname = \"pypi\"\nfallback = false\n").to_string(),
+        "index pypi: `fallback`, `protected`, and `pins` require `[[index.upstream]]`"
     );
 }
 
 #[rstest]
-#[case::routing_without_sources(
-    "[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\nfallback = false\n",
-    "`fallback`, `protected`, and `pins` require `[[index.upstream]]`"
+#[case::cached("cached = \"https://pypi.org/simple/\"", "cached")]
+#[case::upload_token("hosted = true\nupload_token = \"s\"", "upload_token")]
+#[case::index_token(
+    "token = \"x\"\n[[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"",
+    "token"
 )]
-#[case::credentials_on_index(
-    "[[index]]\nname = \"pypi\"\ntoken = \"wrong-level\"\n\
-     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
-    "credentials for `[[index.upstream]]` belong on each source"
+#[case::index_ca_file(
+    "ca_file = \"ca.pem\"\n[[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"",
+    "ca_file"
 )]
-#[case::credential_refresh_on_index(
-    "[[index]]\nname = \"pypi\"\ncredential_refresh_secs = 30\n\
-     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
-    "credentials for `[[index.upstream]]` belong on each source"
-)]
-#[case::credential_unauthorized_refresh_on_index(
-    "[[index]]\nname = \"pypi\"\ncredential_refresh_on_unauthorized = false\n\
-     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
-    "credentials for `[[index.upstream]]` belong on each source"
-)]
-#[case::credential_failure_on_index(
-    "[[index]]\nname = \"pypi\"\ncredential_failure = \"anonymous\"\n\
-     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
-    "credentials for `[[index.upstream]]` belong on each source"
-)]
-#[case::tls_on_index(
-    "[[index]]\nname = \"pypi\"\nca_file = \"wrong-level.pem\"\n\
-     [[index.upstream]]\nname = \"public\"\nurl = \"https://pypi.org/simple/\"\n",
-    "TLS files for `[[index.upstream]]` belong on each source"
-)]
-fn test_ordered_upstream_options_reject_ambiguous_placement(#[case] text: &str, #[case] reason: &str) {
-    assert_eq!(toml_error(text).to_string(), format!("index pypi: {reason}"));
+fn test_removed_shorthand_keys_are_unknown_fields(#[case] body: &str, #[case] key: &str) {
+    let error = config::from_toml(
+        PathBuf::from("x.toml"),
+        &format!("[[index]]\nname = \"pypi\"\n{body}\n"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains(&format!("unknown field `{key}`")), "{error}");
 }
 
 #[test]
 fn test_upstream_password_and_token_read_from_files() {
     let c = toml_config(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
          password_file = \"/run/secrets/pw\"\ntoken_file = \"/run/secrets/tok\"\n",
     );
     assert!(matches!(
         &c.indexes[0].kind,
-        IndexKind::Cached {
-            password: Some(SecretSource::File(pw)),
-            token: Some(SecretSource::File(tok)),
-            ..
-        } if pw == Path::new("/run/secrets/pw") && tok == Path::new("/run/secrets/tok")
+        IndexKind::Cached { routing, .. }
+            if matches!(&routing.upstreams[0].password, Some(SecretSource::File(pw)) if pw == Path::new("/run/secrets/pw"))
+                && matches!(&routing.upstreams[0].token, Some(SecretSource::File(tok)) if tok == Path::new("/run/secrets/tok"))
     ));
 }
 
 #[test]
 fn test_upstream_password_and_token_read_from_env() {
     let c = toml_config(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
          password_env = \"CORP_PASSWORD\"\ntoken_env = \"CORP_TOKEN\"\n",
     );
     assert!(matches!(
         &c.indexes[0].kind,
-        IndexKind::Cached {
-            password: Some(SecretSource::Env(pw)),
-            token: Some(SecretSource::Env(tok)),
-            ..
-        } if pw == "CORP_PASSWORD" && tok == "CORP_TOKEN"
+        IndexKind::Cached { routing, .. }
+            if matches!(&routing.upstreams[0].password, Some(SecretSource::Env(pw)) if pw == "CORP_PASSWORD")
+                && matches!(&routing.upstreams[0].token, Some(SecretSource::Env(tok)) if tok == "CORP_TOKEN")
     ));
 }
 
@@ -471,10 +434,7 @@ fn test_ordered_upstream_password_reads_from_env() {
         "[[index]]\nname = \"corp\"\n\
          [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\npassword_env = \"CORP_PASSWORD\"\n",
     );
-    let IndexKind::Cached {
-        routing: Some(routing), ..
-    } = &c.indexes[0].kind
-    else {
+    let IndexKind::Cached { routing, .. } = &c.indexes[0].kind else {
         panic!("expected a routed cached index");
     };
     assert!(matches!(
@@ -486,15 +446,14 @@ fn test_ordered_upstream_password_reads_from_env() {
 #[test]
 fn test_upstream_credential_refresh_resolves_for_file_sources() {
     let config = toml_config(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
          token_file = \"/run/secrets/token\"\ncredential_refresh_secs = 30\n\
          credential_refresh_on_unauthorized = false\ncredential_failure = \"anonymous\"\n",
     );
-    let IndexKind::Cached {
-        credential_refresh: Some(refresh),
-        ..
-    } = &config.indexes[0].kind
-    else {
+    let IndexKind::Cached { routing, .. } = &config.indexes[0].kind else {
+        panic!("expected cached index");
+    };
+    let Some(refresh) = routing.upstreams[0].credential_refresh else {
         panic!("expected credential refresh");
     };
 
@@ -505,24 +464,18 @@ fn test_upstream_credential_refresh_resolves_for_file_sources() {
 }
 
 #[test]
-fn test_routed_credential_refresh_defaults_apply_to_the_primary_client() {
+fn test_routed_credential_refresh_applies_its_defaults() {
     let config = toml_config(
         "[[index]]\nname = \"corp\"\n\
          [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
          token_env = \"CORP_TOKEN\"\ncredential_refresh_secs = 60\n",
     );
-    let IndexKind::Cached {
-        credential_refresh: Some(primary),
-        routing: Some(routing),
-        ..
-    } = &config.indexes[0].kind
-    else {
-        panic!("expected routed credential refresh");
+    let IndexKind::Cached { routing, .. } = &config.indexes[0].kind else {
+        panic!("expected cached index");
     };
-
-    assert_eq!(*primary, routing.upstreams[0].credential_refresh.unwrap());
+    let refresh = routing.upstreams[0].credential_refresh.expect("credential refresh");
     assert_eq!(
-        (primary.on_unauthorized, primary.failure),
+        (refresh.on_unauthorized, refresh.failure),
         (true, CredentialFailureMode::Fail)
     );
 }
@@ -530,16 +483,15 @@ fn test_routed_credential_refresh_defaults_apply_to_the_primary_client() {
 #[test]
 fn test_exec_credential_resolves_for_a_cached_index() {
     let config = toml_config(&format!(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
-         [index.credential_exec]\nargv = [{:?}, \"--profile\", \"production\"]\n\
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
+         [index.upstream.credential_exec]\nargv = [{:?}, \"--profile\", \"production\"]\n\
          timeout_secs = 12\nenvironment = [\"HOME\", \"AWS_PROFILE\"]\nfailure = \"anonymous\"\n",
         exec_path()
     ));
-    let IndexKind::Cached {
-        credential_exec: Some(exec),
-        ..
-    } = &config.indexes[0].kind
-    else {
+    let IndexKind::Cached { routing, .. } = &config.indexes[0].kind else {
+        panic!("expected cached index");
+    };
+    let Some(exec) = &routing.upstreams[0].credential_exec else {
         panic!("expected an exec credential");
     };
 
@@ -555,23 +507,17 @@ fn test_exec_credential_resolves_for_a_cached_index() {
 }
 
 #[test]
-fn test_routed_exec_credential_applies_to_the_primary_client() {
+fn test_routed_exec_credential_applies_its_defaults() {
     let config = toml_config(&format!(
         "[[index]]\nname = \"corp\"\n\
          [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
          [index.upstream.credential_exec]\n{}\n",
         exec_argv()
     ));
-    let IndexKind::Cached {
-        credential_exec: Some(primary),
-        routing: Some(routing),
-        ..
-    } = &config.indexes[0].kind
-    else {
-        panic!("expected routed exec credentials");
+    let IndexKind::Cached { routing, .. } = &config.indexes[0].kind else {
+        panic!("expected cached index");
     };
-
-    assert_eq!(primary, routing.upstreams[0].credential_exec.as_ref().unwrap());
+    let primary = routing.upstreams[0].credential_exec.as_ref().expect("exec credential");
     assert_eq!(
         (primary.timeout(), primary.environment(), primary.failure()),
         (Duration::from_secs(30), &[][..], CredentialFailure::Fail)
@@ -594,8 +540,9 @@ fn test_exec_credential_rejects_invalid_settings(#[case] settings: &str, #[case]
     } else {
         format!("{}\n{settings}", exec_argv())
     };
-    let text =
-        format!("[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n[index.credential_exec]\n{settings}\n");
+    let text = format!(
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n[index.upstream.credential_exec]\n{settings}\n"
+    );
 
     assert_eq!(toml_error(&text).to_string(), format!("index corp: {reason}"));
 }
@@ -606,7 +553,7 @@ fn test_exec_credential_bounds_argv_items() {
         .collect::<Vec<_>>()
         .join(", ");
     let text = format!(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n[index.credential_exec]\nargv = [{argv}]\n"
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n[index.upstream.credential_exec]\nargv = [{argv}]\n"
     );
 
     assert_eq!(
@@ -619,8 +566,8 @@ fn test_exec_credential_bounds_argv_items() {
 fn test_exec_credential_bounds_environment_items() {
     let environment = std::iter::repeat_n("\"NAME\"", 65).collect::<Vec<_>>().join(", ");
     let text = format!(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n\
-         [index.credential_exec]\n{}\nenvironment = [{environment}]\n",
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n\
+         [index.upstream.credential_exec]\n{}\nenvironment = [{environment}]\n",
         exec_argv()
     );
 
@@ -636,8 +583,8 @@ fn test_exec_credential_bounds_environment_items() {
 #[case::token("token_env = \"TOKEN\"")]
 fn test_exec_credential_rejects_static_credentials(#[case] credential: &str) {
     let text = format!(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n{credential}\n\
-         [index.credential_exec]\n{}\n",
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n{credential}\n\
+         [index.upstream.credential_exec]\n{}\n",
         exec_argv()
     );
 
@@ -650,41 +597,14 @@ fn test_exec_credential_rejects_static_credentials(#[case] credential: &str) {
 #[test]
 fn test_exec_credential_rejects_refresh_controls() {
     let error = toml_error(&format!(
-        "[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\ncredential_refresh_secs = 30\n\
-         [index.credential_exec]\n{}\n",
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\ncredential_refresh_secs = 30\n\
+         [index.upstream.credential_exec]\n{}\n",
         exec_argv()
     ));
 
     assert_eq!(
         error.to_string(),
         "index corp: `credential_exec` controls its own expiry and failure behavior"
-    );
-}
-
-#[test]
-fn test_exec_credential_requires_a_cached_index() {
-    let error = toml_error(&format!(
-        "[[index]]\nname = \"hosted\"\nhosted = true\n[index.credential_exec]\n{}\n",
-        exec_argv()
-    ));
-
-    assert_eq!(
-        error.to_string(),
-        "index hosted: upstream credentials require a cached index"
-    );
-}
-
-#[test]
-fn test_routed_exec_credential_rejects_top_level_configuration() {
-    let error = toml_error(&format!(
-        "[[index]]\nname = \"corp\"\n[index.credential_exec]\n{}\n\
-         [[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n",
-        exec_argv()
-    ));
-
-    assert_eq!(
-        error.to_string(),
-        "index corp: credentials for `[[index.upstream]]` belong on each source"
     );
 }
 
@@ -706,7 +626,9 @@ fn test_routed_exec_credential_rejects_top_level_configuration() {
     "`credential_refresh_secs` is required for credential refresh controls"
 )]
 fn test_credential_refresh_rejects_invalid_controls(#[case] controls: &str, #[case] reason: &str) {
-    let text = format!("[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n{controls}");
+    let text = format!(
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n{controls}"
+    );
     assert_eq!(toml_error(&text).to_string(), format!("index corp: {reason}"));
 }
 
@@ -724,24 +646,15 @@ fn test_routed_credential_refresh_rejects_invalid_controls() {
 }
 
 #[rstest]
-#[case("credential_refresh_secs = 30")]
-#[case("credential_refresh_on_unauthorized = false")]
-#[case("credential_failure = \"anonymous\"")]
-fn test_credential_refresh_requires_a_cached_index(#[case] control: &str) {
-    assert_eq!(
-        toml_error(&format!("[[index]]\nname = \"hosted\"\nhosted = true\n{control}\n")).to_string(),
-        "index hosted: credential refresh requires a cached index"
-    );
-}
-
-#[rstest]
 #[case::password_and_file("password = \"p\"\npassword_file = \"/run/secrets/pw\"\n")]
 #[case::password_and_env("password = \"p\"\npassword_env = \"CORP_PASSWORD\"\n")]
 #[case::file_and_env("password_file = \"/run/secrets/pw\"\npassword_env = \"CORP_PASSWORD\"\n")]
 #[case::token_and_file("token = \"t\"\ntoken_file = \"/run/secrets/tok\"\n")]
 #[case::token_and_env("token = \"t\"\ntoken_env = \"CORP_TOKEN\"\n")]
 fn test_an_upstream_credential_may_not_have_two_sources(#[case] credential: &str) {
-    let text = format!("[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\n{credential}");
+    let text = format!(
+        "[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\n{credential}"
+    );
     let err = toml_error(&text).to_string();
     assert!(
         err.contains("index corp: set at most one of a secret, its `_file` sibling, and its `_env` sibling"),
@@ -769,7 +682,7 @@ fn test_an_ordered_upstream_credential_may_not_have_two_sources(#[case] credenti
 #[test]
 fn test_an_upstream_env_credential_may_not_be_empty() {
     let err =
-        toml_error("[[index]]\nname = \"corp\"\ncached = \"https://corp/simple/\"\npassword_env = \"\"\n").to_string();
+        toml_error("[[index]]\nname = \"corp\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://corp/simple/\"\npassword_env = \"\"\n").to_string();
     assert_eq!(
         err,
         "index corp: `_env` names an environment variable and must not be empty"
@@ -816,48 +729,6 @@ fn test_index_webhook_rejects(#[case] text: &str, #[case] expected: &str) {
 }
 
 #[test]
-fn test_empty_upload_token_is_rejected() {
-    assert!(matches!(
-        toml_error("[[index]]\nname = \"hosted\"\nupload_token = \"\"\n"),
-        ConfigError::Index { name, reason } if name == "hosted" && reason.contains("`upload_token` must not be empty")
-    ));
-}
-
-#[test]
-fn test_nonempty_upload_token_is_hosted() {
-    let c = toml_config("[[index]]\nname = \"hosted\"\nupload_token = \"s3cret\"\n");
-    assert!(matches!(
-        &c.indexes[0].kind,
-        IndexKind::Hosted {
-            upload_token: Some(SecretSource::Literal(token)),
-            ..
-        } if token == "s3cret"
-    ));
-}
-
-#[rstest]
-#[case::virtual_token(
-    "[[index]]\nname = \"team\"\nlayers = [\"hosted\"]\nupload = \"hosted\"\nupload_token = \"s\"\n",
-    "`upload_token` is not honored on a virtual index; set it on the hosted layer named by `upload`"
-)]
-#[case::virtual_token_file(
-    "[[index]]\nname = \"team\"\nlayers = [\"hosted\"]\nupload = \"hosted\"\nupload_token_file = \"t.txt\"\n",
-    "`upload_token` is not honored on a virtual index; set it on the hosted layer named by `upload`"
-)]
-#[case::cached_token(
-    "[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\nupload_token = \"s\"\n",
-    "`upload_token` is not honored on a cached index, which does not accept uploads"
-)]
-#[case::routed_token(
-    "[[index]]\nname = \"pypi\"\nupload_token = \"s\"\n\
-     [[index.upstream]]\nname = \"mirror\"\nurl = \"https://mirror.example/simple/\"\n",
-    "`upload_token` is not honored on a cached index, which does not accept uploads"
-)]
-fn test_upload_token_rejected_when_kind_ignores_it(#[case] text: &str, #[case] expected: &str) {
-    assert!(toml_error(text).to_string().contains(expected));
-}
-
-#[test]
 fn test_upload_target_requires_layers() {
     assert!(
         toml_error("[[index]]\nname = \"hosted\"\nhosted = true\nupload = \"other\"\n")
@@ -866,25 +737,26 @@ fn test_upload_target_requires_layers() {
     );
 }
 
-#[rstest]
-#[case::layers_and_cached("[[index]]\nname = \"team\"\nlayers = [\"a\"]\ncached = \"https://pypi.org/simple/\"\n")]
-#[case::layers_and_upstreams(
-    "[[index]]\nname = \"team\"\nlayers = [\"a\"]\n\
-     [[index.upstream]]\nname = \"mirror\"\nurl = \"https://mirror.example/simple/\"\n"
-)]
-fn test_layers_excludes_cached_and_upstreams(#[case] text: &str) {
+#[test]
+fn test_layers_excludes_upstreams() {
+    let text = "[[index]]\nname = \"team\"\nlayers = [\"a\"]\n\
+                [[index.upstream]]\nname = \"mirror\"\nurl = \"https://mirror.example/simple/\"\n";
     assert!(
         toml_error(text)
             .to_string()
-            .contains("`layers` and `cached`/`[[index.upstream]]` are mutually exclusive")
+            .contains("`layers` and `[[index.upstream]]` are mutually exclusive")
     );
 }
 
 #[test]
 fn test_index_ecosystem_parses_and_defaults() {
-    let c = toml_config("[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\necosystem = \"pypi\"\n");
+    let c = toml_config(
+        "[[index]]\nname = \"pypi\"\necosystem = \"pypi\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n",
+    );
     assert_eq!(c.indexes[0].ecosystem, peryx_core::Ecosystem::Pypi);
-    let d = toml_config("[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\n");
+    let d = toml_config(
+        "[[index]]\nname = \"pypi\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n",
+    );
     assert_eq!(d.indexes[0].ecosystem, peryx_core::Ecosystem::Pypi);
 }
 
@@ -892,7 +764,7 @@ fn test_index_ecosystem_parses_and_defaults() {
 fn test_unknown_ecosystem_is_rejected() {
     let partial = config::from_toml(
         PathBuf::from("x.toml"),
-        "[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\necosystem = \"npm\"\n",
+        "[[index]]\nname = \"pypi\"\necosystem = \"npm\"\n[[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n",
     )
     .unwrap();
     let err = Config::default().apply(partial).unwrap_err();

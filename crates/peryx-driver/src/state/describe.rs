@@ -198,12 +198,29 @@ impl SecretDescription {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::{MemberDescription, describe_index, describe_upstream_route};
     use peryx_core::Ecosystem;
-    use peryx_identity::IndexAcl;
+    use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
     use peryx_index::{Index, IndexKind};
     use peryx_policy::Policy;
     use peryx_upstream::{NamedUpstream, UpstreamClient, UpstreamRouter};
+
+    fn writer_acl(secret: impl Into<String>) -> IndexAcl {
+        IndexAcl {
+            anonymous_read: true,
+            tokens: vec![NamedToken {
+                name: "uploader".to_owned(),
+                secret: secret.into(),
+                grants: vec![Grant {
+                    projects: vec![Glob::new("*")],
+                    actions: BTreeSet::from([Action::Write, Action::Delete]),
+                }],
+                expires_at: None,
+            }],
+        }
+    }
 
     fn index(name: &str, kind: IndexKind, acl: IndexAcl) -> Index {
         Index {
@@ -256,11 +273,7 @@ mod tests {
 
     #[test]
     fn test_hosted_index_reports_volatile_deletes_when_writable_and_volatile() {
-        let indexes = vec![index(
-            "store",
-            IndexKind::Hosted { volatile: true },
-            IndexAcl::upload_token("s"),
-        )];
+        let indexes = vec![index("store", IndexKind::Hosted { volatile: true }, writer_acl("s"))];
         let described = describe_index(&indexes, 0);
         assert_eq!(described.kind, "hosted");
         assert!(described.volatile_deletes);
@@ -292,11 +305,7 @@ mod tests {
     #[test]
     fn test_virtual_upload_target_drives_uploads_and_volatile_deletes() {
         let indexes = vec![
-            index(
-                "store",
-                IndexKind::Hosted { volatile: true },
-                IndexAcl::upload_token("s"),
-            ),
+            index("store", IndexKind::Hosted { volatile: true }, writer_acl("s")),
             index(
                 "v",
                 IndexKind::Virtual {

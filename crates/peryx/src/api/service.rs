@@ -219,8 +219,8 @@ fn acl() -> OperationBuilder {
         .description(Some(
             "The tokens, grants, expiry, and anonymous-read policy one index is configured with. peryx \
              has no server-wide administrator, so the gate is the index's own: authenticate with HTTP \
-             Basic as a token holding write over every project here (the `upload_token` standing). Token \
-             secrets are never returned, only a marker that one is set.",
+             Basic as an access token that holds write over every project here. Token secrets are never \
+             returned, only a marker that one is set.",
         ))
         .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
         .parameter(
@@ -240,7 +240,7 @@ fn acl() -> OperationBuilder {
                     "route": "hosted",
                     "anonymous_read": true,
                     "tokens": [
-                        {"name": "upload_token", "secret": {"configured": true, "redacted": "<redacted>"},
+                        {"name": "uploader", "secret": {"configured": true, "redacted": "<redacted>"},
                          "expires_at": null, "grants": [{"projects": ["*"], "actions": ["write", "delete"]}]},
                         {"name": "ci", "secret": {"configured": true, "redacted": "<redacted>"},
                          "expires_at": 1_800_000_000, "grants": [{"projects": ["team/*"], "actions": ["read"]}]}

@@ -141,7 +141,7 @@ async fn test_oci_indexer_omits_a_policy_blocked_repository() {
         ecosystem: Ecosystem::Oci,
         kind: IndexKind::Hosted { volatile: true },
         policy,
-        acl: IndexAcl::upload_token(TOKEN.to_owned()),
+        acl: crate::tests::writer_acl(TOKEN.to_owned()),
     };
     let (state, _app) = app_with_indexes(&dir, vec![index]);
     store::put_tag(&state.meta, "store", "blocked/app", "1.0", DIGEST).unwrap();

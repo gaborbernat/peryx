@@ -87,28 +87,18 @@ async fn all_projects(state: &Arc<AppState>, target: &Target, source: SelectionS
             .into_iter()
             .collect());
     }
-    let sync = match state.upstream_routes.get(&target.cached) {
-        Some(router) => {
-            peryx_ecosystem_pypi::catalog::sync_catalog(
-                router,
-                &state.cache.inflight,
-                &state.meta,
-                &target.cached,
-                target.client.base_url(),
-            )
-            .await
-        }
-        None => {
-            peryx_ecosystem_pypi::catalog::sync_catalog(
-                &target.client,
-                &state.cache.inflight,
-                &state.meta,
-                &target.cached,
-                target.client.base_url(),
-            )
-            .await
-        }
-    };
+    let router = state
+        .upstream_routes
+        .get(&target.cached)
+        .expect("a cached index always has an upstream route");
+    let sync = peryx_ecosystem_pypi::catalog::sync_catalog(
+        router,
+        &state.cache.inflight,
+        &state.meta,
+        &target.cached,
+        target.client.base_url(),
+    )
+    .await;
     let (outcome, projects) = match &sync {
         Ok(peryx_ecosystem_pypi::catalog::CatalogSyncOutcome::Published { projects }) => {
             (peryx_events::metrics::CatalogSyncOutcome::Published, Some(*projects))

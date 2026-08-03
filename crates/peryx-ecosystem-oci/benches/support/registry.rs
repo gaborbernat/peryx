@@ -9,7 +9,7 @@ use peryx_core::Ecosystem;
 use peryx_driver::AppState;
 use peryx_ecosystem_oci::{OCI_LEXICON, OciIndexer, OciRegistryWithHasher};
 use peryx_http::router;
-use peryx_identity::IndexAcl;
+use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::Policy;
 use peryx_storage::blob::{BlobStore, Digest};
@@ -18,6 +18,21 @@ use tokio::runtime::Runtime;
 use tower::ServiceExt as _;
 
 const TOKEN: &str = "bench-token";
+
+fn writer_acl(secret: impl Into<String>) -> IndexAcl {
+    IndexAcl {
+        anonymous_read: true,
+        tokens: vec![NamedToken {
+            name: "uploader".to_owned(),
+            secret: secret.into(),
+            grants: vec![Grant {
+                projects: vec![Glob::new("*")],
+                actions: std::collections::BTreeSet::from([Action::Write, Action::Delete]),
+            }],
+            expires_at: None,
+        }],
+    }
+}
 
 pub fn runtime() -> Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -39,7 +54,7 @@ where
         ecosystem: Ecosystem::Oci,
         kind: IndexKind::Hosted { volatile: true },
         policy: Policy::default(),
-        acl: IndexAcl::upload_token(TOKEN.to_owned()),
+        acl: writer_acl(TOKEN.to_owned()),
     };
     let mut state = AppState::with_clock(meta, blobs, 60, vec![index], Arc::new(|| 1000));
     state.register_ecosystem(Arc::new(registry), Arc::new(OciIndexer));

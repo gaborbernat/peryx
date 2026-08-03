@@ -8,7 +8,6 @@ use axum::http::{Method, Request, StatusCode};
 use peryx_core::Ecosystem;
 use peryx_driver::AppState;
 use peryx_http::router;
-use peryx_identity::IndexAcl;
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{Policy, PolicyConfig};
 use peryx_storage::blob::BlobStore;
@@ -42,7 +41,7 @@ fn store_blocking(dir: &tempfile::TempDir) -> (Arc<AppState>, axum::Router) {
             ecosystem: Ecosystem::Oci,
             kind: IndexKind::Hosted { volatile: true },
             policy,
-            acl: IndexAcl::upload_token(TOKEN.to_owned()),
+            acl: crate::tests::writer_acl(TOKEN.to_owned()),
         }],
         Arc::new(|| 1000),
     );
@@ -222,7 +221,7 @@ fn store_size_limited(dir: &tempfile::TempDir, limit: u64) -> (Arc<AppState>, ax
             ecosystem: Ecosystem::Oci,
             kind: IndexKind::Hosted { volatile: true },
             policy,
-            acl: IndexAcl::upload_token(TOKEN.to_owned()),
+            acl: crate::tests::writer_acl(TOKEN.to_owned()),
         }],
         Arc::new(|| 1000),
     );

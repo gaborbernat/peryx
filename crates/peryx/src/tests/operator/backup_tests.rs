@@ -199,9 +199,6 @@ role = "administrator"
 name = "python"
 route = "root/python"
 ecosystem = "pypi"
-cached = "https://pypi.example/simple/"
-username = "mirror"
-password = "mirror-secret"
 upstream_concurrency = 7
 offline = true
 anonymous_read = true
@@ -229,12 +226,15 @@ max_versions_per_project = 34
 quota_audit = true
 allow_versions = ">=1"
 
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.example/simple/"
+username = "mirror"
+password = "mirror-secret"
+
 [[index]]
 name = "hub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
-token_env = "DOCKERHUB_TOKEN"
-credential_refresh_secs = 60
 upstream_concurrency = 9
 offline = false
 
@@ -256,17 +256,27 @@ block_projects = []
 [index.settings]
 library_prefix = true
 
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
+token_env = "DOCKERHUB_TOKEN"
+credential_refresh_secs = 60
+
 [[index]]
 name = "images"
 ecosystem = "oci"
 hosted = true
-upload_token_file = "/run/secrets/upload-token"
 volatile = false
 anonymous_read = false
 
 [index.policy]
 allow_projects = []
 block_projects = ["internal/*"]
+
+[[index.access_token]]
+name = "uploader"
+secret_file = "/run/secrets/upload-token"
+actions = ["write", "delete"]
 
 [[index.access_token]]
 name = "ci"
@@ -436,8 +446,9 @@ fn test_backup_config_round_trips_exec_credentials() {
     std::fs::create_dir(&data_dir).unwrap();
     drop(MetaStore::open(data_dir.join("peryx.redb")).unwrap());
     let source = format!(
-        "data_dir = {:?}\n[[index]]\nname = \"pypi\"\ncached = \"https://pypi.org/simple/\"\n\
-         [index.credential_exec]\nargv = [{:?}, \"--profile\", \"public\"]\ntimeout_secs = 12\n\
+        "data_dir = {:?}\n[[index]]\nname = \"pypi\"\n\
+         [[index.upstream]]\nname = \"primary\"\nurl = \"https://pypi.org/simple/\"\n\
+         [index.upstream.credential_exec]\nargv = [{:?}, \"--profile\", \"public\"]\ntimeout_secs = 12\n\
          environment = [\"HOME\", \"AWS_PROFILE\"]\nfailure = \"anonymous\"\n",
         data_dir.display().to_string(),
         exec_path()
@@ -454,33 +465,6 @@ fn test_backup_config_round_trips_exec_credentials() {
         .unwrap();
 
     assert_eq!(restored, config);
-}
-
-#[rstest]
-#[case::literal(SecretSource::Literal("s3cret".to_owned()), "upload_token = \"s3cret\"")]
-#[case::file(
-    SecretSource::File(PathBuf::from("/run/secrets/token")),
-    "upload_token_file = \"/run/secrets/token\""
-)]
-fn test_backup_snapshots_where_the_upload_token_lives(#[case] source: SecretSource, #[case] expected: &str) {
-    let root = tempfile::tempdir().unwrap();
-    let data_dir = root.path().join("data");
-    std::fs::create_dir(&data_dir).unwrap();
-    drop(MetaStore::open(data_dir.join("peryx.redb")).unwrap());
-    let backup = root.path().join("backup");
-    let mut config = Config {
-        data_dir,
-        ..Config::default()
-    };
-    config.indexes[1].kind = IndexKind::Hosted {
-        upload_token: Some(source),
-        volatile: true,
-    };
-
-    operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
-
-    let snapshot = std::fs::read_to_string(backup.join("config.toml")).unwrap();
-    assert!(snapshot.contains(expected), "{snapshot}");
 }
 
 #[test]
@@ -645,17 +629,15 @@ fn test_backup_snapshots_upstream_secret_paths(#[case] expected: &str) {
         data_dir,
         ..Config::default()
     };
-    let IndexKind::Cached {
-        password, token, tls, ..
-    } = &mut config.indexes[0].kind
-    else {
+    let IndexKind::Cached { routing, .. } = &mut config.indexes[0].kind else {
         panic!("expected a cached index");
     };
-    *password = Some(SecretSource::File(PathBuf::from("/run/secrets/pw")));
-    *token = Some(SecretSource::File(PathBuf::from("/run/secrets/tok")));
-    tls.ca_file = Some(PathBuf::from("/run/secrets/ca.pem"));
-    tls.client_cert_file = Some(PathBuf::from("/run/secrets/client.pem"));
-    tls.client_key_file = Some(PathBuf::from("/run/secrets/client-key.pem"));
+    let primary = &mut routing.upstreams[0];
+    primary.password = Some(SecretSource::File(PathBuf::from("/run/secrets/pw")));
+    primary.token = Some(SecretSource::File(PathBuf::from("/run/secrets/tok")));
+    primary.tls.ca_file = Some(PathBuf::from("/run/secrets/ca.pem"));
+    primary.tls.client_cert_file = Some(PathBuf::from("/run/secrets/client.pem"));
+    primary.tls.client_key_file = Some(PathBuf::from("/run/secrets/client-key.pem"));
 
     operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
 
@@ -674,11 +656,11 @@ fn test_backup_snapshots_upstream_env_references_not_values() {
         data_dir,
         ..Config::default()
     };
-    let IndexKind::Cached { password, token, .. } = &mut config.indexes[0].kind else {
+    let IndexKind::Cached { routing, .. } = &mut config.indexes[0].kind else {
         panic!("expected a cached index");
     };
-    *password = Some(SecretSource::Env("CORP_PASSWORD".to_owned()));
-    *token = Some(SecretSource::Env("CORP_TOKEN".to_owned()));
+    routing.upstreams[0].password = Some(SecretSource::Env("CORP_PASSWORD".to_owned()));
+    routing.upstreams[0].token = Some(SecretSource::Env("CORP_TOKEN".to_owned()));
 
     operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
 

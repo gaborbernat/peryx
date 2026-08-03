@@ -675,7 +675,7 @@ pub struct IndexConfig {
     /// Whether a request with no credential may read here. `None` takes the value of
     /// [`AuthConfig::default_anonymous_read`].
     pub anonymous_read: Option<bool>,
-    /// The credentials this index accepts beyond the `upload_token` shorthand.
+    /// The named credentials this index accepts, each from a `[[index.access_token]]` table.
     pub tokens: Vec<TokenConfig>,
     pub policy: PolicyConfig,
     /// The `[policy]` keys the neutral engine did not claim, left raw for this index's ecosystem
@@ -689,33 +689,28 @@ pub struct IndexConfig {
 }
 
 impl IndexConfig {
-    /// The index's access rules, with every secret read from wherever it lives: the `upload_token`
-    /// shorthand becomes one write-and-delete-everywhere credential, and each `[[index.token]]` its
-    /// own named one.
+    /// The index's access rules, with every secret read from wherever it lives: each `[[index.token]]`
+    /// becomes one named credential with its own grant.
     ///
     /// # Errors
     /// Returns [`ConfigError::Read`] when a secret file cannot be read and [`ConfigError::EmptySecret`]
     /// when one holds nothing: an empty secret would authenticate an empty password.
     pub fn acl(&self, auth: &AuthConfig) -> Result<IndexAcl, ConfigError> {
-        let mut tokens = Vec::with_capacity(self.tokens.len() + 1);
-        if let IndexKind::Hosted {
-            upload_token: Some(source),
-            ..
-        } = &self.kind
-        {
-            tokens.push(NamedToken::upload(source.read()?));
-        }
-        for token in &self.tokens {
-            tokens.push(NamedToken {
-                name: token.name.clone(),
-                secret: token.secret.read()?,
-                grants: vec![Grant {
-                    projects: token.projects.iter().cloned().map(Glob::new).collect(),
-                    actions: token.actions.clone(),
-                }],
-                expires_at: token.expires_at,
-            });
-        }
+        let tokens = self
+            .tokens
+            .iter()
+            .map(|token| {
+                Ok(NamedToken {
+                    name: token.name.clone(),
+                    secret: token.secret.read()?,
+                    grants: vec![Grant {
+                        projects: token.projects.iter().cloned().map(Glob::new).collect(),
+                        actions: token.actions.clone(),
+                    }],
+                    expires_at: token.expires_at,
+                })
+            })
+            .collect::<Result<_, ConfigError>>()?;
         Ok(IndexAcl {
             anonymous_read: self.anonymous_read.unwrap_or(auth.default_anonymous_read),
             tokens,
@@ -729,20 +724,9 @@ impl IndexConfig {
 pub enum IndexKind {
     /// Cache an upstream simple index, fetching on demand.
     Cached {
-        upstream: String,
-        username: Option<String>,
-        /// Upstream password; a `password_file` sibling keeps it out of the config file.
-        password: Option<SecretSource>,
-        /// Bearer token; takes precedence over username/password. A `token_file` sibling keeps it out
-        /// of the config file.
-        token: Option<SecretSource>,
-        credential_exec: Option<ExecCredentialConfig>,
-        credential_refresh: Option<CredentialRefreshConfig>,
-        /// Per-upstream trust and client identity files.
-        tls: UpstreamTlsConfig,
-        /// Ordered named sources and fallback controls. `None` preserves the legacy single-upstream
-        /// behavior of `cached = URL`.
-        routing: Option<Box<UpstreamRoutingConfig>>,
+        /// The ordered `[[index.upstream]]` sources and their fallback controls, each carrying its own
+        /// URL, credentials, and TLS; a single source is the one-element case.
+        routing: UpstreamRoutingConfig,
         /// Concurrent upstream fetches allowed for this cached index in this process; `0` disables the cap.
         upstream_concurrency: usize,
         /// Serve only cached data for this index.
@@ -750,13 +734,9 @@ pub enum IndexKind {
         /// Optional package set and artifact filters for `peryx prefetch`.
         prefetch: Box<PrefetchConfig>,
     },
-    /// A hosted store that accepts uploads. `upload_token` is the shorthand for a single credential
-    /// that writes and deletes everywhere here (`None` disables uploads unless `[[index.token]]`
-    /// grants them); `volatile` allows delete and overwrite.
-    Hosted {
-        upload_token: Option<SecretSource>,
-        volatile: bool,
-    },
+    /// A hosted store that accepts uploads. Uploads are enabled by the `[[index.token]]` grants that
+    /// permit writes; `volatile` allows delete and overwrite.
+    Hosted { volatile: bool },
     /// An ordered aggregation of other indexes (its members, by name, in `layers`). Resolution merges
     /// members first-match; a file in an earlier member shadows a later one. Uploads target `upload`.
     Virtual {
@@ -919,22 +899,27 @@ pub struct AcmeConfig {
 /// once a token is set.
 fn default_indexes() -> Vec<IndexConfig> {
     let cache = |upstream: &str| IndexKind::Cached {
-        upstream: upstream.to_owned(),
-        username: None,
-        password: None,
-        token: None,
-        credential_exec: None,
-        credential_refresh: None,
-        tls: UpstreamTlsConfig::default(),
-        routing: None,
+        routing: UpstreamRoutingConfig {
+            upstreams: vec![UpstreamConfig {
+                name: "primary".to_owned(),
+                url: upstream.to_owned(),
+                artifact_url: None,
+                username: None,
+                password: None,
+                token: None,
+                credential_exec: None,
+                credential_refresh: None,
+                tls: UpstreamTlsConfig::default(),
+            }],
+            fallback: true,
+            protected: Vec::new(),
+            pins: BTreeMap::new(),
+        },
         upstream_concurrency: DEFAULT_UPSTREAM_CONCURRENCY,
         offline: false,
         prefetch: Box::default(),
     };
-    let store = || IndexKind::Hosted {
-        upload_token: None,
-        volatile: true,
-    };
+    let store = || IndexKind::Hosted { volatile: true };
     let overlay = |hosted: &str, cached: &str| IndexKind::Virtual {
         layers: vec![hosted.to_owned(), cached.to_owned()],
         upload: Some(hosted.to_owned()),

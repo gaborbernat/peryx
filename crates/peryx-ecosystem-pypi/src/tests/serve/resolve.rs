@@ -492,7 +492,7 @@ async fn test_oci_index_rejects_pypi_protocol_dispatch() {
             ecosystem: peryx_core::Ecosystem::Oci,
             kind: IndexKind::Hosted { volatile: true },
             policy: Policy::default(),
-            acl: IndexAcl::upload_token("s3cret".to_owned()),
+            acl: crate::tests::writer_acl("s3cret".to_owned()),
         }]
     });
     // An OCI index serves the `/v2/` namespace, not the PyPI Simple/legacy/upload/mutation APIs.

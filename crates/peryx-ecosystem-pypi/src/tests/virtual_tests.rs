@@ -72,7 +72,7 @@ fn cached_first_indexes(upstream: UpstreamClient, cached_policy: Policy) -> Vec<
             ecosystem: peryx_core::Ecosystem::Pypi,
             kind: IndexKind::Hosted { volatile: true },
             policy: Policy::default(),
-            acl: IndexAcl::upload_token("s3cret".to_owned()),
+            acl: crate::tests::writer_acl("s3cret".to_owned()),
         },
         Index {
             name: "root/pypi".to_owned(),

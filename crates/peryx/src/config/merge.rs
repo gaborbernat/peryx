@@ -10,7 +10,7 @@ use peryx_driver::jobs::{
     ScheduledJob,
 };
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
-use peryx_identity::{ExternalGroup, ExternalGroupGrant, GrantScope, ProviderId, UPLOAD_TOKEN_NAME};
+use peryx_identity::{ExternalGroup, ExternalGroupGrant, GrantScope, ProviderId};
 use peryx_upstream::{CredentialFailure, ExecCredentialConfig, ExecCredentialConfigError};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -220,9 +220,7 @@ fn validate_schedules(indexes: &[IndexConfig], schedules: &[Schedule]) -> Result
             });
         }
         if let Some(source) = &parameters.source
-            && !routing
-                .as_ref()
-                .is_some_and(|routing| routing.upstreams.iter().any(|upstream| upstream.name == *source))
+            && !routing.upstreams.iter().any(|upstream| upstream.name == *source)
         {
             return Err(ConfigError::Jobs {
                 index: position,
@@ -498,7 +496,7 @@ fn membership_error(reason: impl Into<String>) -> ConfigError {
 }
 
 /// Turn a raw `[[index]]` table into a classified [`IndexConfig`]: `layers` makes a virtual index, else
-/// `cached` makes a cached index, else `hosted`/`upload_token` makes a hosted store.
+/// `[[index.upstream]]` makes a cached index, else `hosted` makes a hosted store.
 fn classify_index(raw: RawIndex) -> Result<IndexConfig, ConfigError> {
     let mut raw = raw;
     let route = raw.route.clone().unwrap_or_else(|| raw.name.clone());
@@ -537,78 +535,31 @@ fn classify_index_kind(raw: &mut RawIndex) -> Result<IndexKind, ConfigError> {
             upload: raw.upload.take(),
         });
     }
-    if let Some(upstream) = raw.cached.take() {
-        return classify_legacy_cached(raw, upstream);
-    }
     if !raw.upstreams.is_empty() {
         return classify_routed_cached(raw);
     }
-    if raw.hosted == Some(true) || raw.upload_token.is_some() || raw.upload_token_file.is_some() {
+    if raw.hosted == Some(true) {
         return Ok(IndexKind::Hosted {
-            upload_token: secret_source(raw.upload_token.take(), raw.upload_token_file.take()).map_err(|reason| {
-                ConfigError::Index {
-                    name: raw.name.clone(),
-                    reason,
-                }
-            })?,
             volatile: raw.volatile.unwrap_or(true),
         });
     }
     Err(ConfigError::Index {
         name: raw.name.clone(),
-        reason: "index needs one of `cached`, `hosted`, or `layers`",
+        reason: "index needs one of `[[index.upstream]]`, `hosted`, or `layers`",
     })
 }
 
 fn validate_index_kind(raw: &RawIndex) -> Result<(), ConfigError> {
-    if raw.upload_token.as_deref() == Some("") {
-        // An empty token authorizes any request whose Basic password is empty, so it is a
-        // configuration error, not "uploads with no token" (which is `hosted = true`).
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: "`upload_token` must not be empty",
-        });
-    }
-    let has_upload_token = raw.upload_token.is_some() || raw.upload_token_file.is_some();
-    if has_upload_token && raw.layers.is_some() {
-        // Only the hosted branch consumes `upload_token`; a virtual index wins first and would drop
-        // the credential, leaving uploads on the target layer's ACL. Reject rather than fail open.
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: "`upload_token` is not honored on a virtual index; set it on the hosted layer named by `upload`",
-        });
-    }
-    if has_upload_token && (raw.cached.is_some() || !raw.upstreams.is_empty()) {
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: "`upload_token` is not honored on a cached index, which does not accept uploads",
-        });
-    }
     if raw.upload.is_some() && raw.layers.is_none() {
         return Err(ConfigError::Index {
             name: raw.name.clone(),
             reason: "`upload` names the layer that receives uploads and requires `layers`",
         });
     }
-    if raw.layers.is_some() && (raw.cached.is_some() || !raw.upstreams.is_empty()) {
+    if raw.layers.is_some() && !raw.upstreams.is_empty() {
         return Err(ConfigError::Index {
             name: raw.name.clone(),
-            reason: "`layers` and `cached`/`[[index.upstream]]` are mutually exclusive",
-        });
-    }
-    if raw.cached.is_some() && !raw.upstreams.is_empty() {
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: "`cached` and `[[index.upstream]]` are mutually exclusive",
-        });
-    }
-    if raw.cached.is_none()
-        && raw.upstreams.is_empty()
-        && (raw.ca_file.is_some() || raw.client_cert_file.is_some() || raw.client_key_file.is_some())
-    {
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: "upstream TLS files require a cached index",
+            reason: "`layers` and `[[index.upstream]]` are mutually exclusive",
         });
     }
     if raw.upstreams.is_empty() && (raw.fallback.is_some() || !raw.protected.is_empty() || !raw.pins.is_empty()) {
@@ -617,98 +568,7 @@ fn validate_index_kind(raw: &RawIndex) -> Result<(), ConfigError> {
             reason: "`fallback`, `protected`, and `pins` require `[[index.upstream]]`",
         });
     }
-    if !raw.upstreams.is_empty()
-        && (raw.username.is_some()
-            || raw.password.is_some()
-            || raw.password_file.is_some()
-            || raw.password_env.is_some()
-            || raw.token.is_some()
-            || raw.token_file.is_some()
-            || raw.token_env.is_some()
-            || raw.credential_exec.is_some()
-            || raw.credential_refresh_secs.is_some()
-            || raw.credential_refresh_on_unauthorized.is_some()
-            || raw.credential_failure.is_some())
-    {
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: "credentials for `[[index.upstream]]` belong on each source",
-        });
-    }
-    if raw.cached.is_none()
-        && raw.upstreams.is_empty()
-        && (raw.credential_refresh_secs.is_some()
-            || raw.credential_refresh_on_unauthorized.is_some()
-            || raw.credential_failure.is_some()
-            || raw.credential_exec.is_some())
-    {
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: if raw.credential_exec.is_some() {
-                "upstream credentials require a cached index"
-            } else {
-                "credential refresh requires a cached index"
-            },
-        });
-    }
-    if !raw.upstreams.is_empty()
-        && (raw.ca_file.is_some() || raw.client_cert_file.is_some() || raw.client_key_file.is_some())
-    {
-        return Err(ConfigError::Index {
-            name: raw.name.clone(),
-            reason: "TLS files for `[[index.upstream]]` belong on each source",
-        });
-    }
     Ok(())
-}
-
-fn classify_legacy_cached(raw: &mut RawIndex, upstream: String) -> Result<IndexKind, ConfigError> {
-    let tls = upstream_tls(
-        &raw.name,
-        raw.ca_file.take(),
-        raw.client_cert_file.take(),
-        raw.client_key_file.take(),
-    )?;
-    let password = upstream_secret_source(raw.password.take(), raw.password_file.take(), raw.password_env.take())
-        .map_err(|reason| ConfigError::Index {
-            name: raw.name.clone(),
-            reason,
-        })?;
-    let token =
-        upstream_secret_source(raw.token.take(), raw.token_file.take(), raw.token_env.take()).map_err(|reason| {
-            ConfigError::Index {
-                name: raw.name.clone(),
-                reason,
-            }
-        })?;
-    let credential_exec = credential_exec(
-        &raw.name,
-        raw.credential_exec.take(),
-        raw.username.is_some() || password.is_some() || token.is_some(),
-        raw.credential_refresh_secs.is_some()
-            || raw.credential_refresh_on_unauthorized.is_some()
-            || raw.credential_failure.is_some(),
-    )?;
-    let credential_refresh = credential_refresh(
-        &raw.name,
-        token.as_ref().or_else(|| raw.username.as_ref().and(password.as_ref())),
-        raw.credential_refresh_secs.take(),
-        raw.credential_refresh_on_unauthorized.take(),
-        raw.credential_failure.take(),
-    )?;
-    Ok(IndexKind::Cached {
-        upstream,
-        username: raw.username.take(),
-        password,
-        token,
-        credential_exec,
-        credential_refresh,
-        tls,
-        routing: None,
-        upstream_concurrency: raw.upstream_concurrency.unwrap_or(DEFAULT_UPSTREAM_CONCURRENCY),
-        offline: raw.offline.unwrap_or(false),
-        prefetch: Box::new(raw.prefetch.take().unwrap_or_default().resolve()),
-    })
 }
 
 fn classify_routed_cached(raw: &mut RawIndex) -> Result<IndexKind, ConfigError> {
@@ -716,21 +576,13 @@ fn classify_routed_cached(raw: &mut RawIndex) -> Result<IndexKind, ConfigError> 
         .into_iter()
         .map(|upstream| classify_upstream(&raw.name, upstream))
         .collect::<Result<Vec<_>, _>>()?;
-    let primary = &upstreams[0];
     Ok(IndexKind::Cached {
-        upstream: primary.url.clone(),
-        username: primary.username.clone(),
-        password: primary.password.clone(),
-        token: primary.token.clone(),
-        credential_exec: primary.credential_exec.clone(),
-        credential_refresh: primary.credential_refresh,
-        tls: primary.tls.clone(),
-        routing: Some(Box::new(UpstreamRoutingConfig {
+        routing: UpstreamRoutingConfig {
             upstreams,
             fallback: raw.fallback.unwrap_or(true),
             protected: std::mem::take(&mut raw.protected),
             pins: std::mem::take(&mut raw.pins),
-        })),
+        },
         upstream_concurrency: raw.upstream_concurrency.unwrap_or(DEFAULT_UPSTREAM_CONCURRENCY),
         offline: raw.offline.unwrap_or(false),
         prefetch: Box::new(raw.prefetch.take().unwrap_or_default().resolve()),
@@ -1130,8 +982,7 @@ fn upstream_secret_source(
     }
 }
 
-/// Classify an index's `[[index.access_token]]` tables, rejecting names that collide with each other
-/// or with the `upload_token` shorthand, which occupies the name it would authenticate as.
+/// Classify an index's `[[index.access_token]]` tables, rejecting names that collide with each other.
 fn classify_tokens(index: &str, raw: Vec<RawToken>) -> Result<Vec<TokenConfig>, ConfigError> {
     let mut names = HashSet::with_capacity(raw.len());
     raw.into_iter()
@@ -1157,12 +1008,6 @@ fn classify_token(index: &str, raw: RawToken) -> Result<TokenConfig, ConfigError
     };
     if raw.name.is_empty() {
         return Err(fail(&raw.name, "token name is required"));
-    }
-    if raw.name == UPLOAD_TOKEN_NAME {
-        return Err(fail(
-            &raw.name,
-            "token name is reserved for the `upload_token` shorthand",
-        ));
     }
     let secret = match secret_source(raw.secret, raw.secret_file) {
         Ok(Some(SecretSource::Literal(secret))) if secret.is_empty() => {

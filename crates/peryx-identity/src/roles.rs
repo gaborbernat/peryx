@@ -1,7 +1,7 @@
 //! Role-based access control, the decision model that sits beside the per-index token ACL.
 //!
-//! The token ACL in [`crate::acl`] answers "does this credential's grant cover this project?"; a
-//! legacy `upload_token` still resolves entirely through it. This module answers a different question
+//! The token ACL in [`crate::acl`] answers "does this credential's grant cover this project?" through
+//! its named tokens. This module answers a different question
 //! that the server user model asks: "does this *user* hold a role that permits this scope on this
 //! resource?" A [`Principal`](crate::Principal) is a resolved credential; a [`UserId`] is a persistent
 //! account, and roles bind to the account.

@@ -34,6 +34,27 @@ thread_local! {
     static ACTIVE_CAPTURE: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
 }
 
+/// An ACL whose one named token writes and deletes across every project, for tests that need a
+/// hosted index that accepts uploads.
+fn writer_acl(secret: impl Into<String>) -> peryx_identity::IndexAcl {
+    use std::collections::BTreeSet;
+
+    use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
+
+    IndexAcl {
+        anonymous_read: true,
+        tokens: vec![NamedToken {
+            name: "uploader".to_owned(),
+            secret: secret.into(),
+            grants: vec![Grant {
+                projects: vec![Glob::new("*")],
+                actions: BTreeSet::from([Action::Write, Action::Delete]),
+            }],
+            expires_at: None,
+        }],
+    }
+}
+
 /// Install one process-global JSON subscriber the first time any test captures logs.
 ///
 /// A single, permanent subscriber keeps tracing's per-callsite interest cache stable: every

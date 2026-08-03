@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use axum::http::{Method, StatusCode};
-use peryx_identity::IndexAcl;
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{Policy, PolicyConfig};
 use peryx_storage::meta::{AccountingClass, NewQuotaReservation};
@@ -51,7 +50,7 @@ const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 /// A hosted store at route `store` whose one upload token is `s3cret`, under the quota `limits`.
 fn quota_store(dir: &tempfile::TempDir, limits: &PolicyConfig) -> (Arc<peryx_driver::AppState>, axum::Router) {
     let index = Index {
-        acl: IndexAcl::upload_token(TOKEN),
+        acl: crate::tests::writer_acl(TOKEN),
         policy: Policy::compile(limits, str::to_owned),
         ..super::oci_index("store", "store", IndexKind::Hosted { volatile: true })
     };

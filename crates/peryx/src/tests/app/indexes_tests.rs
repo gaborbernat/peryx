@@ -4,7 +4,7 @@ use rstest::rstest;
 use super::*;
 use crate::app::{self, init_data_dir};
 use crate::cli::{EcosystemArg, IndexCommand, IndexListArgs, IndexShowArgs};
-use crate::config::{IndexKind, SecretSource};
+use crate::config::SecretSource;
 
 #[test]
 fn test_init_data_dir_creates_then_idempotent() {
@@ -185,10 +185,9 @@ fn test_config_snippet_renders_pip_conf() {
 #[test]
 fn test_config_snippet_redacts_upload_token() {
     let mut config = Config::default();
-    let IndexKind::Hosted { upload_token, .. } = &mut config.indexes[1].kind else {
-        panic!("expected hosted index");
-    };
-    *upload_token = Some(SecretSource::Literal("s3cret".to_owned()));
+    config.indexes[1]
+        .tokens
+        .push(crate::tests::writer_token(SecretSource::Literal("s3cret".to_owned())));
 
     let text = app::config_snippet(
         &config,
@@ -207,10 +206,9 @@ fn test_config_snippet_redacts_upload_token() {
 #[test]
 fn test_config_snippet_renders_uv_toml_with_upload_url() {
     let mut config = Config::default();
-    let IndexKind::Hosted { upload_token, .. } = &mut config.indexes[1].kind else {
-        panic!("expected hosted index");
-    };
-    *upload_token = Some(SecretSource::Literal("s3cret".to_owned()));
+    config.indexes[1]
+        .tokens
+        .push(crate::tests::writer_token(SecretSource::Literal("s3cret".to_owned())));
 
     let text = app::config_snippet(
         &config,

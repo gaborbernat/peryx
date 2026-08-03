@@ -17,7 +17,6 @@ use super::http::{fixture_wheel, multipart_body, request, upload_auth, upload_pe
 use peryx_driver::state::AppState;
 use peryx_events::webhook::{self, WebhookRuntime, WebhookTargetConfig};
 use peryx_http::router;
-use peryx_identity::IndexAcl;
 use peryx_index::{Index, IndexKind};
 use peryx_policy::Policy;
 
@@ -54,7 +53,7 @@ impl Harness {
                 ecosystem: peryx_core::Ecosystem::Pypi,
                 kind: IndexKind::Hosted { volatile: true },
                 policy: Policy::default(),
-                acl: IndexAcl::upload_token("s3cret".to_owned()),
+                acl: crate::tests::writer_acl("s3cret".to_owned()),
             }],
             Arc::new(move || ticks.load(Ordering::Relaxed)),
             webhooks,

@@ -1,11 +1,28 @@
+use std::collections::BTreeSet;
 use std::error::Error as _;
 
 use peryx_identity::{
-    IndexAcl, PasswordCheck, PasswordError, PasswordPolicy, Principal, UserId, UserLifecycleChange, UserState,
+    Action, Glob, Grant, IndexAcl, NamedToken, PasswordCheck, PasswordError, PasswordPolicy, Principal, UserId,
+    UserLifecycleChange, UserState,
 };
 use peryx_storage::meta::MetaStore;
 
 use crate::users::{BootstrapError, EnrollError, UserService};
+
+fn writer_acl(secret: impl Into<String>) -> IndexAcl {
+    IndexAcl {
+        anonymous_read: true,
+        tokens: vec![NamedToken {
+            name: "uploader".to_owned(),
+            secret: secret.into(),
+            grants: vec![Grant {
+                projects: vec![Glob::new("*")],
+                actions: BTreeSet::from([Action::Write, Action::Delete]),
+            }],
+            expires_at: None,
+        }],
+    }
+}
 
 fn service() -> (tempfile::TempDir, UserService) {
     let dir = tempfile::tempdir().unwrap();
@@ -49,10 +66,10 @@ fn test_user_service_runs_the_account_lifecycle() {
 }
 
 #[test]
-fn test_user_disable_does_not_change_legacy_upload_token_identity() {
+fn test_user_disable_does_not_change_token_identity() {
     let (_dir, service) = service();
     let user = service.create("Alice").unwrap();
-    let acl = IndexAcl::upload_token("s3cret");
+    let acl = writer_acl("s3cret");
     let before = acl.identify(Some("Basic YWxpY2U6czNjcmV0"), 0).principal;
 
     service.disable(&user.id).unwrap();
@@ -60,7 +77,7 @@ fn test_user_disable_does_not_change_legacy_upload_token_identity() {
     assert_eq!(
         before,
         Principal::Named {
-            subject: "upload_token".to_owned(),
+            subject: "uploader".to_owned(),
         }
     );
     assert_eq!(acl.identify(Some("Basic YWxpY2U6czNjcmV0"), 0).principal, before);

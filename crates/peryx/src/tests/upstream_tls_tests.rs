@@ -8,7 +8,7 @@ use peryx_upstream::{Auth, RangeError, UpstreamClient, UpstreamError, UpstreamTl
 use rstest::rstest;
 
 use super::tls_support::{TestPki, TlsFiles};
-use crate::config::{Config, IndexConfig, IndexKind, UpstreamTlsConfig};
+use crate::config::{Config, IndexConfig, IndexKind, UpstreamConfig, UpstreamRoutingConfig, UpstreamTlsConfig};
 use crate::server::build_state;
 
 fn cached_config(data_dir: &Path, ecosystem: Ecosystem, upstream: String, files: &TlsFiles) -> Config {
@@ -25,18 +25,26 @@ fn cached_config(data_dir: &Path, ecosystem: Ecosystem, upstream: String, files:
             tokens: Vec::new(),
             webhooks: Vec::new(),
             kind: IndexKind::Cached {
-                upstream,
-                username: None,
-                password: None,
-                token: None,
-                credential_exec: None,
-                credential_refresh: None,
-                tls: UpstreamTlsConfig {
-                    ca_file: Some(files.ca.clone()),
-                    client_cert_file: Some(files.certificate.clone()),
-                    client_key_file: Some(files.key.clone()),
+                routing: UpstreamRoutingConfig {
+                    upstreams: vec![UpstreamConfig {
+                        name: "primary".to_owned(),
+                        url: upstream,
+                        artifact_url: None,
+                        username: None,
+                        password: None,
+                        token: None,
+                        credential_exec: None,
+                        credential_refresh: None,
+                        tls: UpstreamTlsConfig {
+                            ca_file: Some(files.ca.clone()),
+                            client_cert_file: Some(files.certificate.clone()),
+                            client_key_file: Some(files.key.clone()),
+                        },
+                    }],
+                    fallback: true,
+                    protected: Vec::new(),
+                    pins: std::collections::BTreeMap::new(),
                 },
-                routing: None,
                 upstream_concurrency: 0,
                 offline: false,
                 prefetch: Box::default(),
@@ -140,10 +148,10 @@ fn test_build_state_rejects_incomplete_programmatic_tls_identity() {
         "https://packages.example/".to_owned(),
         &files,
     );
-    let IndexKind::Cached { tls, .. } = &mut config.indexes[0].kind else {
+    let IndexKind::Cached { routing, .. } = &mut config.indexes[0].kind else {
         panic!("expected cached index");
     };
-    tls.client_key_file = None;
+    routing.upstreams[0].tls.client_key_file = None;
     let Err(error) = build_state(&config) else {
         panic!("expected incomplete upstream TLS identity to fail state construction");
     };

@@ -9,7 +9,7 @@
 
 use std::future::Future;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::Stream;
 use peryx_upstream::retry::{MAX_RETRIES, should_retry_error, sleep_before_retry};
 use peryx_upstream::{NamedUpstream, UpstreamClient, UpstreamError, UpstreamRouter};
@@ -72,7 +72,7 @@ impl SimpleHead {
     /// # Errors
     /// Returns [`UpstreamError::Http`] if the transfer fails.
     pub async fn bytes(self) -> Result<Bytes, UpstreamError> {
-        Ok(self.response.bytes().await?)
+        read_capped(self.response.bytes_stream(), MAX_SIMPLE_PAGE_BYTES).await
     }
 
     /// Consume the body as a stream of chunks.
@@ -271,12 +271,37 @@ impl SimpleStatus for SimpleHead {
     }
 }
 
+/// The ceiling for a buffered Simple page. A project page and the root index both persist under a
+/// 256 MiB sync cap (`MAX_PROJECT_BYTES` and `MAX_CATALOG_BYTES`), so a live buffered read holds the
+/// same ceiling: past it the upstream is broken or hostile, not serving a real page.
+const MAX_SIMPLE_PAGE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Read a Simple-page body into memory under `limit`, counting the bytes as they stream so a chunked
+/// or missing-`Content-Length` response cannot force an unbounded body into memory: the read fails
+/// the instant a chunk would carry the running total past `limit`, before that chunk is buffered.
+async fn read_capped<S>(stream: S, limit: usize) -> Result<Bytes, UpstreamError>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>>,
+{
+    use futures_util::TryStreamExt as _;
+
+    let mut stream = std::pin::pin!(stream);
+    let mut body = BytesMut::new();
+    while let Some(chunk) = stream.try_next().await? {
+        if chunk.len() > limit - body.len() {
+            return Err(UpstreamError::ResponseTooLarge { limit });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
+}
+
 async fn fetch_simple(client: &UpstreamClient, url: Url, etag: Option<&str>) -> Result<SimpleResponse, UpstreamError> {
     let mut attempt = 0;
     loop {
         let response = client.send_conditional(url.clone(), ACCEPT_SIMPLE, etag).await?;
         let head = simple_head(response)?;
-        match head.response.bytes().await {
+        match read_capped(head.response.bytes_stream(), MAX_SIMPLE_PAGE_BYTES).await {
             Ok(body) => {
                 return Ok(SimpleResponse {
                     status: head.status,
@@ -290,11 +315,11 @@ async fn fetch_simple(client: &UpstreamClient, url: Url, etag: Option<&str>) -> 
                     body,
                 });
             }
-            Err(err) if should_retry_error(&err) && attempt < MAX_RETRIES => {
+            Err(UpstreamError::Http(err)) if should_retry_error(&err) && attempt < MAX_RETRIES => {
                 sleep_before_retry(&head.url, attempt, &err).await;
                 attempt += 1;
             }
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err),
         }
     }
 }
@@ -447,5 +472,47 @@ impl UpstreamProtocol for UpstreamClient {
 
     fn fetch_bytes(&self, url: &str) -> impl Future<Output = Result<Bytes, UpstreamError>> + Send {
         Self::fetch_bytes(self, url)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use bytes::Bytes;
+    use futures_util::{Stream, StreamExt as _, stream};
+    use peryx_upstream::UpstreamError;
+
+    use super::{MAX_SIMPLE_PAGE_BYTES, read_capped};
+
+    fn body(sizes: Vec<usize>) -> impl Stream<Item = Result<Bytes, reqwest::Error>> {
+        stream::iter(sizes.into_iter().map(|size| Ok(Bytes::from(vec![b'a'; size]))))
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_returns_a_body_within_the_limit() {
+        let read = read_capped(body(vec![8, 8]), 64).await.unwrap();
+
+        assert_eq!(read.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_stops_at_the_first_chunk_past_the_limit() {
+        let polled = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&polled);
+        let stream = body(vec![20, 20]).inspect(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let error = read_capped(stream, 8).await.unwrap_err();
+
+        assert!(matches!(error, UpstreamError::ResponseTooLarge { limit: 8 }));
+        assert_eq!(polled.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_simple_page_cap_matches_the_project_sync_cap() {
+        assert_eq!(MAX_SIMPLE_PAGE_BYTES as u64, crate::cache::MAX_PROJECT_BYTES);
     }
 }

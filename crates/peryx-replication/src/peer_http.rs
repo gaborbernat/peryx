@@ -128,7 +128,7 @@ impl PeerTransport for HttpPeerTransport {
         url.query_pairs_mut()
             .append_pair("after", &request.after.to_string())
             .append_pair("limit", &request.max_operations.get().to_string());
-        let response = self
+        let mut response = self
             .http
             .get(url)
             .bearer_auth(&self.token)
@@ -153,6 +153,10 @@ impl PeerTransport for HttpPeerTransport {
             });
         }
         let cap = self.limits.max_encoded_bytes.get();
+        // A Content-Length over the cap is an early reject, but a chunked reply carries none, so the
+        // body is read in bounded steps: the running total is checked before each chunk is retained, and
+        // the read stops the moment it would exceed the cap. A hostile peer cannot force an unbounded
+        // read by omitting Content-Length.
         if let Some(length) = response.content_length()
             && length > cap
         {
@@ -161,8 +165,18 @@ impl PeerTransport for HttpPeerTransport {
                 actual: length,
             });
         }
-        let bytes = response.bytes().await.map_err(|error| classify_loss(&error))?;
-        let page: ChangePage = serde_json::from_slice(&bytes).map_err(|_| TransportError::Malformed)?;
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| classify_loss(&error))? {
+            let total = body.len() as u64 + chunk.len() as u64;
+            if total > cap {
+                return Err(TransportError::FrameTooLarge {
+                    limit: cap,
+                    actual: total,
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let page: ChangePage = serde_json::from_slice(&body).map_err(|_| TransportError::Malformed)?;
         Ok(BatchFrame::new(page))
     }
 }

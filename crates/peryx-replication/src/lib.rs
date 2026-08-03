@@ -9,6 +9,7 @@ mod analytics;
 mod authority;
 mod backoff;
 mod blob;
+mod blob_availability;
 mod blob_fetch;
 mod blob_placement;
 mod channel;
@@ -41,6 +42,7 @@ pub use analytics::{
 pub use authority::{Admission, AuthorityFence, AuthorityKey, CommitOutcome};
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
+pub use blob_availability::{BlobAvailability, ReferencedBlob, blob_availability};
 pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
@@ -94,6 +96,8 @@ mod analytics_tests;
 mod authority_tests;
 #[cfg(test)]
 mod backoff_tests;
+#[cfg(test)]
+mod blob_availability_tests;
 #[cfg(test)]
 mod blob_fetch_tests;
 #[cfg(test)]

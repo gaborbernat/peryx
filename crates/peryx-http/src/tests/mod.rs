@@ -3,6 +3,7 @@ mod analytics_tests;
 mod availability_tests;
 mod fallback_tests;
 mod grant_tests;
+mod job_tests;
 mod oidc_tests;
 mod policy_decision_tests;
 mod pql_tests;

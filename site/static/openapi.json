@@ -1104,6 +1104,60 @@
         ]
       }
     },
+    "/+jobs/{id}/cancel": {
+      "post": {
+        "description": "Signals a node-local job run to stop, reaching the cooperative cancellation token that lives only in the process running it, so no separate CLI process can. The run observes the signal and unwinds within its grace period, so a delivered signal answers 202 rather than a completed stop. Requires the administration-write scope; an unknown run and an unauthorized caller answer 404 alike, so a denial cannot confirm a run id.",
+        "parameters": [
+          {
+            "description": "The durable job-run identifier the job history reports",
+            "example": "jr_000000000000ffff",
+            "in": "path",
+            "name": "id",
+            "required": true
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The cancellation signal reached the running attempt"
+          },
+          "401": {
+            "description": "No valid local user credential was presented"
+          },
+          "404": {
+            "description": "The caller cannot administer jobs, or no run has this id"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "job run is not running on this node"
+                }
+              }
+            },
+            "description": "The run is not one this node is currently running"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "job control unavailable"
+                }
+              }
+            },
+            "description": "Authentication or authorization storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Cancel a running job",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+policy/decisions": {
       "get": {
         "description": "Bounded policy decision history. Administrators may inspect all repositories or select one. Repository readers and publishers may inspect a selected repository they can read; the server operator role carries no repository access. A repository's legacy upload token retains access to that repository when presented with the `__token__` username. Records contain package subjects and matched rule IDs without credentials or request headers. `fresh` is false after repository data, catalog, or policy inputs change.",

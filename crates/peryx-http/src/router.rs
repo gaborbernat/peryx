@@ -122,6 +122,7 @@ fn service_routes() -> Router<Arc<AppState>> {
             get(handlers::inspect_token).merge(axum::routing::delete(handlers::revoke_token)),
         )
         .route("/+tokens/{id}/rotate", post(handlers::rotate_token))
+        .route("/+jobs/{id}/cancel", post(handlers::cancel_job))
         .route("/+ui/projects", get(handlers::ui_projects))
         .route("/+ui/project", get(handlers::ui_project))
         .route("/+ui/manifest", get(handlers::ui_manifest))

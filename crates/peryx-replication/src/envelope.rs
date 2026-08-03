@@ -7,27 +7,21 @@
 //! recovery over, and its identity is the `(source, epoch, serial)` triple, stable across replay
 //! and idempotent to apply.
 //!
-//! Two compatibility rules keep a rolling upgrade between adjacent schema versions safe. The
-//! *unknown-field rule*: decoding ignores fields it does not recognize, so a newer producer that
-//! adds a field stays readable by an older consumer within the supported window. The
-//! *required-version rule*: decoding rejects any `schema_version` outside
-//! [`SUPPORTED_SCHEMA_VERSIONS`], so a consumer never guesses at a schema it cannot model. Untrusted
-//! peer bytes are bounded by [`DecodeLimits`] before parsing, so envelope decoding cannot be turned
-//! into a blob transport or a stack-exhaustion vector.
+//! Two rules govern how the envelope decodes untrusted input. The *unknown-field rule*: decoding
+//! ignores fields it does not recognize, so a later producer that adds a field stays readable by
+//! this build. The *required-version rule*: decoding rejects any `schema_version` other than
+//! [`SCHEMA_VERSION`], the one schema this build speaks, so a consumer never guesses at a schema it
+//! cannot model. Untrusted peer bytes are bounded by [`DecodeLimits`] before parsing, so envelope
+//! decoding cannot be turned into a blob transport or a stack-exhaustion vector.
 
 use std::fmt;
-use std::ops::RangeInclusive;
 
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::Change;
 
-/// The oldest envelope schema version this build can decode.
-pub const MIN_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
-/// The envelope schema version this build produces.
-pub const CURRENT_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
-/// The inclusive range of schema versions this build accepts on decode.
-pub const SUPPORTED_SCHEMA_VERSIONS: RangeInclusive<SchemaVersion> = MIN_SCHEMA_VERSION..=CURRENT_SCHEMA_VERSION;
+/// The one envelope schema version this build produces and accepts on decode.
+pub const SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
 /// The default untrusted-decode bounds: a metadata envelope, never a blob channel.
 pub const DEFAULT_DECODE_LIMITS: DecodeLimits = DecodeLimits {
     max_bytes: 1 << 20,
@@ -38,19 +32,6 @@ pub const DEFAULT_DECODE_LIMITS: DecodeLimits = DecodeLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SchemaVersion(pub u16);
-
-impl SchemaVersion {
-    /// The highest version both ends support, or `None` when their ranges do not overlap.
-    ///
-    /// This is the version-negotiation surface: a producer and consumer each advertise the inclusive
-    /// range they can speak, and the exchange proceeds at the newest version common to both.
-    #[must_use]
-    pub fn negotiate(local: RangeInclusive<Self>, remote: RangeInclusive<Self>) -> Option<Self> {
-        let low = *local.start().max(remote.start());
-        let high = *local.end().min(remote.end());
-        (low <= high).then_some(high)
-    }
-}
 
 impl fmt::Display for SchemaVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -144,11 +125,10 @@ pub enum EnvelopeError {
     TooDeep { limit: usize },
     #[error("replication envelope is malformed: {0}")]
     Malformed(#[source] serde_json::Error),
-    #[error("unsupported envelope schema version {version}; this build accepts {min} through {max}")]
+    #[error("unsupported envelope schema version {version}; this build accepts {expected}")]
     UnsupportedVersion {
         version: SchemaVersion,
-        min: SchemaVersion,
-        max: SchemaVersion,
+        expected: SchemaVersion,
     },
     #[error("replication envelope has an empty source identity")]
     EmptySource,
@@ -174,7 +154,7 @@ impl OperationEnvelope {
     #[must_use]
     pub fn current(source: impl Into<String>, epoch: AuthorityEpoch, kind: OperationKind, change: Change) -> Self {
         Self {
-            schema_version: CURRENT_SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             source: source.into(),
             epoch,
             kind,
@@ -205,13 +185,13 @@ impl OperationEnvelope {
     /// Parse an envelope from untrusted peer bytes under `limits`.
     ///
     /// Oversized or over-nested input is rejected before parsing; a decoded envelope must then carry
-    /// a non-empty source, a schema version within [`SUPPORTED_SCHEMA_VERSIONS`], and a well-formed
-    /// traceparent when a trace context is present. Unrecognized fields are ignored, so an adjacent
-    /// newer schema stays readable.
+    /// a non-empty source, a schema version equal to [`SCHEMA_VERSION`], and a well-formed
+    /// traceparent when a trace context is present. Unrecognized fields are ignored, so a later
+    /// producer that adds a field stays readable.
     ///
     /// # Errors
     /// Returns [`EnvelopeError`] for input past the byte or depth limit, malformed JSON, an empty
-    /// source, an out-of-window schema version, or a malformed W3C traceparent.
+    /// source, a schema version other than [`SCHEMA_VERSION`], or a malformed W3C traceparent.
     pub fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Self, EnvelopeError> {
         if bytes.len() > limits.max_bytes {
             return Err(EnvelopeError::TooLarge {
@@ -232,11 +212,10 @@ impl OperationEnvelope {
         if self.source.is_empty() {
             return Err(EnvelopeError::EmptySource);
         }
-        if !SUPPORTED_SCHEMA_VERSIONS.contains(&self.schema_version) {
+        if self.schema_version != SCHEMA_VERSION {
             return Err(EnvelopeError::UnsupportedVersion {
                 version: self.schema_version,
-                min: MIN_SCHEMA_VERSION,
-                max: CURRENT_SCHEMA_VERSION,
+                expected: SCHEMA_VERSION,
             });
         }
         if let Some(trace) = &self.trace

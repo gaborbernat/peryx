@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use crate::{
-    AuthorityEpoch, BlobReference, CURRENT_SCHEMA_VERSION, Change, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError,
-    MetadataMutation, OperationEnvelope, OperationKind, SchemaVersion, TraceContext,
+    AuthorityEpoch, BlobReference, Change, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, MetadataMutation,
+    OperationEnvelope, OperationKind, SCHEMA_VERSION, SchemaVersion, TraceContext,
 };
 
 const VALID_TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
@@ -46,7 +46,7 @@ fn test_envelope_round_trips_through_encode_decode() {
 #[test]
 fn test_envelope_current_sets_schema_version_and_no_trace() {
     let envelope = envelope();
-    assert_eq!(envelope.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(envelope.schema_version, SCHEMA_VERSION);
     assert_eq!(envelope.trace, None);
     assert_eq!(envelope.change, change());
 }
@@ -124,27 +124,26 @@ fn test_envelope_decode_rejects_empty_source() {
 }
 
 #[test]
-fn test_envelope_decode_rejects_version_below_window() {
-    let bytes = OperationEnvelope {
-        schema_version: SchemaVersion(0),
-        ..envelope()
+fn test_envelope_decode_rejects_any_version_but_the_current_one() {
+    for offending in [SchemaVersion(0), SchemaVersion(2)] {
+        let bytes = OperationEnvelope {
+            schema_version: offending,
+            ..envelope()
+        }
+        .encode();
+        let error = OperationEnvelope::decode(&bytes, DecodeLimits::default()).unwrap_err();
+        assert!(
+            matches!(error, EnvelopeError::UnsupportedVersion { version, expected }
+                if version == offending && expected == SCHEMA_VERSION),
+            "{offending}: {error}"
+        );
+        assert!(
+            error.to_string().contains(&format!(
+                "unsupported envelope schema version {offending}; this build accepts v1"
+            )),
+            "{offending}: {error}"
+        );
     }
-    .encode();
-    let error = OperationEnvelope::decode(&bytes, DecodeLimits::default()).unwrap_err();
-    assert!(matches!(error, EnvelopeError::UnsupportedVersion { version, min, max }
-        if version == SchemaVersion(0) && min == SchemaVersion(1) && max == SchemaVersion(1)));
-    assert!(error.to_string().contains("unsupported envelope schema version v0"));
-}
-
-#[test]
-fn test_envelope_decode_rejects_version_above_window() {
-    let bytes = OperationEnvelope {
-        schema_version: SchemaVersion(2),
-        ..envelope()
-    }
-    .encode();
-    let error = OperationEnvelope::decode(&bytes, DecodeLimits::default()).unwrap_err();
-    assert!(matches!(error, EnvelopeError::UnsupportedVersion { version, .. } if version == SchemaVersion(2)));
 }
 
 #[test]
@@ -219,26 +218,6 @@ fn test_envelope_decode_rejects_each_malformed_traceparent() {
 #[test]
 fn test_schema_version_displays_with_v_prefix() {
     assert_eq!(SchemaVersion(1).to_string(), "v1");
-}
-
-#[test]
-fn test_schema_version_negotiate_picks_highest_common() {
-    assert_eq!(
-        SchemaVersion::negotiate(SchemaVersion(1)..=SchemaVersion(3), SchemaVersion(2)..=SchemaVersion(5)),
-        Some(SchemaVersion(3)),
-    );
-    assert_eq!(
-        SchemaVersion::negotiate(SchemaVersion(1)..=SchemaVersion(2), SchemaVersion(2)..=SchemaVersion(4)),
-        Some(SchemaVersion(2)),
-    );
-}
-
-#[test]
-fn test_schema_version_negotiate_returns_none_when_disjoint() {
-    assert_eq!(
-        SchemaVersion::negotiate(SchemaVersion(1)..=SchemaVersion(1), SchemaVersion(3)..=SchemaVersion(4)),
-        None,
-    );
 }
 
 #[test]

@@ -7,9 +7,9 @@
 mod analytics;
 mod backoff;
 mod blob;
-||||||| parent of 07dae272 (✨ feat(replication): add bounded change channel)
 mod channel;
 mod consensus;
+mod driver;
 mod election;
 mod envelope;
 mod error;
@@ -28,12 +28,12 @@ pub use analytics::{
 };
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
-||||||| parent of 07dae272 (✨ feat(replication): add bounded change channel)
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use consensus::{
     AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
     RaftLogError, Term,
 };
+pub use driver::{StepOutcome, advance_once};
 pub use election::{ElectionError, NodeId, PersistentState, VoteDecision, VoteReason, VoteRequest};
 pub use envelope::{
     AuthorityEpoch, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, OperationEnvelope, OperationId, OperationKind,
@@ -65,10 +65,12 @@ mod analytics_tests;
 mod backoff_tests;
 #[cfg(test)]
 mod blob_tests;
-||||||| parent of 07dae272 (✨ feat(replication): add bounded change channel)
+#[cfg(test)]
 mod channel_tests;
 #[cfg(test)]
 mod consensus_tests;
+#[cfg(test)]
+mod driver_tests;
 #[cfg(test)]
 mod election_tests;
 #[cfg(test)]

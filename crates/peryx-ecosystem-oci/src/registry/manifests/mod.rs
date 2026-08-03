@@ -72,6 +72,12 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 served.unwrap_or_else(|| error_response(ErrorCode::ManifestUnknown, "manifest unknown"))
             }
             Reference::Tag(tag) => {
+                // A tag is a mutable name→digest resolution, so on a replica it stays hidden until the
+                // search view catches the serial that published it; a by-digest read above is
+                // content-addressed and never held.
+                if holds_below_readable_frontier(state, index, hosted_last_serial(state, index)?) {
+                    return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
+                }
                 let mut served = None;
                 let members = serving_members(state, index);
                 let mut checked = members.len();

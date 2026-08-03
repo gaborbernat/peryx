@@ -27,6 +27,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         if policy_blocks(index, PolicyAction::Serve, repo) {
             return Ok(error_response(ErrorCode::NameUnknown, "repository name unknown"));
         }
+        // A tag list is a mutable derived view, so a replica hides a hosted index's until the search
+        // view catches the serial that changed it.
+        if holds_below_readable_frontier(state, index, hosted_last_serial(state, index)?) {
+            return Ok(error_response(ErrorCode::NameUnknown, "repository name unknown"));
+        }
         let active = state.revocations.has_active()?;
         let members = serving_members(state, index);
         if let [member] = members.as_slice()
@@ -343,6 +348,12 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             ));
         }
         let filter = query_params(query).remove("artifactType");
+        // The referrers list is a mutable derived view, so a replica hides a hosted index's until the
+        // search view catches the serial that changed it, reporting an empty set as the spec's response
+        // to a subject with none.
+        if holds_below_readable_frontier(state, index, hosted_last_serial(state, index)?) {
+            return Ok(referrers_response(&[], filter.as_deref()));
+        }
         let active = state.revocations.has_active()?;
         if active && digest_decision(state, digest)? == DigestDecision::Revoked {
             return Ok(referrers_response(&[], filter.as_deref()));

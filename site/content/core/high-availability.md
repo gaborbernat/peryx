@@ -159,6 +159,20 @@ and the local `frontier`. `administration:read` adds each node's advertised `add
 caller never reads a liveness, frontier, or peer address. The response sends `Cache-Control: no-store`, and the node
 list is capped so one request cannot return an unbounded roster.
 
+## What `none` costs
+
+`none` runs no availability subsystem. A single-node process builds no availability record, route, metric, background
+client, task, timer, queue, or thread. It mounts none of the `/+replication` routes, spawns no replica poll loop, and
+registers no `peryx_replication_*` or `peryx_availability_*` metric family. The omitted `[availability]` table and an
+explicit `mode = "none"` resolve to the same process; neither builds the availability surface.
+
+Ordinary work keeps running. General request metrics such as `peryx_requests_total` and the node-local `peryx_jobs_*`
+counters stay present, background maintenance still runs, and single-node writes keep their local-durability
+acknowledgement. Turning availability off removes availability cost without disabling a running server's metrics or
+jobs.
+
+The availability subsystems that later work adds hold the same guarantee. Each builds nothing under `none`.
+
 ## Manual promotion
 
 1. Stop or fence the old writer so it cannot accept another mutation.

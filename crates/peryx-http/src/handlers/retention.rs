@@ -21,7 +21,7 @@ use peryx_driver::retention::{
     RetentionExport, RetentionPage, RetentionPlanError, RetentionQuery, decode_cursor, export_body, plan, summary,
 };
 use peryx_driver::serving::EcosystemDriver;
-use peryx_driver::state::{AppState, Index};
+use peryx_driver::state::AppState;
 use peryx_identity::{Resource, Scope, UserId, parse_basic};
 use peryx_policy::{RetentionConfig, RetentionDecision, RetentionPolicy, RetentionSelector, RetentionSummary};
 
@@ -162,7 +162,7 @@ impl Prepared {
         };
         // A repository the caller cannot resolve is a 404, not a distinct error, so an administrator
         // cannot probe which routes exist by the shape of the failure.
-        let index = index_by_route(state, &request.repository).ok_or_else(not_found)?;
+        let index = super::index_by_route(state, &request.repository).ok_or_else(not_found)?;
         let driver = state.driver_for(index.ecosystem).ok_or_else(not_found)?.clone();
         let (after, expect) = match &request.cursor {
             Some(cursor) => {
@@ -205,10 +205,6 @@ async fn administrator(state: &AppState, headers: &HeaderMap) -> Result<UserId, 
         return Err(not_found());
     }
     Ok(actor)
-}
-
-fn index_by_route<'state>(state: &'state AppState, route: &str) -> Option<&'state Index> {
-    state.indexes.iter().find(|index| index.route == route)
 }
 
 fn is_json(headers: &HeaderMap) -> bool {

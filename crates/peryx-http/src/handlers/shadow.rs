@@ -17,7 +17,7 @@ use peryx_driver::authz::{Decision, DenyReason, ScopedDecision};
 use peryx_driver::shadow::{ShadowQuery, ShadowQueryError};
 use peryx_driver::shadow_inspect::{InspectedCandidate, ShadowInspection};
 use peryx_driver::state::AppState;
-use peryx_identity::{Action, Denial, Resource, Scope, UserId, authorize_all, parse_basic};
+use peryx_identity::{Action, Resource, Scope, UserId, parse_basic};
 use peryx_policy::PolicyDecisionState;
 
 use crate::response_security::{
@@ -96,6 +96,15 @@ impl ShadowRejection {
     }
 }
 
+impl From<super::LegacyDenied> for ShadowRejection {
+    fn from(denied: super::LegacyDenied) -> Self {
+        match denied {
+            super::LegacyDenied::Forbidden => Self::Forbidden,
+            super::LegacyDenied::Unauthorized => Self::Unauthorized,
+        }
+    }
+}
+
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<ShadowIdentity, ShadowRejection> {
     let credentials = headers
         .get(header::AUTHORIZATION)
@@ -129,7 +138,7 @@ fn authorize(
 /// A caller who can read the repository may inspect how it resolves a project; the operator role, which
 /// carries no repository access, cannot.
 fn authorize_local(state: &AppState, actor: &UserId, route: &str) -> Result<ShadowAuthorization, ShadowRejection> {
-    let index = index_by_route(state, route)?;
+    let index = super::index_by_route(state, route).ok_or(ShadowRejection::NotFound)?;
     let authorization =
         state
             .authorization
@@ -146,21 +155,11 @@ fn authorize_legacy(
     headers: &HeaderMap,
     route: &str,
 ) -> Result<ShadowAuthorization, ShadowRejection> {
-    let index = state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(ShadowRejection::Unauthorized)?;
-    let authorization = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok());
-    let principal = index.acl.identify(authorization, (state.clock)()).principal;
-    match authorize_all(&principal, &index.acl, Action::Write) {
-        Ok(()) => Ok(ShadowAuthorization {
-            repository: index.name.clone(),
-            response: ResponseAuthorization::Repository,
-        }),
-        Err(Denial::Forbidden) => Err(ShadowRejection::Forbidden),
-        Err(Denial::Unavailable | Denial::Unauthenticated) => Err(ShadowRejection::Unauthorized),
-    }
+    let index = super::authorize_legacy_route(state, headers, route, Action::Write)?;
+    Ok(ShadowAuthorization {
+        repository: index.name.clone(),
+        response: ResponseAuthorization::Repository,
+    })
 }
 
 const fn require_permission(authorization: ScopedDecision) -> Result<(), ShadowRejection> {
@@ -169,17 +168,6 @@ const fn require_permission(authorization: ScopedDecision) -> Result<(), ShadowR
         Decision::Deny(DenyReason::NoGrant) => Err(ShadowRejection::NotFound),
         Decision::Deny(DenyReason::StorageUnavailable) => Err(ShadowRejection::Unavailable),
     }
-}
-
-fn index_by_route<'state>(
-    state: &'state AppState,
-    route: &str,
-) -> Result<&'state peryx_driver::state::Index, ShadowRejection> {
-    state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(ShadowRejection::NotFound)
 }
 
 #[derive(serde::Serialize)]

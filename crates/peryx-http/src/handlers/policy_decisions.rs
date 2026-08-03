@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, Request, StatusCode, Uri, header};
 use axum::response::{IntoResponse as _, Response};
 use peryx_driver::authz::{Decision, DenyReason, ScopedDecision};
 use peryx_driver::state::AppState;
-use peryx_identity::{Action, Denial, Resource, Scope, UserId, authorize_all, parse_basic};
+use peryx_identity::{Action, Resource, Scope, UserId, parse_basic};
 use peryx_policy::PolicyDecisionState;
 use peryx_storage::meta::{PolicyDecisionItem, PolicyDecisionPage, PolicyDecisionQuery, PolicyDecisionQueryError};
 
@@ -98,6 +98,15 @@ impl PolicyDecisionRejection {
     }
 }
 
+impl From<super::LegacyDenied> for PolicyDecisionRejection {
+    fn from(denied: super::LegacyDenied) -> Self {
+        match denied {
+            super::LegacyDenied::Forbidden => Self::Forbidden,
+            super::LegacyDenied::Unauthorized => Self::Unauthorized,
+        }
+    }
+}
+
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
@@ -146,7 +155,7 @@ fn authorize_local_repository(
             response: ResponseAuthorization::Scoped(authorization),
         });
     };
-    let index = index_by_route(state, route)?;
+    let index = super::index_by_route(state, route).ok_or(PolicyDecisionRejection::NotFound)?;
     let authorization =
         state
             .authorization
@@ -163,24 +172,12 @@ fn authorize_legacy_repository(
     headers: &HeaderMap,
     route: Option<&str>,
 ) -> Result<PolicyDecisionAuthorization, PolicyDecisionRejection> {
-    let Some(route) = route else {
-        return Err(PolicyDecisionRejection::Unauthorized);
-    };
-    let index = state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(PolicyDecisionRejection::Unauthorized)?;
-    let authorization = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok());
-    let principal = index.acl.identify(authorization, (state.clock)()).principal;
-    match authorize_all(&principal, &index.acl, Action::Write) {
-        Ok(()) => Ok(PolicyDecisionAuthorization {
-            repository: Some(index.name.clone()),
-            response: ResponseAuthorization::Repository,
-        }),
-        Err(Denial::Forbidden) => Err(PolicyDecisionRejection::Forbidden),
-        Err(Denial::Unavailable | Denial::Unauthenticated) => Err(PolicyDecisionRejection::Unauthorized),
-    }
+    let route = route.ok_or(PolicyDecisionRejection::Unauthorized)?;
+    let index = super::authorize_legacy_route(state, headers, route, Action::Write)?;
+    Ok(PolicyDecisionAuthorization {
+        repository: Some(index.name.clone()),
+        response: ResponseAuthorization::Repository,
+    })
 }
 
 const fn require_permission(authorization: ScopedDecision) -> Result<(), PolicyDecisionRejection> {
@@ -189,17 +186,6 @@ const fn require_permission(authorization: ScopedDecision) -> Result<(), PolicyD
         Decision::Deny(DenyReason::NoGrant) => Err(PolicyDecisionRejection::NotFound),
         Decision::Deny(DenyReason::StorageUnavailable) => Err(PolicyDecisionRejection::Unavailable),
     }
-}
-
-fn index_by_route<'state>(
-    state: &'state AppState,
-    route: &str,
-) -> Result<&'state peryx_driver::state::Index, PolicyDecisionRejection> {
-    state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(PolicyDecisionRejection::NotFound)
 }
 
 fn policy_decision_page(page: PolicyDecisionPage, authorization: ResponseAuthorization) -> Response {

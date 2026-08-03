@@ -15,7 +15,7 @@ use peryx_core::{Ecosystem, TrashState};
 use peryx_driver::authz::{Decision, DenyReason, ScopedDecision};
 use peryx_driver::state::AppState;
 use peryx_driver::trash::{TrashItem, TrashPage, TrashQuery, TrashQueryError, TrashRef};
-use peryx_identity::{Action, Denial, Resource, Scope, UserId, authorize_all, parse_basic};
+use peryx_identity::{Action, Resource, Scope, UserId, parse_basic};
 
 use crate::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
@@ -153,6 +153,15 @@ impl TrashRejection {
     }
 }
 
+impl From<super::LegacyDenied> for TrashRejection {
+    fn from(denied: super::LegacyDenied) -> Self {
+        match denied {
+            super::LegacyDenied::Forbidden => Self::Forbidden,
+            super::LegacyDenied::Unauthorized => Self::Unauthorized,
+        }
+    }
+}
+
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<TrashIdentity, TrashRejection> {
     let credentials = headers
         .get(header::AUTHORIZATION)
@@ -202,7 +211,7 @@ fn authorize_local(
             response: ResponseAuthorization::Scoped(authorization),
         });
     };
-    let index = index_by_route(state, route)?;
+    let index = super::index_by_route(state, route).ok_or(TrashRejection::NotFound)?;
     let authorization =
         state
             .authorization
@@ -227,25 +236,13 @@ fn authorize_legacy(
     headers: &HeaderMap,
     route: Option<&str>,
 ) -> Result<TrashAuthorization, TrashRejection> {
-    let Some(route) = route else {
-        return Err(TrashRejection::Unauthorized);
-    };
-    let index = state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(TrashRejection::Unauthorized)?;
-    let authorization = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok());
-    let principal = index.acl.identify(authorization, (state.clock)()).principal;
-    match authorize_all(&principal, &index.acl, Action::Write) {
-        Ok(()) => Ok(TrashAuthorization {
-            repository: Some(index.name.clone()),
-            actor: ActorDetail::Redacted,
-            response: ResponseAuthorization::Repository,
-        }),
-        Err(Denial::Forbidden) => Err(TrashRejection::Forbidden),
-        Err(Denial::Unavailable | Denial::Unauthenticated) => Err(TrashRejection::Unauthorized),
-    }
+    let route = route.ok_or(TrashRejection::Unauthorized)?;
+    let index = super::authorize_legacy_route(state, headers, route, Action::Write)?;
+    Ok(TrashAuthorization {
+        repository: Some(index.name.clone()),
+        actor: ActorDetail::Redacted,
+        response: ResponseAuthorization::Repository,
+    })
 }
 
 const fn require_permission(authorization: ScopedDecision) -> Result<(), TrashRejection> {
@@ -254,17 +251,6 @@ const fn require_permission(authorization: ScopedDecision) -> Result<(), TrashRe
         Decision::Deny(DenyReason::NoGrant) => Err(TrashRejection::NotFound),
         Decision::Deny(DenyReason::StorageUnavailable) => Err(TrashRejection::Unavailable),
     }
-}
-
-fn index_by_route<'state>(
-    state: &'state AppState,
-    route: &str,
-) -> Result<&'state peryx_driver::state::Index, TrashRejection> {
-    state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(TrashRejection::NotFound)
 }
 
 fn parse_ecosystem(value: Option<String>) -> Result<Option<Ecosystem>, ()> {

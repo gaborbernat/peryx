@@ -23,17 +23,28 @@ data_dir = "peryx-data"
 
 [[index]]
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]]
 name = "data-hosted"
 hosted = true
-upload_token = "data-secret"
+
+[[index.access_token]]
+name = "upload"
+secret = "data-secret"
+actions = ["write", "delete"]
 
 [[index]]
 name = "web-hosted"
 hosted = true
-upload_token = "web-secret"
+
+[[index.access_token]]
+name = "upload"
+secret = "web-secret"
+actions = ["write", "delete"]
 
 [[index]]
 name = "data"

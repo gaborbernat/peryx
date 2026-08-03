@@ -7,17 +7,25 @@ aliases = [ "/ecosystems/pypi/guides/legacy-wheel/", "/ecosystems/pypi/guides/md
 
 peryx accepts the [legacy upload API](https://docs.pypi.org/api/upload/), the wire protocol both
 [twine](https://twine.readthedocs.io/) and [`uv publish`](https://docs.astral.sh/uv/guides/package/) speak. Uploads need
-a hosted index with an `upload_token`; the default topology's `hosted` index has none, so uploads are off until you set
-one:
+a hosted index with a write-granting `[[index.access_token]]`; the default topology's `hosted` index has none, so
+uploads are off until you add one:
 
 ```toml
 [[index]]
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]]
 name = "hosted"
-upload_token = "<secret>"
+hosted = true
+
+[[index.access_token]]
+name = "upload"
+secret = "<secret>"
+actions = ["write", "delete"]
 
 [[index]]
 name = "root/pypi"

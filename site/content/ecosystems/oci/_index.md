@@ -83,14 +83,21 @@ and a hosted store:
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [[index]]
 name = "images"
 route = "images"
 ecosystem = "oci"
 hosted = true
-upload_token = "<token>"
+
+[[index.access_token]]
+name = "upload"
+secret = "<token>"
+actions = ["write", "delete"]
 ```
 
 Assume peryx is then running at `127.0.0.1:4433`.
@@ -124,7 +131,8 @@ crane pull --insecure 127.0.0.1:4433/dockerhub/library/alpine:latest alpine.tar
 
 ### Push
 
-Pushing needs a hosted index with an `upload_token`. peryx accepts any username; the token is the Basic-auth password.
+Pushing needs a write-granting `[[index.access_token]]` on the hosted index. peryx accepts any username; the token's
+secret is the Basic-auth password.
 
 {% tabs(names="docker, podman, crane") %}
 

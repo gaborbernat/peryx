@@ -29,14 +29,21 @@ data_dir = "peryx-data"
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [[index]] # hosted: the team's own images, push needs the token
 name = "team"
 route = "team"
 ecosystem = "oci"
 hosted = true
-upload_token = "team-secret"
+
+[[index.access_token]]
+name = "upload"
+secret = "team-secret"
+actions = ["write", "delete"]
 
 [[index]] # virtual: team images shadow the upstream, uploads land in team
 name = "root/oci"
@@ -67,10 +74,11 @@ The dashboard at [http://127.0.0.1:4433/](http://127.0.0.1:4433/) draws the topo
 
 ## A teammate pushes an image
 
-Pushing needs the hosted store's `upload_token`; peryx accepts any username, and the token is the Basic-auth password. A
-teammate logs in, tags an image for the `root/oci` route, and pushes it. peryx streams blobs into the content-addressed
-store and verifies each digest on commit. When the client finds the same layer in another repository, it can mount the
-layer instead of uploading its bytes; peryx checks source pull access before it links the target:
+Pushing needs a write-granting `[[index.access_token]]` on the hosted store; peryx accepts any username, and the token's
+secret is the Basic-auth password. A teammate logs in, tags an image for the `root/oci` route, and pushes it. peryx
+streams blobs into the content-addressed store and verifies each digest on commit. When the client finds the same layer
+in another repository, it can mount the layer instead of uploading its bytes; peryx checks source pull access before it
+links the target:
 
 {% tabs(names="docker, podman, crane") %}
 

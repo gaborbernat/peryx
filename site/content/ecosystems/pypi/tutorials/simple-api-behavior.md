@@ -61,11 +61,17 @@ data_dir = "peryx-data"
 
 [[index]] # declares api-version 1.1 or newer
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]] # a bare PEP 503 HTML tree: no version declared
 name = "local"
-cached = "http://127.0.0.1:8000/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "http://127.0.0.1:8000/simple/"
 ```
 
 ```shell
@@ -143,7 +149,10 @@ its URL alone. In a second terminal, point a cached index at the static server a
 # peryx.toml
 [[index]] # cached: read-through cache of the static index
 name = "static"
-cached = "http://127.0.0.1:8000/"
+
+[[index.upstream]]
+name = "primary"
+url = "http://127.0.0.1:8000/"
 ```
 
 ```shell

@@ -25,7 +25,10 @@ Configure a proxy of Docker Hub. The `route` becomes the name prefix clients pul
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 ```
 
 The data directory is the cache; give it a persistent volume. Nothing else is stateful (no database, no sidecar), so in

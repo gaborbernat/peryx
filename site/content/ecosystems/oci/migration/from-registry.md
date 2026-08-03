@@ -18,13 +18,13 @@ so the wire protocol does not change, only where it points and how it is configu
 | Your setup                                                    | peryx                                                                            |
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `registry:2` with `proxy.remoteurl = https://registry-1...`   | a `cached` OCI index pointed at the same upstream                                |
-| `registry:2`/Harbor hosted repository (you push into it)      | a `hosted` OCI index with an `upload_token`                                      |
+| `registry:2`/Harbor hosted repository (you push into it)      | a `hosted` OCI index with a write-granting `[[index.access_token]]`              |
 | Harbor project (namespace for a set of repos)                 | an index (a `route` prefix is the namespace)                                     |
 | Harbor proxy-cache project                                    | a `cached` index                                                                 |
 | Harbor replication rule pulling one registry into another     | a `cached` index, warmed on pull (no rule engine)                                |
 | A stack of the above served under one endpoint                | a `virtual` index with `layers = [...]` ([why](@/core/indexes.md))               |
 | `storage.filesystem.rootdirectory` / Harbor's registry volume | peryx's content-addressed blob store: one copy per digest, shared across indexes |
-| `htpasswd` / Harbor robot account on a push repo              | one `upload_token` per hosted index; reads are open to peryx's network           |
+| `htpasswd` / Harbor robot account on a push repo              | one write-granting `[[index.access_token]]` per hosted index; reads are open     |
 
 ## The config
 
@@ -38,14 +38,21 @@ Hub cache plus a hosted store:
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [[index]]
 name = "images"
 route = "images"
 ecosystem = "oci"
 hosted = true
-upload_token = "<token>"
+
+[[index.access_token]]
+name = "upload"
+secret = "<token>"
+actions = ["write", "delete"]
 ```
 
 To serve both under one name (your images shadowing Docker Hub, everything else falling through), stack them behind a
@@ -60,9 +67,9 @@ layers = ["images", "dockerhub"]
 ```
 
 A pull of `all/library/alpine` you have never published falls through to Docker Hub; once you push `all/library/alpine`,
-your image wins. That is the [dependency-confusion defense](@/core/glossary.md#shadowing) for containers. Point `cached`
-at [GHCR](https://docs.github.com/packages), [ECR](https://aws.amazon.com/ecr/), or a Harbor `/v2/` the same way; any
-registry that implements the spec.
+your image wins. That is the [dependency-confusion defense](@/core/glossary.md#shadowing) for containers. Point the
+`[[index.upstream]]` `url` at [GHCR](https://docs.github.com/packages), [ECR](https://aws.amazon.com/ecr/), or a Harbor
+`/v2/` the same way; any registry that implements the spec.
 
 ## What changes for clients
 
@@ -90,9 +97,9 @@ Harbor replacement:
 - **No vulnerability scanning.** Harbor ships [Trivy](https://trivy.dev/)/[Clair](https://github.com/quay/clair)
   integration and can block a pull on a CVE. peryx does not scan images; run scanning in your pipeline or in front of
   peryx.
-- **No project-level RBAC.** Harbor has users, roles, and per-project permissions. peryx has one `upload_token` per
-  hosted index and open reads on its network; for per-team write control, issue a distinct hosted index and token per
-  team.
+- **No project-level RBAC.** Harbor has users, roles, and per-project permissions. peryx has one write-granting
+  `[[index.access_token]]` per hosted index and open reads on its network; for per-team write control, issue a distinct
+  hosted index and token per team.
 - **No replication UI or rule engine.** Harbor's replication rules push and pull between registries on a schedule. peryx
   has no rule engine; a `cached` index warms itself on pull, and you run one instance per site.
 - **No web-based user management.** There is no admin console for accounts, quotas, or robot tokens; configuration is

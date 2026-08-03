@@ -4,15 +4,18 @@ description = "Point peryx at Artifactory, GitLab, or any other PEP 503 index, w
 weight = 3
 +++
 
-Declare a cached index whose `cached` field is the upstream's simple-index URL. Two authentication styles cover the
-common servers; a bearer token wins when you set both.
+Declare a cached index whose `[[index.upstream]]` source points at the upstream's simple-index URL. Two authentication
+styles cover the common servers; a bearer token wins when you set both.
 
 ## Artifactory or GitLab (bearer token)
 
 ```toml
 [[index]]
 name = "corp"
-cached = "https://myco.jfrog.io/artifactory/api/pypi/pypi/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://myco.jfrog.io/artifactory/api/pypi/pypi/simple/"
 token = "<access-token>"
 ```
 
@@ -24,7 +27,10 @@ pypi.org tokens use the `__token__` username convention from the
 ```toml
 [[index]]
 name = "corp"
-cached = "https://private.example/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://private.example/simple/"
 username = "__token__"
 password = "<token>"
 ```
@@ -39,9 +45,12 @@ mounted file or an injected environment variable rather than `peryx.toml`:
 ```toml
 [[index]]
 name = "corp"
-cached = "https://private.example/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://private.example/simple/"
 username = "__token__"
-password_file = "/run/secrets/corp-token"  # or password_env = "PERYX_CORP_TOKEN"
+password_file = "/run/secrets/corp-token" # or password_env = "PERYX_CORP_TOKEN"
 ```
 
 peryx reads the source once at startup and reports a missing, empty, or oversized file or an unset variable without
@@ -58,7 +67,10 @@ netrc = "/run/secrets/upstream.netrc"
 
 [[index]]
 name = "corp"
-cached = "https://private.example/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://private.example/simple/"
 ```
 
 ```text
@@ -79,7 +91,10 @@ index, then populate and verify the cache while the upstream is reachable:
 ```toml
 [[index]]
 name = "corp"
-cached = "https://private.example/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://private.example/simple/"
 token = "<token>"
 
 [index.prefetch]

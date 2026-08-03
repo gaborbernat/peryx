@@ -59,8 +59,8 @@ the puller would not retry.
 Pulls take no authentication unless an OCI index restricts access, in which case peryx mints Bearer tokens at
 `/v2/token` and enforces each token's grants when it serves the request; on the pull-through path the same handshake
 runs the other way, where peryx fetches and caches a token per scope against an upstream that challenges it. Writes
-require a Basic-auth token, the target hosted index's `upload_token`, which is why `docker login` against peryx uses the
-token as the password.
+require a Basic-auth token, a write-granting `[[index.access_token]]` secret on the target hosted index, which is why
+`docker login` against peryx uses the token as the password.
 
 ## In practice
 

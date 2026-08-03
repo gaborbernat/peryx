@@ -15,8 +15,8 @@ on [getting started](@/ecosystems/oci/tutorials/getting-started.md).
 
 ## Configure a hosted index
 
-An upload session belongs to a hosted index, and writing to it needs the index's `upload_token`. Save this as
-`peryx.toml`:
+An upload session belongs to a hosted index, and writing to it needs a write-granting `[[index.access_token]]` on that
+index. Save this as `peryx.toml`:
 
 ```toml
 # peryx.toml
@@ -25,7 +25,11 @@ name = "images"
 route = "images"
 ecosystem = "oci"
 hosted = true
-upload_token = "demo-secret"
+
+[[index.access_token]]
+name = "upload"
+secret = "demo-secret"
+actions = ["write", "delete"]
 ```
 
 Start peryx and leave it running; use a second terminal for the rest:
@@ -217,7 +221,10 @@ Save this as `sha512.toml` and start a second peryx (stop the hosted one first, 
 name = "reg"
 route = "reg"
 ecosystem = "oci"
-cached = "http://127.0.0.1:5000"
+
+[[index.upstream]]
+name = "primary"
+url = "http://127.0.0.1:5000"
 ```
 
 ```shell

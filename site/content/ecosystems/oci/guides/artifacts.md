@@ -15,7 +15,7 @@ the plain-HTTP-versus-HTTPS transport rule the commands below rely on.
 ## Configure a hosted index
 
 Referrers and artifact pushes need a writable index. A [cached](@/core/glossary.md#roles) proxy is read-only, so declare
-a `hosted` index with an `upload_token`:
+a `hosted` index with a write-granting `[[index.access_token]]`:
 
 ```toml
 # peryx.toml
@@ -27,10 +27,14 @@ name = "artifacts"
 route = "artifacts"
 ecosystem = "oci"
 hosted = true
-upload_token = "<token>"
+
+[[index.access_token]]
+name = "upload"
+secret = "<token>"
+actions = ["write", "delete"]
 ```
 
-Run it with `peryx serve --config peryx.toml`. peryx accepts any username and treats the `upload_token` as the
+Run it with `peryx serve --config peryx.toml`. peryx accepts any username and treats the access token's secret as the
 Basic-auth password. The `--plain-http` flags below are what each client needs to talk HTTP to a
 [loopback](@/core/glossary.md#loopback-http) registry; over the network give peryx a certificate
 ([serve HTTPS](@/core/serve-https.md)) and drop them.

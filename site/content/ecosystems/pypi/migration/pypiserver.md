@@ -54,14 +54,14 @@ because it caches nothing.
 Your package directory does not drop in: re-upload it once with twine, and peryx derives hashes and metadata
 server-side. Map the flags across:
 
-| pypiserver                                           | peryx                                                      |
-| ---------------------------------------------------- | ---------------------------------------------------------- |
-| `pypi-server run -p 8080 ~/packages`                 | `peryx serve`                                              |
-| `http://host:8080/simple/`                           | `http://host:4433/{route}/simple/`                         |
-| `-P htpasswd.txt -a update`                          | `upload_token` on the hosted index                         |
-| `--fallback-url https://pypi.org/simple/` (redirect) | a cached layer under the virtual index (served and cached) |
-| `--disable-fallback`                                 | a hosted-only index, no cached layer                       |
-| `twine upload -r local dist/*`                       | the same command, pointed at the virtual route             |
+| pypiserver                                           | peryx                                                         |
+| ---------------------------------------------------- | ------------------------------------------------------------- |
+| `pypi-server run -p 8080 ~/packages`                 | `peryx serve`                                                 |
+| `http://host:8080/simple/`                           | `http://host:4433/{route}/simple/`                            |
+| `-P htpasswd.txt -a update`                          | a write-granting `[[index.access_token]]` on the hosted index |
+| `--fallback-url https://pypi.org/simple/` (redirect) | a cached layer under the virtual index (served and cached)    |
+| `--disable-fallback`                                 | a hosted-only index, no cached layer                          |
+| `twine upload -r local dist/*`                       | the same command, pointed at the virtual route                |
 
 Re-upload the directory in one pass:
 

@@ -97,11 +97,19 @@ Uploads are disabled until you set a token. Stop peryx, write a config that adds
 # peryx.toml
 [[index]] # cached: read-through cache of pypi.org
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]] # hosted: your own packages, upload needs the token
 name = "hosted"
-upload_token = "demo-secret"
+hosted = true
+
+[[index.access_token]]
+name = "upload"
+secret = "demo-secret"
+actions = ["write", "delete"]
 
 [[index]] # virtual: your uploads shadow upstream behind one URL
 name = "root/pypi"

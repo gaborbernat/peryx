@@ -24,14 +24,21 @@ port = 4433
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [[index]] # hosted: your own images
 name = "images"
 route = "images"
 ecosystem = "oci"
 hosted = true
-upload_token = "<token>"
+
+[[index.access_token]]
+name = "upload"
+secret = "<token>"
+actions = ["write", "delete"]
 
 [[index]] # virtual: hosted shadows the proxy
 name = "reg"

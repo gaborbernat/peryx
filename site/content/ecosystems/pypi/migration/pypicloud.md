@@ -70,7 +70,7 @@ the default. Your cached-index state refills on first use; only hosted uploads n
 | `pypi.fallback = redirect` / `none`      | not offered; misses serve through the cache or 404 on hosted-only indexes |
 | `storage = s3 / gcs / azure`             | local `data_dir` only                                                     |
 | `db = sqlalchemy / redis / dynamo` cache | embedded (redb), nothing to provision                                     |
-| access backends (config / SQL / LDAP)    | one `upload_token` per hosted index                                       |
+| access backends (config / SQL / LDAP)    | one write-granting `[[index.access_token]]` per hosted index              |
 | `/simple/` and `/pypi/` routes           | `/{route}/simple/`                                                        |
 
 ## Gotchas

@@ -17,7 +17,10 @@ that gap.
 name = "hub"
 route = "hub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [index.settings]
 library_prefix = "auto" # the default; shown here for clarity
@@ -60,7 +63,10 @@ the way Hub resolves them:
 name = "hub-mirror"
 route = "hub"
 ecosystem = "oci"
-cached = "https://hub-mirror.internal"
+
+[[index.upstream]]
+name = "primary"
+url = "https://hub-mirror.internal"
 
 [index.settings]
 library_prefix = true

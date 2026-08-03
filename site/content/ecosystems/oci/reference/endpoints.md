@@ -227,12 +227,12 @@ peryx runs the same `401` + `WWW-Authenticate: Bearer` handshake as a *client* a
 it, fetching a bearer token from the challenge realm and caching it per scope.
 
 Writes (`PUT`/`DELETE` on manifests, `DELETE` on blobs, every blob upload verb, and the upload-status `GET`) require
-`Authorization: Basic` where the password is the target hosted index's `upload_token`; the username is ignored. A
-virtual index routes the write to its configured upload-target member. Responses:
+`Authorization: Basic` where the password is a write-granting `[[index.access_token]]` secret on the target hosted
+index; the username is ignored. A virtual index routes the write to its configured upload-target member. Responses:
 
 - `401 UNAUTHORIZED` with `WWW-Authenticate: Basic realm="peryx"`: missing or wrong credentials.
-- `403 DENIED`: the resolved index is read-only (proxy, or virtual with no upload target), or its `upload_token` is
-  unset (uploads disabled).
+- `403 DENIED`: the resolved index is read-only (proxy, or virtual with no upload target), or it has no write-granting
+  `[[index.access_token]]` (uploads disabled).
 - `404 NAME_UNKNOWN`: `<name>` matches no OCI index route.
 
 `docker login` / `podman login` / `crane auth login` against peryx use Basic auth with the token as the password.

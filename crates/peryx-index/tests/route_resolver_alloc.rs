@@ -4,7 +4,9 @@ use peryx_core::Ecosystem;
 use peryx_identity::IndexAcl;
 use peryx_index::{Index, IndexKind, RouteResolver};
 use peryx_policy::Policy;
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
+#[cfg(not(coverage))]
+use stats_alloc::Region;
+use stats_alloc::{INSTRUMENTED_SYSTEM, StatsAlloc};
 
 #[global_allocator]
 static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
@@ -19,12 +21,18 @@ fn test_route_resolver_lookup_allocates_nothing() {
         policy: Policy::default(),
         acl: IndexAcl::default(),
     }]);
+    // `-C instrument-coverage` perturbs the process allocation count, so the zero-allocation
+    // guarantee is only measurable off the instrumented run. cargo-llvm-cov sets `--cfg coverage`:
+    // the normal test matrix still verifies the guarantee, while the coverage run keeps exercising
+    // `resolve` for its line coverage without the unmeasurable assertion.
+    #[cfg(not(coverage))]
     let region = Region::new(ALLOCATOR);
     let result = routes.resolve("root/pypi/simple/project");
-    let stats = region.change();
 
-    assert_eq!(
-        (result, stats.allocations, stats.bytes_allocated),
-        (Some((0, "simple/project")), 0, 0)
-    );
+    assert_eq!(result, Some((0, "simple/project")));
+    #[cfg(not(coverage))]
+    {
+        let stats = region.change();
+        assert_eq!((stats.allocations, stats.bytes_allocated), (0, 0));
+    }
 }

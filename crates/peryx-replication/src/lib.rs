@@ -20,6 +20,7 @@ mod protocol;
 mod readiness;
 mod replica;
 pub mod sim;
+mod versions;
 mod visibility;
 
 pub use analytics::{
@@ -57,6 +58,10 @@ pub use protocol::{
 };
 pub use readiness::{DurabilityPolicy, GroupReadiness, MemberFrontier, MemberRole, ReadinessBlocker, group_readiness};
 pub use replica::{Replica, ReplicaState, SyncOutcome};
+pub use versions::{
+    AvailabilityVersions, Incompatibility, Negotiation, Version, VersionRange, WireKind, accepts_operation_kind,
+    feature_activated, negotiate, snapshot_compatible,
+};
 pub use visibility::{ApplyEffect, ArtifactId, OpOrder, Visibility, VisibilityAction, VisibilityOp, VisibilityState};
 
 #[cfg(test)]
@@ -87,5 +92,7 @@ mod protocol_tests;
 mod readiness_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod versions_tests;
 #[cfg(test)]
 mod visibility_tests;

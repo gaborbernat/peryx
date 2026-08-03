@@ -35,17 +35,22 @@ remove releases. An index can carry several `[[index.access_token]]` tables; eac
 
 ## Let one token write everywhere
 
-For a hosted index that a single trusted credential may write and delete across every project, the `upload_token` key is
-the whole configuration:
+For a hosted index that a single trusted credential may write and delete across every project, one
+`[[index.access_token]]` grant with no `projects` filter is the whole configuration:
 
 ```toml
 [[index]]
 name = "hosted"
-upload_token = "hosted-secret"
+hosted = true
+
+[[index.access_token]]
+name = "upload"
+secret = "hosted-secret"
+actions = ["write", "delete"]
 ```
 
-This is sugar for one token granted write and delete over `*`. Use it when you do not need per-project scope; reach for
-`[[index.access_token]]` the moment you do.
+An omitted `projects` filter defaults to `*`, so this one token writes and deletes everywhere. Add a `projects` list the
+moment you need per-project scope.
 
 ## Declare an index's reads private
 
@@ -130,7 +135,12 @@ signing_key_file = "/run/secrets/peryx-signing-key"
 
 [[index]]
 name = "hosted"
-upload_token_file = "/run/secrets/hosted-token"
+hosted = true
+
+[[index.access_token]]
+name = "upload"
+secret_file = "/run/secrets/hosted-token"
+actions = ["write", "delete"]
 
 [[index.access_token]]
 name = "ci"

@@ -85,8 +85,8 @@ Every secret key therefore has a `_file` sibling naming a path to read the value
 startup and holds only the value, never the path's contents on disk beyond that read. This composes with the mechanisms
 a deployment already uses for secrets:
 
-- Docker and Kubernetes mount secrets as files under `/run/secrets`, so
-  `upload_token_file = "/run/secrets/hosted-token"` reads a Kubernetes `Secret` with no plaintext in the manifest.
+- Docker and Kubernetes mount secrets as files under `/run/secrets`, so an `[[index.access_token]]`
+  `secret_file = "/run/secrets/hosted-token"` reads a Kubernetes `Secret` with no plaintext in the manifest.
 - systemd `LoadCredential` places a credential in a per-service directory, optionally sealed to the TPM, that a `_file`
   key points at.
 - [Vault](https://developer.hashicorp.com/vault) Agent and [SOPS](https://github.com/getsops/sops) render a secret to a

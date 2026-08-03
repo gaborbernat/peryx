@@ -1190,9 +1190,13 @@ mod tests {
         metrics.record(download("pypi", "numpy", "numpy-1.whl", 100));
         metrics.record(download("pypi", "numpy", "numpy-1.whl", 100));
         metrics.record(download("pypi", "scipy", "scipy-1.whl", 50));
+        metrics.record(download("pypi", "flask", "flask-1.whl", 40));
         metrics.record(download("other", "django", "django-1.whl", 30));
-        settle(&metrics, || metrics.usage_totals(None).len() == 3);
+        settle(&metrics, || metrics.usage_totals(None).len() == 4);
 
+        // flask and scipy tie on downloads within the same repository, so ordering falls through to the
+        // project tiebreak; django ties on downloads but under a different repository, exercising the
+        // repository tiebreak.
         assert_eq!(
             metrics.usage_totals(None),
             [
@@ -1207,6 +1211,12 @@ mod tests {
                     project: "django".into(),
                     downloads: 1,
                     bytes: 30,
+                },
+                PackageUsage {
+                    repository: "pypi".into(),
+                    project: "flask".into(),
+                    downloads: 1,
+                    bytes: 40,
                 },
                 PackageUsage {
                     repository: "pypi".into(),

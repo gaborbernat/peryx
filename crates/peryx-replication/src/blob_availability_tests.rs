@@ -83,11 +83,13 @@ fn test_any_non_verified_placement_holds_the_frontier() {
 
 #[test]
 fn test_the_lowest_unavailable_serial_owns_the_frontier() {
+    // The higher-serial unavailable blob sits before the lower one, so a first-encountered scan would
+    // wrongly blame digest-4; only picking the minimum serial holds the frontier at digest-2.
     let referenced = [
         blob(1, PlacementAvailability::Verified, true),
-        blob(2, PlacementAvailability::Failed, true),
-        blob(3, PlacementAvailability::Verified, true),
         blob(4, PlacementAvailability::Pending, false),
+        blob(3, PlacementAvailability::Verified, true),
+        blob(2, PlacementAvailability::Failed, true),
     ];
 
     assert_eq!(

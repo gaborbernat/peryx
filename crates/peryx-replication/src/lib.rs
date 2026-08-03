@@ -5,6 +5,7 @@
 //! copied journal entries, and its resume cursor in one transaction.
 
 mod analytics;
+mod authority;
 mod backoff;
 mod blob;
 mod consensus;
@@ -24,6 +25,7 @@ pub use analytics::{
     APPLY_STATE_SCHEMA, AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, ApplyError, ApplyLimits,
     ApplyOutcome, ApplyState, DEFAULT_APPLY_LIMITS, Frontier, IntervalId, ProducerId, SnapshotError,
 };
+pub use authority::{Admission, AuthorityFence, AuthorityKey, CommitOutcome};
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
 pub use consensus::{
@@ -57,6 +59,8 @@ pub use replica::{Replica, ReplicaState, SyncOutcome};
 
 #[cfg(test)]
 mod analytics_tests;
+#[cfg(test)]
+mod authority_tests;
 #[cfg(test)]
 mod backoff_tests;
 #[cfg(test)]

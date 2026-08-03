@@ -58,6 +58,47 @@ fn test_execute_injects_repository_scope() {
 }
 
 #[test]
+fn test_execute_scope_drops_row_without_string_repository() {
+    // Scope injection permits a row only when its `repository` cell is a string it is allowed to read.
+    // A row missing the scope column has a non-string value there, so a repository-scoped read must
+    // exclude it rather than leak it.
+    let rows = vec![
+        decision("pypi", "numpy", "allowed", "cache", 100, 1),
+        Row::new()
+            .with("project", Value::Str("ghost".to_owned()))
+            .with("state", Value::Str("allowed".to_owned()))
+            .with("source", Value::Str("cache".to_owned()))
+            .with("evaluated_at", Value::Timestamp(50)),
+    ];
+    let page = execute(
+        &parse("from policy.decisions select project").expect("parses"),
+        &repository_scope("pypi"),
+        None,
+        &TestSource::new(rows),
+    )
+    .expect("runs");
+    assert_eq!(projects(&page), ["numpy"]);
+}
+
+#[test]
+fn test_execute_order_by_tied_key_keeps_both_rows() {
+    // Two rows share the ordering key, so the tuple comparison exhausts every key and falls through to
+    // `Equal`. The tie must keep both rows in their original, stable order.
+    let rows = vec![
+        decision("pypi", "numpy", "blocked", "cache", 300, 10),
+        decision("pypi", "scipy", "blocked", "cache", 200, 5),
+    ];
+    let page = execute(
+        &parse("from policy.decisions select project, state order by state asc").expect("parses"),
+        &operator_scope(),
+        None,
+        &TestSource::new(rows),
+    )
+    .expect("runs");
+    assert_eq!(projects(&page), ["numpy", "scipy"]);
+}
+
+#[test]
 fn test_execute_applies_user_predicate_after_scope() {
     let page = query(
         r#"from policy.decisions where state == "blocked""#,

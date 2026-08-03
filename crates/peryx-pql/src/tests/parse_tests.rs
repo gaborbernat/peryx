@@ -155,6 +155,40 @@ fn test_bind_replaces_each_param_type() {
 }
 
 #[test]
+fn test_bind_replaces_params_under_or_and_not() {
+    // Binding must recurse through `or` and `not`, not only `and`: the right branch is a negated
+    // comparison, so both the disjunction and the negation carry a parameter that has to be replaced.
+    let ast = parse("from d where a == :x or not b == :y").expect("parses");
+    let bound = bind(
+        ast,
+        &params(&[("x", Value::Str("left".to_owned())), ("y", Value::Int(7))]),
+    )
+    .expect("binds");
+    let Some(Predicate::Or(left, right)) = bound.predicate else {
+        panic!("expected a disjunction");
+    };
+    assert_eq!(
+        *left,
+        Predicate::Compare {
+            field: "a".to_owned(),
+            op: CompareOp::Eq,
+            value: Literal::Str("left".to_owned()),
+        }
+    );
+    let Predicate::Not(inner) = *right else {
+        panic!("expected a negation");
+    };
+    assert_eq!(
+        *inner,
+        Predicate::Compare {
+            field: "b".to_owned(),
+            op: CompareOp::Eq,
+            value: Literal::Int(7),
+        }
+    );
+}
+
+#[test]
 fn test_bind_missing_parameter_is_rejected() {
     let ast = parse("from d where a == :missing").expect("parses");
     assert_eq!(
@@ -223,6 +257,8 @@ fn test_parse_error_cases() {
         "from",
         "from d where",
         "from d where a =! 1",
+        "from d where a b",
+        r#"from d where a == "bad\q""#,
         "from d where a == \"open",
         "from d where a == @notatime",
         "from d where a == :",

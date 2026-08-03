@@ -71,6 +71,26 @@ fn test_plan_type_checks_literals() {
 }
 
 #[test]
+fn test_plan_rejects_unbound_parameter() {
+    // A literal left as a parameter placeholder means binding never ran; validation refuses it rather
+    // than treating the hole as a value.
+    assert!(matches!(
+        plan_text("from policy.decisions where state == :missing"),
+        Err(PqlError::Validation(_))
+    ));
+}
+
+#[test]
+fn test_plan_type_checks_bool_and_timestamp_literals() {
+    // Equality on a bool column and a range comparison on a timestamp column each type-check their
+    // literal against the column, so the bool and timestamp literal arms both run and admit the query.
+    let with_bool = plan_text("from policy.decisions where blocked == true").expect("plans");
+    assert_eq!(with_bool.outputs.len(), schema().columns.len());
+    let with_timestamp = plan_text("from policy.decisions where evaluated_at >= @2026-06-01T00:00:00Z").expect("plans");
+    assert_eq!(with_timestamp.outputs.len(), schema().columns.len());
+}
+
+#[test]
 fn test_plan_rejects_ordering_on_text_and_bool() {
     assert!(matches!(
         plan_text(r#"from policy.decisions where state < "x""#),
@@ -129,6 +149,32 @@ fn test_plan_aggregate_rejections() {
     ] {
         assert!(matches!(plan_text(text), Err(PqlError::Validation(_))), "for `{text}`");
     }
+}
+
+#[test]
+fn test_plan_aggregate_rejects_empty_alias() {
+    // The parser always reads a non-empty alias after `as`, so the empty-alias guard is reachable only
+    // from a hand-built tree; drive it directly through the public AST.
+    let ast = crate::ast::Ast {
+        domain: "policy.decisions".to_owned(),
+        join: None,
+        predicate: None,
+        selection: crate::ast::Selection::All,
+        aggregate: Some(crate::ast::Aggregate {
+            terms: vec![crate::ast::AggregateTerm {
+                func: crate::ast::AggregateFunc::Count,
+                column: None,
+                alias: String::new(),
+            }],
+            group_by: vec!["state".to_owned()],
+        }),
+        order_by: Vec::new(),
+        limit: None,
+    };
+    assert_eq!(
+        plan(&ast, &schema()),
+        Err(PqlError::Validation("an aggregate needs an alias".to_owned()))
+    );
 }
 
 #[test]

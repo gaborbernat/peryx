@@ -12,10 +12,12 @@ use peryx_driver::users::UserService;
 use peryx_identity::{Action, Glob, Grant, GrantScope, IndexAcl, NamedToken, PasswordPolicy, Role};
 use peryx_policy::{Policy, PolicyAction, PolicyDecisionState};
 use peryx_storage::meta::{MetaStore, NewPolicyDecision};
+use redb::TableDefinition;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 const READER_SECRET: &str = "reader-secret";
+const NOREAD_SECRET: &str = "noread-secret";
 const PASSWORD: &str = "local password";
 
 async fn app(read_only: bool) -> (tempfile::TempDir, MetaStore, axum::Router) {
@@ -46,10 +48,35 @@ async fn app(read_only: bool) -> (tempfile::TempDir, MetaStore, axum::Router) {
         authorization.grant(&user.id, role, scope).unwrap();
     }
     let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
-    let mut state = AppState::new(meta.clone(), blobs, 60, vec![index()]);
+    let mut state = AppState::new(meta.clone(), blobs, 60, vec![index(), locked_index()]);
     state.users = UserService::with_password_settings(meta.clone(), PasswordPolicy::new(8, 1, 1).unwrap(), 2);
     state.read_only = read_only;
     (dir, meta, crate::router(Arc::new(state)))
+}
+
+/// An app whose authorization service reads a store whose `role_grant` table has the wrong shape, so
+/// every grant lookup faults and the decision fails closed as [`DenyReason::StorageUnavailable`] while
+/// user authentication still succeeds against the healthy store.
+async fn app_authz_storage_fault() -> (tempfile::TempDir, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let users = UserService::with_password_settings(meta.clone(), PasswordPolicy::new(8, 1, 1).unwrap(), 2);
+    let alice = users.create("Alice").unwrap();
+    users.set_password(&alice.id, PASSWORD).await.unwrap();
+
+    let broken_path = dir.path().join("broken.redb");
+    let database = redb::Database::create(&broken_path).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.open_table(TableDefinition::<&str, u64>::new("role_grant")).unwrap();
+    txn.commit().unwrap();
+    drop(database);
+    let broken = AuthorizationService::new(MetaStore::open_existing(broken_path).unwrap());
+
+    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
+    let mut state = AppState::new(meta.clone(), blobs, 60, vec![index()]);
+    state.users = UserService::with_password_settings(meta.clone(), PasswordPolicy::new(8, 1, 1).unwrap(), 2);
+    state.authorization = broken;
+    (dir, crate::router(Arc::new(state)))
 }
 
 fn index() -> Index {
@@ -69,6 +96,30 @@ fn index() -> Index {
                 grants: vec![Grant {
                     projects: vec![Glob::new("*")],
                     actions: BTreeSet::from([Action::Read]),
+                }],
+                expires_at: None,
+            }],
+        },
+    }
+}
+
+/// A repository whose only token grants writes, never reads, so a legacy read is authenticated but
+/// forbidden rather than unauthenticated.
+fn locked_index() -> Index {
+    Index {
+        name: "locked".to_owned(),
+        route: "locked-route".to_owned(),
+        ecosystem: Ecosystem::Pypi,
+        kind: IndexKind::Hosted { volatile: false },
+        policy: Policy::default(),
+        acl: IndexAcl {
+            anonymous_read: false,
+            tokens: vec![NamedToken {
+                name: "noread".to_owned(),
+                secret: NOREAD_SECRET.to_owned(),
+                grants: vec![Grant {
+                    projects: vec![Glob::new("*")],
+                    actions: BTreeSet::from([Action::Write]),
                 }],
                 expires_at: None,
             }],
@@ -99,6 +150,14 @@ fn seed(meta: &MetaStore) {
         .unwrap();
     meta.record_policy_decision(decision("other", "gamma", PolicyDecisionState::Deny, 10))
         .unwrap();
+}
+
+fn seed_many(meta: &MetaStore, repository: &str, count: i64) {
+    for at in 0..count {
+        let project = format!("proj-{at}");
+        meta.record_policy_decision(decision(repository, &project, PolicyDecisionState::Allow, at))
+            .unwrap();
+    }
 }
 
 async fn post(
@@ -390,4 +449,129 @@ async fn test_query_rejects_invalid_body() {
     let (_dir, _meta, app) = app(false).await;
     let (status, _headers, _document) = post(&app, json!({"unknown": "field"}), Some(("Alice", PASSWORD))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_query_scopes_to_repository_equality_on_the_right_of_an_and() {
+    // The repository equality that scopes the grant may sit on either side of an `and`; here it is the
+    // right operand, so the resolver must recurse past the left comparison to find it.
+    let (_dir, meta, app) = app(false).await;
+    seed(&meta);
+    let (status, _headers, document) = post(
+        &app,
+        json!({"query": "from policy.decisions where state == \"deny\" and repository == \"private\""}),
+        Some(("Rita", PASSWORD)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(projects(&document), ["alpha"]);
+}
+
+#[tokio::test]
+async fn test_query_backend_fault_is_service_unavailable() {
+    // A project filter longer than the store's bound makes the backing query reject it; the source
+    // surfaces that as a backend error, which the endpoint answers as 503.
+    let (_dir, meta, app) = app(false).await;
+    seed(&meta);
+    let long = "x".repeat(513);
+    let (status, _headers, _document) = post(
+        &app,
+        json!({"query": format!("from policy.decisions where project == \"{long}\"")}),
+        Some(("Alice", PASSWORD)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_query_unknown_domain_is_not_found() {
+    // A domain the source does not serve is answered as 404 without disclosing whether it exists.
+    let (_dir, meta, app) = app(false).await;
+    seed(&meta);
+    let (status, _headers, _document) = post(&app, json!({"query": "from ghosts"}), Some(("Alice", PASSWORD))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_query_accepts_bool_and_int_parameters() {
+    // A boolean and an integer parameter each convert to a typed value; the boolean binds the query and
+    // the unused integer still exercises the numeric conversion.
+    let (_dir, meta, app) = app(false).await;
+    seed(&meta);
+    let (status, _headers, _document) = post(
+        &app,
+        json!({
+            "query": "from policy.decisions where fresh == :flag",
+            "params": {"flag": true, "count": 5}
+        }),
+        Some(("Alice", PASSWORD)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_query_body_over_the_limit_is_too_large() {
+    let (_dir, _meta, app) = app(false).await;
+    let (status, _headers, _document) = post(&app, json!({"query": "x".repeat(9000)}), Some(("Alice", PASSWORD))).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn test_query_legacy_token_with_wrong_secret_is_unauthorized() {
+    // A legacy token whose secret matches no grant identifies as anonymous, and the repository forbids
+    // anonymous reads, so the caller is asked to authenticate.
+    let (_dir, meta, app) = app(false).await;
+    seed(&meta);
+    let (status, _headers, _document) = post(
+        &app,
+        json!({"query": "from policy.decisions where repository == \"private\""}),
+        Some(("__token__", "wrong-secret")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_query_legacy_token_without_read_is_forbidden() {
+    // The `locked` token authenticates but grants only writes, so a read is refused as forbidden rather
+    // than unauthenticated.
+    let (_dir, meta, app) = app(false).await;
+    seed(&meta);
+    let (status, _headers, _document) = post(
+        &app,
+        json!({"query": "from policy.decisions where repository == \"locked\""}),
+        Some(("__token__", NOREAD_SECRET)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_query_authz_storage_fault_is_service_unavailable() {
+    let (_dir, app) = app_authz_storage_fault().await;
+    let (status, _headers, _document) = post(
+        &app,
+        json!({"query": "from policy.decisions"}),
+        Some(("Alice", PASSWORD)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_query_source_pages_through_the_store() {
+    // With more decisions than one store page, the source must loop on the store cursor to gather them
+    // all; a full page plus a next cursor proves it read past the first store page.
+    let (_dir, meta, app) = app(false).await;
+    seed_many(&meta, "private", 101);
+    let (status, _headers, document) = post(
+        &app,
+        json!({"query": "from policy.decisions where repository == \"private\" limit 100"}),
+        Some(("Rita", PASSWORD)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(document["rows"].as_array().unwrap().len(), 100);
+    assert!(document["next_cursor"].is_string());
 }

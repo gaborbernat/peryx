@@ -17,7 +17,7 @@ use testcontainers::{ContainerAsync, GenericImage};
 use url::Url;
 
 #[cfg(target_os = "linux")]
-use crate::{ExternalGroupGrant, ExternalLogin, GrantScope, MAX_EXTERNAL_GROUPS, Role};
+use crate::{ExternalGroupGrant, ExternalIdentityStore, ExternalLogin, GrantScope, MAX_EXTERNAL_GROUPS, Role};
 use crate::{
     ExternalIdentityResolution, ExternalLinkRequest, LdapBindMode, LdapLoginError, LdapLoginService, LdapProvider,
     LdapProviderBuildError, LdapProviderError, LdapProviderSettings, ProviderId, ServerUser, UserId, UserName,
@@ -295,7 +295,10 @@ async fn test_ldap_login_crosses_starttls_bind_and_store_boundaries() {
         },
     ))
     .unwrap();
-    let fry = search_provider.authenticate("fry", "fry").await.unwrap().unwrap();
+    let fry = stable_authenticate(&search_provider, "fry", "fry")
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(fry.display_name.display(), "Fry");
     assert!(
@@ -303,11 +306,18 @@ async fn test_ldap_login_crosses_starttls_bind_and_store_boundaries() {
             .iter()
             .any(|group| group.as_str().starts_with("cn=ship_crew,"))
     );
-    assert_eq!(search_provider.authenticate("fry", "wrong").await.unwrap(), None);
-    assert_eq!(search_provider.authenticate("fry)(uid=*)", "fry").await.unwrap(), None);
     assert_eq!(
-        search_provider
-            .authenticate("bender", "bender")
+        stable_authenticate(&search_provider, "fry", "wrong").await.unwrap(),
+        None
+    );
+    assert_eq!(
+        stable_authenticate(&search_provider, "fry)(uid=*)", "fry")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        stable_authenticate(&search_provider, "bender", "bender")
             .await
             .unwrap()
             .unwrap()
@@ -316,11 +326,12 @@ async fn test_ldap_login_crosses_starttls_bind_and_store_boundaries() {
         "Bender"
     );
     assert_eq!(
-        direct_provider.authenticate("Philip J. Fry", "wrong").await.unwrap(),
+        stable_authenticate(&direct_provider, "Philip J. Fry", "wrong")
+            .await
+            .unwrap(),
         None
     );
-    let direct = direct_provider
-        .authenticate("Philip J. Fry", "fry")
+    let direct = stable_authenticate(&direct_provider, "Philip J. Fry", "fry")
         .await
         .unwrap()
         .unwrap();
@@ -375,6 +386,54 @@ async fn wait_until_serving(port: u16, ca: &[u8]) {
     })
     .await
     .expect("openldap never began serving StartTLS binds");
+}
+
+// A per-provider pool opens its connection lazily and does not retry it, so a first-use StartTLS race
+// under CI load surfaces as `Unavailable` or `Timeout` where a warmed connection returns a definitive
+// result. Retry only that transient class; a bind, a rejected password, or a directory-mapping error
+// returns at once. Cases that assert an unreachable server keep their single call, since a transient
+// loss there is the outcome they already expect.
+#[cfg(target_os = "linux")]
+const STABLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[cfg(target_os = "linux")]
+async fn stable_authenticate(
+    provider: &LdapProvider,
+    username: &str,
+    password: &str,
+) -> Result<Option<ExternalLogin>, LdapProviderError> {
+    tokio::time::timeout(STABLE_TIMEOUT, async {
+        loop {
+            match provider.authenticate(username, password).await {
+                Err(LdapProviderError::Unavailable | LdapProviderError::Timeout) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                stable => return stable,
+            }
+        }
+    })
+    .await
+    .expect("LDAP authenticate never returned a stable result")
+}
+
+#[cfg(target_os = "linux")]
+async fn stable_service_authenticate<S: ExternalIdentityStore + Sync>(
+    service: &LdapLoginService<S>,
+    username: &str,
+    password: &str,
+) -> Result<Option<ExternalIdentityResolution>, LdapLoginError<S::Error>> {
+    tokio::time::timeout(STABLE_TIMEOUT, async {
+        loop {
+            match service.authenticate(username, password).await {
+                Err(LdapLoginError::Provider(LdapProviderError::Unavailable | LdapProviderError::Timeout)) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                stable => return stable,
+            }
+        }
+    })
+    .await
+    .expect("LDAP login never returned a stable result")
 }
 
 #[cfg(target_os = "linux")]
@@ -435,9 +494,15 @@ async fn assert_service_link(search_provider: LdapProvider, fry: &ExternalLogin)
         }],
     );
 
-    assert_eq!(service.authenticate("fry", "wrong").await.unwrap(), None);
+    assert_eq!(
+        stable_service_authenticate(&service, "fry", "wrong").await.unwrap(),
+        None
+    );
     assert_eq!(requests.lock().unwrap().len(), 0);
-    let resolution = service.authenticate("fry", "fry").await.unwrap().unwrap();
+    let resolution = stable_service_authenticate(&service, "fry", "fry")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(resolution.user.id, stable_user);
     let request = requests.lock().unwrap().pop().unwrap();
     assert_eq!(request.identity.subject, fry.identity.subject);
@@ -480,21 +545,17 @@ async fn assert_invalid_entries(port: u16, certificate: &[u8]) {
         invalid.subject_attribute = subject.to_owned();
         invalid.display_name_attribute = display.to_owned();
         invalid.group_attribute = group.map(str::to_owned);
+        let invalid = LdapProvider::new(invalid).unwrap();
         assert_eq!(
-            LdapProvider::new(invalid)
-                .unwrap()
-                .authenticate("fry", "fry")
-                .await
-                .unwrap_err(),
+            stable_authenticate(&invalid, "fry", "fry").await.unwrap_err(),
             LdapProviderError::InvalidEntry
         );
     }
     let mut no_groups = openldap_settings(port, certificate.to_vec(), search_bind());
     no_groups.group_attribute = None;
+    let no_groups = LdapProvider::new(no_groups).unwrap();
     assert!(
-        LdapProvider::new(no_groups)
-            .unwrap()
-            .authenticate("fry", "fry")
+        stable_authenticate(&no_groups, "fry", "fry")
             .await
             .unwrap()
             .unwrap()
@@ -514,10 +575,9 @@ async fn assert_directory_errors(port: u16, certificate: &[u8]) {
             bind_password: "GoodNewsEveryone".to_owned(),
         },
     );
+    let ambiguous = LdapProvider::new(ambiguous).unwrap();
     assert_eq!(
-        LdapProvider::new(ambiguous)
-            .unwrap()
-            .authenticate("inetOrgPerson", "irrelevant")
+        stable_authenticate(&ambiguous, "inetOrgPerson", "irrelevant")
             .await
             .unwrap_err(),
         LdapProviderError::AmbiguousUser
@@ -572,7 +632,9 @@ async fn assert_store_error(port: u16, certificate: Vec<u8>) {
         Vec::new(),
     );
     assert_eq!(
-        failing_service.authenticate("fry", "fry").await.unwrap_err(),
+        stable_service_authenticate(&failing_service, "fry", "fry")
+            .await
+            .unwrap_err(),
         LdapLoginError::Store("write failed")
     );
 }

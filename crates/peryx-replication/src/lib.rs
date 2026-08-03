@@ -6,6 +6,7 @@
 
 mod analytics;
 mod backoff;
+mod blob;
 mod consensus;
 mod election;
 mod envelope;
@@ -24,6 +25,7 @@ pub use analytics::{
     ApplyOutcome, ApplyState, DEFAULT_APPLY_LIMITS, Frontier, IntervalId, ProducerId, SnapshotError,
 };
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
+pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
 pub use consensus::{
     AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
     RaftLogError, Term,
@@ -57,6 +59,8 @@ pub use replica::{Replica, ReplicaState, SyncOutcome};
 mod analytics_tests;
 #[cfg(test)]
 mod backoff_tests;
+#[cfg(test)]
+mod blob_tests;
 #[cfg(test)]
 mod consensus_tests;
 #[cfg(test)]

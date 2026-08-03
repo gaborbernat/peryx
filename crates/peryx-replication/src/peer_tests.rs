@@ -72,10 +72,19 @@ fn test_retryable_transport_loss_is_flagged() {
     assert!(TransportError::Disconnected.is_retryable());
     assert!(TransportError::Timeout.is_retryable());
     assert!(TransportError::ServerError { status: 503 }.is_retryable());
+    assert!(TransportError::AtCapacity.is_retryable());
     assert!(!TransportError::Unauthenticated.is_retryable());
     assert!(!TransportError::BadStatus { status: 404 }.is_retryable());
     assert!(!TransportError::Malformed.is_retryable());
     assert!(!TransportError::FrameTooLarge { limit: 1, actual: 2 }.is_retryable());
+    assert!(
+        !TransportError::DigestMismatch {
+            expected: "a".to_owned(),
+            actual: "b".to_owned()
+        }
+        .is_retryable()
+    );
+    assert!(!TransportError::BlobNotFound { digest: "a".to_owned() }.is_retryable());
 }
 
 #[test]
@@ -83,9 +92,22 @@ fn test_terminal_reason_is_none_for_retryable_and_named_otherwise() {
     assert_eq!(TransportError::Disconnected.terminal_reason(), None);
     assert_eq!(TransportError::Timeout.terminal_reason(), None);
     assert_eq!(TransportError::ServerError { status: 503 }.terminal_reason(), None);
+    assert_eq!(TransportError::AtCapacity.terminal_reason(), None);
     assert_eq!(
         TransportError::Unauthenticated.terminal_reason(),
         Some("unauthenticated")
+    );
+    assert_eq!(
+        TransportError::DigestMismatch {
+            expected: "a".to_owned(),
+            actual: "b".to_owned()
+        }
+        .terminal_reason(),
+        Some("digest_mismatch")
+    );
+    assert_eq!(
+        TransportError::BlobNotFound { digest: "a".to_owned() }.terminal_reason(),
+        Some("blob_not_found")
     );
     assert_eq!(
         TransportError::BadStatus { status: 503 }.terminal_reason(),

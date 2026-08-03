@@ -195,6 +195,32 @@ async fn test_fetch_rejects_an_oversized_frame_before_reading_it() {
 }
 
 #[tokio::test]
+async fn test_fetch_caps_a_chunked_body_without_reading_it_all() {
+    // A streaming body carries no Content-Length and never ends. If the cap were enforced only through
+    // Content-Length, the read would run forever; the streaming guard must reject it after the running
+    // total first crosses the cap.
+    let router = Router::new().route(
+        CHANGES_ROUTE,
+        get(|| async {
+            let stream = futures_util::stream::repeat_with(|| {
+                Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(&[b'x'; 64]))
+            });
+            axum::body::Body::from_stream(stream)
+        }),
+    );
+    let server = TestServer::start(router).await;
+    let transport = transport(&server.url, limits(256, 16));
+
+    let error = transport.fetch_batch(request(0, 10)).await.unwrap_err();
+
+    let TransportError::FrameTooLarge { limit, actual } = error else {
+        panic!("expected a frame-too-large rejection, got {error:?}");
+    };
+    assert_eq!(limit, 16);
+    assert!(actual > 16);
+}
+
+#[tokio::test]
 async fn test_fetch_maps_a_non_page_body_to_malformed() {
     let router = Router::new().route(CHANGES_ROUTE, get(|| async { (StatusCode::OK, "not a change page") }));
     let server = TestServer::start(router).await;

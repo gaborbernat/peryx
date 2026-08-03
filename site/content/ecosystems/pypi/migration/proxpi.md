@@ -63,7 +63,7 @@ refills on first use. Map the environment knobs across:
 | proxpi                                 | peryx                                                                                                       |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `http://host:5000/index/`              | `http://host:4433/{route}/simple/`                                                                          |
-| `PROXPI_INDEX_URL`                     | `cached = "https://pypi.org/simple/"` on a cached index                                                     |
+| `PROXPI_INDEX_URL`                     | an `[[index.upstream]]` `url = "https://pypi.org/simple/"` on a cached index                                |
 | `PROXPI_EXTRA_INDEX_URLS`              | extra cached indexes, composed by a [virtual index](@/ecosystems/pypi/guides/compose-overlays.md)           |
 | `PROXPI_INDEX_TTL`                     | upstream `Cache-Control`, with `cache_ttl_secs` as fallback ([how freshness works](@/core/architecture.md)) |
 | `PROXPI_CACHE_DIR` (default: temp dir) | `data_dir` (persistent)                                                                                     |

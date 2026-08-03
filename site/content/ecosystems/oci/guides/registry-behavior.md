@@ -25,7 +25,10 @@ Nothing about the digest algorithm is configurable, so a cached index is the usu
 name = "reg"
 route = "reg"
 ecosystem = "oci"
-cached = "https://registry.example.com"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry.example.com"
 ```
 
 Pull as normal. peryx fetches the manifest, hashes the exact bytes under its own sha256, and serves them:
@@ -111,7 +114,7 @@ references it.
 A container push is a series of blob uploads, and an upload can be left half-done: a client crashes mid-layer, or a
 chunk arrives out of order and peryx answers `416`. Both cleanups act on an
 [upload session](@/ecosystems/oci/reference/registry-behavior.md#upload-sessions), so both need the hosted index's
-`upload_token` as the Basic-auth password (`-u _:<token>`).
+access-token secret as the Basic-auth password (`-u _:<token>`).
 
 An open session holds a staged temp file on the server. After one hour without a status request or `PATCH` attempt,
 peryx removes that file during the next maintenance pass; the pass runs once per minute. To release it before the

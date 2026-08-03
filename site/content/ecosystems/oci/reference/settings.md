@@ -19,7 +19,10 @@ peryx route sends the short name it typed.
 name = "hub"
 route = "hub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [index.settings]
 library_prefix = "auto"

@@ -10,8 +10,8 @@ This isolates the upstream secret in one process instead of on every developer's
 
 ## The index
 
-A cached OCI proxy is an `[[index]]` with `ecosystem = "oci"`, a `route`, and `cached` pointing at the upstream's
-registry root. Add the credential fields the upstream expects:
+A cached OCI proxy is an `[[index]]` with `ecosystem = "oci"`, a `route`, and an `[[index.upstream]]` `url` pointing at
+the upstream's registry root. Add the credential fields the upstream expects to that source:
 
 ```toml
 # peryx.toml
@@ -19,12 +19,15 @@ registry root. Add the credential fields the upstream expects:
 name = "ghcr"
 route = "ghcr"
 ecosystem = "oci"
-cached = "https://ghcr.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://ghcr.io"
 username = "<user>"
 token = "<pat>"
 ```
 
-peryx supports three credential fields on a cached index:
+peryx supports three credential fields on the `[[index.upstream]]` source:
 
 - `username` and `password`: Basic-auth credentials peryx presents when the upstream's `WWW-Authenticate` challenge asks
   for them.
@@ -34,11 +37,12 @@ Which you set depends on the upstream:
 
 - **[GHCR](https://docs.github.com/packages)**: `username = "<github-user>"`, `token = "<personal-access-token>"` (a PAT
   with `read:packages`).
-- **[Amazon ECR](https://aws.amazon.com/ecr/)**: `cached = "https://<account>.dkr.ecr.<region>.amazonaws.com"`, with
-  `username = "AWS"` and the password from `aws ecr get-login-password`. ECR tokens are short-lived; rotate the value on
-  the schedule the token's lifetime demands.
-- **[Artifactory](https://jfrog.com/artifactory/) or [Harbor](https://goharbor.io/)**: point `cached` at the registry's
-  `/v2/` root and set `username`/`password`, or `token` if the server issues bearer tokens.
+- **[Amazon ECR](https://aws.amazon.com/ecr/)**: an `[[index.upstream]]`
+  `url = "https://<account>.dkr.ecr.<region>.amazonaws.com"`, with `username = "AWS"` and the password from
+  `aws ecr get-login-password`. ECR tokens are short-lived; rotate the value on the schedule the token's lifetime
+  demands.
+- **[Artifactory](https://jfrog.com/artifactory/) or [Harbor](https://goharbor.io/)**: point the `[[index.upstream]]`
+  `url` at the registry's `/v2/` root and set `username`/`password`, or `token` if the server issues bearer tokens.
 
 ## Keep secrets out of the file
 

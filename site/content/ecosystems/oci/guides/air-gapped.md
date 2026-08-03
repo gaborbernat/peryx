@@ -25,7 +25,10 @@ data_dir = "./peryx-data"
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 ```
 
 ```shell
@@ -54,8 +57,11 @@ data_dir = "./peryx-data"
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
 offline = true
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 ```
 
 This fits a machine that was connected during the pre-seed and later lost its route: same data directory, one flag
@@ -91,7 +97,11 @@ name = "team"
 route = "team"
 ecosystem = "oci"
 hosted = true
-upload_token = "team-secret"
+
+[[index.access_token]]
+name = "upload"
+secret = "team-secret"
+actions = ["write", "delete"]
 ```
 
 Push and pull it directly on the air-gapped side:

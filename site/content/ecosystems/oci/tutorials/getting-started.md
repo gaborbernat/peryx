@@ -48,14 +48,21 @@ with two indexes: a cached proxy of Docker Hub, and a hosted store for your own 
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [[index]] # hosted: your own images, push needs the token
 name = "images"
 route = "images"
 ecosystem = "oci"
 hosted = true
-upload_token = "demo-secret"
+
+[[index.access_token]]
+name = "upload"
+secret = "demo-secret"
+actions = ["write", "delete"]
 ```
 
 ## Start peryx
@@ -100,9 +107,9 @@ crane pull --insecure 127.0.0.1:4433/dockerhub/library/alpine:latest alpine.tar
 
 ## Push your own image
 
-Pushing needs the hosted index's `upload_token`. peryx accepts any username; the token is the Basic-auth password. Log
-in, tag an image for the `images` route, and push it. Blobs stream into the content-addressed store and are verified on
-commit:
+Pushing needs a write-granting `[[index.access_token]]` on the hosted index. peryx accepts any username; the token's
+secret is the Basic-auth password. Log in, tag an image for the `images` route, and push it. Blobs stream into the
+content-addressed store and are verified on commit:
 
 {% tabs(names="docker, podman, crane") %}
 

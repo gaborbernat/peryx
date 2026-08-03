@@ -21,7 +21,10 @@ Write a config with one cached index, routed at `hub`:
 name = "hub"
 route = "hub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 ```
 
 Nothing else is needed. The `library_prefix` setting that resolves the short name defaults to `auto`, and `auto`

@@ -26,11 +26,19 @@ it:
 # peryx.toml
 [[index]] # cached: read-through cache of pypi.org
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]] # hosted: your own uploads, gated by the token
 name = "hosted"
-upload_token = "demo-secret"
+hosted = true
+
+[[index.access_token]]
+name = "upload"
+secret = "demo-secret"
+actions = ["write", "delete"]
 
 [[index]] # virtual: uploads shadow upstream behind one URL
 name = "root/pypi"

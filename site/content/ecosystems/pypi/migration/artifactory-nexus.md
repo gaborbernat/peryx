@@ -31,15 +31,15 @@ and metadata fast paths the upstream does not offer.
 
 ## The renames
 
-| Artifactory / Nexus                          | peryx                           |
-| -------------------------------------------- | ------------------------------- |
-| remote repository                            | cached index                    |
-| local / hosted repository                    | hosted index                    |
-| virtual / group repository                   | virtual index                   |
-| `…/api/pypi/{repo}/simple` (Artifactory)     | `/{route}/simple/`              |
-| `…/repository/{repo}/simple` (Nexus)         | `/{route}/simple/`              |
-| deploy via UI or REST                        | `twine upload` / `uv publish`   |
-| access tokens, user tokens (Nexus: Pro only) | `upload_token` per hosted index |
+| Artifactory / Nexus                          | peryx                                                      |
+| -------------------------------------------- | ---------------------------------------------------------- |
+| remote repository                            | cached index                                               |
+| local / hosted repository                    | hosted index                                               |
+| virtual / group repository                   | virtual index                                              |
+| `…/api/pypi/{repo}/simple` (Artifactory)     | `/{route}/simple/`                                         |
+| `…/repository/{repo}/simple` (Nexus)         | `/{route}/simple/`                                         |
+| deploy via UI or REST                        | `twine upload` / `uv publish`                              |
+| access tokens, user tokens (Nexus: Pro only) | a write-granting `[[index.access_token]]` per hosted index |
 
 ## Pitfalls
 

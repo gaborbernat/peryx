@@ -70,8 +70,8 @@ projects = ["team/*"]
 actions = ["read", "write", "delete"]
 ```
 
-An index may carry as many `[[index.access_token]]` tables as you need. The legacy `upload_token` shorthand still works
-and stands for one credential that writes and deletes everywhere on the index.
+An index may carry as many `[[index.access_token]]` tables as you need. One table with `actions = ["write", "delete"]`
+and no `projects` filter is the credential that writes and deletes everywhere on the index.
 
 ## Give a token an expiry
 

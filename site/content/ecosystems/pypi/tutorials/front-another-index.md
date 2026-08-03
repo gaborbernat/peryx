@@ -22,7 +22,10 @@ data_dir = "peryx-data"
 
 [[index]]
 name = "testpypi"
-cached = "https://test.pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://test.pypi.org/simple/"
 ```
 
 ```shell
@@ -55,7 +58,10 @@ One route that prefers the private-ish index and falls back to the big one:
 ```toml
 [[index]]
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]]
 name = "both"

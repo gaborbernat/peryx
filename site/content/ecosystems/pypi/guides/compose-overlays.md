@@ -13,16 +13,27 @@ same filename in a later one. Versions union across layers.
 ```toml
 [[index]]
 name = "pypi"
-cached = "https://pypi.org/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://pypi.org/simple/"
 
 [[index]]
 name = "corp"
-cached = "https://myco.jfrog.io/artifactory/api/pypi/pypi/simple/"
+
+[[index.upstream]]
+name = "primary"
+url = "https://myco.jfrog.io/artifactory/api/pypi/pypi/simple/"
 token = "<access-token>"
 
 [[index]]
 name = "team-hosted"
-upload_token = "<secret>"
+hosted = true
+
+[[index.access_token]]
+name = "upload"
+secret = "<secret>"
+actions = ["write", "delete"]
 
 [[index]]
 name = "team"

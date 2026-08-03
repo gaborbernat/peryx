@@ -24,14 +24,21 @@ port = 4433
 name = "dockerhub"
 route = "dockerhub"
 ecosystem = "oci"
-cached = "https://registry-1.docker.io"
+
+[[index.upstream]]
+name = "primary"
+url = "https://registry-1.docker.io"
 
 [[index]] # hosted: your own images
 name = "images"
 route = "images"
 ecosystem = "oci"
 hosted = true
-upload_token = "<token>"
+
+[[index.access_token]]
+name = "upload"
+secret = "<token>"
+actions = ["write", "delete"]
 
 [[index]] # virtual: hosted shadows the proxy
 name = "reg"
@@ -87,8 +94,8 @@ when to override it.
 
 ## Push your own images
 
-Pushing needs the hosted index's `upload_token`; peryx accepts any username, and the token is the Basic-auth password.
-Blobs stream into the content-addressed store and are verified on commit:
+Pushing needs a write-granting `[[index.access_token]]` on the hosted index; peryx accepts any username, and the token's
+secret is the Basic-auth password. Blobs stream into the content-addressed store and are verified on commit:
 
 {% tabs(names="docker, podman, crane") %}
 
@@ -114,7 +121,7 @@ crane push --insecure my-app.tar 127.0.0.1:4433/images/my-app:1.0
 
 {% end %}
 
-The `upload_token` gates writes only. Reads are open: anyone who can reach the route can pull an image you pushed, so
+The access token gates writes only. Reads are open: anyone who can reach the route can pull an image you pushed, so
 restrict who reaches peryx at the network layer (or front it with TLS) when a hosted index holds private images.
 
 ## Combine both with a virtual index

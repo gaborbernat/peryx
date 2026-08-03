@@ -4,6 +4,7 @@
 //! [`Replica`] verifies the serial sequence and every missing blob before committing metadata,
 //! copied journal entries, and its resume cursor in one transaction.
 
+mod ack;
 mod analytics;
 mod authority;
 mod backoff;
@@ -29,6 +30,7 @@ mod status;
 mod versions;
 mod visibility;
 
+pub use ack::{AckDecision, acknowledge};
 pub use analytics::{
     APPLY_STATE_SCHEMA, AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, ApplyError, ApplyLimits,
     ApplyOutcome, ApplyState, DEFAULT_APPLY_LIMITS, Frontier, IntervalId, ProducerId, SnapshotError,
@@ -78,6 +80,8 @@ pub use versions::{
 };
 pub use visibility::{ApplyEffect, ArtifactId, OpOrder, Visibility, VisibilityAction, VisibilityOp, VisibilityState};
 
+#[cfg(test)]
+mod ack_tests;
 #[cfg(test)]
 mod analytics_tests;
 #[cfg(test)]

@@ -311,6 +311,37 @@ async fn test_replica_runtime_copies_primary_metadata() {
 }
 
 #[tokio::test]
+async fn test_replica_dispatches_applied_keys_to_ecosystem_drivers() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    primary_meta
+        .commit_driver_txn(|txn| {
+            txn.put("pypi\0p\0hosted/flask", b"Flask")?;
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"upload".to_vec()]))
+        })
+        .unwrap();
+    let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
+    let state = build_state(&config).unwrap();
+    // A cached hosted page whose project the applied marker names, so the driver's invalidation shows.
+    let hot = state.hot_key("hosted", "flask", "simple.html");
+    state
+        .cache
+        .store_hot(hot.clone(), axum::body::Bytes::from_static(b"x"), i64::MAX);
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+
+    // The replica handed the applied project key to the PyPI driver, which retired flask's pages by
+    // advancing their epoch; the OCI driver's default hook ignored the key.
+    assert_ne!(
+        state.hot_key("hosted", "flask", "simple.html"),
+        hot,
+        "the replica dispatched the change to the ecosystem driver"
+    );
+}
+
+#[tokio::test]
 async fn test_replica_runtime_copies_primary_blobs() {
     let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
     let digest = primary_blobs.write(b"artifact").unwrap();

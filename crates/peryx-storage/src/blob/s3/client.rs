@@ -51,7 +51,7 @@ pub struct S3Get {
 pub struct S3Part {
     pub number: i32,
     pub etag: String,
-    pub checksum: String,
+    pub checksum: Option<String>,
 }
 
 /// An S3 client bound to one bucket.
@@ -100,10 +100,17 @@ impl S3Client {
     }
 
     fn service_config(config: &S3Config, builder: Builder) -> Config {
+        // With checksums off the SDK must not fall back to its default algorithm, or the endpoint
+        // the operator disabled them for still receives a checksum on every write.
+        let checksums = if config.checksum_writes {
+            RequestChecksumCalculation::WhenSupported
+        } else {
+            RequestChecksumCalculation::WhenRequired
+        };
         builder
             .endpoint_url(config.endpoint.as_str())
             .force_path_style(config.force_path_style())
-            .request_checksum_calculation(RequestChecksumCalculation::WhenSupported)
+            .request_checksum_calculation(checksums)
             .response_checksum_validation(ResponseChecksumValidation::WhenSupported)
             .build()
     }
@@ -188,8 +195,12 @@ impl S3Client {
             .put_object()
             .bucket(&self.config.bucket)
             .key(key)
-            .body(body)
-            .checksum_sha256(checksum);
+            .body(body);
+        // Some S3-compatible endpoints reject the checksum header, so the operator disables it per
+        // instance; sending it anyway would fail every write against such an endpoint.
+        if self.config.checksum_writes {
+            request = request.checksum_sha256(checksum);
+        }
         // Some S3-compatible endpoints reject the `*` precondition, so the operator disables it per
         // instance; sending it anyway would fail every write against such an endpoint.
         if self.config.conditional_writes {
@@ -230,12 +241,16 @@ impl S3Client {
     /// # Errors
     /// Returns [`S3Error`] when creation fails or no upload id is returned.
     pub async fn create_multipart(&self, key: &str) -> Result<String, S3Error> {
-        self.client()
+        let mut request = self
+            .client()
             .await
             .create_multipart_upload()
             .bucket(&self.config.bucket)
-            .key(key)
-            .checksum_algorithm(ChecksumAlgorithm::Sha256)
+            .key(key);
+        if self.config.checksum_writes {
+            request = request.checksum_algorithm(ChecksumAlgorithm::Sha256);
+        }
+        request
             .send()
             .await
             .map_err(aws_sdk_s3::Error::from)
@@ -264,7 +279,7 @@ impl S3Client {
             .build()
             .await
             .map_err(|error| S3Error::Request(error.to_string()))?;
-        let output = self
+        let mut request = self
             .client()
             .await
             .upload_part()
@@ -272,8 +287,11 @@ impl S3Client {
             .key(key)
             .upload_id(upload_id)
             .part_number(number)
-            .body(body)
-            .checksum_algorithm(ChecksumAlgorithm::Sha256)
+            .body(body);
+        if self.config.checksum_writes {
+            request = request.checksum_algorithm(ChecksumAlgorithm::Sha256);
+        }
+        let output = request
             .send()
             .await
             .map_err(aws_sdk_s3::Error::from)
@@ -281,9 +299,11 @@ impl S3Client {
         Ok(S3Part {
             number,
             etag: output.e_tag.ok_or(S3Error::InvalidResponse("part ETag"))?,
-            checksum: output
-                .checksum_sha256
-                .ok_or(S3Error::InvalidResponse("part checksum"))?,
+            checksum: self
+                .config
+                .checksum_writes
+                .then(|| output.checksum_sha256.ok_or(S3Error::InvalidResponse("part checksum")))
+                .transpose()?,
         })
     }
 
@@ -296,11 +316,11 @@ impl S3Client {
         let parts = parts
             .into_iter()
             .map(|part| {
-                CompletedPart::builder()
-                    .part_number(part.number)
-                    .e_tag(part.etag)
-                    .checksum_sha256(part.checksum)
-                    .build()
+                let mut completed = CompletedPart::builder().part_number(part.number).e_tag(part.etag);
+                if let Some(checksum) = part.checksum {
+                    completed = completed.checksum_sha256(checksum);
+                }
+                completed.build()
             })
             .collect();
         let mut request = self
@@ -519,7 +539,7 @@ mod tests {
         let part = S3Part {
             number: 1,
             etag: "part".to_owned(),
-            checksum: "checksum".to_owned(),
+            checksum: Some("checksum".to_owned()),
         };
 
         client
@@ -528,5 +548,128 @@ mod tests {
             .unwrap();
 
         assert_eq!(request.expect_request().headers().get("if-none-match"), precondition);
+    }
+
+    #[rstest]
+    #[case::declared(true, Some(CHECKSUM))]
+    #[case::disabled(false, None)]
+    #[tokio::test]
+    async fn test_put_file_attaches_checksum_on_checksum_writes(
+        #[case] checksum_writes: bool,
+        #[case] checksum: Option<&str>,
+    ) {
+        let config = S3Config::new(S3Settings {
+            checksum_writes,
+            ..base_settings()
+        })
+        .unwrap();
+        let (client, request) = capturing_client(config, None);
+        let stage = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(stage.path(), b"package").unwrap();
+
+        client
+            .put_file("cache/sha256/digest", stage.path(), CHECKSUM)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            request.expect_request().headers().get("x-amz-checksum-sha256"),
+            checksum
+        );
+    }
+
+    #[rstest]
+    #[case::declared(true, Some("SHA256"))]
+    #[case::disabled(false, None)]
+    #[tokio::test]
+    async fn test_create_multipart_sets_algorithm_on_checksum_writes(
+        #[case] checksum_writes: bool,
+        #[case] algorithm: Option<&str>,
+    ) {
+        let config = S3Config::new(S3Settings {
+            checksum_writes,
+            ..base_settings()
+        })
+        .unwrap();
+        let response = http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<InitiateMultipartUploadResult><UploadId>u</UploadId></InitiateMultipartUploadResult>",
+            ))
+            .unwrap();
+        let (client, request) = capturing_client(config, Some(response));
+
+        assert_eq!(client.create_multipart("cache/sha256/digest").await.unwrap(), "u");
+
+        assert_eq!(
+            request.expect_request().headers().get("x-amz-checksum-algorithm"),
+            algorithm
+        );
+    }
+
+    #[rstest]
+    #[case::declared(true, Some("SHA256"), Some(CHECKSUM.to_owned()))]
+    #[case::disabled(false, None, None)]
+    #[tokio::test]
+    async fn test_upload_part_sets_algorithm_on_checksum_writes(
+        #[case] checksum_writes: bool,
+        #[case] algorithm: Option<&str>,
+        #[case] part_checksum: Option<String>,
+    ) {
+        let config = S3Config::new(S3Settings {
+            checksum_writes,
+            ..base_settings()
+        })
+        .unwrap();
+        let mut response = http::Response::builder().status(200).header("ETag", "part-etag");
+        if checksum_writes {
+            response = response.header("x-amz-checksum-sha256", CHECKSUM);
+        }
+        let (client, request) = capturing_client(config, Some(response.body(SdkBody::empty()).unwrap()));
+        let stage = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(stage.path(), b"package").unwrap();
+
+        let part = client
+            .upload_part("cache/sha256/digest", "upload-1", 1, stage.path(), 0, 7)
+            .await
+            .unwrap();
+
+        assert_eq!(part.checksum, part_checksum);
+        assert_eq!(
+            request.expect_request().headers().get("x-amz-sdk-checksum-algorithm"),
+            algorithm
+        );
+    }
+
+    #[rstest]
+    #[case::present(Some("checksum".to_owned()), true)]
+    #[case::absent(None, false)]
+    #[tokio::test]
+    async fn test_complete_multipart_part_checksum_matches_upload(
+        #[case] part_checksum: Option<String>,
+        #[case] sends_checksum: bool,
+    ) {
+        let config = S3Config::new(base_settings()).unwrap();
+        let response = http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<CompleteMultipartUploadResult><ETag>etag</ETag></CompleteMultipartUploadResult>",
+            ))
+            .unwrap();
+        let (client, request) = capturing_client(config, Some(response));
+        let part = S3Part {
+            number: 1,
+            etag: "part".to_owned(),
+            checksum: part_checksum,
+        };
+
+        client
+            .complete_multipart("cache/sha256/digest", "upload-1", vec![part])
+            .await
+            .unwrap();
+
+        let captured = request.expect_request();
+        let body = std::str::from_utf8(captured.body().bytes().unwrap()).unwrap();
+        assert_eq!(body.contains("<ChecksumSHA256>"), sends_checksum);
     }
 }

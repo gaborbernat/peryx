@@ -343,11 +343,31 @@ impl Upstream {
         if !response.status().is_success() {
             return Err(UpstreamError::Status(response.status()));
         }
-        let body: TokenResponse = serde_json::from_str(&response.text().await?)?;
+        let body: TokenResponse = serde_json::from_slice(&read_capped(response).await?)?;
         body.token
             .or(body.access_token)
             .ok_or_else(|| UpstreamError::Transport("token endpoint returned no token".to_owned()))
     }
+}
+
+/// The largest token-endpoint response the client reads. A bearer token runs a few hundred bytes, so
+/// this cap is generous while it stops an unbounded or hostile auth response from exhausting memory.
+const MAX_TOKEN_RESPONSE_BYTES: u64 = 1 << 20;
+
+/// Read `response` into a buffer, refusing a body past [`MAX_TOKEN_RESPONSE_BYTES`] before it retains
+/// another chunk. The realm is untrusted, so the read is bounded without trusting an advertised length:
+/// a peer that streams an unbounded body is rejected before the buffer grows past the cap.
+async fn read_capped(mut response: Response) -> Result<Vec<u8>, UpstreamError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() as u64 + chunk.len() as u64 > MAX_TOKEN_RESPONSE_BYTES {
+            return Err(UpstreamError::Transport(format!(
+                "upstream token response exceeds the {MAX_TOKEN_RESPONSE_BYTES}-byte limit"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Whether the realm host is a loopback address, the one `http` case where Basic credentials stay on
@@ -751,6 +771,32 @@ mod tests {
             .await;
 
         assert_manifest_authenticates(&server, &base).await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_token_rejects_an_oversized_response() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(Unauthenticated)
+            .respond_with(challenge(&base))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let oversized = format!(r#"{{"filler":"{}"}}"#, "A".repeat(2 * 1024 * 1024));
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(oversized))
+            .mount(&server)
+            .await;
+
+        let error = Upstream::new()
+            .manifest(&base, &credentials(Auth::None), "library/nginx", "latest")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exceeds"), "{error}");
     }
 
     #[rstest]

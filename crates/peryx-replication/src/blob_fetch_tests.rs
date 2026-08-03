@@ -190,6 +190,45 @@ async fn test_fetch_missing_reports_the_first_terminal_in_request_order() {
     );
 }
 
+struct SlowFirstTerminal {
+    slow: Digest,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl BlobTransport for SlowFirstTerminal {
+    async fn fetch_blob(&self, request: BlobRequest) -> Result<Vec<u8>, TransportError> {
+        if request.digest == self.slow {
+            self.release.notified().await;
+        } else {
+            self.release.notify_one();
+        }
+        Err(TransportError::BlobNotFound {
+            digest: request.digest.as_str().to_owned(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_fetch_missing_names_the_first_terminal_even_when_it_completes_last() {
+    let slow = Digest::of(b"index-zero");
+    let fast = Digest::of(b"index-one");
+    let transport = SlowFirstTerminal {
+        slow: slow.clone(),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+
+    let report = fetch_missing(&transport, &[slow.clone(), fast], nz(2)).await;
+
+    assert_eq!(
+        report.outcome,
+        FetchOutcome::Failed {
+            reason: "blob_not_found",
+            digest: slow,
+        }
+    );
+}
+
 struct Counting {
     in_flight: Arc<AtomicUsize>,
     max: Arc<AtomicUsize>,

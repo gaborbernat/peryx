@@ -24,6 +24,7 @@ mod readiness;
 mod reconcile;
 mod replica;
 pub mod sim;
+mod status;
 mod versions;
 mod visibility;
 
@@ -66,6 +67,7 @@ pub use protocol::{
 pub use readiness::{DurabilityPolicy, GroupReadiness, MemberFrontier, MemberRole, ReadinessBlocker, group_readiness};
 pub use reconcile::{Disposition, OldEpochOp, classify};
 pub use replica::{Replica, ReplicaState, SyncOutcome};
+pub use status::{OperationStatus, WriteRecord};
 pub use versions::{
     AvailabilityVersions, Incompatibility, Negotiation, Version, VersionRange, WireKind, accepts_operation_kind,
     feature_activated, negotiate, snapshot_compatible,
@@ -106,6 +108,8 @@ mod protocol_tests;
 mod readiness_tests;
 #[cfg(test)]
 mod reconcile_tests;
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

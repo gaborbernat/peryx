@@ -14,6 +14,7 @@ mod blob_fetch;
 mod blob_http;
 mod blob_placement;
 mod blob_reassembly;
+mod blob_routing;
 mod channel;
 mod completeness;
 mod consensus;
@@ -49,6 +50,7 @@ pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 pub use blob_http::{HttpBlobError, HttpBlobTransport};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
+pub use blob_routing::RoutingBlobTransport;
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use completeness::{Completeness, ProducerCoverage, assess};
 pub use consensus::{
@@ -110,6 +112,8 @@ mod blob_http_tests;
 mod blob_placement_tests;
 #[cfg(test)]
 mod blob_reassembly_tests;
+#[cfg(test)]
+mod blob_routing_tests;
 #[cfg(test)]
 mod blob_tests;
 #[cfg(test)]

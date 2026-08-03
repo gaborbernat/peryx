@@ -20,6 +20,7 @@ fn test_openapi_document_covers_every_endpoint() {
         "/+grants",
         "/+grants/{id}",
         "/+health",
+        "/+jobs/{id}/cancel",
         "/+policy/decisions",
         "/+query",
         "/+quota",

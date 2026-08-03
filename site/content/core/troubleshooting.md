@@ -132,6 +132,12 @@ refresh shows `state = failed` and an `error` whose leading category tells you w
 and `retryable_timeout` are transient, while `upstream`, `catalog_sync`, and `project_sync` need investigation. The
 [configuration reference](@/core/configuration.md) documents the job model these records come from.
 
+A run that is stuck rather than failed can be stopped over HTTP: `POST /+jobs/{id}/cancel` as a server administrator
+reaches the cooperative cancellation signal, which lives in the process running the job and so cannot be delivered by
+the `job` CLI from a separate process. The run observes the signal and unwinds within its grace period, so a delivered
+signal answers `202`; a run already finished, or one this node is not currently running, answers `409`; an unknown run,
+like a caller without the administration-write scope, answers `404`.
+
 `peryx index show <index>` prints one index's resolved role, upstream, and offline flag without starting the server —
 the fastest way to confirm that the topology peryx loaded matches the file you edited.
 

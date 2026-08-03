@@ -210,6 +210,61 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
                 .operation(HttpMethod::Post, rotate_token())
                 .build(),
         )
+        .path(
+            "/+jobs/{id}/cancel",
+            PathItemBuilder::new().operation(HttpMethod::Post, cancel_job()).build(),
+        )
+}
+
+fn cancel_job() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Cancel a running job"))
+        .description(Some(
+            "Signals a node-local job run to stop, reaching the cooperative cancellation token that lives only in \
+             the process running it, so no separate CLI process can. The run observes the signal and unwinds \
+             within its grace period, so a delivered signal answers 202 rather than a completed stop. Requires the \
+             administration-write scope; an unknown run and an unauthorized caller answer 404 alike, so a denial \
+             cannot confirm a run id.",
+        ))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .parameter(job_id_parameter())
+        .response(
+            "202",
+            ResponseBuilder::new().description("The cancellation signal reached the running attempt"),
+        )
+        .response(
+            "401",
+            ResponseBuilder::new().description("No valid local user credential was presented"),
+        )
+        .response(
+            "404",
+            ResponseBuilder::new().description("The caller cannot administer jobs, or no run has this id"),
+        )
+        .response(
+            "409",
+            api_json_response(
+                "The run is not one this node is currently running",
+                json!({"error": "job run is not running on this node"}),
+            ),
+        )
+        .response(
+            "503",
+            api_json_response(
+                "Authentication or authorization storage is unavailable",
+                json!({"error": "job control unavailable"}),
+            ),
+        )
+}
+
+fn job_id_parameter() -> utoipa::openapi::path::Parameter {
+    ParameterBuilder::new()
+        .name("id")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("The durable job-run identifier the job history reports"))
+        .example(Some(json!("jr_000000000000ffff")))
+        .build()
 }
 
 fn acl() -> OperationBuilder {

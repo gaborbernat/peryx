@@ -21,7 +21,7 @@ use serde_json::json;
 use peryx_driver::authz::{Decision, DenyReason, ScopedDecision};
 use peryx_driver::quota::repository_quota;
 use peryx_driver::state::{AppState, Index};
-use peryx_identity::{Action, Denial, Resource, Scope, UserId, authorize_all, parse_basic};
+use peryx_identity::{Action, Resource, Scope, UserId, parse_basic};
 
 use crate::response_security::ProtectedCachePolicy;
 
@@ -145,6 +145,15 @@ impl Rejection {
     }
 }
 
+impl From<super::LegacyDenied> for Rejection {
+    fn from(denied: super::LegacyDenied) -> Self {
+        match denied {
+            super::LegacyDenied::Forbidden => Self::Forbidden,
+            super::LegacyDenied::Unauthorized => Self::Unauthorized,
+        }
+    }
+}
+
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Identity, Rejection> {
     let credentials = headers
         .get(header::AUTHORIZATION)
@@ -186,7 +195,7 @@ fn authorize_repository<'state>(
 }
 
 fn authorize_local<'state>(state: &'state AppState, actor: &UserId, route: &str) -> Result<&'state Index, Rejection> {
-    let index = index_by_route(state, route)?;
+    let index = super::index_by_route(state, route).ok_or(Rejection::NotFound)?;
     let decision =
         state
             .authorization
@@ -200,18 +209,7 @@ fn authorize_legacy<'state>(
     headers: &HeaderMap,
     route: &str,
 ) -> Result<&'state Index, Rejection> {
-    let index = state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(Rejection::Unauthorized)?;
-    let authorization = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok());
-    let principal = index.acl.identify(authorization, (state.clock)()).principal;
-    match authorize_all(&principal, &index.acl, Action::Read) {
-        Ok(()) => Ok(index),
-        Err(Denial::Forbidden) => Err(Rejection::Forbidden),
-        Err(Denial::Unavailable | Denial::Unauthenticated) => Err(Rejection::Unauthorized),
-    }
+    super::authorize_legacy_route(state, headers, route, Action::Read).map_err(Into::into)
 }
 
 const fn require_permission(decision: ScopedDecision) -> Result<(), Rejection> {
@@ -220,14 +218,6 @@ const fn require_permission(decision: ScopedDecision) -> Result<(), Rejection> {
         Decision::Deny(DenyReason::NoGrant) => Err(Rejection::NotFound),
         Decision::Deny(DenyReason::StorageUnavailable) => Err(Rejection::Unavailable),
     }
-}
-
-fn index_by_route<'state>(state: &'state AppState, route: &str) -> Result<&'state Index, Rejection> {
-    state
-        .indexes
-        .iter()
-        .find(|index| index.route == route)
-        .ok_or(Rejection::NotFound)
 }
 
 fn encode_cursor(offset: usize) -> String {

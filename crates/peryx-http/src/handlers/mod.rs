@@ -25,9 +25,10 @@ mod trash;
 mod ui;
 mod usage;
 
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use peryx_identity::Denial;
+use peryx_driver::state::{AppState, Index};
+use peryx_identity::{Action, Denial, authorize_all};
 
 pub use acl::{AclQuery, acl};
 pub use analytics::{analytics_sources, analytics_timeline, analytics_top, analytics_unused, analytics_versions};
@@ -60,4 +61,42 @@ fn denied(denial: Denial) -> Response {
         [(header::WWW_AUTHENTICATE, "Basic realm=\"peryx\"")],
     )
         .into_response()
+}
+
+/// The configured index a `route` addresses, or `None` when no index claims it. Callers render the
+/// miss as their own not-found response.
+fn index_by_route<'state>(state: &'state AppState, route: &str) -> Option<&'state Index> {
+    state.indexes.iter().find(|index| index.route == route)
+}
+
+/// The two outcomes a legacy per-index token authorization can be denied for, before a handler renders
+/// them: `403` when a known token holds no covering grant, `401` for every other denial — an unknown
+/// route, an absent credential, or an index whose ACL grants the action to no one.
+enum LegacyDenied {
+    Forbidden,
+    Unauthorized,
+}
+
+/// Authorize a legacy `__token__` request against the ACL of the index that `route` addresses, for
+/// `action`.
+///
+/// This is the one path a per-index upload token takes across the trash, quota, shadow, analytics, and
+/// policy-decision handlers: resolve the route to its index, identify the credential against that
+/// index's ACL, and ask whether the resulting principal may take `action` on any project there. Each
+/// caller maps the returned index and [`LegacyDenied`] onto its own response type; the role-based path
+/// for server users is decided separately.
+fn authorize_legacy_route<'state>(
+    state: &'state AppState,
+    headers: &HeaderMap,
+    route: &str,
+    action: Action,
+) -> Result<&'state Index, LegacyDenied> {
+    let index = index_by_route(state, route).ok_or(LegacyDenied::Unauthorized)?;
+    let authorization = headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok());
+    let principal = index.acl.identify(authorization, (state.clock)()).principal;
+    match authorize_all(&principal, &index.acl, action) {
+        Ok(()) => Ok(index),
+        Err(Denial::Forbidden) => Err(LegacyDenied::Forbidden),
+        Err(Denial::Unavailable | Denial::Unauthenticated) => Err(LegacyDenied::Unauthorized),
+    }
 }

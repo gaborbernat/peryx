@@ -89,6 +89,25 @@ fn test_new_rejects_a_non_http_base() {
 }
 
 #[test]
+fn test_new_appends_a_missing_trailing_slash_to_the_base_path() {
+    // A base path without a trailing slash must gain one before the blob path joins it, or the two fuse
+    // into a single segment (…/replication+replication/…) that points nowhere.
+    let transport = HttpBlobTransport::new(
+        "https://peer.test/replication",
+        TOKEN,
+        limits(64),
+        Duration::from_secs(1),
+    )
+    .unwrap();
+
+    let rendered = format!("{transport:?}");
+    assert!(
+        rendered.contains("/replication/+replication/v1/blobs/sha256/"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn test_debug_redacts_the_token() {
     let rendered = format!("{:?}", transport("http://peer/", 64));
 

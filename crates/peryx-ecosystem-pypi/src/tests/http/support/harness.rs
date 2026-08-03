@@ -174,6 +174,27 @@ pub async fn harness() -> Harness {
     harness_with(true, true).await
 }
 
+fn clone_index(index: &Index) -> Index {
+    Index {
+        name: index.name.clone(),
+        route: index.route.clone(),
+        ecosystem: index.ecosystem,
+        kind: match &index.kind {
+            IndexKind::Cached { client, offline } => IndexKind::Cached {
+                client: client.clone(),
+                offline: *offline,
+            },
+            IndexKind::Hosted { volatile } => IndexKind::Hosted { volatile: *volatile },
+            IndexKind::Virtual { layers, upload } => IndexKind::Virtual {
+                layers: layers.clone(),
+                upload: *upload,
+            },
+        },
+        policy: index.policy.clone(),
+        acl: index.acl.clone(),
+    }
+}
+
 pub fn restarted_state(harness: &Harness) -> Arc<AppState> {
     restarted_state_with_ttl(harness, harness.state.ttl_secs)
 }
@@ -184,32 +205,27 @@ pub fn restarted_state_with_ttl(harness: &Harness, ttl_secs: i64) -> Arc<AppStat
         harness.state.meta.clone(),
         harness.state.blobs.clone(),
         ttl_secs,
-        harness
-            .state
-            .indexes
-            .iter()
-            .map(|index| Index {
-                name: index.name.clone(),
-                route: index.route.clone(),
-                ecosystem: index.ecosystem,
-                kind: match &index.kind {
-                    IndexKind::Cached { client, offline } => IndexKind::Cached {
-                        client: client.clone(),
-                        offline: *offline,
-                    },
-                    IndexKind::Hosted { volatile } => IndexKind::Hosted { volatile: *volatile },
-                    IndexKind::Virtual { layers, upload } => IndexKind::Virtual {
-                        layers: layers.clone(),
-                        upload: *upload,
-                    },
-                },
-                policy: index.policy.clone(),
-                acl: index.acl.clone(),
-            })
-            .collect(),
+        harness.state.indexes.iter().map(clone_index).collect(),
         Arc::new(move || clock.load(Ordering::Relaxed)),
     );
     state.max_stale_secs = harness.state.max_stale_secs;
+    crate::tests::wired(state)
+}
+
+/// A read-only replica over the harness's committed store, for the derived-view frontier gating a
+/// replica applies. It shares the store, so it serves what the primary published, but its read-only
+/// posture is what holds a read behind the readable frontier.
+pub fn replica_state(harness: &Harness) -> Arc<AppState> {
+    let clock = harness.clock.clone();
+    let mut state = AppState::with_clock(
+        harness.state.meta.clone(),
+        harness.state.blobs.clone(),
+        harness.state.ttl_secs,
+        harness.state.indexes.iter().map(clone_index).collect(),
+        Arc::new(move || clock.load(Ordering::Relaxed)),
+    );
+    state.max_stale_secs = harness.state.max_stale_secs;
+    state.read_only = true;
     crate::tests::wired(state)
 }
 

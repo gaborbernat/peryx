@@ -79,7 +79,7 @@ impl<'store> Replica<'store> {
     ///
     /// # Errors
     /// Returns an error for a source failure, invalid page, digest mismatch, or local store failure.
-    pub async fn sync_once<P: Primary>(&self, primary: &P) -> Result<SyncOutcome, SyncError> {
+    pub async fn sync_once<P: Primary>(&self, primary: &P) -> Result<(SyncOutcome, Vec<String>), SyncError> {
         let state = self.state()?;
         let after = state.as_ref().map_or(0, |state| state.serial);
         let page = primary
@@ -87,8 +87,59 @@ impl<'store> Replica<'store> {
             .await
             .map_err(SyncError::primary)?;
         let validated = ValidatedPage::new(page, after, self.page_limit.get(), state.as_ref())?;
+        let fetched = self.fetch_blobs(&validated.blobs, primary).await?;
+        if validated.journal.is_empty() {
+            return Ok((
+                SyncOutcome {
+                    changes: 0,
+                    blobs: fetched,
+                    serial: after,
+                    primary_serial: validated.primary_serial,
+                },
+                Vec::new(),
+            ));
+        }
+        let next_state = serde_json::to_vec(&ReplicaState {
+            source: validated.source,
+            serial: validated.through,
+        })?;
+        let changes = validated.journal.len();
+        let changed_keys = validated.metadata.keys().cloned().collect();
+        self.meta.commit_replica_txn(after, |txn| {
+            for (key, value) in validated.metadata {
+                match value {
+                    Some(value) => txn.put(&key, &value)?,
+                    None => {
+                        txn.remove(&key)?;
+                    }
+                }
+            }
+            for (digest, size) in validated.blobs.values() {
+                txn.reference_blob(digest.as_str(), *size);
+            }
+            txn.put_local(REPLICA_STATE_KEY, &next_state)?;
+            Ok::<_, SyncError>(((), validated.journal))
+        })?;
+        Ok((
+            SyncOutcome {
+                changes,
+                blobs: fetched,
+                serial: validated.through,
+                primary_serial: validated.primary_serial,
+            },
+            changed_keys,
+        ))
+    }
+
+    /// Verify each blob the page references is present and intact, downloading the ones this replica
+    /// lacks, and return how many it fetched. A mismatched size or a corrupt local copy fails the sync.
+    async fn fetch_blobs<P: Primary>(
+        &self,
+        blobs: &BTreeMap<String, (Digest, u64)>,
+        primary: &P,
+    ) -> Result<usize, SyncError> {
         let mut fetched = 0;
-        for (digest, size) in validated.blobs.values() {
+        for (digest, size) in blobs.values() {
             if let Some(metadata) = self.blobs.head(digest).await? {
                 if metadata.bytes != *size {
                     return Err(SyncError::BlobSizeMismatch {
@@ -144,40 +195,7 @@ impl<'store> Replica<'store> {
             pending.commit(digest).await?;
             fetched += 1;
         }
-        if validated.journal.is_empty() {
-            return Ok(SyncOutcome {
-                changes: 0,
-                blobs: fetched,
-                serial: after,
-                primary_serial: validated.primary_serial,
-            });
-        }
-        let next_state = serde_json::to_vec(&ReplicaState {
-            source: validated.source,
-            serial: validated.through,
-        })?;
-        let changes = validated.journal.len();
-        self.meta.commit_replica_txn(after, |txn| {
-            for (key, value) in validated.metadata {
-                match value {
-                    Some(value) => txn.put(&key, &value)?,
-                    None => {
-                        txn.remove(&key)?;
-                    }
-                }
-            }
-            for (digest, size) in validated.blobs.values() {
-                txn.reference_blob(digest.as_str(), *size);
-            }
-            txn.put_local(REPLICA_STATE_KEY, &next_state)?;
-            Ok::<_, SyncError>(((), validated.journal))
-        })?;
-        Ok(SyncOutcome {
-            changes,
-            blobs: fetched,
-            serial: validated.through,
-            primary_serial: validated.primary_serial,
-        })
+        Ok(fetched)
     }
 }
 

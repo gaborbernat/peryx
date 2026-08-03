@@ -33,6 +33,25 @@ fn serving() -> (tempfile::TempDir, Arc<ServingState>) {
     (dir, state.serving)
 }
 
+#[test]
+fn test_apply_replicated_changes_defaults_to_a_no_op() {
+    let (_dir, state) = serving();
+    let hot = state.hot_key("hosted", "flask", "simple.html");
+    state
+        .cache
+        .store_hot(hot.clone(), bytes::Bytes::from_static(b"x"), i64::MAX);
+    // A driver with no replicated derived views inherits the neutral default, which retires nothing,
+    // unlike an ecosystem that owns the changed keys.
+    StubDriver::new(0, Ok(RefreshSweep::default()))
+        .apply_replicated_changes(&state, &["pypi\u{0}p\u{0}hosted/flask".to_owned()]);
+    assert_eq!(
+        state.hot_key("hosted", "flask", "simple.html"),
+        hot,
+        "the default advanced no epoch"
+    );
+    assert!(state.hot_fresh(&hot).is_some(), "the default left the hot page intact");
+}
+
 fn limits(workers: usize, queue: usize, per_kind: usize, per_repository: usize) -> JobLimits {
     let nz = |value: usize| NonZeroUsize::new(value).unwrap();
     JobLimits {

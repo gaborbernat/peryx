@@ -15,7 +15,7 @@ use peryx_driver::not_found;
 use peryx_driver::range::{RangeSpec, parse_range, unsatisfiable_range};
 use peryx_driver::state::ServingState;
 use peryx_events::metrics::Event;
-use peryx_index::Index;
+use peryx_index::{Index, IndexKind};
 use peryx_policy::PolicyAction;
 use peryx_storage::blob::Digest;
 
@@ -30,6 +30,22 @@ use super::response::{
 };
 use super::{Format, METADATA_FAMILY, PROVENANCE_FAMILY, negotiate, path_error_response, safe_filename};
 use crate::attestation;
+
+/// On a replica, whether serving content at `last_serial` would expose metadata past the readable
+/// frontier — a serial a required derived view (the search index) has not caught up to yet. A replica
+/// holds such a read and serves the older contiguous view (a surviving cached page) or a not-found
+/// instead, so a search that misses the new metadata and a page that shows it never disagree. The
+/// primary is never read-only, so its freshness is unchanged.
+///
+/// Only a hosted index's `last_serial` is a local journal serial the frontier governs; a cached index
+/// reports its upstream's serial and a virtual index has none, so neither is gated. A page with no
+/// serial cannot be past the frontier, and an unreadable frontier reads as zero, so a replica fails
+/// closed.
+fn holds_below_readable_frontier(state: &ServingState, index: &Index, last_serial: Option<u64>) -> bool {
+    state.read_only
+        && matches!(index.kind, IndexKind::Hosted { .. })
+        && last_serial.is_some_and(|serial| serial > state.readable_frontier().unwrap_or_default().serial)
+}
 
 /// `GET /{route}/...` serves the project list, project detail, or a file/metadata download for the
 /// index the neutral router already resolved to `position`. The peryx-owned `+api`/`+search` routes run
@@ -122,6 +138,9 @@ async fn pypi_get(
             }
             let detail = Box::pin(cache::resolve_detail_page(state, index, &normalized, &index.route)).await;
             if let Ok(Some(found)) = &detail {
+                if holds_below_readable_frontier(state, index, found.last_serial) {
+                    return not_found();
+                }
                 let body = bytes::Bytes::from(crate::render_detail_html(&found.detail));
                 remember_rendered(
                     state,
@@ -137,6 +156,11 @@ async fn pypi_get(
             return detail_response(detail, &index.route, &normalized);
         }
         let detail = Box::pin(cache::resolve_detail_page(state, index, &normalized, &index.route)).await;
+        if let Ok(Some(found)) = &detail
+            && holds_below_readable_frontier(state, index, found.last_serial)
+        {
+            return not_found();
+        }
         return detail_response(detail, &index.route, &normalized);
     }
     if let Some(file) = rest.strip_prefix("files/") {
@@ -184,6 +208,9 @@ async fn legacy_json_route(state: &Arc<ServingState>, index: &Index, rest: &str)
             found.last_serial,
         )
     {
+        if holds_below_readable_frontier(state, index, found.last_serial) {
+            return Some(not_found());
+        }
         let body = bytes::Bytes::from(body);
         remember_rendered(
             state,
@@ -207,6 +234,11 @@ async fn legacy_json_route(state: &Arc<ServingState>, index: &Index, rest: &str)
 fn simple_index_response(state: &ServingState, index: &Index, headers: &HeaderMap) -> Response {
     let list = cache::resolve_list(state, index)
         .and_then(|list| cache::list_serial(state, index).map(|last_serial| (list, last_serial)));
+    if let Ok((_, last_serial)) = &list
+        && holds_below_readable_frontier(state, index, *last_serial)
+    {
+        return not_found();
+    }
     index_response(list, negotiate(headers), &index.route)
 }
 

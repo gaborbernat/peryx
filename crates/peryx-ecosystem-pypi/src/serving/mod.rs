@@ -470,6 +470,17 @@ impl EcosystemDriver for PypiServing {
             })
             .map_err(|err| err.user_message())
     }
+
+    fn apply_replicated_changes(&self, state: &ServingState, changed_keys: &[String]) {
+        let mut invalidated = std::collections::BTreeSet::new();
+        for key in changed_keys {
+            if let Some(project) = crate::store::project_of_key(key)
+                && invalidated.insert(project)
+            {
+                state.invalidate_project(project);
+            }
+        }
+    }
 }
 
 fn safe_filename(raw: &str) -> Result<String, PathSafetyError> {

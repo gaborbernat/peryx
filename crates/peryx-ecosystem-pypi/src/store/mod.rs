@@ -146,6 +146,20 @@ fn project_key(index: &str, normalized: &str) -> String {
     format!("{PROJECTS_PREFIX}{index}/{normalized}")
 }
 
+/// The normalized project a replicated authoritative key names, or `None` when the key is not a project
+/// marker. A replica maps the keys it just applied to the projects whose derived views need rebuilding
+/// through this. Publishing a file, and retiring or restoring a project, write or remove that project's
+/// marker; a per-file yank, unyank, or delete instead goes through `mutate_uploads`, which touches only
+/// the file's own record under the upload prefix, so it names no project here and retires no page. That
+/// is harmless today, since a replica hot-caches no hosted page for such a change to leave stale. File,
+/// metadata, and journal keys carry no project either. A project name never contains a slash, so the
+/// final segment is the project and the rest is the index route.
+pub(crate) fn project_of_key(key: &str) -> Option<&str> {
+    key.strip_prefix(PROJECTS_PREFIX)?
+        .rsplit_once('/')
+        .map(|(_index, normalized)| normalized)
+}
+
 fn project_status_key(index: &str, normalized: &str) -> String {
     format!("{PROJECT_STATUS_PREFIX}{index}/{normalized}")
 }

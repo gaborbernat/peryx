@@ -386,10 +386,14 @@ impl ReplicaLoop {
             .await;
         let elapsed = started.elapsed();
         match result {
-            Ok(outcome) => {
+            Ok((outcome, changed_keys)) => {
                 if outcome.changes > 0 {
                     log_replica_page(outcome);
                     self.app.bump_search_epoch();
+                    let state = self.app.serving.as_ref();
+                    for driver in self.app.drivers() {
+                        driver.apply_replicated_changes(state, &changed_keys);
+                    }
                 }
                 self.monitor.record(outcome);
                 let readable = self.app.readable_frontier().map_or(0, |frontier| frontier.serial);

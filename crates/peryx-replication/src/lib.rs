@@ -7,6 +7,8 @@
 mod analytics;
 mod backoff;
 mod blob;
+||||||| parent of 07dae272 (✨ feat(replication): add bounded change channel)
+mod channel;
 mod consensus;
 mod election;
 mod envelope;
@@ -26,6 +28,8 @@ pub use analytics::{
 };
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
+||||||| parent of 07dae272 (✨ feat(replication): add bounded change channel)
+pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use consensus::{
     AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
     RaftLogError, Term,
@@ -61,6 +65,8 @@ mod analytics_tests;
 mod backoff_tests;
 #[cfg(test)]
 mod blob_tests;
+||||||| parent of 07dae272 (✨ feat(replication): add bounded change channel)
+mod channel_tests;
 #[cfg(test)]
 mod consensus_tests;
 #[cfg(test)]

@@ -19,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use peryx_core::Role;
+use peryx_replication::{AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, IntervalId};
 use peryx_storage::meta::AnalyticsHandle;
 
 /// Unix seconds, the shape every peryx clock reports, so the aggregator can date a download's UTC
@@ -461,6 +462,35 @@ impl Metrics {
     pub fn daily_usage(&self) -> Vec<DailyUsage> {
         let daily = self.daily.read().expect("metrics lock");
         daily_rows(&daily)
+    }
+
+    /// Package this node's daily usage as an idempotent [`AnalyticsBatch`] stamped with `interval`, so
+    /// a replica can fold it into its accepted totals exactly once. Each additive bucket becomes one
+    /// row carrying only bounded server-side labels and its download and byte totals, never a raw
+    /// request or actor history.
+    ///
+    /// # Panics
+    /// Panics if the aggregator thread panicked and poisoned the daily lock.
+    #[must_use]
+    pub fn export_daily_batch(&self, interval: IntervalId) -> AnalyticsBatch {
+        let rows = self
+            .daily_usage()
+            .into_iter()
+            .map(|usage| AggregateRow {
+                key: AggregateKey {
+                    day: usage.day,
+                    repository: usage.repository,
+                    project: usage.project,
+                    version: usage.version,
+                    source: usage.source,
+                },
+                delta: AggregateDelta {
+                    downloads: usage.downloads,
+                    bytes: usage.bytes,
+                },
+            })
+            .collect();
+        AnalyticsBatch { interval, rows }
     }
 
     /// Record one event; never blocks, and a stopped aggregator is ignored.
@@ -1036,6 +1066,9 @@ fn apply(tree: &mut StatsTree, event: Event) {
 mod tests {
     use std::sync::Arc;
 
+    use peryx_replication::{
+        AggregateDelta, AggregateKey, ApplyLimits, ApplyOutcome, ApplyState, AuthorityEpoch, IntervalId, ProducerId,
+    };
     use peryx_storage::meta::{AnalyticsHandle, MetaStore};
 
     use super::{
@@ -1221,6 +1254,49 @@ mod tests {
                 downloads: 1,
                 bytes: 12,
             }]
+        );
+    }
+
+    #[test]
+    fn test_exported_daily_batch_applies_once_on_a_replica() {
+        let (_dir, meta) = store();
+        let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(20_000));
+        metrics.record(download_of("pypi", "flask", "3.0", Some("pypi-org"), 40));
+        metrics.record(download_of("pypi", "flask", "3.0", Some("pypi-org"), 10));
+        settle(&metrics, || metrics.daily_usage().len() == 1);
+
+        let interval = IntervalId {
+            producer: ProducerId("east".into()),
+            epoch: AuthorityEpoch(1),
+            sequence: 1,
+        };
+        let export = metrics.export_daily_batch(interval);
+        assert_eq!(export.rows.len(), 1);
+
+        let dimension = AggregateKey {
+            day: 20_000,
+            repository: "pypi".into(),
+            project: "flask".into(),
+            version: "3.0".into(),
+            source: "pypi-org".into(),
+        };
+        let mut replica = ApplyState::new(ApplyLimits::default());
+        assert_eq!(replica.apply(&export).unwrap(), ApplyOutcome::Applied);
+        assert_eq!(
+            replica.total(&dimension),
+            AggregateDelta {
+                downloads: 2,
+                bytes: 50
+            }
+        );
+
+        assert_eq!(replica.apply(&export).unwrap(), ApplyOutcome::Duplicate);
+        assert_eq!(
+            replica.total(&dimension),
+            AggregateDelta {
+                downloads: 2,
+                bytes: 50
+            }
         );
     }
 

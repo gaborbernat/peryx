@@ -47,7 +47,7 @@ pub use driver::{StepOutcome, advance_once};
 pub use election::{ElectionError, NodeId, PersistentState, VoteDecision, VoteReason, VoteRequest};
 pub use envelope::{
     AuthorityEpoch, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, OperationEnvelope, OperationId, OperationKind,
-    SCHEMA_VERSION, SchemaVersion, TraceContext,
+    SCHEMA_VERSION, SchemaVersion, TraceContext, TraceError, derive_child,
 };
 pub use error::SyncError;
 pub use follower::{

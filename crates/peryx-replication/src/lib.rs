@@ -7,6 +7,7 @@
 mod analytics;
 mod backoff;
 mod blob;
+mod channel;
 mod consensus;
 mod election;
 mod envelope;
@@ -27,6 +28,7 @@ pub use analytics::{
 };
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
+pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use consensus::{
     AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
     RaftLogError, Term,
@@ -63,6 +65,8 @@ mod analytics_tests;
 mod backoff_tests;
 #[cfg(test)]
 mod blob_tests;
+#[cfg(test)]
+mod channel_tests;
 #[cfg(test)]
 mod consensus_tests;
 #[cfg(test)]

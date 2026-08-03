@@ -309,23 +309,6 @@ fn test_an_unwired_state_holds_no_driver_for_any_ecosystem() {
     }
 }
 
-#[test]
-fn test_serving_for_path_resolves_a_request_uri_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
-    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
-    let mut state = AppState::new(meta, blobs, 60, vec![pypi_index("pypi")]);
-    state.register_ecosystem(
-        std::sync::Arc::new(StubServing(peryx_core::Ecosystem::Pypi)),
-        std::sync::Arc::new(peryx_search::EmptyIndexer),
-    );
-    // A request URI path carries a leading slash; index routes do not. The rate limiter classes a
-    // route by the driver this finds, so failing to resolve here silently downgrades every artifact
-    // request to the listing limit.
-    assert!(state.driver_for_path("/pypi/files/abc/x.whl").is_some());
-    assert!(state.driver_for_path("/unconfigured/simple/").is_none());
-}
-
 #[tokio::test]
 async fn test_post_without_multipart_content_type_is_bad_request() {
     let dir = tempfile::tempdir().unwrap();

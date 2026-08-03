@@ -84,15 +84,6 @@ impl AppState {
         summaries
     }
 
-    /// The indexed-mount driver that would serve `path`, found by resolving the index it addresses.
-    ///
-    /// `path` is a request URI path, so it carries a leading slash; index routes do not.
-    #[must_use]
-    pub fn driver_for_path(&self, path: &str) -> Option<&Arc<dyn crate::serving::EcosystemDriver>> {
-        let (position, _) = self.resolve_position(path.trim_start_matches('/'))?;
-        self.driver_for(self.index_at(position).ecosystem)
-    }
-
     /// Every installed driver, in ecosystem declaration order.
     pub fn drivers(&self) -> impl Iterator<Item = &Arc<dyn crate::serving::EcosystemDriver>> {
         self.drivers.iter().flatten()

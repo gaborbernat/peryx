@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::{
     AuthorityEpoch, BlobReference, Change, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, MetadataMutation,
-    OperationEnvelope, OperationKind, SCHEMA_VERSION, SchemaVersion, TraceContext,
+    OperationEnvelope, OperationKind, SCHEMA_VERSION, SchemaVersion, TraceContext, TraceError, derive_child,
 };
 
 const VALID_TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
@@ -241,4 +241,48 @@ fn test_decode_limits_default_is_the_shared_constant() {
     assert_eq!(DecodeLimits::default(), DEFAULT_DECODE_LIMITS);
     assert_eq!(DEFAULT_DECODE_LIMITS.max_bytes, 1 << 20);
     assert_eq!(DEFAULT_DECODE_LIMITS.max_depth, 32);
+}
+
+const CHILD_SPAN: &str = "b7ad6b7169203331";
+
+#[test]
+fn test_derive_child_continues_the_parent_trace() {
+    let child = derive_child(VALID_TRACEPARENT, CHILD_SPAN).unwrap();
+
+    assert_eq!(child, "00-4bf92f3577b34da6a3ce929d0e0e4736-b7ad6b7169203331-01");
+}
+
+#[test]
+fn test_derive_child_preserves_the_parent_flags() {
+    let parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+
+    let child = derive_child(parent, CHILD_SPAN).unwrap();
+
+    assert_eq!(child, "00-4bf92f3577b34da6a3ce929d0e0e4736-b7ad6b7169203331-00");
+}
+
+#[test]
+fn test_derive_child_rejects_a_malformed_parent() {
+    let parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa-01";
+
+    let error = derive_child(parent, CHILD_SPAN).unwrap_err();
+
+    assert_eq!(error, TraceError::MalformedParent(parent.to_owned()));
+}
+
+#[test]
+fn test_derive_child_rejects_a_reserved_ff_version_parent() {
+    let parent = "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+    let error = derive_child(parent, CHILD_SPAN).unwrap_err();
+
+    assert_eq!(error, TraceError::MalformedParent(parent.to_owned()));
+}
+
+#[test]
+fn test_derive_child_rejects_an_invalid_span_id() {
+    for span in ["short", "zzzzzzzzzzzzzzzz", "0000000000000000"] {
+        let error = derive_child(VALID_TRACEPARENT, span).unwrap_err();
+        assert_eq!(error, TraceError::InvalidSpanId(span.to_owned()), "{span}");
+    }
 }

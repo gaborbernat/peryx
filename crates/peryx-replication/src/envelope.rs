@@ -276,12 +276,20 @@ fn exceeds_depth(bytes: &[u8], max: usize) -> bool {
     false
 }
 
-/// Whether `value` is a well-formed W3C traceparent. Beyond the field shapes, this enforces the three
-/// values the spec singles out as invalid: an all-zero trace-id, an all-zero parent-id, and the
-/// reserved version `ff`. The version is a hex byte, so `0xff` is reserved whichever case its two
-/// digits use; the guard compares case-insensitively so an uppercase `FF` cannot slip past. An
-/// unrecognized non-`ff` version stays valid for forward compatibility.
-fn valid_traceparent(value: &str) -> bool {
+/// The parts of a well-formed W3C traceparent a child derivation carries over: everything but the
+/// parent-id, which the child replaces with its own span id.
+struct TraceparentParts<'a> {
+    version: &'a str,
+    trace_id: &'a str,
+    flags: &'a str,
+}
+
+/// Parse `value` into its fields when it is a well-formed W3C traceparent. Beyond the field shapes this
+/// enforces the three values the spec singles out as invalid: an all-zero trace-id, an all-zero
+/// parent-id, and the reserved version `ff`. The version is a hex byte, so `0xff` is reserved whichever
+/// case its two digits use; the guard compares case-insensitively so an uppercase `FF` cannot slip
+/// past. An unrecognized non-`ff` version stays valid for forward compatibility.
+fn parse_traceparent(value: &str) -> Option<TraceparentParts<'_>> {
     let mut fields = value.split('-');
     let (Some(version), Some(trace_id), Some(parent_id), Some(flags), None) = (
         fields.next(),
@@ -290,9 +298,9 @@ fn valid_traceparent(value: &str) -> bool {
         fields.next(),
         fields.next(),
     ) else {
-        return false;
+        return None;
     };
-    version.len() == 2
+    (version.len() == 2
         && !version.eq_ignore_ascii_case("ff")
         && trace_id.len() == 32
         && parent_id.len() == 16
@@ -301,5 +309,55 @@ fn valid_traceparent(value: &str) -> bool {
             .iter()
             .all(|field| field.bytes().all(|byte| byte.is_ascii_hexdigit()))
         && trace_id.bytes().any(|byte| byte != b'0')
-        && parent_id.bytes().any(|byte| byte != b'0')
+        && parent_id.bytes().any(|byte| byte != b'0'))
+    .then_some(TraceparentParts {
+        version,
+        trace_id,
+        flags,
+    })
+}
+
+/// Whether `value` is a well-formed W3C traceparent.
+fn valid_traceparent(value: &str) -> bool {
+    parse_traceparent(value).is_some()
+}
+
+/// Deriving a child trace context failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TraceError {
+    #[error("parent traceparent {0:?} is not a well-formed W3C traceparent")]
+    MalformedParent(String),
+    #[error("child span id {0:?} must be sixteen hex digits and not all zero")]
+    InvalidSpanId(String),
+}
+
+/// Derive the child W3C traceparent for an operation that continues the trace `parent` authored.
+///
+/// The child keeps `parent`'s version, trace-id, and flags and takes `span_id` as its new parent-id, so
+/// a follower's apply span joins the trace the ingress opened rather than starting a disconnected one.
+/// The caller supplies `span_id`, a fresh sixteen-hex-digit span identifier, which keeps this
+/// deterministic.
+///
+/// # Errors
+/// Returns [`TraceError::MalformedParent`] when `parent` is not a valid traceparent, including a
+/// reserved `ff` version, and [`TraceError::InvalidSpanId`] when `span_id` is not sixteen hex digits or
+/// is all zero.
+pub fn derive_child(parent: &str, span_id: &str) -> Result<String, TraceError> {
+    let Some(parts) = parse_traceparent(parent) else {
+        return Err(TraceError::MalformedParent(parent.to_owned()));
+    };
+    if !valid_span_id(span_id) {
+        return Err(TraceError::InvalidSpanId(span_id.to_owned()));
+    }
+    Ok(format!(
+        "{}-{}-{span_id}-{}",
+        parts.version, parts.trace_id, parts.flags
+    ))
+}
+
+/// Whether `span_id` is a well-formed traceparent parent-id: sixteen hex digits, not all zero.
+fn valid_span_id(span_id: &str) -> bool {
+    span_id.len() == 16
+        && span_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && span_id.bytes().any(|byte| byte != b'0')
 }

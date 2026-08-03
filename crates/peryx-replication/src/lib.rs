@@ -19,6 +19,7 @@ mod peer_http;
 mod protocol;
 mod replica;
 pub mod sim;
+mod versions;
 mod visibility;
 
 pub use analytics::{
@@ -55,6 +56,10 @@ pub use protocol::{
     Primary,
 };
 pub use replica::{Replica, ReplicaState, SyncOutcome};
+pub use versions::{
+    AvailabilityVersions, Incompatibility, Negotiation, Version, VersionRange, WireKind, accepts_operation_kind,
+    feature_activated, negotiate, snapshot_compatible,
+};
 pub use visibility::{ApplyEffect, ArtifactId, OpOrder, Visibility, VisibilityAction, VisibilityOp, VisibilityState};
 
 #[cfg(test)]
@@ -83,5 +88,7 @@ mod peer_tests;
 mod protocol_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod versions_tests;
 #[cfg(test)]
 mod visibility_tests;

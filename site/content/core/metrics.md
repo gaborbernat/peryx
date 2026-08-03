@@ -183,6 +183,22 @@ is a fixed ladder of second bounds plus `+Inf`.
 alert on a sustained `rate(peryx_availability_sync_errors_total{class="transport"}[5m])` to catch a primary a replica
 can no longer reach before the lag alert fires.
 
+Five more replica-only series read the
+[background worker runtime](@/core/high-availability.md#background-worker-runtime) that hosts apply and copy work off
+the foreground executor. They carry no labels, so they add a fixed five series.
+
+| Series                                     | Type    | Meaning                                                         |
+| ------------------------------------------ | ------- | --------------------------------------------------------------- |
+| `peryx_availability_worker_threads`        | gauge   | Worker threads the availability runtime runs.                   |
+| `peryx_availability_worker_slots`          | gauge   | Concurrent background tasks the runtime admits.                 |
+| `peryx_availability_worker_slots_active`   | gauge   | Background tasks currently holding a slot.                      |
+| `peryx_availability_worker_rejected_total` | counter | Task submissions refused because every slot was in use.         |
+| `peryx_availability_worker_panics_total`   | counter | Background tasks that panicked and marked the domain unhealthy. |
+
+Watch `peryx_availability_worker_slots_active` against `peryx_availability_worker_slots` for saturation, and alert on
+any increase in `peryx_availability_worker_panics_total`: a panic marks the worker domain unhealthy and drops the node
+out of a read pool through the `worker_unhealthy` readiness reason.
+
 ## Alerts worth building
 
 The queries below assume the `job="peryx"` scrape above. They are starting points; set thresholds to your traffic.

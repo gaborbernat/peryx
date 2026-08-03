@@ -109,6 +109,8 @@ frontier and `503 Service Unavailable` otherwise, naming every cause in `reasons
 - `sync_error` — a replica's last poll of its primary failed.
 - `incompatible_schema` — a replica's primary speaks an unsupported replication protocol version, which a later poll
   cannot resolve without upgrading the primary.
+- `worker_unhealthy` — a background availability task panicked. The node keeps answering the reads it can still satisfy,
+  but readiness reports the fault until the process restarts.
 
 Both documents are filtered to the caller's class, like `/+status`. Any caller reads `mode`, `role`, `ready`, and
 `reasons`. `operator:read` adds a replica's `serial`, `primary_serial`, `lag`, and synced counters, or a primary's own
@@ -172,6 +174,29 @@ acknowledgement. Turning availability off removes availability cost without disa
 jobs.
 
 The availability subsystems that later work adds hold the same guarantee. Each builds nothing under `none`.
+
+## Background worker runtime
+
+A `dc` or `ha` replica runs its changelog apply and blob copies on a dedicated runtime, apart from the executor that
+serves package traffic, so a burst of replication never steals threads from a foreground request. A `none` node builds
+none of it: no worker threads, no queue, no metrics.
+
+The runtime starts one worker thread per CPU the process is scheduled on, capped at four, so a container pinned to two
+cores starts two workers and a large host does not start one background worker per core. A separate blocking pool,
+capped at eight threads, absorbs filesystem writes and checksum work without touching the foreground executor. Both caps
+are deliberate: replication is a throughput-bounded trickle whose job is to stay out of the way of the request path, not
+to consume the machine.
+
+Background tasks draw from a fixed set of concurrency slots. The resident apply loop holds one for the process lifetime;
+the rest bound the copy and apply work a replica issues. A full set returns backpressure to the caller rather than
+queueing without limit, and every refused submission increments `peryx_availability_worker_rejected_total` so a
+sustained rejection rate is visible rather than silent. `peryx_availability_worker_slots_active` against
+`peryx_availability_worker_slots` shows how close the runtime runs to saturation.
+
+A panicked task releases its slot, is counted in `peryx_availability_worker_panics_total`, and marks the worker domain
+unhealthy, which surfaces as the `worker_unhealthy` readiness reason above; the process keeps serving the reads it can
+still satisfy rather than aborting. Shutting the node down stops the workers without blocking the foreground runtime; a
+replica reapplies any page it had not yet committed when it restarts.
 
 ## Manual promotion
 

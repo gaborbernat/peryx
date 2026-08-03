@@ -1,6 +1,7 @@
 //! Process-level replication configuration and follower scheduling.
 
 mod availability_metrics;
+mod worker;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::config::{AvailabilityConfig, Config, DcRole, ReplicationConfig};
 use crate::replication::availability_metrics::AvailabilityMetrics;
+use crate::replication::worker::{AvailabilityRuntime, WorkerShared};
 
 #[derive(Clone, Copy)]
 enum ReplicaHealthStatus {
@@ -221,6 +223,15 @@ struct ReplicaView {
     upstream: String,
 }
 
+/// The readiness reason a replica reports when its background worker domain has failed, or `None`
+/// when no worker runs or the runtime is still healthy. A panicked task clears the domain's health,
+/// so a replica keeps serving reads under its staleness contract while readiness names the fault.
+fn worker_reason(workers: Option<&Arc<WorkerShared>>) -> Option<&'static str> {
+    workers
+        .filter(|workers| !workers.is_healthy())
+        .map(|_| "worker_unhealthy")
+}
+
 /// The availability surface a `dc` or `ha` process serves its health and readiness resources from.
 /// A `none` process holds none of this, so it mounts neither resource.
 #[derive(Clone)]
@@ -232,6 +243,7 @@ struct AvailabilityNode {
     /// The writer's view of replica liveness, present only when a `dc`/`ha` primary follows a
     /// configured member roster. It informs routing hints and never gates this node's own readiness.
     liveness: Option<Arc<LivenessTracker>>,
+    workers: Option<Arc<WorkerShared>>,
 }
 
 impl AvailabilityNode {
@@ -251,6 +263,7 @@ impl AvailabilityNode {
         {
             reasons.push(gap);
         }
+        reasons.extend(worker_reason(self.workers.as_ref()));
         (reasons.is_empty(), reasons)
     }
 
@@ -417,7 +430,7 @@ fn primary_liveness(config: &Config) -> Option<Arc<LivenessTracker>> {
 /// Replication routes and follower work prepared from one resolved configuration.
 pub struct ReplicationRuntime {
     primary: Option<Router>,
-    replica: Option<ReplicaLoop>,
+    replica: Option<(ReplicaLoop, AvailabilityRuntime)>,
     availability: Option<AvailabilityNode>,
 }
 
@@ -457,6 +470,7 @@ impl ReplicationRuntime {
                     role: AvailabilityRole::Primary,
                     replica: None,
                     liveness,
+                    workers: None,
                 };
                 (Some(router), None, Some(node))
             }
@@ -472,8 +486,12 @@ impl ReplicationRuntime {
                     state.meta.current_serial().context("read the replica serial")?,
                 ));
                 let metrics = Arc::new(AvailabilityMetrics::default());
+                let workers = Arc::new(WorkerShared::for_replica());
                 state.register_prometheus(monitor.clone());
                 state.register_prometheus(metrics.clone());
+                state.register_prometheus(workers.clone());
+                let runtime =
+                    AvailabilityRuntime::start(workers.clone()).context("build the availability worker runtime")?;
                 let node = AvailabilityNode {
                     app: state.clone(),
                     mode,
@@ -483,19 +501,23 @@ impl ReplicationRuntime {
                         upstream: redact_url(upstream),
                     }),
                     liveness: None,
+                    workers: Some(workers),
                 };
                 (
                     None,
-                    Some(ReplicaLoop {
-                        app: state.clone(),
-                        primary,
-                        meta: state.serving.meta.clone(),
-                        blobs: state.serving.blobs.clone(),
-                        page_size: *page_size,
-                        poll_interval: *poll_interval,
-                        monitor,
-                        metrics,
-                    }),
+                    Some((
+                        ReplicaLoop {
+                            app: state.clone(),
+                            primary,
+                            meta: state.serving.meta.clone(),
+                            blobs: state.serving.blobs.clone(),
+                            page_size: *page_size,
+                            poll_interval: *poll_interval,
+                            monitor,
+                            metrics,
+                        },
+                        runtime,
+                    )),
                     Some(node),
                 )
             }
@@ -531,17 +553,38 @@ impl ReplicationRuntime {
         }
     }
 
-    /// Start the replica loop, when configured.
+    /// Start the replica loop on its own availability runtime, when configured, returning the
+    /// runtime so the caller keeps it alive for the process lifetime. Follower work runs on the
+    /// bounded worker pool rather than the foreground request executor.
     #[must_use]
-    pub fn start(self) -> Option<tokio::task::JoinHandle<()>> {
-        self.replica.map(|replica| tokio::spawn(replica.run()))
+    pub fn start(self) -> Option<AvailabilityRuntime> {
+        let (replica, runtime) = self.replica?;
+        let _ = runtime.try_spawn(Box::pin(replica.run()));
+        Some(runtime)
     }
 
     #[cfg(test)]
     pub(crate) async fn sync_cycle(&self) -> Option<bool> {
         match &self.replica {
-            Some(replica) => Some(replica.cycle().await),
+            Some((replica, _)) => Some(replica.cycle().await),
             None => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{WorkerShared, worker_reason};
+
+    #[test]
+    fn test_worker_reason_names_only_a_failed_domain() {
+        assert_eq!(worker_reason(None), None);
+        let healthy = Arc::new(WorkerShared::for_replica());
+        assert_eq!(worker_reason(Some(&healthy)), None);
+        let failed = Arc::new(WorkerShared::for_replica());
+        failed.record_panic();
+        assert_eq!(worker_reason(Some(&failed)), Some("worker_unhealthy"));
     }
 }

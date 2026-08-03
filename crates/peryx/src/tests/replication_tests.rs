@@ -12,7 +12,7 @@ use http_body_util::BodyExt as _;
 use peryx_driver::IndexKind as RuntimeIndexKind;
 use peryx_driver::state::AppState;
 use peryx_identity::{Action, GrantScope, Role};
-use peryx_replication::{ChangePage, primary_router};
+use peryx_replication::{ChangePage, SyncOutcome, primary_router};
 use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
@@ -338,6 +338,63 @@ async fn test_replica_dispatches_applied_keys_to_ecosystem_drivers() {
         state.hot_key("hosted", "flask", "simple.html"),
         hot,
         "the replica dispatched the change to the ecosystem driver"
+    );
+}
+
+#[test]
+fn test_apply_replicated_page_dispatches_a_changed_page_to_drivers() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, None);
+    let state = build_state(&config).unwrap();
+    let hot = state.hot_key("hosted", "flask", "simple.html");
+    state
+        .cache
+        .store_hot(hot.clone(), axum::body::Bytes::from_static(b"x"), i64::MAX);
+
+    // Synchronous and independent of the async sync loop, so this covers the dispatch every run.
+    crate::replication::apply_replicated_page(
+        &state,
+        SyncOutcome {
+            changes: 1,
+            blobs: 0,
+            serial: 1,
+            primary_serial: 1,
+        },
+        &["pypi\u{0}p\u{0}hosted/flask".to_owned()],
+    );
+
+    assert_ne!(
+        state.hot_key("hosted", "flask", "simple.html"),
+        hot,
+        "a page with changes reached the PyPI driver, which retired flask's pages",
+    );
+}
+
+#[test]
+fn test_apply_replicated_page_ignores_a_page_with_no_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, None);
+    let state = build_state(&config).unwrap();
+    let hot = state.hot_key("hosted", "flask", "simple.html");
+    state
+        .cache
+        .store_hot(hot.clone(), axum::body::Bytes::from_static(b"x"), i64::MAX);
+
+    crate::replication::apply_replicated_page(
+        &state,
+        SyncOutcome {
+            changes: 0,
+            blobs: 0,
+            serial: 0,
+            primary_serial: 0,
+        },
+        &["pypi\u{0}p\u{0}hosted/flask".to_owned()],
+    );
+
+    assert_eq!(
+        state.hot_key("hosted", "flask", "simple.html"),
+        hot,
+        "a page with no changes dispatched nothing",
     );
 }
 

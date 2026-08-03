@@ -27,8 +27,8 @@ pub use consensus::{
 };
 pub use election::{ElectionError, NodeId, PersistentState, VoteDecision, VoteReason, VoteRequest};
 pub use envelope::{
-    AuthorityEpoch, CURRENT_SCHEMA_VERSION, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, MIN_SCHEMA_VERSION,
-    OperationEnvelope, OperationId, OperationKind, SUPPORTED_SCHEMA_VERSIONS, SchemaVersion, TraceContext,
+    AuthorityEpoch, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, OperationEnvelope, OperationId, OperationKind,
+    SCHEMA_VERSION, SchemaVersion, TraceContext,
 };
 pub use error::SyncError;
 pub use follower::{

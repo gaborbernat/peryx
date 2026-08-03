@@ -98,6 +98,12 @@ pub enum TransportError {
     FrontierGap { expected: u64, actual: u64 },
     #[error("peer returned no changes but advertised frontier {frontier} past serial {after}")]
     EmptyBatch { frontier: u64, after: u64 },
+    #[error("peer blob content hashes to {actual}; the request asked for {expected}")]
+    DigestMismatch { expected: String, actual: String },
+    #[error("peer holds no blob for digest {digest}")]
+    BlobNotFound { digest: String },
+    #[error("peer blob transport is at its concurrent-stream limit")]
+    AtCapacity,
 }
 
 impl TransportError {
@@ -105,15 +111,20 @@ impl TransportError {
     /// failures are terminal and fail closed instead.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::Disconnected | Self::Timeout | Self::ServerError { .. })
+        matches!(
+            self,
+            Self::Disconnected | Self::Timeout | Self::ServerError { .. } | Self::AtCapacity
+        )
     }
 
     /// A stable machine reason for a terminal failure, or `None` when the failure is retryable.
     #[must_use]
     pub const fn terminal_reason(&self) -> Option<&'static str> {
         match self {
-            Self::Disconnected | Self::Timeout | Self::ServerError { .. } => None,
+            Self::Disconnected | Self::Timeout | Self::ServerError { .. } | Self::AtCapacity => None,
             Self::Unauthenticated => Some("unauthenticated"),
+            Self::DigestMismatch { .. } => Some("digest_mismatch"),
+            Self::BlobNotFound { .. } => Some("blob_not_found"),
             Self::BadStatus { .. } => Some("bad_status"),
             Self::Malformed => Some("malformed"),
             Self::FrameTooLarge { .. } => Some("frame_too_large"),

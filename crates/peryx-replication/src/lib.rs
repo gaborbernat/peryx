@@ -16,6 +16,7 @@ mod envelope;
 mod error;
 mod follower;
 mod http;
+mod ingress_intent;
 mod liveness;
 mod peer;
 mod peer_http;
@@ -51,6 +52,9 @@ pub use follower::{
     AppendAccepted, AppendReject, AppendRequest, AppendResponse, CommitTracker, receive_append_entries,
 };
 pub use http::{DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PrimaryHttpConfigError, primary_router};
+pub use ingress_intent::{
+    Ecosystem, IngressIntent, IntentKey, IntentLedger, IntentState, StageOutcome, TransitionOutcome,
+};
 pub use liveness::{
     DEFAULT_DEAD_AFTER, DEFAULT_MAX_HEARTBEAT_BYTES, DEFAULT_SUSPECT_AFTER, HeartbeatReport, LivenessRejection,
     LivenessTracker, PeerHealth, Suspicion, liveness_router,
@@ -96,6 +100,8 @@ mod envelope_tests;
 mod follower_tests;
 #[cfg(test)]
 mod http_tests;
+#[cfg(test)]
+mod ingress_intent_tests;
 #[cfg(test)]
 mod liveness_tests;
 #[cfg(test)]

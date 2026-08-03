@@ -48,9 +48,13 @@ pub fn render_legacy_json_with_serial(
     metadata: Option<&CoreMetadataDoc>,
     last_serial: Option<u64>,
 ) -> Option<String> {
-    let selected_version = match version {
-        Some(version) => Some(find_release_version(detail, version)?),
-        None => latest_release_version(detail),
+    let (selected_version, grouped) = if let Some(version) = version {
+        (Some(find_release_version(detail, version)?), None)
+    } else {
+        let groups = group_by_version(detail);
+        let versions = release_versions(detail);
+        let latest = latest_release_version(&groups, &versions);
+        (latest, Some((groups, versions)))
     };
     let mut response = Map::new();
     response.insert(
@@ -58,8 +62,8 @@ pub fn render_legacy_json_with_serial(
         legacy_info(detail, selected_version.as_deref(), metadata),
     );
     response.insert("last_serial".to_owned(), json!(last_serial.unwrap_or_default()));
-    if version.is_none() {
-        response.insert("releases".to_owned(), legacy_releases(detail));
+    if let Some((groups, versions)) = grouped.as_ref() {
+        response.insert("releases".to_owned(), legacy_releases(groups, versions));
     }
     response.insert("urls".to_owned(), legacy_files(detail, selected_version.as_deref()));
     response.insert("vulnerabilities".to_owned(), json!([]));
@@ -107,14 +111,13 @@ fn legacy_info(detail: &ProjectDetail, version: Option<&str>, metadata: Option<&
     })
 }
 
-fn legacy_releases(detail: &ProjectDetail) -> Value {
-    let groups = group_by_version(detail);
+fn legacy_releases(groups: &OrderedMap<VersionKey, Vec<&File>>, versions: &[String]) -> Value {
     let mut releases = Map::new();
-    for version in release_versions(detail) {
+    for version in versions {
         let files = groups
-            .get(&version_key(&version))
+            .get(&version_key(version))
             .map_or_else(Vec::new, |files| files.iter().map(|file| legacy_file(file)).collect());
-        releases.insert(version, Value::Array(files));
+        releases.insert(version.clone(), Value::Array(files));
     }
     Value::Object(releases)
 }
@@ -165,21 +168,23 @@ fn find_release_version(detail: &ProjectDetail, requested: &str) -> Option<Strin
 /// stable `1.0` beats a later `2.0rc1` and a higher yanked release does not win. When every release is
 /// pre-release or yanked the greatest of them wins; when no release carries files the greatest version
 /// wins.
-fn latest_release_version(detail: &ProjectDetail) -> Option<String> {
-    let versions = release_versions(detail);
-    let groups = group_by_version(detail);
+fn latest_release_version(groups: &OrderedMap<VersionKey, Vec<&File>>, versions: &[String]) -> Option<String> {
     let best = versions
         .iter()
         .filter_map(|version| {
-            let files = groups.get(&version_key(version))?;
-            let parsed = parse_version(version);
+            let key = version_key(version);
+            let files = groups.get(&key)?;
+            let parsed = match key {
+                VersionKey::Parsed(parsed) => Some(parsed),
+                VersionKey::Raw(_) => None,
+            };
             let stable = parsed.as_ref().is_some_and(|parsed| !parsed.any_prerelease());
             let active = files.iter().any(|file| !yanked_bool(&file.yanked));
             Some((active, stable, parsed, version))
         })
         .max()
         .map(|(.., version)| version.clone());
-    best.or_else(|| versions.into_iter().next())
+    best.or_else(|| versions.first().cloned())
 }
 
 fn release_versions(detail: &ProjectDetail) -> Vec<String> {

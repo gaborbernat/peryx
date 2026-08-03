@@ -54,6 +54,16 @@ fn info_version(versions: &[&str], files: &[(&str, bool)]) -> String {
     "2.0"
 )]
 #[case::no_files_falls_back_to_greatest(&["1.0", "2.0"], &[], "2.0")]
+#[case::unparseable_version_with_files_loses_to_stable(
+    &["1.0", "not_a_version"],
+    &[("pkg-1.0.tar.gz", false), ("pkg-not_a_version.tar.gz", false)],
+    "1.0"
+)]
+#[case::all_unparseable_picks_greatest_string(
+    &["alpha_build", "zeta_build"],
+    &[("pkg-alpha_build.tar.gz", false), ("pkg-zeta_build.tar.gz", false)],
+    "zeta_build"
+)]
 fn test_latest_release_version_matches_web_default(
     #[case] versions: &[&str],
     #[case] files: &[(&str, bool)],

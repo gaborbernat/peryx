@@ -4,6 +4,7 @@ mod bearer_tests;
 mod conformance_tests;
 mod contents_tests;
 mod discovery_tests;
+mod frontier;
 mod metrics_tests;
 mod mirror_tests;
 mod negotiate_tests;
@@ -77,6 +78,17 @@ fn app_with_journal(dir: &TempDir, indexes: Vec<Index>, journal: bool) -> (Arc<A
     crate::install(&mut state, HashMap::new(), journal);
     let state = Arc::new(state);
     (state.clone(), router(state))
+}
+
+/// A read-only replica over the same store as `state`, for the derived-view frontier a replica gates
+/// hosted reads on. It shares the metadata and blobs, so it serves what the primary published, but its
+/// read-only posture is what holds a read behind the readable frontier.
+fn replica_router(state: &Arc<AppState>, indexes: Vec<Index>) -> (Arc<AppState>, axum::Router) {
+    let mut replica = AppState::with_clock(state.meta.clone(), state.blobs.clone(), 60, indexes, Arc::new(|| 1000));
+    crate::install(&mut replica, HashMap::new(), false);
+    replica.read_only = true;
+    let replica = Arc::new(replica);
+    (replica.clone(), router(replica))
 }
 
 /// An OCI index of the given kind, mounted at `route`.

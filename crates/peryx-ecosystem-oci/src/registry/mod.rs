@@ -673,6 +673,27 @@ pub fn serving_members<'a>(state: &'a ServingState, index: &'a Index) -> Vec<&'a
         .map(|position| state.index_at(position))
         .collect()
 }
+/// The serial a frontier gate compares against for `index`: the whole-store serial for a hosted index,
+/// which the readable frontier governs, and none for a proxied or virtual index, which it does not.
+/// Mirrors the `PyPI` hosted-page rule, where a hosted index's last serial is `current_serial` and a
+/// cached or virtual one has none.
+fn hosted_last_serial(state: &ServingState, index: &Index) -> Result<Option<u64>, ServeError> {
+    Ok(match index.kind {
+        IndexKind::Hosted { .. } => Some(state.meta.current_serial()?),
+        IndexKind::Cached { .. } | IndexKind::Virtual { .. } => None,
+    })
+}
+/// Whether a replica must hold a hosted index's mutable derived view (a tag resolution, tag list, or
+/// referrers list) until its search view catches the authority serial. Only a hosted index's serial is
+/// a local journal serial the frontier governs; a proxied index reports upstream state and a virtual
+/// index has no serial, so `last_serial` is `None` for both and neither is held. A serial past an
+/// unreadable frontier (which reads as zero) is held, so a replica fails closed. Mirrors the `PyPI`
+/// hosted-page gate exactly.
+fn holds_below_readable_frontier(state: &ServingState, index: &Index, last_serial: Option<u64>) -> bool {
+    state.read_only
+        && matches!(index.kind, IndexKind::Hosted { .. })
+        && last_serial.is_some_and(|serial| serial > state.readable_frontier().unwrap_or_default().serial)
+}
 /// Whether the first member with repository state for a digest has hidden it. A lower tombstone does
 /// not override a live digest in a higher member.
 fn manifest_trashed_in(state: &ServingState, members: &[&Index], repo: &str, digest: &str) -> Result<bool, ServeError> {

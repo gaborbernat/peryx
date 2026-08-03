@@ -370,6 +370,21 @@ fn log_replica_page(outcome: SyncOutcome) {
     );
 }
 
+/// Apply the effects of one replicated page: log it, refresh the search view, and hand the changed keys
+/// to every ecosystem driver so each retires the derived views those keys touch. A page with no changes
+/// does nothing. This is synchronous and independent of the async sync loop, so a direct test covers it
+/// deterministically rather than riding on async scheduling.
+pub(crate) fn apply_replicated_page(app: &AppState, outcome: SyncOutcome, changed_keys: &[String]) {
+    if outcome.changes > 0 {
+        log_replica_page(outcome);
+        app.bump_search_epoch();
+        let state = app.serving.as_ref();
+        for driver in app.drivers() {
+            driver.apply_replicated_changes(state, changed_keys);
+        }
+    }
+}
+
 impl ReplicaLoop {
     async fn run(self) {
         loop {
@@ -387,14 +402,7 @@ impl ReplicaLoop {
         let elapsed = started.elapsed();
         match result {
             Ok((outcome, changed_keys)) => {
-                if outcome.changes > 0 {
-                    log_replica_page(outcome);
-                    self.app.bump_search_epoch();
-                    let state = self.app.serving.as_ref();
-                    for driver in self.app.drivers() {
-                        driver.apply_replicated_changes(state, &changed_keys);
-                    }
-                }
+                apply_replicated_page(&self.app, outcome, &changed_keys);
                 self.monitor.record(outcome);
                 let readable = self.app.readable_frontier().map_or(0, |frontier| frontier.serial);
                 self.monitor.record_readable(readable);

@@ -54,6 +54,11 @@ pub async fn pypi_dispatch_get(
 /// Only the file route reads `head`. Everywhere else the answer is a page peryx has to produce anyway
 /// to know its status, and axum drops the body of it; a file is the one representation whose body costs
 /// an upstream download.
+///
+/// The streaming, resolve, and file branches each build a multi-kilobyte future (upstream fetch and
+/// transform state). Inlined, they would size this dispatch future to their max and copy it on every
+/// request, including the hot cached path that never enters them, so each is boxed to contribute a
+/// pointer instead. See #779.
 async fn pypi_get(
     state: &Arc<ServingState>,
     position: usize,
@@ -85,7 +90,7 @@ async fn pypi_get(
             project: normalized.clone(),
         });
         if matches!(negotiate(headers), Format::Json) {
-            match cache::stream_detail(state.clone(), position, normalized.clone()).await {
+            match Box::pin(cache::stream_detail(state.clone(), position, normalized.clone())).await {
                 Ok(PageOutcome::Ready(bytes, last_serial)) => {
                     return json_bytes_response(bytes, last_serial);
                 }
@@ -115,7 +120,7 @@ async fn pypi_get(
             if let Some((bytes, last_serial)) = hot {
                 return html_bytes_response(bytes, last_serial);
             }
-            let detail = cache::resolve_detail_page(state, index, &normalized, &index.route).await;
+            let detail = Box::pin(cache::resolve_detail_page(state, index, &normalized, &index.route)).await;
             if let Ok(Some(found)) = &detail {
                 let body = bytes::Bytes::from(crate::render_detail_html(&found.detail));
                 remember_rendered(
@@ -131,14 +136,14 @@ async fn pypi_get(
             }
             return detail_response(detail, &index.route, &normalized);
         }
-        let detail = cache::resolve_detail_page(state, index, &normalized, &index.route).await;
+        let detail = Box::pin(cache::resolve_detail_page(state, index, &normalized, &index.route)).await;
         return detail_response(detail, &index.route, &normalized);
     }
     if let Some(file) = rest.strip_prefix("files/") {
-        return file_route(state, index, file, headers, head).await;
+        return Box::pin(file_route(state, index, file, headers, head)).await;
     }
     if let Some(target) = rest.strip_prefix("inspect/") {
-        return inspect_route(state.clone(), index.route.clone(), target, uri.query()).await;
+        return Box::pin(inspect_route(state.clone(), index.route.clone(), target, uri.query())).await;
     }
     not_found()
 }
@@ -170,7 +175,7 @@ async fn legacy_json_route(state: &Arc<ServingState>, index: &Index, rest: &str)
     if let Some((bytes, last_serial)) = hot {
         return Some(legacy_bytes_response(bytes, last_serial));
     }
-    let detail = cache::resolve_detail_page(state, index, &target.project, &index.route).await;
+    let detail = Box::pin(cache::resolve_detail_page(state, index, &target.project, &index.route)).await;
     if let Ok(Some(found)) = &detail
         && let Some(body) = crate::legacy_json::render_legacy_json_with_serial(
             &found.detail,

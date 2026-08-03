@@ -10,6 +10,7 @@ mod backoff;
 mod blob;
 mod channel;
 mod consensus;
+mod driver;
 mod election;
 mod envelope;
 mod error;
@@ -37,6 +38,7 @@ pub use consensus::{
     AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
     RaftLogError, Term,
 };
+pub use driver::{StepOutcome, advance_once};
 pub use election::{ElectionError, NodeId, PersistentState, VoteDecision, VoteReason, VoteRequest};
 pub use envelope::{
     AuthorityEpoch, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, OperationEnvelope, OperationId, OperationKind,
@@ -80,6 +82,8 @@ mod blob_tests;
 mod channel_tests;
 #[cfg(test)]
 mod consensus_tests;
+#[cfg(test)]
+mod driver_tests;
 #[cfg(test)]
 mod election_tests;
 #[cfg(test)]

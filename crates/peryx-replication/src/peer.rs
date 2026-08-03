@@ -337,27 +337,10 @@ pub async fn drain_to_frontier<T: PeerTransport>(
         } else {
             source = Some(page.source.clone());
         }
-        if page.after != after {
-            return Err(TransportError::FrontierGap {
-                expected: after,
-                actual: page.after,
-            });
-        }
-        let frontier = page.current_serial;
-        if page.changes.is_empty() && after < frontier {
-            return Err(TransportError::EmptyBatch { frontier, after });
-        }
-        for change in &page.changes {
-            if change.serial != after + 1 {
-                return Err(TransportError::FrontierGap {
-                    expected: after + 1,
-                    actual: change.serial,
-                });
-            }
-            after = change.serial;
-            changes.push(change.clone());
-        }
-        if after >= frontier {
+        let (reached, caught_up) = validate_contiguous(after, page)?;
+        changes.extend(page.changes.iter().cloned());
+        after = reached;
+        if caught_up {
             return Ok(FrontierSync {
                 source: source.unwrap_or_default(),
                 through: after,
@@ -374,4 +357,38 @@ pub async fn drain_to_frontier<T: PeerTransport>(
             });
         }
     }
+}
+
+/// Check that `page` continues the frontier from `from`: its `after` matches the cursor, its change
+/// serials run `from + 1, from + 2, ...` with no gap, and an empty page is not hiding a frontier still
+/// ahead. Returns the serial the changes reach and whether they meet the peer's advertised frontier.
+///
+/// This is the one contiguity check both [`drain_to_frontier`] and the single-step driver run, so a
+/// caller cannot skip serials or accept a stalled batch by taking a different validation path.
+///
+/// # Errors
+/// Returns [`TransportError::FrontierGap`] for a mismatched cursor or a non-contiguous serial, and
+/// [`TransportError::EmptyBatch`] for an empty page behind the advertised frontier.
+pub fn validate_contiguous(from: u64, page: &ChangePage) -> Result<(u64, bool), TransportError> {
+    if page.after != from {
+        return Err(TransportError::FrontierGap {
+            expected: from,
+            actual: page.after,
+        });
+    }
+    let frontier = page.current_serial;
+    if page.changes.is_empty() && from < frontier {
+        return Err(TransportError::EmptyBatch { frontier, after: from });
+    }
+    let mut reached = from;
+    for change in &page.changes {
+        if change.serial != reached + 1 {
+            return Err(TransportError::FrontierGap {
+                expected: reached + 1,
+                actual: change.serial,
+            });
+        }
+        reached = change.serial;
+    }
+    Ok((reached, reached >= frontier))
 }

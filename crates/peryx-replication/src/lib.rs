@@ -9,6 +9,7 @@ mod authority;
 mod backoff;
 mod blob;
 mod channel;
+mod completeness;
 mod consensus;
 mod driver;
 mod election;
@@ -37,6 +38,7 @@ pub use authority::{Admission, AuthorityFence, AuthorityKey, CommitOutcome};
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
+pub use completeness::{Completeness, ProducerCoverage, assess};
 pub use consensus::{
     AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
     RaftLogError, Term,
@@ -88,6 +90,8 @@ mod backoff_tests;
 mod blob_tests;
 #[cfg(test)]
 mod channel_tests;
+#[cfg(test)]
+mod completeness_tests;
 #[cfg(test)]
 mod consensus_tests;
 #[cfg(test)]

@@ -240,6 +240,32 @@ fn test_remove_deletes_existing_blob() {
 }
 
 #[test]
+fn test_remove_prunes_empty_fan_out_directories() {
+    let (_dir, store) = store();
+    let digest = store.write(b"payload").unwrap();
+    let cd = store.path_for(&digest).parent().unwrap().to_path_buf();
+    let ab = cd.parent().unwrap().to_path_buf();
+    assert!(cd.is_dir());
+    store.remove(&digest).unwrap();
+    assert!(!cd.exists());
+    assert!(!ab.exists());
+}
+
+#[test]
+fn test_remove_stops_pruning_at_a_directory_a_sibling_occupies() {
+    let (_dir, store) = store();
+    let digest = store.write(b"payload").unwrap();
+    let cd = store.path_for(&digest).parent().unwrap().to_path_buf();
+    let ab = cd.parent().unwrap().to_path_buf();
+    let sibling = ab.join("zz");
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(sibling.join("other"), b"x").unwrap();
+    store.remove(&digest).unwrap();
+    assert!(!cd.exists(), "the emptied second-level directory is pruned");
+    assert!(ab.exists(), "the first-level directory a sibling still occupies stays");
+}
+
+#[test]
 fn test_remove_io_error_when_blob_path_is_a_directory() {
     let (_dir, store) = store();
     let digest = Digest::of(b"payload");

@@ -331,6 +331,43 @@ impl MetaStore {
         Ok(records)
     }
 
+    /// Remove up to `limit` abandoned ([`Skipped`](ReclamationState::Skipped)) tombstones, bounding the
+    /// terminal backlog a scheduler clears in one pass. Returns the number removed, so a caller loops
+    /// until it returns fewer than `limit`.
+    ///
+    /// A `Skipped` tombstone is terminal: re-selecting the digest moves it back to
+    /// [`Pending`](ReclamationState::Pending), so pruning one never races a live decision.
+    ///
+    /// # Errors
+    /// Returns a store error when a row cannot be read, decoded, or committed.
+    pub fn prune_skipped_reclamation_tombstones(&self, limit: usize) -> Result<usize, MetaError> {
+        let txn = self.db.begin_write()?;
+        let stale = {
+            let table = txn.open_table(RECLAMATION_TOMBSTONE)?;
+            let mut keys = Vec::new();
+            for entry in table.iter()? {
+                if keys.len() >= limit {
+                    break;
+                }
+                let (raw_key, value) = entry?;
+                let record: ReclamationTombstone = serde_json::from_slice(value.value())?;
+                if matches!(record.state, ReclamationState::Skipped { .. }) {
+                    keys.push(raw_key.value().to_owned());
+                }
+            }
+            keys
+        };
+        let removed = stale.len();
+        {
+            let mut table = txn.open_table(RECLAMATION_TOMBSTONE)?;
+            for key in stale {
+                table.remove(key.as_str())?;
+            }
+        }
+        txn.commit()?;
+        Ok(removed)
+    }
+
     /// Count reclamation tombstones by state for a bounded progress view.
     ///
     /// # Errors

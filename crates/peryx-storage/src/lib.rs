@@ -5,6 +5,7 @@ pub mod archive;
 pub mod blob;
 pub mod meta;
 pub mod raft;
+pub mod reclaim;
 
 #[cfg(test)]
 mod tests;

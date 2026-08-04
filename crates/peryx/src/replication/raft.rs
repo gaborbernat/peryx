@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use openraft::error::{ClientWriteError, RaftError};
-use peryx_driver::state::{HomeClaim, OwnershipAuthority, OwnershipError};
+use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError};
 use peryx_replication::raft::log_store::RaftLogStoreAdapter;
 use peryx_replication::raft::network::PeerRaftNetworkFactory;
 use peryx_replication::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
@@ -174,6 +174,20 @@ impl OwnershipAuthority for OwnershipGroup {
                 leader: forward.leader_node.map(|node| node.addr),
             }),
             Err(error) => Err(OwnershipError::Unavailable(error.to_string())),
+        }
+    }
+
+    fn cluster_status(&self) -> ClusterStatus {
+        let metrics = self.node.metrics().borrow().clone();
+        let membership = metrics.membership_config.membership();
+        let voters = membership
+            .voter_ids()
+            .filter_map(|id| membership.get_node(&id).map(|node| node.datacenter.0.clone()))
+            .collect();
+        ClusterStatus {
+            leader: metrics.current_leader,
+            term: metrics.current_term,
+            voters,
         }
     }
 }

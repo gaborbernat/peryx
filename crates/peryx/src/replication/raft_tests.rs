@@ -457,3 +457,15 @@ async fn test_has_home_reflects_a_committed_assignment() {
     // client_write returns after the entry applies, so the home reads back locally at once.
     assert!(group.has_home("proj").await);
 }
+
+#[tokio::test]
+async fn test_cluster_status_reports_the_leader_and_voter_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    let status = group.cluster_status();
+
+    assert_eq!(status.leader, Some(1));
+    assert!(status.term >= 1, "an elected leader holds a nonzero term");
+    assert_eq!(status.voters, vec!["east".to_owned()]);
+}

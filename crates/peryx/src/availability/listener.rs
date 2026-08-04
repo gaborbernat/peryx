@@ -126,15 +126,25 @@ async fn authorize(app: &AppState, headers: &HeaderMap) -> Result<UserId, Respon
 }
 
 /// Report the node's availability posture: the advertised protocol version, its mode and authority role,
-/// and whether it currently serves read-only.
+/// whether it currently serves read-only, and, when this node runs an ownership consensus group, that
+/// group's leader, term, and voter membership.
 async fn status(State(state): State<ListenerState>) -> Response {
-    let body = json!({
-        "protocol_version": AVAILABILITY_PROTOCOL_VERSION,
-        "mode": state.posture.mode,
-        "role": state.posture.role,
-        "read_only": state.app.read_only,
-    });
-    (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+    let mut body = serde_json::Map::from_iter([
+        ("protocol_version".to_owned(), json!(AVAILABILITY_PROTOCOL_VERSION)),
+        ("mode".to_owned(), json!(state.posture.mode)),
+        ("role".to_owned(), json!(state.posture.role)),
+        ("read_only".to_owned(), json!(state.app.read_only)),
+    ]);
+    if let Some(group) = state.app.ownership_authority() {
+        let status = serde_json::to_value(group.cluster_status()).expect("cluster status serializes to JSON");
+        body.insert("consensus".to_owned(), status);
+    }
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::Value::Object(body)),
+    )
+        .into_response()
 }
 
 fn unauthorized() -> Response {

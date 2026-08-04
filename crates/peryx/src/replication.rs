@@ -3,6 +3,7 @@
 mod availability_metrics;
 mod worker;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fmt::Write as _, sync::Mutex};
@@ -19,9 +20,9 @@ use peryx_http::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
 };
 use peryx_replication::{
-    CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpBlobTransport, HttpPrimary, LivenessTracker,
-    Replica, SyncError, SyncOutcome, TransferLimits, advance_blob_frontier, liveness_router, primary_router,
-    pull_outstanding,
+    BlobSources, CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpBlobTransport, HttpPrimary,
+    LivenessTracker, Replica, SyncError, SyncOutcome, TransferLimits, advance_blob_frontier, liveness_router,
+    primary_router, pull_outstanding,
 };
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
@@ -423,8 +424,17 @@ impl ReplicaLoop {
     }
 
     async fn pull_blobs(&self) -> Result<(), SyncError> {
+        // A replica draws every blob whole from its upstream primary until placement descriptors ride in
+        // the replicated page and name the peers that hold each blob; with no delegates every blob is
+        // single-source and takes the whole-blob path.
+        let delegates = HashMap::new();
+        let sources = BlobSources {
+            simple: &self.transport,
+            delegates: &delegates,
+            local_dc: "",
+        };
         pull_outstanding(
-            &self.transport,
+            &sources,
             &self.meta,
             &self.blobs,
             self.page_size,

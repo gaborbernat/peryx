@@ -3,11 +3,16 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{
+    BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId, MetaStore,
+};
 
 use crate::blob::{BlobRequest, BlobTransport, LoopbackBlobSource};
-use crate::blob_plane::{BLOB_VIEW, BlobPlaneReport, advance_blob_frontier, pull_outstanding, pull_referenced};
+use crate::blob_plane::{
+    BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_outstanding, pull_referenced,
+};
 use crate::error::SyncError;
 use crate::peer::{TransferLimits, TransportError};
 
@@ -27,6 +32,46 @@ fn limits() -> TransferLimits {
 
 fn loopback(digest: &Digest, bytes: &'static [u8]) -> LoopbackBlobSource {
     LoopbackBlobSource::new(HashMap::from([(digest.clone(), Bytes::from_static(bytes))]), limits())
+}
+
+/// A source holding `content` under `digest` even when that content is not the digest's preimage, so a
+/// test can drive a peer that serves the wrong bytes for a range and let the whole-blob check catch it.
+fn mislabeled(digest: &Digest, content: &'static [u8]) -> LoopbackBlobSource {
+    LoopbackBlobSource::new(HashMap::from([(digest.clone(), Bytes::from_static(content))]), limits())
+}
+
+/// A source holding nothing, so every fetch answers not-found and a ranged pull falls through it.
+fn empty_source() -> LoopbackBlobSource {
+    LoopbackBlobSource::new(HashMap::new(), limits())
+}
+
+/// Advertise a verified placement of `digest` in `dc`, the local record a multi-source plan reads.
+fn seed_verified_placement(meta: &MetaStore, digest: &Digest, dc: &str, size: u64) {
+    seed_verified_placement_on(meta, digest, dc, "filesystem", size);
+}
+
+/// Advertise a verified placement of `digest` in `dc` on a named `backend`, so two placements can share a
+/// data center on distinct backends.
+fn seed_verified_placement_on(meta: &MetaStore, digest: &Digest, dc: &str, backend: &str, size: u64) {
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).unwrap();
+    let key = BlobPlacementKey {
+        digest: artifact.clone(),
+        backend: BackendId::new(backend).unwrap(),
+        data_center: DataCenterId::new(dc).unwrap(),
+        location: BackendLocation::new(format!("{backend}/{}", digest.as_str())).unwrap(),
+    };
+    meta.apply_blob_placement(&key, &BlobPlacementTransition::Stage, 1, 10)
+        .unwrap();
+    meta.apply_blob_placement(
+        &key,
+        &BlobPlacementTransition::Verify {
+            observed: artifact,
+            size,
+        },
+        1,
+        20,
+    )
+    .unwrap();
 }
 
 fn nz(n: usize) -> NonZeroUsize {
@@ -218,8 +263,14 @@ async fn test_pull_outstanding_retries_a_blob_from_the_journal_tail() {
     // The blob is referenced by the journal, not by any current page: a self-healing pull finds it.
     seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
     let source = loopback(&digest, bytes);
+    let delegates = HashMap::new();
+    let sources = BlobSources {
+        simple: &source,
+        delegates: &delegates,
+        local_dc: "",
+    };
 
-    let report = pull_outstanding(&source, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
 
     assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
     assert!(blobs.head(&digest).await.unwrap().is_some());
@@ -238,8 +289,193 @@ async fn test_pull_outstanding_skips_a_present_tail_blob() {
     let source = Faulty(TransportError::BlobNotFound {
         digest: digest.as_str().to_owned(),
     });
+    let delegates = HashMap::new();
+    let sources = BlobSources {
+        simple: &source,
+        delegates: &delegates,
+        local_dc: "",
+    };
 
-    let report = pull_outstanding(&source, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
 
     assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_ranges_a_multi_placement_blob_across_sources() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"multi-source-blob";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    seed_verified_placement(&meta, &digest, "dc-a", bytes.len() as u64);
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    // The local, higher-preference source is down; the ranged pull falls through to the peer that holds it.
+    let down = empty_source();
+    let up = loopback(&digest, bytes);
+    let delegates = HashMap::from([("dc-a".to_owned(), down), ("dc-b".to_owned(), up)]);
+    let sources = BlobSources {
+        simple: &empty_source(),
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+    let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
+    assert!(placement.availability.is_local());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_leaves_a_ranged_blob_pending_when_every_source_is_down() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"unreachable";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    seed_verified_placement(&meta, &digest, "dc-a", bytes.len() as u64);
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    let delegates = HashMap::from([("dc-a".to_owned(), empty_source()), ("dc-b".to_owned(), empty_source())]);
+    let sources = BlobSources {
+        simple: &empty_source(),
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 1 });
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_rejects_a_ranged_blob_a_peer_corrupts() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"12345";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    seed_verified_placement(&meta, &digest, "dc-a", bytes.len() as u64);
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    // Both peers serve the right length but the wrong content, so the whole-blob digest check fails closed.
+    let delegates = HashMap::from([
+        ("dc-a".to_owned(), mislabeled(&digest, b"67890")),
+        ("dc-b".to_owned(), mislabeled(&digest, b"67890")),
+    ]);
+    let sources = BlobSources {
+        simple: &empty_source(),
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let error = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2))
+        .await
+        .unwrap_err();
+
+    let SyncError::BlobFetchFailed { reason, digest: failed } = error else {
+        panic!("expected a terminal ranged-fetch failure, got {error:?}");
+    };
+    assert_eq!(reason, "reassembly_failed");
+    assert_eq!(failed, digest.as_str());
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_rejects_a_ranged_range_of_the_wrong_length() {
+    let (_dir, meta, blobs) = stores();
+    let content = b"12345";
+    let digest = Digest::of(content);
+    // The journal declares ten bytes but each peer serves five, so the range length check fails closed.
+    seed_serial(&meta, 0, &[(digest.as_str(), 10)]);
+    seed_verified_placement(&meta, &digest, "dc-a", 10);
+    seed_verified_placement(&meta, &digest, "dc-b", 10);
+    let delegates = HashMap::from([
+        ("dc-a".to_owned(), loopback(&digest, content)),
+        ("dc-b".to_owned(), loopback(&digest, content)),
+    ]);
+    let sources = BlobSources {
+        simple: &empty_source(),
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let error = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2))
+        .await
+        .unwrap_err();
+
+    let SyncError::BlobFetchFailed { reason, digest: failed } = error else {
+        panic!("expected a terminal ranged-fetch failure, got {error:?}");
+    };
+    assert_eq!(reason, "range_length_mismatch");
+    assert_eq!(failed, digest.as_str());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_counts_two_placements_in_one_data_center_as_one_source() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"one-data-center";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    // Two verified placements share a data center, so the plan is one source and the blob takes the
+    // whole-blob path rather than a pointless same-transport ranged pull.
+    seed_verified_placement_on(&meta, &digest, "dc-a", "filesystem", bytes.len() as u64);
+    seed_verified_placement_on(&meta, &digest, "dc-a", "s3", bytes.len() as u64);
+    let simple = loopback(&digest, bytes);
+    let delegates = HashMap::from([("dc-a".to_owned(), empty_source())]);
+    let sources = BlobSources {
+        simple: &simple,
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_takes_the_whole_blob_path_for_a_single_placement() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"single-source";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    seed_verified_placement(&meta, &digest, "dc-a", bytes.len() as u64);
+    // One resolvable placement is not multi-source, so the blob falls to the whole-blob `simple` transport
+    // rather than the ranged delegate, which would error if asked.
+    let simple = loopback(&digest, bytes);
+    let delegates = HashMap::from([("dc-a".to_owned(), empty_source())]);
+    let sources = BlobSources {
+        simple: &simple,
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_needs_two_resolvable_delegates_to_range() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"one-delegate";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    seed_verified_placement(&meta, &digest, "dc-a", bytes.len() as u64);
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    // Two placements exist but only one resolves to a delegate, so the plan is single-source and the blob
+    // takes the whole-blob path over `simple`.
+    let simple = loopback(&digest, bytes);
+    let delegates = HashMap::from([("dc-a".to_owned(), empty_source())]);
+    let sources = BlobSources {
+        simple: &simple,
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
 }

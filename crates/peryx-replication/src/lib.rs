@@ -53,8 +53,10 @@ pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 pub use blob_http::{HttpBlobError, HttpBlobTransport};
 pub use blob_piece::{PieceError, blob_piece};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
-pub use blob_plane::{BLOB_VIEW, BlobPlaneReport, advance_blob_frontier, pull_outstanding, pull_referenced};
-pub use blob_pull::{PullError, pull_ranged};
+pub use blob_plane::{
+    BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_outstanding, pull_referenced,
+};
+pub use blob_pull::{PullError, pull_ranged, pull_ranged_blob};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};

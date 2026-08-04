@@ -13,14 +13,17 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 
 use bytes::Bytes;
+use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::{ArtifactSource, MetaStore};
 
 use crate::blob::BlobTransport;
 use crate::blob_availability::{BlobAvailability, ReferencedBlob, blob_availability};
 use crate::blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
+use crate::blob_placement::{FetchPlan, plan_blob_fetch};
+use crate::blob_pull::{PullError, pull_ranged_blob};
 use crate::error::SyncError;
-use crate::protocol::PlacementAvailability;
+use crate::protocol::{PlacementAvailability, PlacementDescriptor};
 
 /// The derived-view name whose frontier tracks how far a replica's metadata is backed by blobs it holds.
 ///
@@ -94,27 +97,132 @@ pub async fn pull_referenced<T: BlobTransport>(
     }
 }
 
+/// The transports one blob-plane pass may draw bytes from.
+///
+/// `simple` is the whole-blob transport every single-source blob falls through to, the digest-verified
+/// whole-blob path the plane has always used. `delegates` maps a data center to its ranged transport and
+/// `local_dc` names this replica's own data center, so a same-datacenter source is preferred: a blob whose
+/// verified placements resolve to two or more distinct delegates is pulled as a multi-source ranged fetch
+/// instead. `delegates` is empty until placement descriptors ride in the replicated page, so today every
+/// blob is single-source and takes the whole-blob path; once they arrive a multi-placement blob draws its
+/// ranges across the peers that hold it.
+pub struct BlobSources<'a, T> {
+    /// The whole-blob transport for a single-source blob.
+    pub simple: &'a T,
+    /// The per-data-center ranged transports a multi-source blob draws from.
+    pub delegates: &'a HashMap<String, T>,
+    /// This replica's own data center, preferred when a blob has a local placement.
+    pub local_dc: &'a str,
+}
+
 /// Pull every blob the journal tail after the current [`BLOB_VIEW`] frontier references that this replica
 /// still lacks.
 ///
-/// This is the self-healing counterpart to [`pull_referenced`]: it derives the outstanding set from
+/// A multi-placement blob is drawn as ranges across the peers that hold it; a single-source blob is drawn
+/// whole. This is the self-healing counterpart to [`pull_referenced`]: it derives the outstanding set from
 /// durable state — the same bounded journal tail [`advance_blob_frontier`] examines — rather than the
 /// page a single cycle produced. So a blob that back-pressured or failed on an earlier cycle is retried
 /// on a later one, and a restarted replica re-derives the set from the journal with no lost in-memory
-/// pending. It defers the byte commit and placement to [`pull_referenced`], which skips the blobs already
-/// present.
+/// pending.
+///
+/// Each absent blob is classified from its advertised placements: one whose verified placements resolve to
+/// two or more distinct [`delegates`](BlobSources::delegates) is fetched as a ranged multi-source pull
+/// ([`pull_ranged_blob`]) that falls through source to source and verifies the reassembled whole; every
+/// other blob defers to [`pull_referenced`] over [`simple`](BlobSources::simple). The trusted journal size
+/// bounds the ranged reassembly's pre-allocation, never a peer advertisement. Only verified whole blobs
+/// are committed, so a ranged fetch that a peer corrupts fails closed rather than landing bad bytes.
 ///
 /// # Errors
-/// The same failures as [`pull_referenced`], plus a store error reading the journal tail.
+/// The same failures as [`pull_referenced`], a terminal ranged-fetch loss ([`SyncError::BlobFetchFailed`]),
+/// or a store error reading the journal tail or a blob's placements.
 pub async fn pull_outstanding<T: BlobTransport>(
-    transport: &T,
+    sources: &BlobSources<'_, T>,
     meta: &MetaStore,
     blobs: &BlobStorage,
     batch: NonZeroUsize,
     concurrency: NonZeroUsize,
 ) -> Result<BlobPlaneReport, SyncError> {
     let referenced = referenced_over_tail(meta, batch)?;
-    pull_referenced(transport, blobs, meta, &referenced, concurrency).await
+    let mut simple = Vec::new();
+    let mut ranged = Vec::new();
+    for (digest, size) in &referenced {
+        if blobs.head(digest).await?.is_some() {
+            continue;
+        }
+        let plan = planned_source_dcs(meta, digest, sources)?;
+        if plan.len() >= 2 {
+            ranged.push((digest.clone(), *size, plan));
+        } else {
+            simple.push((digest.clone(), *size));
+        }
+    }
+    let mut report = pull_referenced(sources.simple, blobs, meta, &simple, concurrency).await?;
+    for (digest, size, plan) in ranged {
+        pull_one_ranged(meta, blobs, sources, &digest, size, &plan, &mut report).await?;
+    }
+    Ok(report)
+}
+
+/// The ordered, distinct data centers a ranged pull of `digest` should draw from: its verified placements
+/// planned by [`plan_blob_fetch`], kept only where a [`delegate`](BlobSources::delegates) transport can
+/// reach them, and deduplicated so two placements in one data center count as one source. A digest with no
+/// advertised placement, an unverified set, or no reachable delegate yields an empty plan and falls to the
+/// whole-blob path.
+fn planned_source_dcs<T>(
+    meta: &MetaStore,
+    digest: &Digest,
+    sources: &BlobSources<'_, T>,
+) -> Result<Vec<String>, SyncError> {
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).expect("a journal digest is canonical sha256 hex");
+    let placements = meta.blob_placements(&artifact)?;
+    let descriptors: Vec<PlacementDescriptor> = placements.iter().map(PlacementDescriptor::from).collect();
+    let FetchPlan::Sources(ordered) = plan_blob_fetch(&descriptors, sources.local_dc) else {
+        return Ok(Vec::new());
+    };
+    let mut dcs = Vec::new();
+    for descriptor in ordered {
+        if sources.delegates.contains_key(&descriptor.data_center) && !dcs.contains(&descriptor.data_center) {
+            dcs.push(descriptor.data_center);
+        }
+    }
+    Ok(dcs)
+}
+
+/// Drive one ranged multi-source pull and fold its result into `report`. A source exhaustion leaves the
+/// blob [pending](BlobPlaneReport::pending) for a later pass; a length or verification failure is a
+/// terminal [`SyncError::BlobFetchFailed`] the caller records and retries.
+async fn pull_one_ranged<T: BlobTransport>(
+    meta: &MetaStore,
+    blobs: &BlobStorage,
+    sources: &BlobSources<'_, T>,
+    digest: &Digest,
+    size: u64,
+    dcs: &[String],
+    report: &mut BlobPlaneReport,
+) -> Result<(), SyncError> {
+    let transports: Vec<&T> = dcs.iter().filter_map(|dc| sources.delegates.get(dc)).collect();
+    // The trusted journal size bounds the reassembly pre-allocation, never a peer advertisement.
+    let total_length = usize::try_from(size).expect("a blob fits addressable memory");
+    let reason = match pull_ranged_blob(&transports, digest, total_length).await {
+        Ok(bytes) => {
+            commit_blob(blobs, meta, digest, size, bytes.to_vec()).await?;
+            report.fetched += 1;
+            return Ok(());
+        }
+        // Every source lost the range: retryable, so the blob is left for a later pass.
+        Err(PullError::Exhausted { .. }) => {
+            report.pending += 1;
+            return Ok(());
+        }
+        // A source served the wrong number of bytes for a range, or the reassembled whole did not verify:
+        // fail closed rather than committing bytes a peer corrupted.
+        Err(PullError::Piece(_)) => "range_length_mismatch",
+        Err(PullError::Reassembly(_)) => "reassembly_failed",
+    };
+    Err(SyncError::BlobFetchFailed {
+        reason,
+        digest: digest.as_str().to_owned(),
+    })
 }
 
 /// The `(digest, size)` set every journal record after the current [`BLOB_VIEW`] frontier references,

@@ -62,6 +62,44 @@ pub async fn pull_ranged<T: BlobTransport>(
     reassemble_verified(&pieces, total_length, expected).map_err(PullError::Reassembly)
 }
 
+/// The byte span one ranged request covers, so a large blob is drawn in bounded pieces rather than a
+/// single request that must buffer the whole body before it can be checked.
+const RANGED_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Pull the whole blob `digest` of `total_length` bytes across `sources` as fixed-size ranges and return
+/// the verified whole.
+///
+/// This is the per-blob driver: it tiles `[0, total_length)` into [`RANGED_CHUNK_BYTES`] ranges and drives
+/// [`pull_ranged`] over `sources`, so each range falls through to the next source on a loss and the whole
+/// is digest-verified against `digest` before any byte is returned. `total_length` bounds the reassembly
+/// pre-allocation, so the caller MUST pass the size from its own trusted metadata rather than a peer
+/// advertisement. Nothing is committed; the caller commits the returned bytes.
+///
+/// # Errors
+/// [`PullError`] when every source is exhausted for a range, a fetched range is the wrong length, or the
+/// reassembled blob does not verify against `digest`.
+pub async fn pull_ranged_blob<T: BlobTransport>(
+    sources: &[&T],
+    digest: &Digest,
+    total_length: usize,
+) -> Result<Bytes, PullError> {
+    let ranges = chunk_ranges(total_length, RANGED_CHUNK_BYTES);
+    pull_ranged(sources, digest, &ranges, total_length, digest).await
+}
+
+/// Tile `[0, total_length)` into consecutive `chunk`-byte ranges, the last one short. A zero-length blob
+/// yields no ranges, which [`reassemble_verified`] accepts as the empty blob.
+pub fn chunk_ranges(total_length: usize, chunk: usize) -> Vec<ByteRange> {
+    let mut ranges = Vec::with_capacity(total_length.div_ceil(chunk.max(1)));
+    let mut offset = 0;
+    while offset < total_length {
+        let length = chunk.min(total_length - offset);
+        ranges.push(ByteRange { offset, length });
+        offset += length;
+    }
+    ranges
+}
+
 async fn fetch_range<T: BlobTransport>(
     sources: &[&T],
     digest: &Digest,

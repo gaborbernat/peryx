@@ -42,6 +42,8 @@ pub enum SyncError {
     CorruptBlob(String),
     #[error("metadata mutation targets reserved key {0:?}")]
     ReservedMetadataKey(String),
+    #[error("blob plane could not fetch {digest}: {reason}")]
+    BlobFetchFailed { reason: &'static str, digest: String },
 }
 
 impl SyncError {

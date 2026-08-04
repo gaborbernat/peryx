@@ -12,7 +12,7 @@ mod topology;
 
 pub use archive::{member_chunk, members};
 pub use login::login_state;
-pub use placement::placements;
+pub use placement::{blob_placements, placements};
 pub use router::{UiState, ui_router};
 pub use search::search;
 pub use simple::{layer_chunk, layer_members, manifest, project_view, projects};

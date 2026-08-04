@@ -32,7 +32,7 @@ pub use analytics::load_analytics;
 pub use archive::{load_member_chunk, load_members};
 pub use login::load_login;
 pub use manifest::{load_layer_chunk, load_layer_members, load_manifest};
-pub use placement::load_placements;
+pub use placement::{load_blob_placement, load_placements};
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 pub use policy_decisions::load_policy_decisions;
 pub use search::load_search;

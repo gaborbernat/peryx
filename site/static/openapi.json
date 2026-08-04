@@ -756,6 +756,54 @@
         ]
       }
     },
+    "/+availability/placements/{digest}": {
+      "get": {
+        "description": "Where one blob's bytes are placed across datacenters, keyed by its content digest, so an administrator reads which datacenters hold a blob and in what state. Administrator only, because the datacenter layout is topology an operator does not read; a caller below administrator reads nothing. Each entry names its datacenter and lifecycle (`pending`, `verified`, `failed`, or `revoked`) with the verified byte size, but never the backend or the on-disk location, so the view reveals convergence without an internal path. Entries come in datacenter order, are capped by the store's per-digest placement bound, and the response is `no-store`.",
+        "parameters": [
+          {
+            "description": "The blob's content digest, for example `sha256:0f1e…`",
+            "example": "sha256:0f1e",
+            "in": "path",
+            "name": "digest",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "datacenters": [
+                    {
+                      "data_center": "east-1",
+                      "size": 4096,
+                      "status": "verified",
+                      "updated_at": 1800000000
+                    },
+                    {
+                      "data_center": "west-2",
+                      "status": "pending",
+                      "updated_at": 1800000050
+                    }
+                  ],
+                  "digest": "sha256:0f1e"
+                }
+              }
+            },
+            "description": "The blob's placement across datacenters"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Blob placement across datacenters",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+availability/topology": {
       "get": {
         "description": "One immutable picture of the availability group, taken at a single instant and filtered to the caller's class, so an operator surface renders it without traversing live membership and storage state. The mode, group, node identities, datacenters, and roles are public; each node's liveness and this node's committed frontier need operator authority; the advertised peer addresses need administrator authority. A peer's liveness is `unknown` until a consensus layer observes it, so stale peer data never reads as healthy. `captured_at` dates the snapshot, `node_count` reports the full roster size when the node list is capped, and the response is `no-store`. The example shows the administrator view.",

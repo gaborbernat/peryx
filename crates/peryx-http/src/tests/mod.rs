@@ -1,6 +1,7 @@
 mod acl_tests;
 mod analytics_tests;
 mod availability_tests;
+mod blob_placements_tests;
 mod fallback_tests;
 mod grant_tests;
 mod job_tests;

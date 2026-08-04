@@ -56,10 +56,81 @@ pub struct PlacementView {
     pub next_cursor: Option<String>,
 }
 
+/// The lifecycle of one datacenter's copy of a blob, mirroring the storage placement state without its
+/// internal evidence payload. `Verified` is the only state that serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlobPlacementStatus {
+    /// A transfer into the datacenter is in flight or staged; no serving copy exists there yet.
+    Pending,
+    /// The datacenter holds a verified copy it can serve.
+    Verified,
+    /// A transfer into the datacenter failed; it holds no serving copy.
+    Failed,
+    /// The datacenter's copy was withdrawn from serving.
+    Revoked,
+}
+
+/// One datacenter's copy of a blob: which datacenter holds it and in what state, plus the verified byte
+/// size and when the record last moved.
+///
+/// Names the datacenter alone, never the backend identity or the on-disk location, so an administrator
+/// reads convergence across datacenters without a row leaking an internal path or backend name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobDatacenterPlacement {
+    pub data_center: String,
+    pub status: BlobPlacementStatus,
+    /// The verified byte size, present only once a datacenter holds a verified copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Unix seconds when this datacenter's record last changed, so a stale copy shows as age.
+    pub updated_at: i64,
+}
+
+/// Where one blob's bytes are placed across datacenters, keyed by its content digest.
+///
+/// The administrator-only companion to the whole-store [`PlacementView`]: it answers which datacenters
+/// hold a given blob and in what state, in datacenter order, capped by the store's per-digest placement
+/// bound so one digest cannot return an unbounded list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobPlacementView {
+    pub digest: String,
+    pub datacenters: Vec<BlobDatacenterPlacement>,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PlacementHealth, PlacementRow, PlacementView};
+    use super::{
+        BlobDatacenterPlacement, BlobPlacementStatus, BlobPlacementView, PlacementHealth, PlacementRow, PlacementView,
+    };
     use crate::view::{UiArtifactSource, UiByteAvailability};
+
+    #[test]
+    fn test_blob_placement_view_round_trips_and_omits_a_pending_size() {
+        let view = BlobPlacementView {
+            digest: "sha256:aa".to_owned(),
+            datacenters: vec![
+                BlobDatacenterPlacement {
+                    data_center: "east-1".to_owned(),
+                    status: BlobPlacementStatus::Verified,
+                    size: Some(4096),
+                    updated_at: 1_800_000_000,
+                },
+                BlobDatacenterPlacement {
+                    data_center: "west-2".to_owned(),
+                    status: BlobPlacementStatus::Pending,
+                    size: None,
+                    updated_at: 1_800_000_050,
+                },
+            ],
+        };
+        let encoded = serde_json::to_string(&view).unwrap();
+        assert!(
+            !encoded.contains("\"size\":null"),
+            "a pending copy omits size: {encoded}"
+        );
+        assert_eq!(serde_json::from_str::<BlobPlacementView>(&encoded).unwrap(), view);
+    }
 
     #[test]
     fn test_view_round_trips_through_json() {

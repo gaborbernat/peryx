@@ -8,13 +8,18 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse as _, Response};
-use peryx_core::{PlacementHealth, PlacementRow, PlacementView, UiArtifactSource, UiByteAvailability};
+use peryx_core::{
+    BlobDatacenterPlacement, BlobPlacementStatus, BlobPlacementView, PlacementHealth, PlacementRow, PlacementView,
+    UiArtifactSource, UiByteAvailability,
+};
 use peryx_driver::state::AppState;
+use peryx_identity::ArtifactDigest;
 use peryx_storage::meta::{
-    ArtifactPlacementQuery, ArtifactPlacementQueryError, ArtifactPlacementRow, ArtifactSource, ByteAvailability,
+    ArtifactPlacementQuery, ArtifactPlacementQueryError, ArtifactPlacementRow, ArtifactSource, BlobPlacementRecord,
+    BlobPlacementState, ByteAvailability,
 };
 
 use super::status::status_authorization;
@@ -89,6 +94,62 @@ fn placement_row(row: ArtifactPlacementRow) -> PlacementRow {
         digest: row.digest,
         source: source_class(row.source),
         availability: availability_class(row.availability),
+    }
+}
+
+/// `GET /+availability/placements/{digest}`: where one blob's bytes are placed across datacenters.
+///
+/// Administrator only, because the datacenter layout is topology an operator does not read. Each record
+/// names its datacenter and lifecycle but never the backend or the on-disk location, so the view reveals
+/// convergence without an internal path. The response is never cached.
+pub async fn blob_placements(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(digest): Path<String>,
+) -> Response {
+    let mut response = blob_placements_response(&state, &headers, &digest).await;
+    ProtectedCachePolicy::NoStore.apply(response.headers_mut());
+    response
+}
+
+async fn blob_placements_response(state: &AppState, headers: &HeaderMap, digest: &str) -> Response {
+    if status_authorization(state, headers).await.field_class() != Some(FieldClassification::Administrator) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(digest) = digest.parse::<ArtifactDigest>() else {
+        return bad_request("invalid artifact digest");
+    };
+    let Ok(records) = state.meta.blob_placements(&digest) else {
+        return internal_error();
+    };
+    let mut datacenters: Vec<BlobDatacenterPlacement> = records.iter().map(datacenter_placement).collect();
+    // Datacenter order, then time, so a render is stable and a reader scans one datacenter's copies together.
+    datacenters.sort_by(|left, right| {
+        left.data_center
+            .cmp(&right.data_center)
+            .then(left.updated_at.cmp(&right.updated_at))
+    });
+    axum::Json(BlobPlacementView {
+        digest: digest.canonical(),
+        datacenters,
+    })
+    .into_response()
+}
+
+/// Project one stored placement record to the neutral per-datacenter view, dropping the backend identity
+/// and on-disk location so the response carries no internal path.
+fn datacenter_placement(record: &BlobPlacementRecord) -> BlobDatacenterPlacement {
+    let (status, size) = match record.state {
+        BlobPlacementState::Pending => (BlobPlacementStatus::Pending, None),
+        BlobPlacementState::Verified { size } => (BlobPlacementStatus::Verified, Some(size)),
+        BlobPlacementState::Failed { .. } => (BlobPlacementStatus::Failed, None),
+        BlobPlacementState::Revoked => (BlobPlacementStatus::Revoked, None),
+    };
+    BlobDatacenterPlacement {
+        data_center: record.key.data_center.as_str().to_owned(),
+        status,
+        size,
+        updated_at: record.updated_at_unix,
     }
 }
 

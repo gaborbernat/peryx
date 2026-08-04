@@ -29,7 +29,8 @@ pub use shadow::{ShadowInspectionFilters, UiShadowCandidate, UiShadowDecision, U
 pub use snapshot::{UiEcosystemSummary, UiHosted, UiIndex, UiMetricFamily, UiRecentUpload, UiSnapshot, UiUpstream};
 pub use stats::{UiCounters, UiStats, stats_index, stats_project, stats_routes};
 pub use topology::{
-    HealthLabel, LocalNode, RoleFilter, TopologyNode, TopologySnapshot, liveness_health, mode_label, role_label,
+    HealthLabel, LocalNode, RoleFilter, StreamStatus, TopologyNode, TopologySnapshot, liveness_health, mode_label,
+    role_label, stream_status_label,
 };
 pub use trash::{TrashFilters, UiTrashPage, UiTrashRecord};
 

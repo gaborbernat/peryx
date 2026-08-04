@@ -54,8 +54,23 @@ and the default shows every node so the page stays complete without scripting. A
 itself as a standalone single node.
 
 The snapshot caps the rendered roster while still reporting the full node count, so a large group cannot return an
-unbounded list. The page traverses no live membership or storage state per view, holds no credentials, and does not
-poll.
+unbounded list. The page traverses no live membership or storage state per view and holds no credentials.
+
+The page subscribes to `GET /+availability/topology/stream`, a bounded Server-Sent Events feed, so it reflects this
+node's frontier and liveness as they move instead of polling. The stream reuses the one-shot endpoint's projection and
+authentication: it inherits the browser's credentials and filters every event to the caller's class, so a live feed
+never reveals a field the snapshot would withhold.
+
+Its traffic tracks the change rate rather than the roster size or the count of open pages. One event carries the current
+snapshot on connect, and a later event fires only when the meaningful state changes, so `captured_at` advancing on its
+own emits nothing and an idle group carries only a keep-alive comment every fifteen seconds. Each sample re-reads live
+state and the connection buffers no backlog, so a slow reader coalesces to the latest snapshot rather than a queue, and
+the server drops a client too slow to drain the socket rather than growing memory to hold its backlog.
+
+A feed badge beside the title reads `Live`, `Reconnecting`, or `Offline`. Each event's id increases, so the browser
+resumes from the last one it saw on reconnect; while it retries, the badge shows `Reconnecting`, and once it gives up,
+`Offline`. A paused feed stops the snapshot time from advancing and never reads as `Live`, so a frozen render shows as
+stale rather than passing for health.
 
 ## Policy decisions
 

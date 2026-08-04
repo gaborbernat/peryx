@@ -88,7 +88,7 @@ fn pql_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
-    let paths = grant_paths(quota_paths(analytics_paths(pql_paths(paths))))
+    let paths = grant_paths(quota_paths(analytics_paths(pql_paths(availability_paths(paths)))))
         .path(
             "/+status",
             PathItemBuilder::new().operation(HttpMethod::Get, status()).build(),
@@ -104,12 +104,6 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/+acl",
             PathItemBuilder::new().operation(HttpMethod::Get, acl()).build(),
-        )
-        .path(
-            "/+availability/topology",
-            PathItemBuilder::new()
-                .operation(HttpMethod::Get, availability_topology())
-                .build(),
         )
         .path(
             "/+api",
@@ -183,6 +177,23 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
             "/_/oidc/mint-token",
             PathItemBuilder::new()
                 .operation(HttpMethod::Post, oidc_mint_token())
+                .build(),
+        )
+}
+
+/// Register the availability topology paths, kept apart so the service path list stays short.
+fn availability_paths(paths: PathsBuilder) -> PathsBuilder {
+    paths
+        .path(
+            "/+availability/topology",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, availability_topology())
+                .build(),
+        )
+        .path(
+            "/+availability/topology/stream",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, availability_topology_stream())
                 .build(),
         )
 }
@@ -440,6 +451,41 @@ fn availability_topology() -> OperationBuilder {
                                  "liveness": "unknown", "address": "10.0.0.2:8080"}
                             ]
                         })))
+                        .build(),
+                ),
+        )
+}
+
+fn availability_topology_stream() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Availability topology stream"))
+        .description(Some(
+            "The same role-filtered snapshot as `/+availability/topology`, pushed as a bounded stream of \
+             Server-Sent Events so an operator surface updates live without polling. The first event \
+             carries the current snapshot; a later event fires only when the meaningful state changes, so \
+             traffic tracks the change rate rather than the roster size or the number of open pages, and \
+             `captured_at` advancing on its own emits nothing. An idle stream carries only keep-alive \
+             comments every fifteen seconds. Each event's `id` increases monotonically, so a browser \
+             resumes from `Last-Event-ID` on reconnect; a disconnect the browser cannot recover reads as \
+             a frozen feed rather than fresh data. A slow reader coalesces to the latest snapshot because \
+             each sample re-reads live state and the connection buffers no backlog. Authentication, the \
+             per-class field filtering, and the `no-store` policy match the one-shot endpoint.",
+        ))
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "200",
+            ResponseBuilder::new()
+                .description("An event stream of availability topology snapshots")
+                .content(
+                    "text/event-stream",
+                    ContentBuilder::new()
+                        .example(Some(json!(concat!(
+                            "id: 1\n",
+                            "event: topology\n",
+                            "data: {\"mode\":\"dc\",\"group\":\"east\",\"captured_at\":1800000000,\"node_count\":2,",
+                            "\"local\":{\"role\":\"writer\",\"liveness\":\"live\",\"frontier\":42},\"nodes\":[]}\n\n",
+                        ))))
                         .build(),
                 ),
         )

@@ -38,6 +38,38 @@ pub fn liveness_health(liveness: Option<NodeLiveness>) -> HealthLabel {
     }
 }
 
+/// The live-stream connection state, shown beside the snapshot so a paused feed never passes for fresh.
+///
+/// `Live` means the stream is delivering updates; `Connecting` covers the first connect and every
+/// automatic reconnect; `Offline` means the browser gave up and the render is frozen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StreamStatus {
+    #[default]
+    Live,
+    Connecting,
+    Offline,
+}
+
+/// The connection state as a labelled health cell, reusing the roster's health palette so an operator
+/// reads the feed's health the same way as a node's. A frozen feed never borrows the `Live` tint.
+#[must_use]
+pub fn stream_status_label(status: StreamStatus) -> HealthLabel {
+    match status {
+        StreamStatus::Live => HealthLabel {
+            text: "Live",
+            class: "health-live",
+        },
+        StreamStatus::Connecting => HealthLabel {
+            text: "Reconnecting",
+            class: "health-unready",
+        },
+        StreamStatus::Offline => HealthLabel {
+            text: "Offline",
+            class: "health-unknown",
+        },
+    }
+}
+
 #[must_use]
 pub const fn role_label(role: NodeRole) -> &'static str {
     match role {
@@ -90,7 +122,7 @@ mod tests {
     use peryx_core::{NodeLiveness, NodeRole, TopologyMode};
     use rstest::rstest;
 
-    use super::{RoleFilter, liveness_health, mode_label, role_label};
+    use super::{RoleFilter, StreamStatus, liveness_health, mode_label, role_label, stream_status_label};
 
     #[rstest]
     #[case(Some(NodeLiveness::Live), "Live", "health-live")]
@@ -113,6 +145,32 @@ mod tests {
         assert_ne!(
             liveness_health(None).class,
             liveness_health(Some(NodeLiveness::Live)).class
+        );
+    }
+
+    #[rstest]
+    #[case(StreamStatus::Live, "Live", "health-live")]
+    #[case(StreamStatus::Connecting, "Reconnecting", "health-unready")]
+    #[case(StreamStatus::Offline, "Offline", "health-unknown")]
+    fn test_stream_status_labels_every_state_with_text(
+        #[case] status: StreamStatus,
+        #[case] text: &str,
+        #[case] class: &str,
+    ) {
+        let label = stream_status_label(status);
+        assert_eq!(label.text, text);
+        assert_eq!(label.class, class);
+    }
+
+    #[test]
+    fn test_frozen_feed_never_reads_as_live() {
+        assert_ne!(
+            stream_status_label(StreamStatus::Offline).class,
+            stream_status_label(StreamStatus::Live).class,
+        );
+        assert_ne!(
+            stream_status_label(StreamStatus::Connecting).class,
+            stream_status_label(StreamStatus::Live).class,
         );
     }
 

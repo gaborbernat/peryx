@@ -33,7 +33,7 @@ use peryx_identity::{Action, Denial, authorize_all};
 
 pub use acl::{AclQuery, acl};
 pub use analytics::{analytics_sources, analytics_timeline, analytics_top, analytics_unused, analytics_versions};
-pub use availability::availability_topology;
+pub use availability::{availability_topology, availability_topology_stream};
 pub use discover::{api, openapi_spec};
 pub use dispatch::{dispatch_delete, dispatch_get, dispatch_post, dispatch_put, not_found};
 pub use grants::{GrantsQuery, create_grant, inspect_grant, list_grants, revoke_grant};

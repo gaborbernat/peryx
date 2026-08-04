@@ -81,6 +81,10 @@ fn service_routes() -> Router<Arc<AppState>> {
         .route("/+ready", get(handlers::readiness))
         .route("/+acl", get(handlers::acl))
         .route("/+availability/topology", get(handlers::availability_topology))
+        .route(
+            "/+availability/topology/stream",
+            get(handlers::availability_topology_stream),
+        )
         .route("/+stats", get(handlers::stats))
         .route("/+analytics/top-packages", get(handlers::analytics_top))
         .route("/+analytics/unused", get(handlers::analytics_unused))

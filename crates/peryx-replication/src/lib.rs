@@ -94,7 +94,10 @@ pub use versions::{
     AvailabilityVersions, Incompatibility, Negotiation, Version, VersionRange, WireKind, accepts_operation_kind,
     feature_activated, negotiate, snapshot_compatible,
 };
-pub use visibility::{ApplyEffect, ArtifactId, OpOrder, Visibility, VisibilityAction, VisibilityOp, VisibilityState};
+pub use visibility::{
+    ApplyEffect, ArtifactId, Frontier as VisibilityFrontier, OpOrder, SnapshotError as VisibilitySnapshotError,
+    VISIBILITY_APPLY_SCHEMA, Visibility, VisibilityAction, VisibilityOp, VisibilityState,
+};
 
 #[cfg(test)]
 mod ack_tests;

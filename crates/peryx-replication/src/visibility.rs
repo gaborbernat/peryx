@@ -11,14 +11,29 @@
 //! Trash/restore and revoke/lift are independent dimensions, each with its own high-water mark, so a
 //! trash and a revoke on one artifact do not fence each other out by serial order.
 //!
-//! This module is the pure state and its `apply`; wiring it onto the journal and the served `PyPI`,
-//! OCI, and search projections is deferred to the projection work.
+//! Beyond the live apply, this module owns the durable side of a replica's visibility: an [`encode`] /
+//! [`restore`] snapshot so a follower keeps every tombstone across a log compaction, and a
+//! frontier-bounded [`compact`] that releases an artifact only once a required-replica-and-backup
+//! [`Frontier`] covers its operations and it has returned to the visible default. A still-trashed or
+//! still-revoked tombstone is never released, because it is what holds the artifact out of sight.
+//! Wiring the snapshot onto the journal and the served `PyPI`, OCI, and search projections is deferred
+//! to the projection work.
+//!
+//! [`encode`]: VisibilityState::encode
+//! [`restore`]: VisibilityState::restore
+//! [`compact`]: VisibilityState::compact
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+use serde::{Deserialize, Serialize};
+
+/// The snapshot schema this build writes and is willing to restore. A format change is a deliberate
+/// migration, never a silent misread that could drop a tombstone and resurrect a revoked artifact.
+pub const VISIBILITY_APPLY_SCHEMA: u32 = 1;
 
 /// Where an operation sits in the authoritative order. A higher authority `epoch` always wins; within
 /// one epoch a higher `serial` wins. Declared epoch-first so the derived ordering compares that way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct OpOrder {
     pub epoch: u64,
     pub serial: u64,
@@ -26,7 +41,7 @@ pub struct OpOrder {
 
 /// The artifact a visibility operation targets: its serving coordinate and content digest. Two
 /// operations address the same artifact only when both match.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArtifactId {
     pub coordinate: String,
     pub digest: String,
@@ -75,12 +90,71 @@ impl Visibility {
     }
 }
 
+/// The highest operation serial each authority epoch has durably passed on every required replica and
+/// backup.
+///
+/// [`compact`](VisibilityState::compact) may release an artifact only once this frontier covers its
+/// operations, because the authority never resends an operation below a serial it has been
+/// acknowledged for everywhere, so a released entry can no longer be re-litigated by a late delivery.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Frontier {
+    covered: BTreeMap<u64, u64>,
+}
+
+impl Frontier {
+    /// Record that `epoch` is durable through `serial` everywhere, keeping the highest serial seen so
+    /// an out-of-order acknowledgement never retracts coverage.
+    pub fn acknowledge(&mut self, epoch: u64, serial: u64) {
+        let slot = self.covered.entry(epoch).or_default();
+        *slot = (*slot).max(serial);
+    }
+
+    /// Whether `order` sits at or below the durable frontier for its epoch. An epoch this frontier has
+    /// not acknowledged covers nothing, so an operation in it is always retained.
+    fn covers(&self, order: OpOrder) -> bool {
+        self.covered
+            .get(&order.epoch)
+            .is_some_and(|&serial| order.serial <= serial)
+    }
+}
+
+/// A snapshot that cannot be trusted to preserve every tombstone, so restore refuses it rather than
+/// rebuild a visibility that silently drops one and resurrects a revoked or trashed artifact.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("visibility apply snapshot is malformed: {0}")]
+    Malformed(#[source] serde_json::Error),
+    #[error("visibility apply snapshot schema {found} is not the {expected} this build restores")]
+    UnsupportedSchema { expected: u32, found: u32 },
+}
+
 #[derive(Debug, Default)]
 struct Entry {
     trashed: bool,
     trashed_at: Option<OpOrder>,
     revoked: bool,
     revoked_at: Option<OpOrder>,
+}
+
+/// The persisted serde shape of one artifact's converged visibility: both flags and the high-water
+/// order of each dimension, so a restore keeps the fencing that makes a later stale op a no-op.
+#[derive(Serialize, Deserialize)]
+struct EntrySnapshot {
+    artifact: ArtifactId,
+    trashed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trashed_at: Option<OpOrder>,
+    revoked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoked_at: Option<OpOrder>,
+}
+
+/// The persisted serde shape of a [`VisibilityState`]: a schema tag guarding the retained tombstones,
+/// so a format change is a deliberate migration rather than a silent misread.
+#[derive(Serialize, Deserialize)]
+struct VisibilityStateSnapshot {
+    schema: u32,
+    artifacts: Vec<EntrySnapshot>,
 }
 
 /// The visibility of every artifact a stream of operations has touched, kept idempotent and monotonic
@@ -127,5 +201,86 @@ impl VisibilityState {
                 trashed: entry.trashed,
                 revoked: entry.revoked,
             })
+    }
+
+    /// The number of artifacts the state currently retains.
+    #[must_use]
+    pub fn retained_artifacts(&self) -> usize {
+        self.artifacts.len()
+    }
+
+    /// Release every artifact that has returned to the visible default and whose operations `frontier`
+    /// covers, bounding retention once an entry can no longer be re-litigated by a late delivery.
+    ///
+    /// A still-trashed or still-revoked artifact is kept regardless of the frontier, because its
+    /// tombstone is what holds the artifact out of sight. An artifact with an operation above the
+    /// frontier is kept so a lagging replica or backup still converges to the same state. Compaction
+    /// never turns a visible artifact invisible or the reverse: it only forgets an entry whose absence
+    /// reads as the visible default it already holds.
+    pub fn compact(&mut self, frontier: &Frontier) {
+        self.artifacts.retain(|_, entry| {
+            entry.trashed
+                || entry.revoked
+                || entry.trashed_at.is_some_and(|order| !frontier.covers(order))
+                || entry.revoked_at.is_some_and(|order| !frontier.covers(order))
+        });
+    }
+
+    /// Serialize the retained tombstones to their JSON snapshot form, so a follower keeps every
+    /// visibility fact across a log compaction.
+    ///
+    /// # Panics
+    /// Panics only if serializing to JSON fails, which the field types make unreachable.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let snapshot = VisibilityStateSnapshot {
+            schema: VISIBILITY_APPLY_SCHEMA,
+            artifacts: self
+                .artifacts
+                .iter()
+                .map(|(artifact, entry)| EntrySnapshot {
+                    artifact: artifact.clone(),
+                    trashed: entry.trashed,
+                    trashed_at: entry.trashed_at,
+                    revoked: entry.revoked,
+                    revoked_at: entry.revoked_at,
+                })
+                .collect(),
+        };
+        serde_json::to_vec(&snapshot).expect("a visibility apply-state snapshot always serializes to JSON")
+    }
+
+    /// Restore a state from its snapshot, preserving both the converged visibility and the per-dimension
+    /// high-water order that keeps a later stale operation a no-op.
+    ///
+    /// # Errors
+    /// Returns [`SnapshotError::Malformed`] for unparseable bytes and [`SnapshotError::UnsupportedSchema`]
+    /// for a schema this build does not restore. Restore fails closed rather than rebuild a partial
+    /// visibility, because a dropped tombstone would resurrect a revoked or trashed artifact.
+    pub fn restore(bytes: &[u8]) -> Result<Self, SnapshotError> {
+        let snapshot: VisibilityStateSnapshot = serde_json::from_slice(bytes).map_err(SnapshotError::Malformed)?;
+        if snapshot.schema != VISIBILITY_APPLY_SCHEMA {
+            return Err(SnapshotError::UnsupportedSchema {
+                expected: VISIBILITY_APPLY_SCHEMA,
+                found: snapshot.schema,
+            });
+        }
+        Ok(Self {
+            artifacts: snapshot
+                .artifacts
+                .into_iter()
+                .map(|entry| {
+                    (
+                        entry.artifact,
+                        Entry {
+                            trashed: entry.trashed,
+                            trashed_at: entry.trashed_at,
+                            revoked: entry.revoked,
+                            revoked_at: entry.revoked_at,
+                        },
+                    )
+                })
+                .collect(),
+        })
     }
 }

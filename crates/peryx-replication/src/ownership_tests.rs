@@ -1,0 +1,272 @@
+use crate::authority::{Admission, AuthorityFence, AuthorityKey};
+use crate::envelope::AuthorityEpoch;
+use crate::ownership::{
+    DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipError, OwnershipState, Rejection, TransferRecord,
+};
+
+fn key(name: &str) -> AuthorityKey {
+    AuthorityKey(name.to_owned())
+}
+
+fn dc(name: &str) -> DatacenterId {
+    DatacenterId(name.to_owned())
+}
+
+fn assign(authority: &str, home: &str) -> OwnershipCommand {
+    OwnershipCommand::AssignHome {
+        authority: key(authority),
+        home: dc(home),
+    }
+}
+
+fn advance(authority: &str) -> OwnershipCommand {
+    OwnershipCommand::AdvanceAuthorityEpoch {
+        authority: key(authority),
+    }
+}
+
+fn transfer(authority: &str, new_home: &str) -> OwnershipCommand {
+    OwnershipCommand::RecordTransfer {
+        authority: key(authority),
+        new_home: dc(new_home),
+    }
+}
+
+#[test]
+fn test_assign_home_mints_epoch_one_and_records_the_home() {
+    let mut state = OwnershipState::new();
+
+    let effect = state.apply(&assign("proj", "east"));
+
+    assert_eq!(
+        effect,
+        OwnershipEffect::Assigned {
+            epoch: AuthorityEpoch(1)
+        }
+    );
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(1));
+    assert_eq!(state.home(&key("proj")), Some(&dc("east")));
+}
+
+#[test]
+fn test_an_unassigned_authority_reads_as_the_zero_sentinel() {
+    let state = OwnershipState::new();
+
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(0));
+    assert_eq!(state.home(&key("proj")), None);
+    assert!(state.transfers(&key("proj")).is_empty());
+}
+
+#[test]
+fn test_assigning_an_already_homed_authority_is_rejected_and_leaves_it_unchanged() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("proj", "east"));
+
+    let effect = state.apply(&assign("proj", "west"));
+
+    assert_eq!(effect, OwnershipEffect::Rejected(Rejection::AlreadyAssigned));
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(1));
+    assert_eq!(state.home(&key("proj")), Some(&dc("east")));
+}
+
+#[test]
+fn test_advancing_the_epoch_increments_it_and_keeps_the_home() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("proj", "east"));
+
+    let effect = state.apply(&advance("proj"));
+
+    assert_eq!(
+        effect,
+        OwnershipEffect::EpochAdvanced {
+            epoch: AuthorityEpoch(2)
+        }
+    );
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(2));
+    assert_eq!(state.home(&key("proj")), Some(&dc("east")));
+    assert!(state.transfers(&key("proj")).is_empty());
+}
+
+#[test]
+fn test_advancing_is_monotonic_across_repeated_commands() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("proj", "east"));
+
+    state.apply(&advance("proj"));
+    state.apply(&advance("proj"));
+
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(3));
+}
+
+#[test]
+fn test_advancing_an_unassigned_authority_is_rejected() {
+    let mut state = OwnershipState::new();
+
+    let effect = state.apply(&advance("proj"));
+
+    assert_eq!(effect, OwnershipEffect::Rejected(Rejection::NotAssigned));
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(0));
+}
+
+#[test]
+fn test_transfer_moves_the_home_mints_the_next_epoch_and_records_the_move() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("proj", "east"));
+
+    let effect = state.apply(&transfer("proj", "west"));
+
+    assert_eq!(
+        effect,
+        OwnershipEffect::Transferred {
+            from: dc("east"),
+            to: dc("west"),
+            epoch: AuthorityEpoch(2),
+        }
+    );
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(2));
+    assert_eq!(state.home(&key("proj")), Some(&dc("west")));
+    assert_eq!(
+        state.transfers(&key("proj")),
+        &[TransferRecord {
+            from: dc("east"),
+            to: dc("west"),
+            epoch: AuthorityEpoch(2),
+        }]
+    );
+}
+
+#[test]
+fn test_successive_transfers_keep_the_full_trail_in_order() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("proj", "east"));
+
+    state.apply(&transfer("proj", "west"));
+    state.apply(&transfer("proj", "north"));
+
+    assert_eq!(
+        state.transfers(&key("proj")),
+        &[
+            TransferRecord {
+                from: dc("east"),
+                to: dc("west"),
+                epoch: AuthorityEpoch(2),
+            },
+            TransferRecord {
+                from: dc("west"),
+                to: dc("north"),
+                epoch: AuthorityEpoch(3),
+            },
+        ]
+    );
+    assert_eq!(state.home(&key("proj")), Some(&dc("north")));
+}
+
+#[test]
+fn test_transferring_an_unassigned_authority_is_rejected() {
+    let mut state = OwnershipState::new();
+
+    let effect = state.apply(&transfer("proj", "west"));
+
+    assert_eq!(effect, OwnershipEffect::Rejected(Rejection::NotAssigned));
+    assert_eq!(state.home(&key("proj")), None);
+}
+
+#[test]
+fn test_transferring_to_the_current_home_is_rejected_and_mints_no_epoch() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("proj", "east"));
+
+    let effect = state.apply(&transfer("proj", "east"));
+
+    assert_eq!(effect, OwnershipEffect::Rejected(Rejection::SameHome));
+    assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(1));
+    assert!(state.transfers(&key("proj")).is_empty());
+}
+
+#[test]
+fn test_authorities_move_independently() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("alpha", "east"));
+    state.apply(&assign("beta", "west"));
+
+    state.apply(&advance("alpha"));
+
+    assert_eq!(state.epoch(&key("alpha")), AuthorityEpoch(2));
+    assert_eq!(state.epoch(&key("beta")), AuthorityEpoch(1));
+    assert_eq!(state.home(&key("beta")), Some(&dc("west")));
+}
+
+#[test]
+fn test_a_minted_epoch_admits_at_the_fence_and_fences_the_prior_one() {
+    // The state machine is the producer the fence consumes: the epoch it mints, committed, is the one
+    // the fence admits, and the epoch it superseded is fenced.
+    let mut state = OwnershipState::new();
+    let mut fence = AuthorityFence::new();
+    let authority = key("proj");
+
+    let OwnershipEffect::Assigned { epoch: first } = state.apply(&assign("proj", "east")) else {
+        panic!("assign should mint the first epoch");
+    };
+    fence.commit(&authority, first);
+
+    let OwnershipEffect::Transferred { epoch: second, .. } = state.apply(&transfer("proj", "west")) else {
+        panic!("transfer should mint the next epoch");
+    };
+    fence.commit(&authority, second);
+
+    assert_eq!(fence.admit(&authority, second), Admission::Admit);
+    assert_eq!(
+        fence.admit(&authority, first),
+        Admission::Fenced {
+            committed: second,
+            presented: first,
+        }
+    );
+}
+
+#[test]
+fn test_snapshot_restore_round_trips_the_full_state() {
+    let mut state = OwnershipState::new();
+    state.apply(&assign("alpha", "east"));
+    state.apply(&transfer("alpha", "west"));
+    state.apply(&assign("beta", "north"));
+    state.apply(&advance("beta"));
+
+    let restored = OwnershipState::restore(&state.snapshot()).unwrap();
+
+    assert_eq!(restored, state);
+    assert_eq!(restored.epoch(&key("alpha")), AuthorityEpoch(2));
+    assert_eq!(restored.home(&key("alpha")), Some(&dc("west")));
+    assert_eq!(
+        restored.transfers(&key("alpha")),
+        &[TransferRecord {
+            from: dc("east"),
+            to: dc("west"),
+            epoch: AuthorityEpoch(2),
+        }]
+    );
+    assert_eq!(restored.epoch(&key("beta")), AuthorityEpoch(2));
+}
+
+#[test]
+fn test_an_empty_state_round_trips() {
+    let restored = OwnershipState::restore(&OwnershipState::new().snapshot()).unwrap();
+
+    assert_eq!(restored, OwnershipState::new());
+}
+
+#[test]
+fn test_restore_rejects_malformed_bytes() {
+    let error = OwnershipState::restore(b"not a snapshot").unwrap_err();
+
+    assert!(matches!(error, OwnershipError::Malformed(_)));
+}
+
+#[test]
+fn test_restore_rejects_a_record_at_the_reserved_zero_epoch() {
+    let snapshot = br#"{"proj":{"home":"east","epoch":0,"transfers":[]}}"#;
+
+    let error = OwnershipState::restore(snapshot).unwrap_err();
+
+    assert!(matches!(error, OwnershipError::ZeroEpoch { authority } if authority == "proj"));
+}

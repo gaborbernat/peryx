@@ -20,6 +20,7 @@ mod index;
 mod job;
 mod job_lease;
 mod journal;
+mod operation_outcome;
 mod placement;
 mod placement_reconcile;
 mod policy_decision;
@@ -55,6 +56,9 @@ pub use job::{
 };
 pub use job_lease::{ClaimOutcome, JobLease, JobLeaseError, LeaseState};
 pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSnapshot};
+pub use operation_outcome::{
+    OperationClaim, OperationOutcomeError, OperationOutcomeRecord, OperationResult, OperationState,
+};
 pub use placement::{
     ArtifactOrigin, ArtifactPlacement, ArtifactPlacementHealth, ArtifactPlacementPage, ArtifactPlacementQuery,
     ArtifactPlacementQueryError, ArtifactPlacementRow, ArtifactSource, ByteAvailability, MAX_REPAIR_BATCH,
@@ -105,6 +109,9 @@ const WEBHOOK_DELIVERY: TableDefinition<&str, &[u8]> = TableDefinition::new("web
 const WEBHOOK_DUE: TableDefinition<&str, &str> = TableDefinition::new("webhook_due");
 const JOB_RUN: TableDefinition<&str, &[u8]> = TableDefinition::new("job_run");
 const JOB_LEASE: TableDefinition<&str, &[u8]> = TableDefinition::new("job_lease");
+/// The durable outcome of each admitted write, keyed by operation id so a retry replays the original
+/// result instead of running a second mutation.
+const OPERATION_OUTCOME: TableDefinition<&str, &[u8]> = TableDefinition::new("operation_outcome");
 const POLICY_DECISION: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_decision");
 const POLICY_DECISION_CURRENT: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current");
 const POLICY_DECISION_CURRENT_ID: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current_id");
@@ -275,6 +282,7 @@ impl MetaStore {
             txn.open_table(BLOB_PLACEMENT)?;
             txn.open_table(TRANSFER_ATTEMPT)?;
             txn.open_table(RECLAMATION_TOMBSTONE)?;
+            txn.open_table(OPERATION_OUTCOME)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;
             txn.open_table(SCOPED_TOKEN)?;

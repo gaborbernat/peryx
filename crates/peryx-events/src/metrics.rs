@@ -1134,6 +1134,16 @@ mod tests {
         Arc::new(move || day * SECONDS_PER_DAY + SECONDS_PER_DAY / 2)
     }
 
+    /// A clock the test advances between settled writes, so one running aggregator can date buckets on
+    /// different days and cross its own retention window without a restart.
+    fn steppable_clock() -> (std::sync::Arc<std::sync::atomic::AtomicI64>, Clock) {
+        let day = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let handle = std::sync::Arc::clone(&day);
+        let clock: Clock =
+            Arc::new(move || handle.load(std::sync::atomic::Ordering::SeqCst) * SECONDS_PER_DAY + SECONDS_PER_DAY / 2);
+        (day, clock)
+    }
+
     fn settle_and_assert(metrics: &Metrics, done: impl Fn() -> bool) {
         // Drain the aggregator through its barrier, then assert the state it settled on.
         metrics.settle();
@@ -1333,6 +1343,31 @@ mod tests {
                 downloads: 1,
                 bytes: 9,
             }]
+        );
+    }
+
+    #[test]
+    fn test_the_running_aggregator_expires_a_bucket_that_ages_past_retention() {
+        use std::sync::atomic::Ordering;
+
+        let (_dir, meta) = store();
+        let (day, clock) = steppable_clock();
+        let metrics = Metrics::start_durable(meta.analytics(), Some(2), clock);
+
+        metrics.record(download_of("pypi", "flask", "1.0", Some("up"), 3));
+        settle_and_assert(&metrics, || metrics.daily_usage().iter().any(|row| row.day == 0));
+
+        // Advance five days so the day-0 bucket falls outside the two-day window, then record again:
+        // the running aggregator applies retention to the live map, not just at startup.
+        day.store(5, Ordering::SeqCst);
+        metrics.record(download_of("pypi", "flask", "2.0", Some("up"), 9));
+        settle_and_assert(&metrics, || metrics.daily_usage().iter().any(|row| row.day == 5));
+
+        let days: Vec<i64> = metrics.daily_usage().iter().map(|row| row.day).collect();
+        assert_eq!(
+            days,
+            [5],
+            "the aged day-0 bucket expired during aggregation, leaving only day 5"
         );
     }
 

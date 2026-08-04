@@ -44,6 +44,19 @@ fn test_envelope_round_trips_through_encode_decode() {
 }
 
 #[test]
+fn test_visibility_kind_round_trips_as_its_kebab_case_tag() {
+    let original = OperationEnvelope::current("primary-a", AuthorityEpoch(3), OperationKind::Visibility, change());
+    let bytes = original.encode();
+
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("\"visibility\""),
+        "the kind serializes to its kebab-case tag"
+    );
+    let decoded = OperationEnvelope::decode(&bytes, DecodeLimits::default()).unwrap();
+    assert_eq!(decoded.kind, OperationKind::Visibility);
+}
+
+#[test]
 fn test_envelope_current_sets_schema_version_and_no_trace() {
     let envelope = envelope();
     assert_eq!(envelope.schema_version, SCHEMA_VERSION);
@@ -229,6 +242,7 @@ fn test_operation_kind_as_str_and_display_match() {
         (OperationKind::CacheFill, "cache-fill"),
         (OperationKind::OciPush, "oci-push"),
         (OperationKind::OciDelete, "oci-delete"),
+        (OperationKind::Visibility, "visibility"),
     ];
     for (kind, expected) in cases {
         assert_eq!(kind.as_str(), expected);

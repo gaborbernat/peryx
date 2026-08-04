@@ -58,8 +58,15 @@ async fn test_primary_serves_a_hosted_page_regardless_of_the_search_view() {
     assert!(body.contains("peryxpkg"));
 }
 
+/// A cached index reports its upstream serial, not the local journal the readable frontier governs, so a
+/// replica serves it even though its own frontier sits at zero. The JSON representation streams straight
+/// from the cache, while the HTML one resolves through the gate, so both accepts exercise the path that
+/// decides a cached index is never held.
+#[rstest]
+#[case::json(Some("application/json"))]
+#[case::html(Some("text/html"))]
 #[tokio::test]
-async fn test_replica_does_not_gate_a_cached_index() {
+async fn test_replica_does_not_gate_a_cached_index(#[case] accept: Option<&str>) {
     let h = harness().await;
     let wheel = b"not a real archive";
     let digest = Digest::of(wheel);
@@ -76,10 +83,8 @@ async fn test_replica_does_not_gate_a_cached_index() {
     let (primed, ..) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
     assert_eq!(primed, StatusCode::OK);
 
-    // A cached index reports its upstream serial, not the local journal the readable frontier governs,
-    // so a replica serves it even though its own frontier sits at zero.
     let replica = replica_state(&h);
-    let (status, ..) = get(&replica, "/pypi/simple/flask/", Some("application/json")).await;
+    let (status, ..) = get(&replica, "/pypi/simple/flask/", accept).await;
     assert_eq!(status, StatusCode::OK);
 }
 

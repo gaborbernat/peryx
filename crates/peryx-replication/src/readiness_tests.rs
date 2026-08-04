@@ -2,7 +2,26 @@ use std::num::NonZeroUsize;
 
 use crate::readiness::{
     DurabilityPolicy, GroupReadiness, MemberFrontier, MemberRole, ReadinessBlocker, group_readiness,
+    visibility_compaction_frontier,
 };
+use crate::visibility::{ArtifactId, OpOrder, VisibilityAction, VisibilityOp, VisibilityState};
+
+fn artifact(coordinate: &str) -> ArtifactId {
+    ArtifactId {
+        coordinate: coordinate.to_owned(),
+        digest: "sha256:deadbeef".to_owned(),
+    }
+}
+
+/// Record a visible artifact whose dimension high-water sits at `(epoch, serial)`, so compaction may
+/// release it exactly when the frontier covers that order.
+fn visible_at(state: &mut VisibilityState, coordinate: &str, epoch: u64, serial: u64) {
+    state.apply(&VisibilityOp {
+        artifact: artifact(coordinate),
+        action: VisibilityAction::Restore,
+        order: OpOrder { epoch, serial },
+    });
+}
 
 fn writer(applied: Option<u64>) -> MemberFrontier {
     MemberFrontier {
@@ -201,4 +220,71 @@ fn test_group_readiness_is_the_negation_of_a_blocker() {
 
     assert!(ready.is_ready());
     assert!(!blocked.is_ready());
+}
+
+#[test]
+fn test_the_backup_frontier_bounds_the_compaction_frontier() {
+    let members = [writer(Some(10)), replica("b", Some(10))];
+    let frontier = visibility_compaction_frontier(&members, DurabilityPolicy::Everywhere, 5, 1);
+
+    let mut state = VisibilityState::new();
+    visible_at(&mut state, "at-the-backup", 1, 5);
+    visible_at(&mut state, "above-the-backup", 1, 8);
+    state.compact(&frontier);
+
+    assert_eq!(
+        state.retained_artifacts(),
+        1,
+        "the backup at serial 5 bounds release, so the serial-8 entry stays"
+    );
+}
+
+#[test]
+fn test_the_replicated_frontier_bounds_the_compaction_frontier() {
+    let members = [writer(Some(4)), replica("b", Some(4))];
+    let frontier = visibility_compaction_frontier(&members, DurabilityPolicy::Everywhere, 100, 1);
+
+    let mut state = VisibilityState::new();
+    visible_at(&mut state, "at-the-replicas", 1, 4);
+    visible_at(&mut state, "above-the-replicas", 1, 8);
+    state.compact(&frontier);
+
+    assert_eq!(
+        state.retained_artifacts(),
+        1,
+        "the replicas at serial 4 bound release despite a further-ahead backup"
+    );
+}
+
+#[test]
+fn test_a_lagging_member_lowers_the_compaction_frontier() {
+    let members = [writer(Some(10)), replica("b", Some(3))];
+    let frontier = visibility_compaction_frontier(&members, DurabilityPolicy::Everywhere, 100, 1);
+
+    let mut state = VisibilityState::new();
+    visible_at(&mut state, "above-the-laggard", 1, 5);
+    state.compact(&frontier);
+
+    assert_eq!(
+        state.retained_artifacts(),
+        1,
+        "the lagging replica at serial 3 keeps the serial-5 entry retained"
+    );
+}
+
+#[test]
+fn test_the_frontier_acknowledges_the_given_epoch() {
+    let members = [writer(Some(10)), replica("b", Some(10))];
+    let frontier = visibility_compaction_frontier(&members, DurabilityPolicy::Everywhere, 10, 7);
+
+    let mut state = VisibilityState::new();
+    visible_at(&mut state, "this-epoch", 7, 5);
+    visible_at(&mut state, "later-epoch", 9, 1);
+    state.compact(&frontier);
+
+    assert_eq!(
+        state.retained_artifacts(),
+        1,
+        "the frontier covers epoch 7, so only the later-epoch entry stays"
+    );
 }

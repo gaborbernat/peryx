@@ -442,6 +442,33 @@ async fn test_dual_replica_advances_both_planes_when_the_blob_is_available() {
 }
 
 #[tokio::test]
+async fn test_dual_replica_reports_blob_fetch_counts_to_operators() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    let digest = primary_blobs.write(b"artifact").unwrap();
+    primary_meta
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), 8);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"upload".to_vec()]))
+        })
+        .unwrap();
+    let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let router = runtime.mount(router_for(state));
+
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+
+    // The blob plane pulled the one referenced blob and left nothing outstanding, so a scrape shows the
+    // pull without waiting for the readable frontier to lag.
+    let (_, body) = get(&router, "/metrics").await;
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains("peryx_replication_blobs_fetched_total 1\n"), "{body}");
+    assert!(body.contains("peryx_replication_blobs_pending 0\n"), "{body}");
+}
+
+#[tokio::test]
 async fn test_dual_replica_advances_metadata_while_a_missing_blob_holds_the_blob_frontier() {
     let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
     // Reference a blob the primary never stored, so serving it 404s and the blob plane cannot advance.

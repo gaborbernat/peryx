@@ -5,7 +5,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use std::time::Duration;
 
 use peryx_core::Ecosystem;
 use peryx_driver::authz::AuthorizationService;
@@ -82,11 +81,7 @@ fn seed_usage(metrics: &Metrics) {
             });
         }
     }
-    let settled = (0..500).any(|_| {
-        std::thread::sleep(Duration::from_millis(2));
-        metrics.usage_totals(None).len() == 3
-    });
-    assert!(settled, "usage aggregator never settled");
+    metrics.settle();
 }
 
 /// An app whose authorization service reads a store whose `role_grant` table has the wrong shape, so

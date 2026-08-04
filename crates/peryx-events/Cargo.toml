@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "What a peryx process reports about itself: usage counters, security event logging, and signed webhook delivery."
 
+[features]
+# Exposes the aggregator's deterministic settle barrier (`Metrics::settle`) to downstream test suites
+# so they await drained state instead of polling on a timer.
+test-util = []
+
 [dependencies]
 peryx-core.workspace = true
 peryx-identity.workspace = true

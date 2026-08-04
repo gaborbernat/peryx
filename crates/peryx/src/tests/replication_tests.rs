@@ -86,6 +86,71 @@ fn primary_config() -> ReplicationConfig {
 }
 
 #[tokio::test]
+async fn test_ignite_consensus_forms_no_group_outside_an_ha_roster() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, Some(primary_config()));
+    let state = build_state(&config).unwrap();
+    let replication = ReplicationRuntime::new(&config, &state).unwrap();
+
+    assert!(replication.ignite_consensus().await.unwrap().is_none());
+}
+
+fn ha_group_config(dir: &tempfile::TempDir) -> Config {
+    Config {
+        data_dir: dir.path().to_path_buf(),
+        writer_identity: Some(WRITER_IDENTITY.to_owned()),
+        availability: AvailabilityConfig::Ha(primary_config()),
+        dc_membership: Some(DcMembership {
+            group: "ownership".to_owned(),
+            members: vec![DcMember {
+                node: WRITER_IDENTITY.to_owned(),
+                dc: "east".to_owned(),
+                address: "http://127.0.0.1:4461".to_owned(),
+                role: DcRole::Writer,
+            }],
+        }),
+        ..Config::default()
+    }
+}
+
+#[tokio::test]
+async fn test_ignite_consensus_starts_the_configured_ha_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = ha_group_config(&dir);
+    let state = build_state(&config).unwrap();
+    let replication = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let node = replication
+        .ignite_consensus()
+        .await
+        .unwrap()
+        .expect("an ha roster ignites a consensus node");
+
+    let mut leader = None;
+    for _ in 0..50 {
+        if let Some(found) = node.leader() {
+            leader = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(leader.map(|node| node.datacenter.0), Some("east".to_owned()));
+}
+
+#[tokio::test]
+async fn test_ignite_consensus_surfaces_a_store_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = ha_group_config(&dir);
+    let state = build_state(&config).unwrap();
+    let replication = ReplicationRuntime::new(&config, &state).unwrap();
+    // A file where the consensus log directory belongs makes ignition fail, and the error propagates
+    // rather than being swallowed.
+    std::fs::write(dir.path().join("raft"), b"not a directory").unwrap();
+
+    assert!(replication.ignite_consensus().await.is_err());
+}
+
+#[tokio::test]
 async fn test_build_state_projects_the_configured_dc_topology() {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {

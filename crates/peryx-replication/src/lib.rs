@@ -32,6 +32,7 @@ mod peer_http;
 mod protocol;
 pub mod raft;
 mod readiness;
+mod receipt_quorum;
 mod reconcile;
 mod replica;
 pub mod sim;
@@ -90,6 +91,7 @@ pub use readiness::{
     DurabilityPolicy, GroupReadiness, MemberFrontier, MemberRole, ReadinessBlocker, group_readiness,
     visibility_compaction_frontier,
 };
+pub use receipt_quorum::{ByteDurability, ReceiptAck, assess_byte_durability};
 pub use reconcile::{Disposition, OldEpochOp, classify};
 pub use replica::{Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};
@@ -154,6 +156,8 @@ mod peer_tests;
 mod protocol_tests;
 #[cfg(test)]
 mod readiness_tests;
+#[cfg(test)]
+mod receipt_quorum_tests;
 #[cfg(test)]
 mod reconcile_tests;
 #[cfg(test)]

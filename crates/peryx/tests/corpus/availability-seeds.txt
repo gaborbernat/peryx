@@ -1,0 +1,9 @@
+# Regression corpus for the availability safety-simulator campaign.
+#
+# One u64 seed per line; `#` comments and blank lines are ignored. Every seed here runs on every
+# pull request across the full topology matrix, so a break the scheduled campaign found never
+# reappears unnoticed. When a scheduled shard reports a violating seed, add it here (with the topology
+# and the fix in the same change) to promote it into the permanent pull-request guard.
+#
+# Empty today: the model holds every invariant, so no seed has failed. The scheduled campaign sweeps a
+# large seed space to find the first one.

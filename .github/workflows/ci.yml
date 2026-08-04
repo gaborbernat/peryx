@@ -172,7 +172,7 @@ jobs:
       - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace ${{ matrix.features }} -E 'not(binary(e2e)) & not(binary(availability))'
+      - run: cargo nextest run --workspace ${{ matrix.features }} -E 'not(binary(e2e)) & not(binary(availability)) & not(binary(sim_campaign))'
       - name: Cancel remaining jobs on failure
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure
@@ -331,6 +331,78 @@ jobs:
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure
 
+  # The availability safety-simulator seed campaign: a bounded seed sweep plus the checked-in regression
+  # corpus, per pull request. A break writes the minimized trace as an artifact with a repro command.
+  sim-campaign:
+    needs: changes
+    if: >-
+      needs.changes.outputs.shared == 'true' || github.event_name == 'push' ||
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
+    env:
+      PERYX_SIM_ARTIFACTS: ${{ github.workspace }}/sim-artifacts
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: cargo-nextest
+      - name: Run the pull-request seed campaign
+        run: cargo nextest run -p peryx --features sim-campaign
+      - name: Upload failing traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sim-campaign-traces
+          path: ${{ env.PERYX_SIM_ARTIFACTS }}
+          if-no-files-found: ignore
+      - name: Cancel remaining jobs on failure
+        if: failure() && !cancelled()
+        uses: ./.github/actions/cancel-on-failure
+
+  # A large sharded seed campaign, scheduled only: each shard runs a disjoint slice of the range once.
+  # A shard that finds a violating seed uploads its trace; promote that seed into the corpus with its fix.
+  sim-campaign-scheduled:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      PERYX_SIM_SEEDS: "200000"
+      PERYX_SIM_SHARD_INDEX: ${{ matrix.shard }}
+      PERYX_SIM_SHARD_TOTAL: "8"
+      PERYX_SIM_ARTIFACTS: ${{ github.workspace }}/sim-artifacts
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: cargo-nextest
+      - name: Run seed campaign shard ${{ matrix.shard }}
+        run: cargo nextest run -p peryx --features sim-campaign -E 'test(availability_seed_campaign)'
+      - name: Upload failing traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sim-campaign-traces-shard-${{ matrix.shard }}
+          path: ${{ env.PERYX_SIM_ARTIFACTS }}
+          if-no-files-found: ignore
+
   # The hydrated web UI, driven by Playwright: the wasm bundle is built with cargo-leptos and the
   # suite exercises search, the project page, the archive browser, and token-authenticated actions.
   frontend:
@@ -405,7 +477,7 @@ jobs:
   # skipped; fails if any failed or was cancelled.
   ci-gate:
     if: always()
-    needs: [changes, lint, test, coverage, e2e, e2e-live, availability, frontend, docs]
+    needs: [changes, lint, test, coverage, e2e, e2e-live, availability, sim-campaign, frontend, docs]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify no required job failed

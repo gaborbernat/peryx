@@ -260,4 +260,19 @@ mod tests {
         // label on every error this adapter renders, so match the decoder's own message instead.
         assert!(error.to_string().contains("expected"), "{error}");
     }
+
+    #[tokio::test]
+    async fn test_a_store_fault_surfaces_as_a_storage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bare.redb");
+        // A valid redb database without the raft tables: a read hits redb's "table does not exist"
+        // fault, which the adapter folds through its store-error arm into a storage error rather than
+        // panicking.
+        redb::Database::create(&path).unwrap();
+        let mut adapter = RaftLogStoreAdapter::new(RaftLogStore::open_existing(&path).unwrap());
+
+        let error = adapter.read_vote().await.unwrap_err();
+
+        assert!(error.to_string().to_lowercase().contains("does not exist"), "{error}");
+    }
 }

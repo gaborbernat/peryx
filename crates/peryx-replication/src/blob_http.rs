@@ -34,8 +34,6 @@ pub enum HttpBlobError {
     EmptyToken,
     #[error("invalid peer URL {0:?}")]
     InvalidBase(String),
-    #[error("build replication HTTP client: {0}")]
-    Client(#[source] reqwest::Error),
 }
 
 /// A bearer-authenticated HTTP [`BlobTransport`] that fetches a blob, or a range of it, from a peer's
@@ -70,8 +68,11 @@ impl HttpBlobTransport {
     /// blob with `limits`.
     ///
     /// # Errors
-    /// Returns [`HttpBlobError`] for an empty token, a URL that is not a usable HTTP(S) base, or an HTTP
-    /// client that fails to build.
+    /// Returns [`HttpBlobError`] for an empty token or a URL that is not a usable HTTP(S) base.
+    ///
+    /// # Panics
+    /// Panics if the HTTP client cannot be built, which a static user agent and a duration timeout over
+    /// the guaranteed `rustls` provider never provoke.
     pub fn new(
         base: &str,
         token: impl Into<String>,
@@ -99,7 +100,7 @@ impl HttpBlobTransport {
             .user_agent(USER_AGENT)
             .timeout(timeout)
             .build()
-            .map_err(HttpBlobError::Client)?;
+            .expect("a reqwest client with a static user agent and a duration timeout always builds");
         Ok(Self {
             http,
             blobs_url,

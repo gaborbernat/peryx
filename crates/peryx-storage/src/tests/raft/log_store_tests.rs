@@ -15,6 +15,32 @@ fn store() -> (TempDir, RaftLogStore) {
     (dir, store)
 }
 
+#[test]
+fn test_opening_a_non_database_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("not-a-db.redb");
+    std::fs::write(&path, b"these bytes are not a redb database").unwrap();
+
+    // A garbage file drives redb's open failure through the store's error type.
+    let Err(error) = RaftLogStore::open_existing(&path) else {
+        panic!("opening a non-database file must fail");
+    };
+    assert!(error.to_string().to_lowercase().contains("data"), "{error}");
+}
+
+#[test]
+fn test_reading_a_store_whose_tables_are_absent_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bare.redb");
+    // A valid redb database that was never given the raft tables: opening succeeds, but a read of a
+    // table that does not exist surfaces the store's error.
+    redb::Database::create(&path).unwrap();
+    let store = RaftLogStore::open_existing(&path).unwrap();
+
+    let error = store.read_range(..).unwrap_err();
+    assert!(error.to_string().to_lowercase().contains("does not exist"), "{error}");
+}
+
 fn entry(index: u64, payload: &[u8]) -> StoredEntry {
     StoredEntry {
         index,

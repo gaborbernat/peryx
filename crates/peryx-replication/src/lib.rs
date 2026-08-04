@@ -20,12 +20,9 @@ mod blob_reassembly;
 mod blob_routing;
 mod channel;
 mod completeness;
-mod consensus;
 mod driver;
-mod election;
 mod envelope;
 mod error;
-mod follower;
 mod http;
 mod ingress_intent;
 mod liveness;
@@ -62,20 +59,12 @@ pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use completeness::{Completeness, ProducerCoverage, assess};
-pub use consensus::{
-    AppendEntries, AppendOutcome, DEFAULT_LOG_LIMITS, LogEntry, LogIndex, LogLimits, MemoryRaftLog, RaftLog,
-    RaftLogError, Term,
-};
 pub use driver::{StepOutcome, advance_once};
-pub use election::{ElectionError, NodeId, PersistentState, VoteDecision, VoteReason, VoteRequest};
 pub use envelope::{
     AuthorityEpoch, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, OperationEnvelope, OperationId, OperationKind,
     SCHEMA_VERSION, SchemaVersion, TraceContext, TraceError, derive_child,
 };
 pub use error::SyncError;
-pub use follower::{
-    AppendAccepted, AppendReject, AppendRequest, AppendResponse, CommitTracker, receive_append_entries,
-};
 pub use http::{DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PrimaryHttpConfigError, primary_router};
 pub use ingress_intent::{
     Ecosystem, IngressIntent, IntentKey, IntentLedger, IntentState, StageOutcome, TransitionOutcome,
@@ -139,15 +128,9 @@ mod channel_tests;
 #[cfg(test)]
 mod completeness_tests;
 #[cfg(test)]
-mod consensus_tests;
-#[cfg(test)]
 mod driver_tests;
 #[cfg(test)]
-mod election_tests;
-#[cfg(test)]
 mod envelope_tests;
-#[cfg(test)]
-mod follower_tests;
 #[cfg(test)]
 mod http_tests;
 #[cfg(test)]

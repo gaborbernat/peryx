@@ -3,6 +3,7 @@
 mod support;
 
 mod attestations;
+mod authority;
 mod changelog;
 mod discovery;
 mod download;

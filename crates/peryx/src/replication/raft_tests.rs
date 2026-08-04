@@ -446,3 +446,14 @@ async fn test_claim_home_on_a_stopped_group_is_unavailable() {
         Err(OwnershipError::Unavailable(_))
     ));
 }
+
+#[tokio::test]
+async fn test_has_home_reflects_a_committed_assignment() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(!group.has_home("proj").await);
+    group.claim_home("proj").await.unwrap();
+    // client_write returns after the entry applies, so the home reads back locally at once.
+    assert!(group.has_home("proj").await);
+}

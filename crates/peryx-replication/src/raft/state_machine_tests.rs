@@ -198,3 +198,16 @@ async fn test_installing_a_corrupt_snapshot_fails_closed() {
 
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn test_home_of_reads_the_applied_home() {
+    let mut machine = OwnershipStateMachine::default();
+    assert_eq!(machine.home_of(&key("proj")).await, None);
+
+    machine.apply(vec![normal(1, assign("proj", "east"))]).await.unwrap();
+
+    assert_eq!(
+        machine.home_of(&key("proj")).await,
+        Some(DatacenterId("east".to_owned()))
+    );
+}

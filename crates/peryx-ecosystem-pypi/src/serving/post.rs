@@ -224,11 +224,13 @@ async fn accept_upload(context: UploadContext<'_>, multipart: Multipart) -> Resp
         emit_upload_status_event(&audit, &block);
         return block.response;
     }
-    upload_store_response(
-        state,
-        &audit,
-        cache::store_upload(state, &hosted.name, prepared, quota).await,
-    )
+    let stored = cache::store_upload(state, &hosted.name, prepared, quota).await;
+    // The first stored file publishes the project, so it assigns the project's home datacenter through
+    // the ownership group; a later file finds a home already set and only reads it.
+    if matches!(&stored, Ok(true)) {
+        state.claim_first_publish_home(&project).await;
+    }
+    upload_store_response(state, &audit, stored)
 }
 
 fn project_quota_reservation(

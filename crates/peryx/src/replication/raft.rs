@@ -145,6 +145,14 @@ impl OwnershipGroup {
 
 #[async_trait::async_trait]
 impl OwnershipAuthority for OwnershipGroup {
+    async fn has_home(&self, authority: &str) -> bool {
+        self.node
+            .state_machine()
+            .home_of(&AuthorityKey(authority.to_owned()))
+            .await
+            .is_some()
+    }
+
     async fn claim_home(&self, authority: &str) -> Result<HomeClaim, OwnershipError> {
         let command = OwnershipCommand::AssignHome {
             authority: AuthorityKey(authority.to_owned()),

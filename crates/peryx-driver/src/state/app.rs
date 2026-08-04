@@ -224,6 +224,13 @@ impl ServingState {
         self.ownership.get()
     }
 
+    /// Assign `authority`'s home on its first publish, best effort. A publish path calls this after it
+    /// commits a new project or repository; it claims a home only when a group runs and the authority has
+    /// none yet, and never blocks the publish on the outcome.
+    pub async fn claim_first_publish_home(&self, authority: &str) {
+        crate::state::ownership::claim_first_publish_home(self.ownership.get(), authority).await;
+    }
+
     /// Find the index whose route is the longest segment-aligned prefix of `path` (which has no
     /// leading slash), and the path remainder after `route/`. Returns `None` if no route matches.
     #[must_use]

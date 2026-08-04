@@ -869,9 +869,16 @@ async fn test_s3_times_out_before_response_headers() {
     let (received, request) = tokio::sync::oneshot::channel();
     let (release, wait) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
+        // The accepted connection is the deterministic barrier: the client has reached us. Whether its
+        // request bytes land before its own 500 ms deadline is a race the test must not gate on, because
+        // that deadline is exactly what the client is meant to hit here. Under parallel load the client
+        // can spend the whole budget on connect and credential setup and close before a byte arrives, so
+        // asserting a non-zero read raced the client's timeout rather than measured it. The client still
+        // times out either way, and the response provably never arrives before it does: this server
+        // writes nothing until `release`, which the test sends only after the child has already exited.
         let (mut connection, _) = listener.accept().await.unwrap();
-        assert_ne!(connection.read(&mut [0; 4096]).await.unwrap(), 0);
         received.send(()).unwrap();
+        let _ = connection.read(&mut [0; 4096]).await;
         wait.await.unwrap();
         let _ = connection
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nlate")

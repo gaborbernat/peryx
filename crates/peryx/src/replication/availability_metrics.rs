@@ -235,7 +235,6 @@ mod tests {
         metrics.record_cycle(
             SyncOutcome {
                 changes: 2,
-                blobs: 0,
                 serial: 4,
                 primary_serial: 7,
             },
@@ -246,7 +245,6 @@ mod tests {
         metrics.record_cycle(
             SyncOutcome {
                 changes: 3,
-                blobs: 0,
                 serial: 7,
                 primary_serial: 7,
             },
@@ -261,7 +259,6 @@ mod tests {
         metrics.record_cycle(
             SyncOutcome {
                 changes: 0,
-                blobs: 0,
                 serial: 1,
                 primary_serial: 1,
             },
@@ -270,7 +267,6 @@ mod tests {
         metrics.record_cycle(
             SyncOutcome {
                 changes: 0,
-                blobs: 0,
                 serial: 1,
                 primary_serial: 1,
             },

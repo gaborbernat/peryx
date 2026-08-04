@@ -38,8 +38,6 @@ pub enum SyncError {
     ConflictingBlobSize { digest: String, first: u64, second: u64 },
     #[error("blob {digest} has {actual} bytes; expected {expected}")]
     BlobSizeMismatch { digest: String, expected: u64, actual: u64 },
-    #[error("blob {0} already exists with bytes that fail digest verification")]
-    CorruptBlob(String),
     #[error("metadata mutation targets reserved key {0:?}")]
     ReservedMetadataKey(String),
     #[error("blob plane could not fetch {digest}: {reason}")]

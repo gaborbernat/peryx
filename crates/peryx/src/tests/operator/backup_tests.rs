@@ -74,7 +74,7 @@ fn test_backup_create_rejects_tampered_source_blob() {
 )]
 #[case::ha_replica(
     "[acme]\ndomains = [\"packages.example.com\"]\ncontact = \"ops@example.com\"\ncache-dir = \"/var/cache/peryx/acme\"\nstaging = true",
-    "[availability]\nmode = \"ha\"\n[availability.replication]\nrole = \"replica\"\nupstream = \"https://primary.example/\"\ntoken_file = \"/run/secrets/replication-token\"\npoll_interval_secs = 30\npage_size = 250\ndual_plane = true"
+    "[availability]\nmode = \"ha\"\n[availability.replication]\nrole = \"replica\"\nupstream = \"https://primary.example/\"\ntoken_file = \"/run/secrets/replication-token\"\npoll_interval_secs = 30\npage_size = 250"
 )]
 fn test_backup_config_round_trips_effective_settings(#[case] tls: &str, #[case] availability: &str) {
     let root = tempfile::tempdir().unwrap();

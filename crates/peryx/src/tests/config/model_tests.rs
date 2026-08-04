@@ -124,7 +124,6 @@ fn test_config_requires_a_writer_identity_in_replica_mode(#[case] configured_rep
                 token: SecretSource::Literal("secret".to_owned()),
                 poll_interval: std::time::Duration::from_secs(1),
                 page_size: std::num::NonZeroUsize::MIN,
-                dual_plane: false,
             })
         } else {
             AvailabilityConfig::None

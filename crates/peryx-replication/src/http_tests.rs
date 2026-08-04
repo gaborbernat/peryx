@@ -426,7 +426,7 @@ fn test_http_primary_rejects_a_malformed_url() {
 }
 
 #[tokio::test]
-async fn test_http_primary_fetches_changes_and_streams_blobs() {
+async fn test_http_primary_fetches_changes() {
     let stores = TestStores::new();
     stores.meta.put_driver_value("delete", b"old").unwrap();
     let digest = stores.blobs.put_bytes(b"artifact").await.unwrap();
@@ -443,7 +443,6 @@ async fn test_http_primary_fetches_changes_and_streams_blobs() {
     let primary = HttpPrimary::new(&format!("{}mirror", server.url), TOKEN).unwrap();
 
     let page = primary.changes(0, 10).await.unwrap();
-    let chunks = primary.blob(&digest).await.unwrap().collect::<Vec<_>>().await;
 
     assert_eq!(page.current_serial, 1);
     assert_eq!(page.changes[0].event, b"event");
@@ -465,10 +464,6 @@ async fn test_http_primary_fetches_changes_and_streams_blobs() {
                 value: b"record".to_vec(),
             },
         ]
-    );
-    assert_eq!(
-        chunks.into_iter().collect::<Result<Vec<Bytes>, _>>().unwrap(),
-        [Bytes::from_static(b"artifact")]
     );
     let debug = format!("{primary:?}");
     assert!(debug.contains("<redacted>"));

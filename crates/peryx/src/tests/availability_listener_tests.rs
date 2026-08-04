@@ -72,7 +72,6 @@ fn ha_replica() -> AvailabilityPosture {
         token: SecretSource::Literal("secret".to_owned()),
         poll_interval: Duration::from_secs(1),
         page_size: NonZeroUsize::MIN,
-        dual_plane: false,
     }))
     .expect("ha replica posture")
 }

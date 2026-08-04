@@ -4,7 +4,7 @@ use peryx_storage::blob::Digest;
 
 use crate::blob::{BlobRequest, BlobTransport, ByteRange};
 use crate::blob_piece::PieceError;
-use crate::blob_pull::{PullError, pull_ranged};
+use crate::blob_pull::{PullError, chunk_ranges, pull_ranged, pull_ranged_blob};
 use crate::blob_reassembly::ReassemblyError;
 use crate::peer::TransportError;
 
@@ -140,4 +140,46 @@ async fn test_pull_ranged_verifies_the_empty_blob_from_zero_ranges() {
     let bytes = pull_ranged(&[&source], &expected, &[], 0, &expected).await;
 
     assert_eq!(bytes, Ok(Bytes::new()));
+}
+
+#[tokio::test]
+async fn test_pull_ranged_blob_chunks_and_verifies_the_whole() {
+    let content = b"0123456789";
+    let expected = Digest::of(content);
+    let source = serve(content);
+
+    let bytes = pull_ranged_blob(&[&source], &expected, content.len()).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(content)));
+}
+
+#[tokio::test]
+async fn test_pull_ranged_blob_falls_through_to_the_next_source() {
+    let content = b"0123456789";
+    let expected = Digest::of(content);
+    let down = fail(TransportError::Timeout);
+    let up = serve(content);
+
+    let bytes = pull_ranged_blob(&[&down, &up], &expected, content.len()).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(content)));
+}
+
+#[tokio::test]
+async fn test_pull_ranged_blob_verifies_the_empty_blob() {
+    let expected = Digest::of(b"");
+    let source = serve(b"");
+
+    let bytes = pull_ranged_blob(&[&source], &expected, 0).await;
+
+    assert_eq!(bytes, Ok(Bytes::new()));
+}
+
+#[test]
+fn test_chunk_ranges_tiles_the_blob_into_consecutive_ranges() {
+    assert!(chunk_ranges(0, 4).is_empty());
+    assert_eq!(chunk_ranges(3, 4), [range(0, 3)]);
+    assert_eq!(chunk_ranges(8, 4), [range(0, 4), range(4, 4)]);
+    // The last range is short when the length is not a chunk multiple.
+    assert_eq!(chunk_ranges(10, 4), [range(0, 4), range(4, 4), range(8, 2)]);
 }

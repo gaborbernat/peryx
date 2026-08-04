@@ -17,6 +17,7 @@ mod external_identity;
 mod frontier;
 mod index;
 mod job;
+mod job_lease;
 mod journal;
 mod placement;
 mod policy_decision;
@@ -44,6 +45,7 @@ pub use job::{
     FinishJobRun, JobKind, JobOutcome, JobRunPage, JobRunQuery, JobRunQueryError, JobRunRecord, JobRunStoreError,
     JobState, NewJobRun,
 };
+pub use job_lease::{ClaimOutcome, JobLease, JobLeaseError, LeaseState};
 pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSnapshot};
 pub use placement::{
     ArtifactOrigin, ArtifactPlacement, ArtifactSource, ByteAvailability, MAX_REPAIR_BATCH, PlacementEvent,
@@ -86,6 +88,7 @@ const SERIAL: TableDefinition<&str, u64> = TableDefinition::new("serial");
 const WEBHOOK_DELIVERY: TableDefinition<&str, &[u8]> = TableDefinition::new("webhook_delivery");
 const WEBHOOK_DUE: TableDefinition<&str, &str> = TableDefinition::new("webhook_due");
 const JOB_RUN: TableDefinition<&str, &[u8]> = TableDefinition::new("job_run");
+const JOB_LEASE: TableDefinition<&str, &[u8]> = TableDefinition::new("job_lease");
 const POLICY_DECISION: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_decision");
 const POLICY_DECISION_CURRENT: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current");
 const POLICY_DECISION_CURRENT_ID: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current_id");
@@ -220,6 +223,7 @@ impl MetaStore {
             txn.open_table(WEBHOOK_DELIVERY)?;
             txn.open_table(WEBHOOK_DUE)?;
             txn.open_table(JOB_RUN)?;
+            txn.open_table(JOB_LEASE)?;
             txn.open_table(POLICY_DECISION)?;
             txn.open_table(POLICY_DECISION_CURRENT)?;
             txn.open_table(POLICY_DECISION_CURRENT_ID)?;

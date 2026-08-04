@@ -62,6 +62,19 @@ fn scratch_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Walk up from a removed blob's path, dropping each now-empty fan-out directory until reaching
+/// `stop_at` (the `sha256` root, left in place) or a directory another blob still occupies. A
+/// non-empty directory makes `remove_dir` fail, which ends the walk without disturbing it.
+fn prune_empty_parents(path: &Path, stop_at: &Path) {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        if dir == stop_at || std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+        current = dir.parent();
+    }
+}
+
 fn remove_pending(path: &Path) -> Result<(), BlobError> {
     let mut backoff = Duration::from_millis(1);
     loop {
@@ -305,11 +318,20 @@ impl BlobStore {
 
     /// Remove a blob by digest, returning whether a file existed.
     ///
+    /// After removing the file, the two fan-out directories it hung under (`sha256/ab/cd` then
+    /// `sha256/ab`) are pruned when they fall empty, so reclaiming a store's last blob under a prefix
+    /// leaves no empty skeleton behind. A directory a concurrent writer still needs stays put, since the
+    /// prune skips a non-empty directory and the write path recreates any it needs.
+    ///
     /// # Errors
     /// Returns [`BlobError::Io`] if the filesystem removal fails.
     pub fn remove(&self, digest: &Digest) -> Result<bool, BlobError> {
-        match std::fs::remove_file(self.path_for(digest)) {
-            Ok(()) => Ok(true),
+        let path = self.path_for(digest);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                prune_empty_parents(&path, &self.root.join("sha256"));
+                Ok(true)
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(err) => Err(err.into()),
         }

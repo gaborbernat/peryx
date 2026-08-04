@@ -367,6 +367,46 @@ fn test_reclamation_progress_counts_by_state() {
 }
 
 #[test]
+fn test_prune_removes_skipped_tombstones_up_to_the_limit() {
+    let (_dir, store) = store();
+    for suffix in 1..=3 {
+        store
+            .select_reclamation_candidate(&digest(suffix), false, 5, 1, 0)
+            .unwrap();
+        store
+            .mark_reclamation_ready(&digest(suffix), true, frontier(5, 5), 1, 1)
+            .unwrap();
+    }
+    assert_eq!(store.prune_skipped_reclamation_tombstones(2).unwrap(), 2);
+    assert_eq!(store.reclamation_progress().unwrap().skipped, 1);
+    assert_eq!(store.prune_skipped_reclamation_tombstones(2).unwrap(), 1);
+    assert!(store.reclamation_tombstones().unwrap().is_empty());
+}
+
+#[test]
+fn test_prune_leaves_pending_and_ready_tombstones() {
+    let (_dir, store) = store();
+    store.select_reclamation_candidate(&digest(1), false, 5, 1, 0).unwrap();
+    store.select_reclamation_candidate(&digest(2), false, 5, 1, 0).unwrap();
+    store
+        .mark_reclamation_ready(&digest(2), false, frontier(5, 5), 1, 1)
+        .unwrap();
+    store.select_reclamation_candidate(&digest(3), false, 5, 1, 0).unwrap();
+    store
+        .mark_reclamation_ready(&digest(3), true, frontier(5, 5), 1, 1)
+        .unwrap();
+    assert_eq!(store.prune_skipped_reclamation_tombstones(10).unwrap(), 1);
+    assert_eq!(
+        store.reclamation_progress().unwrap(),
+        ReclamationProgress {
+            pending: 1,
+            ready: 1,
+            skipped: 0,
+        }
+    );
+}
+
+#[test]
 fn test_tombstones_survive_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");

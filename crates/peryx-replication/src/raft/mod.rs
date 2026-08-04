@@ -21,9 +21,11 @@ use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect};
 mod config;
 pub mod log_store;
 pub mod network;
+mod node;
 mod state_machine;
 
 pub use config::RaftConfig;
+pub use node::{RaftNode, StartError};
 pub use state_machine::OwnershipStateMachine;
 
 #[cfg(test)]

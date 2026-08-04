@@ -12,6 +12,7 @@ use sha2::{Digest as _, Sha256};
 mod backend;
 mod durability;
 mod error;
+mod range;
 mod s3;
 mod storage;
 mod store;
@@ -22,6 +23,7 @@ pub use backend::{
 };
 pub use durability::{DurabilityCapabilities, DurabilityRequirement, DurabilityShortfall};
 pub use error::{BlobError, BlobErrorContext, BlobErrorKind, BlobOperation, BlobScanError};
+pub use range::{RangeRequest, parse_range};
 pub use s3::{S3Addressing, S3Backend, S3Client, S3Config, S3ConfigError, S3Error, S3Settings};
 pub use storage::{BlobBlocking, BlobStorage};
 pub use store::{BlobEntry, BlobStore, PendingBlob, StagedBlob};

@@ -12,12 +12,12 @@ use axum::response::{IntoResponse, Response};
 use peryx_core::path::{self};
 use peryx_driver::conditional::{applicable_range, http_date, if_modified_since, if_none_match, last_modified};
 use peryx_driver::not_found;
-use peryx_driver::range::{RangeSpec, parse_range, unsatisfiable_range};
+use peryx_driver::range::unsatisfiable_range;
 use peryx_driver::state::ServingState;
 use peryx_events::metrics::Event;
 use peryx_index::{Index, IndexKind};
 use peryx_policy::PolicyAction;
-use peryx_storage::blob::Digest;
+use peryx_storage::blob::{Digest, RangeRequest, parse_range};
 
 use crate::cache::{self, CacheError, PageOutcome};
 use crate::normalize_name;
@@ -486,13 +486,13 @@ async fn head_blob(
             {
                 return unchanged(etag, Some(modified));
             }
-            match range.map_or(RangeSpec::Ignore, |value| parse_range(value, size)) {
-                RangeSpec::Ignore => (StatusCode::OK, Some(size), None, modified),
-                RangeSpec::Unsatisfiable => return unsatisfiable_range(size),
-                RangeSpec::Satisfiable(start, end) => (
+            match parse_range(range, size) {
+                RangeRequest::Whole => (StatusCode::OK, Some(size), None, modified),
+                RangeRequest::Unsatisfiable => return unsatisfiable_range(size),
+                RangeRequest::Partial(range) => (
                     StatusCode::PARTIAL_CONTENT,
-                    Some(end - start + 1),
-                    Some(format!("bytes {start}-{end}/{size}")),
+                    Some(range.end - range.start),
+                    Some(format!("bytes {}-{}/{size}", range.start, range.end - 1)),
                     modified,
                 ),
             }
@@ -557,17 +557,16 @@ async fn serve_blob(
             {
                 return unchanged(etag, Some(modified));
             }
-            let (status, start, length, content_range) =
-                match range.map_or(RangeSpec::Ignore, |value| parse_range(value, size)) {
-                    RangeSpec::Ignore => (StatusCode::OK, 0, size, None),
-                    RangeSpec::Unsatisfiable => return unsatisfiable_range(size),
-                    RangeSpec::Satisfiable(start, end) => (
-                        StatusCode::PARTIAL_CONTENT,
-                        start,
-                        end - start + 1,
-                        Some(format!("bytes {start}-{end}/{size}")),
-                    ),
-                };
+            let (status, start, length, content_range) = match parse_range(range, size) {
+                RangeRequest::Whole => (StatusCode::OK, 0, size, None),
+                RangeRequest::Unsatisfiable => return unsatisfiable_range(size),
+                RangeRequest::Partial(range) => (
+                    StatusCode::PARTIAL_CONTENT,
+                    range.start,
+                    range.end - range.start,
+                    Some(format!("bytes {}-{}/{size}", range.start, range.end - 1)),
+                ),
+            };
             let mut builder = Response::builder()
                 .status(status)
                 .header(header::CONTENT_LENGTH, length);

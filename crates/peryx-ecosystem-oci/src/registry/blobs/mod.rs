@@ -6,7 +6,7 @@ mod contents;
 
 use contents::{layer_contents_response, layer_query_member};
 use peryx_driver::conditional::applicable_range;
-use peryx_driver::range::{RangeSpec, parse_range, unsatisfiable_range};
+use peryx_driver::range::unsatisfiable_range;
 
 use super::uploads::created;
 use super::*;
@@ -22,7 +22,9 @@ use peryx_events::metrics::Event;
 use peryx_events::webhook::WebhookEventKind;
 use peryx_index::Index;
 use peryx_policy::PolicyAction;
-use peryx_storage::blob::{BlobError, BlobErrorKind, BlobMetadata, BlobStorage, BlobWrite, Digest};
+use peryx_storage::blob::{
+    BlobError, BlobErrorKind, BlobMetadata, BlobStorage, BlobWrite, Digest, RangeRequest, parse_range,
+};
 use std::sync::Arc;
 
 impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> {
@@ -519,9 +521,8 @@ async fn serve_stored_blob(
         (header::ETAG, header_value(asked.etag)),
         (DOCKER_CONTENT_DIGEST, header_value(digest)),
     ];
-    let spec = asked.range.map_or(RangeSpec::Ignore, |value| parse_range(value, size));
-    let (start, end) = match spec {
-        RangeSpec::Ignore => {
+    let range = match parse_range(asked.range, size) {
+        RangeRequest::Whole => {
             let mut builder = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_LENGTH, size);
@@ -537,14 +538,17 @@ async fn serve_stored_blob(
                 .body(body)
                 .expect("blob response builds from validated header parts"));
         }
-        RangeSpec::Unsatisfiable => return Ok(unsatisfiable_range(size)),
-        RangeSpec::Satisfiable(start, end) => (start, end),
+        RangeRequest::Unsatisfiable => return Ok(unsatisfiable_range(size)),
+        RangeRequest::Partial(range) => range,
     };
-    let length = end - start + 1;
+    let length = range.end - range.start;
     let mut builder = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_LENGTH, length)
-        .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{size}", range.start, range.end - 1),
+        );
     for (name, value) in common {
         builder = builder.header(name, value);
     }
@@ -553,7 +557,7 @@ async fn serve_stored_blob(
     }
     Ok(builder
         .body(peryx_driver::body::blob_read(
-            blobs.open(storage, Some(start..end + 1)).await.map_err(blob_fault)?,
+            blobs.open(storage, Some(range)).await.map_err(blob_fault)?,
         ))
         .expect("range response builds from validated header parts"))
 }
@@ -566,13 +570,13 @@ fn blob_head_response(digest: &str, size: Option<u64>, asked: &BlobRequest<'_>) 
     // hold, which is the one thing a client checking a layer must not see.
     let (status, length, content_range) = match size {
         None => (StatusCode::OK, None, None),
-        Some(size) => match asked.range.map_or(RangeSpec::Ignore, |value| parse_range(value, size)) {
-            RangeSpec::Ignore => (StatusCode::OK, Some(size), None),
-            RangeSpec::Unsatisfiable => return unsatisfiable_range(size),
-            RangeSpec::Satisfiable(start, end) => (
+        Some(size) => match parse_range(asked.range, size) {
+            RangeRequest::Whole => (StatusCode::OK, Some(size), None),
+            RangeRequest::Unsatisfiable => return unsatisfiable_range(size),
+            RangeRequest::Partial(range) => (
                 StatusCode::PARTIAL_CONTENT,
-                Some(end - start + 1),
-                Some(format!("bytes {start}-{end}/{size}")),
+                Some(range.end - range.start),
+                Some(format!("bytes {}-{}/{size}", range.start, range.end - 1)),
             ),
         },
     };

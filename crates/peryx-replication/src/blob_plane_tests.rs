@@ -7,7 +7,7 @@ use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
 
 use crate::blob::{BlobRequest, BlobTransport, LoopbackBlobSource};
-use crate::blob_plane::{BLOB_VIEW, BlobPlaneReport, advance_blob_frontier, pull_referenced};
+use crate::blob_plane::{BLOB_VIEW, BlobPlaneReport, advance_blob_frontier, pull_outstanding, pull_referenced};
 use crate::error::SyncError;
 use crate::peer::{TransferLimits, TransportError};
 
@@ -208,4 +208,38 @@ async fn test_advance_fails_closed_on_an_unparseable_journal_digest() {
     // The digest cannot be probed, so the blob counts as absent and the frontier holds below serial 1.
     assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 0);
     assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_retries_a_blob_from_the_journal_tail() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"outstanding";
+    let digest = Digest::of(bytes);
+    // The blob is referenced by the journal, not by any current page: a self-healing pull finds it.
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    let source = loopback(&digest, bytes);
+
+    let report = pull_outstanding(&source, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.head(&digest).await.unwrap().is_some());
+    let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
+    assert!(placement.availability.is_local());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_skips_a_present_tail_blob() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"already-here";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    seed_local(&blobs, &digest, bytes).await;
+    // A transport that errors if asked proves the present tail blob is not re-pulled.
+    let source = Faulty(TransportError::BlobNotFound {
+        digest: digest.as_str().to_owned(),
+    });
+
+    let report = pull_outstanding(&source, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
 }

@@ -94,6 +94,46 @@ pub async fn pull_referenced<T: BlobTransport>(
     }
 }
 
+/// Pull every blob the journal tail after the current [`BLOB_VIEW`] frontier references that this replica
+/// still lacks.
+///
+/// This is the self-healing counterpart to [`pull_referenced`]: it derives the outstanding set from
+/// durable state — the same bounded journal tail [`advance_blob_frontier`] examines — rather than the
+/// page a single cycle produced. So a blob that back-pressured or failed on an earlier cycle is retried
+/// on a later one, and a restarted replica re-derives the set from the journal with no lost in-memory
+/// pending. It defers the byte commit and placement to [`pull_referenced`], which skips the blobs already
+/// present.
+///
+/// # Errors
+/// The same failures as [`pull_referenced`], plus a store error reading the journal tail.
+pub async fn pull_outstanding<T: BlobTransport>(
+    transport: &T,
+    meta: &MetaStore,
+    blobs: &BlobStorage,
+    batch: NonZeroUsize,
+    concurrency: NonZeroUsize,
+) -> Result<BlobPlaneReport, SyncError> {
+    let referenced = referenced_over_tail(meta, batch)?;
+    pull_referenced(transport, blobs, meta, &referenced, concurrency).await
+}
+
+/// The `(digest, size)` set every journal record after the current [`BLOB_VIEW`] frontier references,
+/// bounded to `batch` records. A digest that cannot parse is left out: it cannot be pulled, and
+/// [`advance_blob_frontier`] holds the frontier below it regardless.
+fn referenced_over_tail(meta: &MetaStore, batch: NonZeroUsize) -> Result<Vec<(Digest, u64)>, SyncError> {
+    let frontier = meta.view_frontier(BLOB_VIEW)?.unwrap_or(0);
+    let (_authority, records) = meta.journal_page_after(frontier, batch.get())?;
+    let mut referenced = Vec::new();
+    for record in &records {
+        for blob in &record.blobs {
+            if let Some(digest) = Digest::from_hex(&blob.sha256) {
+                referenced.push((digest, blob.size));
+            }
+        }
+    }
+    Ok(referenced)
+}
+
 /// Advance the [`BLOB_VIEW`] frontier as far as this replica's local blobs allow, and return the serial
 /// it reached.
 ///

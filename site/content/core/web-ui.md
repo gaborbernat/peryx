@@ -35,6 +35,28 @@ The admin status document scans metadata keys once to count observed projects an
 capped recent-upload list per index. It does not fetch upstreams, read package detail pages, read artifacts, or expose
 upload tokens, upstream passwords, bearer tokens, URL user info, URL queries, or URL fragments.
 
+## Availability topology
+
+`/admin/topology` reads `GET /+availability/topology` and renders one role-filtered snapshot of the availability group,
+taken at a single instant. The mode, group, node identities, datacenters, and roles stay public; each node's liveness
+and this node's committed frontier need operator authority; the advertised peer addresses need administrator authority.
+A field above the caller's class reads as restricted rather than showing, so a withheld value never looks healthy.
+
+This node reports its own role, liveness, and committed frontier from a live self-observation. A peer stays `unknown`
+until a consensus layer observes it, so stale peer data never reads as healthy; the writer ages its replica heartbeats
+on the [replication readiness document](@/core/high-availability.md) until then. The snapshot carries the UTC time it
+was taken, so an old render shows as age rather than passing for health.
+
+The roster uses a native table with a caption and columns for node, datacenter, role, health, frontier, and, for an
+administrator, address. Every role and health state carries a text label, so the states stay distinguishable without
+colour, and narrow screens scroll the table inside its page. A role filter narrows the roster to writers or replicas,
+and the default shows every node so the page stays complete without scripting. A node with no configured roster reports
+itself as a standalone single node.
+
+The snapshot caps the rendered roster while still reporting the full node count, so a large group cannot return an
+unbounded list. The page traverses no live membership or storage state per view, holds no credentials, and does not
+poll.
+
 ## Policy decisions
 
 `/admin/policy-decisions` queries the bounded [policy decision history](@/core/policy-decisions.md). Administrators can

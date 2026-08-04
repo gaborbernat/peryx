@@ -10,6 +10,7 @@ mod search;
 mod shadow;
 mod snapshot;
 mod stats;
+mod topology;
 mod trash;
 
 pub use analytics::{
@@ -27,6 +28,9 @@ pub use search::{UiSearchPage, UiSearchResult, source_label};
 pub use shadow::{ShadowInspectionFilters, UiShadowCandidate, UiShadowDecision, UiShadowPage};
 pub use snapshot::{UiEcosystemSummary, UiHosted, UiIndex, UiMetricFamily, UiRecentUpload, UiSnapshot, UiUpstream};
 pub use stats::{UiCounters, UiStats, stats_index, stats_project, stats_routes};
+pub use topology::{
+    HealthLabel, LocalNode, RoleFilter, TopologyNode, TopologySnapshot, liveness_health, mode_label, role_label,
+};
 pub use trash::{TrashFilters, UiTrashPage, UiTrashRecord};
 
 fn string_at(value: &serde_json::Value, key: &str) -> String {

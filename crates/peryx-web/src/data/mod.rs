@@ -19,6 +19,7 @@ mod shadow;
 mod simple;
 mod stats;
 mod status;
+mod topology;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 mod trash;
 
@@ -36,6 +37,7 @@ pub use shadow::load_shadow_candidates;
 pub use simple::{load_project_view, load_projects};
 pub use stats::load_stats;
 pub use status::{load_admin_snapshot, load_snapshot};
+pub use topology::load_topology;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 pub use trash::load_trash;
 

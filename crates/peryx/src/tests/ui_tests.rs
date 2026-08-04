@@ -779,6 +779,91 @@ async fn test_ui_admin_status_lists_counts_and_recent_uploads() {
     assert!(!body.contains("A demonstration package"));
 }
 
+/// A datacenter roster: a local writer and a peer replica across two datacenters, so the topology page
+/// renders roles, per-node health, and the administrator-only peer addresses.
+fn topology_roster() -> peryx_core::TopologyConfig {
+    peryx_core::TopologyConfig {
+        mode: peryx_core::TopologyMode::Dc,
+        group: Some("east".to_owned()),
+        members: vec![
+            peryx_core::TopologyMember {
+                node: "writer-a".to_owned(),
+                dc: "east-1".to_owned(),
+                address: "writer-a.internal:8443".to_owned(),
+                role: peryx_core::NodeRole::Writer,
+            },
+            peryx_core::TopologyMember {
+                node: "replica-b".to_owned(),
+                dc: "east-2".to_owned(),
+                address: "replica-b.internal:8443".to_owned(),
+                role: peryx_core::NodeRole::Replica,
+            },
+        ],
+        local_node: Some("writer-a".to_owned()),
+    }
+}
+
+/// The `ui_router_admin` fixture with a datacenter availability roster installed on the state.
+async fn ui_router_topology() -> (tempfile::TempDir, axum::Router, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = build_state(&ui_config(&dir)).unwrap();
+    {
+        let state = std::sync::Arc::get_mut(&mut state).expect("a freshly built state is uniquely owned");
+        state.set_availability_role(peryx_core::NodeRole::Writer);
+        state.set_availability_topology(topology_roster());
+    }
+    let authorization = seed_administrator(&state).await;
+    (dir, router_for(state), authorization)
+}
+
+#[tokio::test]
+async fn test_ui_topology_renders_roster_health_and_addresses_for_administrator() {
+    let (_dir, router, authorization) = ui_router_topology().await;
+    let (status, body) = get_authorized(&router, "/admin/topology", &authorization).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Availability topology"));
+    assert!(body.contains("read-only"));
+    assert!(body.contains("east"), "{body}");
+    assert!(body.contains("writer-a"), "{body}");
+    assert!(body.contains("replica-b"), "{body}");
+    assert!(body.contains("east-1") && body.contains("east-2"), "{body}");
+    assert!(body.contains("this node"), "{body}");
+    // The local node observes itself Live; the peer stays Unknown until a consensus layer reports it.
+    assert!(body.contains(">Live<"), "{body}");
+    assert!(body.contains(">Unknown<"), "{body}");
+    // Peer addresses are administrator-only, and the role filter is present.
+    assert!(body.contains("writer-a.internal:8443"), "{body}");
+    assert!(body.contains("replica-b.internal:8443"), "{body}");
+    assert!(body.contains("id=\"topology-role\""), "{body}");
+}
+
+#[tokio::test]
+async fn test_ui_topology_withholds_liveness_and_addresses_from_anonymous() {
+    let (_dir, router, _authorization) = ui_router_topology().await;
+    let (status, body) = get(&router, "/admin/topology").await;
+    assert_eq!(status, StatusCode::OK);
+    // The static roster stays public: identities, datacenters, and roles render.
+    assert!(body.contains("writer-a") && body.contains("replica-b"), "{body}");
+    assert!(body.contains("east-1"), "{body}");
+    assert!(body.contains("Writer"), "{body}");
+    // Liveness needs operator access and addresses need administrator access, so neither leaks.
+    assert!(body.contains("Restricted"), "{body}");
+    assert!(!body.contains(">Live<") && !body.contains(">Unknown<"), "{body}");
+    assert!(!body.contains("writer-a.internal:8443"), "{body}");
+    assert!(!body.contains("replica-b.internal:8443"), "{body}");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_ui_topology_reports_a_standalone_node_without_a_roster(ui_router: (tempfile::TempDir, axum::Router)) {
+    let (_dir, router) = ui_router;
+    let (status, body) = get(&router, "/admin/topology").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Availability topology"), "{body}");
+    assert!(body.contains("Single node"), "{body}");
+    assert!(body.contains("runs standalone"), "{body}");
+}
+
 #[rstest]
 #[tokio::test]
 async fn test_ui_browse_lists_projects_after_upload(ui_router: (tempfile::TempDir, axum::Router)) {

@@ -18,6 +18,7 @@ mod blob_plane;
 mod blob_pull;
 mod blob_reassembly;
 mod blob_routing;
+mod byte_ack;
 mod channel;
 mod completeness;
 mod driver;
@@ -59,6 +60,7 @@ pub use blob_plane::{
 pub use blob_pull::{PullError, pull_ranged, pull_ranged_blob};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
+pub use byte_ack::{ByteAckDecision, decide_byte_ack};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use completeness::{Completeness, ProducerCoverage, assess};
 pub use driver::{StepOutcome, advance_once};
@@ -132,6 +134,8 @@ mod blob_reassembly_tests;
 mod blob_routing_tests;
 #[cfg(test)]
 mod blob_tests;
+#[cfg(test)]
+mod byte_ack_tests;
 #[cfg(test)]
 mod channel_tests;
 #[cfg(test)]

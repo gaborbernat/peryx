@@ -16,6 +16,8 @@
 use std::cmp::Reverse;
 use std::num::NonZeroUsize;
 
+use crate::visibility::Frontier as VisibilityFrontier;
+
 /// A member's role in its datacenter group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberRole {
@@ -123,6 +125,27 @@ pub fn group_readiness(members: &[MemberFrontier], policy: DurabilityPolicy) -> 
         blocked,
         durable_frontier: durable_frontier(members, required),
     }
+}
+
+/// The visibility compaction frontier for a datacenter group at authority `epoch`: the highest serial
+/// both the group's required members and the backup have durably applied.
+///
+/// [`VisibilityState::compact`](crate::VisibilityState::compact) releases a tombstone only up to this
+/// frontier, so an operation is forgotten only once no lagging replica or backup restore can still
+/// re-litigate it. The backup frontier bounds the replicated frontier: a serial the backup has not yet
+/// stored stays retained even after the replicas hold it, because a restore from that backup would
+/// otherwise arrive without the operation.
+#[must_use]
+pub fn visibility_compaction_frontier(
+    members: &[MemberFrontier],
+    policy: DurabilityPolicy,
+    backup_applied: u64,
+    epoch: u64,
+) -> VisibilityFrontier {
+    let replicated = group_readiness(members, policy).durable_frontier;
+    let mut frontier = VisibilityFrontier::default();
+    frontier.acknowledge(epoch, replicated.min(backup_applied));
+    frontier
 }
 
 /// The highest serial at least `required` members have applied: the `required`-th largest applied serial,

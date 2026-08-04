@@ -86,7 +86,10 @@ pub use protocol::{
     BlobReference, Change, ChangePage, MetadataMutation, PROTOCOL_VERSION, PlacementAvailability, PlacementDescriptor,
     Primary,
 };
-pub use readiness::{DurabilityPolicy, GroupReadiness, MemberFrontier, MemberRole, ReadinessBlocker, group_readiness};
+pub use readiness::{
+    DurabilityPolicy, GroupReadiness, MemberFrontier, MemberRole, ReadinessBlocker, group_readiness,
+    visibility_compaction_frontier,
+};
 pub use reconcile::{Disposition, OldEpochOp, classify};
 pub use replica::{Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};

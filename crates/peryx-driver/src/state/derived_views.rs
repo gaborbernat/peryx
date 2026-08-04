@@ -9,9 +9,9 @@
 //! and names the view holding it back.
 //!
 //! This module computes the frontier and the replica loop exports it as
-//! `peryx_replication_readable_serial`. The per-ecosystem read gating that holds a `PyPI` page or an
-//! `OCI` tag response to it lands with #510 and #511, so today the frontier is observable but not yet
-//! enforced on the serving path.
+//! `peryx_replication_readable_serial`. Each ecosystem enforces it on the serving path: a `PyPI` page
+//! and an `OCI` tag response are held until every required view reflects the serial they carry, whether
+//! served from a hosted index directly or surfaced through a virtual index that layers one.
 //!
 //! The registry is ecosystem-neutral: a view is a stable name, and an ecosystem crate wires its own
 //! invalidation and rebuild into the frontier it advances without this module learning its format.

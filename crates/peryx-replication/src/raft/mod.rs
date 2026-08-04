@@ -31,6 +31,8 @@ pub use state_machine::OwnershipStateMachine;
 #[cfg(test)]
 mod config_tests;
 #[cfg(test)]
+mod node_tests;
+#[cfg(test)]
 mod state_machine_tests;
 
 openraft::declare_raft_types!(

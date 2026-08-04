@@ -51,6 +51,7 @@ testcontainers = { version = "0.27", features = ["http_wait"] }
 testcontainers-modules = { version = "0.15", default-features = false, features = ["minio", "ring"] }
 mimalloc = "0.1"
 redb = "4.1"
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs", "process"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "rustls-native-certs", "http2", "stream", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

@@ -36,7 +36,7 @@ use crate::envelope::AuthorityEpoch;
 const UNASSIGNED: AuthorityEpoch = AuthorityEpoch(0);
 
 /// A datacenter that can hold authority over an artifact home.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DatacenterId(pub String);
 
 /// One authority transfer: the datacenters it moved between and the epoch it minted. The trail of these
@@ -49,7 +49,7 @@ pub struct TransferRecord {
 }
 
 /// A committed instruction to the ownership state machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnershipCommand {
     /// Home a previously unassigned authority, minting its first epoch. The first-publish path.
     AssignHome {
@@ -68,7 +68,7 @@ pub enum OwnershipCommand {
 }
 
 /// What [`apply`](OwnershipState::apply) made of a command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnershipEffect {
     /// A home was assigned to a previously unassigned authority at the minted epoch.
     Assigned { epoch: AuthorityEpoch },
@@ -85,7 +85,7 @@ pub enum OwnershipEffect {
 }
 
 /// Why the state machine rejected a command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rejection {
     /// [`AssignHome`](OwnershipCommand::AssignHome) named an authority that already has a home; a homed
     /// authority moves only through [`RecordTransfer`](OwnershipCommand::RecordTransfer).

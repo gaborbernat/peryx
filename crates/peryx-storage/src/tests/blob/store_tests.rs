@@ -300,6 +300,38 @@ fn test_streamed_blob_commits_after_verification() {
     assert_eq!(store.read(&digest).unwrap(), b"streamed content");
 }
 
+#[test]
+fn test_commit_returns_a_filesystem_placement_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(dir.path().join("blobs"));
+    let digest = Digest::of(b"receipt content");
+    let mut pending = store.begin().unwrap();
+    pending.write(b"receipt content").unwrap();
+
+    let receipt = store.commit(pending, &digest).unwrap();
+
+    assert_eq!(receipt.digest, digest);
+    assert_eq!(receipt.size, 15);
+    assert_eq!(receipt.durability, crate::blob::DurabilityCapabilities::FILESYSTEM);
+}
+
+#[test]
+fn test_committing_an_already_present_blob_still_returns_a_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(dir.path().join("blobs"));
+    let digest = store.write(b"present").unwrap();
+    let mut pending = store.begin().unwrap();
+    pending.write(b"present").unwrap();
+    let staged = pending.finish().unwrap();
+
+    // The blob is already durable, so the idempotent commit still hands back proof of it.
+    let receipt = store.commit_staged(staged).unwrap();
+
+    assert_eq!(receipt.digest, digest);
+    assert_eq!(receipt.size, 7);
+    assert_eq!(receipt.durability, crate::blob::DurabilityCapabilities::FILESYSTEM);
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn test_materialized_lease_copies_across_filesystems() {

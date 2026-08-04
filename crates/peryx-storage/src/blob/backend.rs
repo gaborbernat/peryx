@@ -594,7 +594,7 @@ impl BlobStaged {
         match backend {
             BlobStagedBackend::Filesystem { store, staged } => {
                 let digest = staged.digest().clone();
-                filesystem_context(store.commit_staged(staged), BlobOperation::Commit, Some(&digest))
+                filesystem_context(store.commit_staged(staged), BlobOperation::Commit, Some(&digest)).map(drop)
             }
             BlobStagedBackend::S3(_) => Err(
                 BlobError::unsupported("blocking commit on the s3 backend").with_context(

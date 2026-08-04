@@ -124,8 +124,8 @@ fn token(name: &str, secret: &str, action: Action) -> NamedToken {
     }
 }
 
-/// Record a fixed usage mix across two repositories and wait for the off-thread aggregator to settle
-/// on its three project buckets.
+/// Record a fixed usage mix across two repositories and drain the off-thread aggregator through its
+/// barrier, so the buckets are fully applied before the view is queried.
 fn seed(state: &AppState) {
     for (route, project, version, source, bytes, times) in [
         ("private", "flask", "3.0", Some("pypi"), 10u64, 2),
@@ -143,12 +143,7 @@ fn seed(state: &AppState) {
             });
         }
     }
-    let interval = state.metrics.resolve_usage_interval(None, None);
-    let settled = (0..500).any(|_| {
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        state.metrics.usage_top(None, &interval).len() == 3
-    });
-    assert!(settled, "metrics aggregator never settled");
+    state.metrics.settle();
 }
 
 async fn get(

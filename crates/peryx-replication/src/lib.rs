@@ -14,6 +14,7 @@ mod blob_fetch;
 mod blob_http;
 mod blob_piece;
 mod blob_placement;
+mod blob_pull;
 mod blob_range;
 mod blob_reassembly;
 mod blob_routing;
@@ -52,6 +53,7 @@ pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 pub use blob_http::{HttpBlobError, HttpBlobTransport};
 pub use blob_piece::{PieceError, blob_piece};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
+pub use blob_pull::{PullError, pull_ranged};
 pub use blob_range::{RangeRequest, parse_range};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
@@ -116,6 +118,8 @@ mod blob_http_tests;
 mod blob_piece_tests;
 #[cfg(test)]
 mod blob_placement_tests;
+#[cfg(test)]
+mod blob_pull_tests;
 #[cfg(test)]
 mod blob_range_tests;
 #[cfg(test)]

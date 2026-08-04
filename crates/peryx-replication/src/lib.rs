@@ -35,6 +35,7 @@ pub mod raft;
 mod readiness;
 mod receipt_quorum;
 mod reconcile;
+mod remote_durability;
 mod replica;
 pub mod sim;
 mod status;
@@ -95,6 +96,7 @@ pub use readiness::{
 };
 pub use receipt_quorum::{ByteDurability, ReceiptAck, assess_byte_durability};
 pub use reconcile::{Disposition, OldEpochOp, classify};
+pub use remote_durability::{MetadataOperation, RemoteAck, RemoteDurability, assess_remote_metadata_durability};
 pub use replica::{Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};
 pub use versions::{
@@ -164,6 +166,8 @@ mod readiness_tests;
 mod receipt_quorum_tests;
 #[cfg(test)]
 mod reconcile_tests;
+#[cfg(test)]
+mod remote_durability_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]

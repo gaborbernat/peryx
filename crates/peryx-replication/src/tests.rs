@@ -94,8 +94,70 @@ fn put(key: &str, value: &[u8]) -> MetadataMutation {
     }
 }
 
+fn delete(key: &str) -> MetadataMutation {
+    MetadataMutation::Delete { key: key.to_owned() }
+}
+
 fn replica<'store>(meta: &'store MetaStore, blobs: &'store BlobStorage) -> Replica<'store> {
     Replica::new(meta, blobs, NonZeroUsize::new(100).unwrap())
+}
+
+#[tokio::test]
+async fn test_sync_metadata_commits_without_fetching_bytes_and_reports_references() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = Bytes::from_static(b"artifact");
+    let digest = Digest::of(&bytes);
+    let size = bytes.len() as u64;
+    let source = primary(
+        vec![page(
+            "primary-a",
+            0,
+            1,
+            vec![change(
+                1,
+                vec![put("pypi\0upload", b"record"), delete("pypi\0stale")],
+                vec![BlobReference {
+                    sha256: digest.as_str().to_owned(),
+                    size,
+                }],
+            )],
+        )],
+        // No blob bytes are served: `sync_metadata` must commit without ever fetching them.
+        vec![],
+    );
+
+    let (outcome, changed_keys, referenced) = replica(&meta, &blobs).sync_metadata(&source).await.unwrap();
+
+    assert_eq!(outcome.changes, 1);
+    assert_eq!(outcome.blobs, 0);
+    assert!(outcome.caught_up());
+    assert_eq!(changed_keys, vec!["pypi\0stale".to_owned(), "pypi\0upload".to_owned()]);
+    assert_eq!(referenced, vec![(digest.clone(), size)]);
+    // Metadata (both the put and the delete), journal, and cursor are committed immediately.
+    assert_eq!(
+        meta.get_driver_value("pypi\0upload").unwrap().as_deref(),
+        Some(b"record".as_slice())
+    );
+    assert!(meta.get_driver_value("pypi\0stale").unwrap().is_none());
+    assert_eq!(meta.journal_after(0, 10).unwrap()[0].payload, b"event-1");
+    assert_eq!(replica(&meta, &blobs).state().unwrap().unwrap().serial, 1);
+    // The referenced bytes are not present locally; the async blob plane pulls them later.
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_sync_metadata_on_an_empty_page_commits_nothing() {
+    let (_dir, meta, blobs) = stores();
+    let source = primary_at(0, page("primary-a", 0, 0, vec![]));
+
+    let (outcome, changed_keys, referenced) = replica(&meta, &blobs).sync_metadata(&source).await.unwrap();
+
+    assert_eq!(outcome.changes, 0);
+    assert_eq!(outcome.blobs, 0);
+    assert!(outcome.caught_up());
+    assert!(changed_keys.is_empty());
+    assert!(referenced.is_empty());
+    assert!(replica(&meta, &blobs).state().unwrap().is_none());
 }
 
 #[tokio::test]

@@ -12,8 +12,8 @@ use http_body_util::BodyExt as _;
 use peryx_driver::IndexKind as RuntimeIndexKind;
 use peryx_driver::state::AppState;
 use peryx_identity::{Action, GrantScope, Role};
-use peryx_replication::{ChangePage, SyncOutcome, primary_router};
-use peryx_storage::blob::BlobStore;
+use peryx_replication::{BLOB_VIEW, ChangePage, SyncOutcome, primary_router};
+use peryx_storage::blob::{BlobStore, Digest};
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
 use tower::ServiceExt as _;
@@ -75,6 +75,27 @@ fn replica_config(upstream: &str, page_size: usize) -> ReplicationConfig {
         token: SecretSource::Literal(TOKEN.to_owned()),
         poll_interval: Duration::from_millis(1),
         page_size: NonZeroUsize::new(page_size).unwrap(),
+        dual_plane: false,
+    }
+}
+
+fn dual_replica_config(upstream: &str, page_size: usize) -> ReplicationConfig {
+    let ReplicationConfig::Replica {
+        upstream,
+        token,
+        poll_interval,
+        page_size,
+        ..
+    } = replica_config(upstream, page_size)
+    else {
+        unreachable!("replica_config builds a replica")
+    };
+    ReplicationConfig::Replica {
+        upstream,
+        token,
+        poll_interval,
+        page_size,
+        dual_plane: true,
     }
 }
 
@@ -416,6 +437,143 @@ async fn test_replica_runtime_copies_primary_blobs() {
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
     assert_eq!(state.blobs.read_bytes(&digest, 8).await.unwrap(), b"artifact");
+}
+
+#[tokio::test]
+async fn test_dual_replica_advances_both_planes_when_the_blob_is_available() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    let digest = primary_blobs.write(b"artifact").unwrap();
+    primary_meta
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), 8);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"upload".to_vec()]))
+        })
+        .unwrap();
+    let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(dual_replica_config(&server.url, 10)));
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+
+    // The metadata plane committed the serial and the blob plane pulled its bytes and advanced its
+    // frontier to match, so a reader gated on both views sees the record fully byte-backed.
+    assert_eq!(state.meta.current_serial().unwrap(), 1);
+    assert_eq!(state.blobs.read_bytes(&digest, 8).await.unwrap(), b"artifact");
+    assert_eq!(state.meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn test_dual_replica_advances_metadata_while_a_missing_blob_holds_the_blob_frontier() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    // Reference a blob the primary never stored, so serving it 404s and the blob plane cannot advance.
+    let digest = Digest::of(b"artifact");
+    primary_meta
+        .commit_driver_txn(|txn| {
+            txn.put("pypi\0upload", b"record")?;
+            txn.reference_blob(digest.as_str(), 8);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"upload".to_vec()]))
+        })
+        .unwrap();
+    let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(dual_replica_config(&server.url, 10)));
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+    drop(guard);
+
+    // The metadata plane committed the record even though its blob never arrived...
+    assert_eq!(
+        state.meta.get_driver_value("pypi\0upload").unwrap().as_deref(),
+        Some(b"record".as_slice())
+    );
+    assert_eq!(state.meta.current_serial().unwrap(), 1);
+    // ...while the blob frontier stays put, so a reader gated on the blob view never sees the serial.
+    assert!(state.blobs.head(&digest).await.unwrap().is_none());
+    assert_eq!(state.meta.view_frontier(BLOB_VIEW).unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_dual_replica_heals_the_blob_frontier_after_the_blob_arrives() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    let digest = Digest::of(b"artifact");
+    primary_meta
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), 8);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"upload".to_vec()]))
+        })
+        .unwrap();
+    let server =
+        TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs.clone()).unwrap()).await;
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(dual_replica_config(&server.url, 10)));
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    // The first pass commits metadata, but the blob is not on the primary yet, so its frontier holds.
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+    assert_eq!(state.meta.view_frontier(BLOB_VIEW).unwrap(), None);
+
+    // The blob lands on the primary; the next pass re-derives the outstanding set from the tail, pulls
+    // it, and advances the blob frontier with no new metadata to apply.
+    assert_eq!(primary_blobs.write(b"artifact").unwrap(), digest);
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+    drop(guard);
+
+    assert_eq!(state.blobs.read_bytes(&digest, 8).await.unwrap(), b"artifact");
+    assert_eq!(state.meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn test_dual_replica_retries_after_a_metadata_sync_error() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    drop(listener);
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, Some(dual_replica_config(&url, 10)));
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    // The metadata plane cannot reach the primary, so the cycle records the error and asks to retry
+    // without advancing either frontier.
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+    drop(guard);
+
+    assert_eq!(state.meta.current_serial().unwrap(), 0);
+    assert_eq!(state.meta.view_frontier(BLOB_VIEW).unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_dual_replica_requires_the_blob_view() {
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(dual_replica_config("https://primary.example/", 10)));
+    let state = build_state(&config).unwrap();
+
+    assert_eq!(
+        &*state.serving.required_views,
+        [peryx_driver::state::SEARCH_VIEW, BLOB_VIEW].as_slice()
+    );
+}
+
+#[tokio::test]
+async fn test_unified_replica_keeps_the_default_required_views() {
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config("https://primary.example/", 10)));
+    let state = build_state(&config).unwrap();
+
+    assert_eq!(
+        &*state.serving.required_views,
+        [peryx_driver::state::SEARCH_VIEW].as_slice()
+    );
 }
 
 #[tokio::test]
@@ -764,6 +922,7 @@ fn test_replica_runtime_disables_local_writers() {
     token: SecretSource::File("missing-replica-token".into()),
     poll_interval: Duration::from_secs(1),
     page_size: NonZeroUsize::new(10).unwrap(),
+    dual_plane: false,
 }, "read the replica replication token")]
 fn test_replication_runtime_reports_secret_errors(#[case] replication: ReplicationConfig, #[case] expected: &str) {
     let dir = tempfile::tempdir().unwrap();

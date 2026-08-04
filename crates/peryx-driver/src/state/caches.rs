@@ -5,7 +5,7 @@ use bytes::Bytes;
 use peryx_storage::meta::MetaError;
 
 use super::app::ServingState;
-use super::derived_views::{REQUIRED_VIEWS, ReadableFrontier, readable_frontier as compute_readable_frontier};
+use super::derived_views::{ReadableFrontier, readable_frontier as compute_readable_frontier};
 
 impl ServingState {
     /// A hot-cache entry that is still within its freshness window; expired entries miss.
@@ -57,6 +57,6 @@ impl ServingState {
     pub fn readable_frontier(&self) -> Result<ReadableFrontier, MetaError> {
         let authority = self.meta.current_serial()?;
         let frontiers = self.meta.view_frontiers()?;
-        Ok(compute_readable_frontier(authority, &frontiers, REQUIRED_VIEWS))
+        Ok(compute_readable_frontier(authority, &frontiers, &self.required_views))
     }
 }

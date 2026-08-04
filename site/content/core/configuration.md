@@ -976,11 +976,18 @@ mutations. peryx rejects an unknown key in either table, naming the offending fi
 | `token_file`         | both    | Path to read `token` from instead of inlining it                | (none)     |
 | `poll_interval_secs` | replica | Seconds between change-journal polls, must be positive          | `1`        |
 | `page_size`          | replica | Changes fetched per poll, positive and within the primary limit | `100`      |
+| `dual_plane`         | replica | Gate reads on whole-blob availability, not metadata alone       | `false`    |
 
 A role needs exactly one of `token` or `token_file`; setting both, or neither, is rejected. Keep the credential out of
 the config file with `token_file`, the path to a mounted Docker or Kubernetes secret or a systemd credential, which
 peryx reads at startup and never logs. A configuration snapshot (`peryx backup`) preserves a `token_file` as its path
 and never resolves the secret behind it into the manifest.
+
+By default a replica commits metadata and its bytes in one step, so a served serial is always byte-backed. Setting
+`dual_plane = true` splits the two: metadata commits as soon as it arrives, and whole blobs are pulled on an independent
+frontier, so a lagging blob never holds up metadata. Reads then wait on the slower of the two frontiers, so a record
+still never appears before the bytes it names — the split trades a metadata-only view the replica hides anyway for a
+blob plane that no longer stalls the whole poll loop behind one slow transfer.
 
 ### Static datacenter membership
 

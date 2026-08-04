@@ -392,6 +392,8 @@ enum SnapshotReplication<'a> {
         token_file: Option<&'a Path>,
         poll_interval_secs: u64,
         page_size: usize,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        dual_plane: bool,
     },
 }
 
@@ -645,6 +647,7 @@ fn snapshot_replication(replication: &ReplicationConfig) -> SnapshotReplication<
             token,
             poll_interval,
             page_size,
+            dual_plane,
         } => {
             let (token, token_file, _) = secret_parts(Some(token));
             SnapshotReplication::Replica {
@@ -653,6 +656,7 @@ fn snapshot_replication(replication: &ReplicationConfig) -> SnapshotReplication<
                 token_file,
                 poll_interval_secs: poll_interval.as_secs(),
                 page_size: page_size.get(),
+                dual_plane: *dual_plane,
             }
         }
     }

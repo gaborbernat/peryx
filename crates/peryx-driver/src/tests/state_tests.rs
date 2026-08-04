@@ -93,6 +93,7 @@ fn state_with_budget(hot_cache_bytes: u64) -> (tempfile::TempDir, AppState) {
             hot_cache_bytes,
             max_stale_secs: crate::DEFAULT_MAX_STALE_SECS,
             usage_retention_days: None,
+            required_views: std::sync::Arc::from(crate::state::REQUIRED_VIEWS),
         },
     )
     .unwrap();

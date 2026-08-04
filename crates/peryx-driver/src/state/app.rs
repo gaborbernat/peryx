@@ -117,6 +117,10 @@ pub struct ServingState {
     /// Seals the browser session and login-handoff cookies. Present only when a token-realm signing key
     /// is configured, since the sealing key derives from it.
     pub(super) session_sealer: Option<Arc<peryx_identity::SessionSealer>>,
+    /// The ownership consensus group this writer submits first-publish home claims to, registered once
+    /// the async runtime has ignited it. Absent when the process runs no group, so the mutation path
+    /// skips the claim.
+    pub(super) ownership: std::sync::OnceLock<Arc<dyn crate::state::OwnershipAuthority>>,
 }
 
 /// The whole process state: the serving data every handler needs, plus the driver registry only the
@@ -206,6 +210,25 @@ impl ServingState {
     #[must_use]
     pub const fn availability_role(&self) -> peryx_core::NodeRole {
         self.availability_role
+    }
+
+    /// Register the ownership consensus group once the runtime ignites it, so the mutation path can
+    /// submit first-publish home claims. Set at most once; a later call is ignored.
+    pub fn set_ownership_authority(&self, authority: Arc<dyn crate::state::OwnershipAuthority>) {
+        let _ = self.ownership.set(authority);
+    }
+
+    /// The ownership consensus group, or `None` when this process runs no group and assigns no homes.
+    #[must_use]
+    pub fn ownership_authority(&self) -> Option<&Arc<dyn crate::state::OwnershipAuthority>> {
+        self.ownership.get()
+    }
+
+    /// Assign `authority`'s home on its first publish, best effort. A publish path calls this after it
+    /// commits a new project or repository; it claims a home only when a group runs and the authority has
+    /// none yet, and never blocks the publish on the outcome.
+    pub async fn claim_first_publish_home(&self, authority: &str) {
+        crate::state::ownership::claim_first_publish_home(self.ownership.get(), authority).await;
     }
 
     /// Find the index whose route is the longest segment-aligned prefix of `path` (which has no

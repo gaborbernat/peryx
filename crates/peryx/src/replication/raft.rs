@@ -14,10 +14,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
-use peryx_replication::DatacenterId;
+use openraft::error::{ClientWriteError, RaftError};
+use peryx_driver::state::{HomeClaim, OwnershipAuthority, OwnershipError};
 use peryx_replication::raft::log_store::RaftLogStoreAdapter;
 use peryx_replication::raft::network::PeerRaftNetworkFactory;
-use peryx_replication::raft::{OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
+use peryx_replication::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
+use peryx_replication::{AuthorityKey, DatacenterId, OwnershipCommand, OwnershipEffect};
 use peryx_storage::raft::RaftLogStore;
 use url::Url;
 
@@ -42,6 +44,7 @@ const LOG_STORE_SUBPATH: &str = "raft/ownership-log.redb";
 /// [`ignite`](Self::ignite) touches the disk or network.
 pub(super) struct ConsensusPlan {
     local: VoterId,
+    home: DatacenterId,
     roster: BTreeMap<VoterId, PeryxNode>,
     log_path: PathBuf,
     group: String,
@@ -60,6 +63,11 @@ impl ConsensusPlan {
     /// Returns an error when a rostered `ha` process has no writer identity, when that identity is not a
     /// member, when a member address is not a bare `host:port` authority, when two members collide onto
     /// one voter id, or when the shared peer token cannot be read.
+    /// This datacenter's identity, assigned as the home of every authority this node first publishes.
+    pub(super) fn home(&self) -> DatacenterId {
+        self.home.clone()
+    }
+
     pub(super) fn from_config(config: &Config) -> anyhow::Result<Option<Self>> {
         let AvailabilityConfig::Ha(replication) = &config.availability else {
             return Ok(None);
@@ -72,11 +80,13 @@ impl ConsensusPlan {
             .as_deref()
             .context("an `ha` consensus roster needs a `writer-identity` to find this node in it")?;
         let roster = build_roster(membership)?;
-        let local = voter_id(&local_datacenter(membership, identity)?);
+        let local_dc = local_datacenter(membership, identity)?;
+        let local = voter_id(&local_dc);
         let (ReplicationConfig::Primary { token, .. } | ReplicationConfig::Replica { token, .. }) = replication;
         let token = token.read().context("read the shared consensus peer token")?;
         Ok(Some(Self {
             local,
+            home: DatacenterId(local_dc),
             roster,
             log_path: config.data_dir.join(LOG_STORE_SUBPATH),
             group: membership.group.clone(),
@@ -117,6 +127,49 @@ impl ConsensusPlan {
             .await
             .context("bootstrap the ownership consensus group")?;
         Ok(node)
+    }
+}
+
+/// The running ownership group as the mutation path reaches it: the node handle plus this datacenter's
+/// identity, which every first-publish claim assigns as the authority's home.
+pub(super) struct OwnershipGroup {
+    node: RaftNode,
+    home: DatacenterId,
+}
+
+impl OwnershipGroup {
+    pub(super) const fn new(node: RaftNode, home: DatacenterId) -> Self {
+        Self { node, home }
+    }
+}
+
+#[async_trait::async_trait]
+impl OwnershipAuthority for OwnershipGroup {
+    async fn has_home(&self, authority: &str) -> bool {
+        self.node
+            .state_machine()
+            .home_of(&AuthorityKey(authority.to_owned()))
+            .await
+            .is_some()
+    }
+
+    async fn claim_home(&self, authority: &str) -> Result<HomeClaim, OwnershipError> {
+        let command = OwnershipCommand::AssignHome {
+            authority: AuthorityKey(authority.to_owned()),
+            home: self.home.clone(),
+        };
+        match self.node.submit(command).await {
+            // AssignHome commits as either this datacenter winning the home or a rejection because one is
+            // already set; both are committed outcomes, and only the first means this call assigned it.
+            Ok(response) => Ok(match response {
+                OwnershipResponse::Applied(OwnershipEffect::Assigned { .. }) => HomeClaim::AssignedHere,
+                _ => HomeClaim::AlreadyHomed,
+            }),
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => Err(OwnershipError::NotLeader {
+                leader: forward.leader_node.map(|node| node.addr),
+            }),
+            Err(error) => Err(OwnershipError::Unavailable(error.to_string())),
+        }
     }
 }
 

@@ -342,6 +342,7 @@ impl AppState {
                 retention_gates: crate::retention::RetentionGates::new(RETENTION_PLANS_PER_REPOSITORY),
                 oidc_logins: HashMap::new(),
                 session_sealer: None,
+                ownership: std::sync::OnceLock::new(),
             }),
             drivers: std::array::from_fn(|_| None),
             absolute_prefixes: Vec::new(),

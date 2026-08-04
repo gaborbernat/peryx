@@ -23,7 +23,8 @@ use openraft::{
 };
 use tokio::sync::Mutex;
 
-use crate::ownership::OwnershipState;
+use crate::AuthorityKey;
+use crate::ownership::{DatacenterId, OwnershipState};
 use crate::raft::{OwnershipResponse, PeryxNode, TypeConfig};
 
 /// The `u64` voter handle `OpenRaft` keys nodes by. See [`crate::raft`] for why it is not the datacenter
@@ -55,6 +56,18 @@ struct Inner {
 struct StoredSnapshot {
     meta: SnapshotMeta<NodeId, PeryxNode>,
     data: Vec<u8>,
+}
+
+impl OwnershipStateMachine {
+    /// The datacenter that homes `authority` in this node's applied ownership state, or `None` when no
+    /// committed command has homed it.
+    ///
+    /// A local read: current on the leader, possibly behind on a follower. It gates work a committed
+    /// compare-and-set still settles — skipping a redundant re-assignment of an already-homed authority —
+    /// so a stale `None` costs one rejected assignment, never a wrong home.
+    pub async fn home_of(&self, authority: &AuthorityKey) -> Option<DatacenterId> {
+        self.inner.lock().await.state.home(authority).cloned()
+    }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for OwnershipStateMachine {

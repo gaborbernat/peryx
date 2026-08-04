@@ -114,27 +114,33 @@ fn ha_group_config(dir: &tempfile::TempDir) -> Config {
 }
 
 #[tokio::test]
-async fn test_ignite_consensus_starts_the_configured_ha_group() {
+async fn test_ignite_consensus_registers_the_group_for_the_mutation_path() {
+    use peryx_driver::state::HomeClaim;
+
     let dir = tempfile::tempdir().unwrap();
     let config = ha_group_config(&dir);
     let state = build_state(&config).unwrap();
     let replication = ReplicationRuntime::new(&config, &state).unwrap();
 
-    let node = replication
+    let group = replication
         .ignite_consensus()
         .await
         .unwrap()
-        .expect("an ha roster ignites a consensus node");
+        .expect("an ha roster ignites a consensus group");
+    state.set_ownership_authority(group);
 
-    let mut leader = None;
+    // The mutation path reaches the same group through the state. The lone voter elects itself, so a
+    // first claim eventually assigns the home here rather than forwarding.
+    let authority = state.ownership_authority().expect("the group is registered").clone();
+    let mut claim = None;
     for _ in 0..50 {
-        if let Some(found) = node.leader() {
-            leader = Some(found);
+        if let Ok(outcome) = authority.claim_home("proj").await {
+            claim = Some(outcome);
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(leader.map(|node| node.datacenter.0), Some("east".to_owned()));
+    assert_eq!(claim, Some(HomeClaim::AssignedHere));
 }
 
 #[tokio::test]
@@ -702,7 +708,14 @@ async fn test_replica_stays_live_but_unready_while_starting() {
 async fn test_replica_readiness_reports_a_sync_error() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
-    drop(listener);
+    // Hold the port and reset every connection so the replica always sees a transport failure. Dropping
+    // the listener would free the port for a parallel test's mock primary to reuse; answering with its
+    // own protocol version, that would flake this into an incompatible-schema reason.
+    let _reset = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, Some(replica_config(&url, 10)));
     let state = build_state(&config).unwrap();

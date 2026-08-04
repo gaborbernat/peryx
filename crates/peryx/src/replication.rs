@@ -614,9 +614,14 @@ impl ReplicationRuntime {
     /// # Errors
     /// Returns an error when the consensus log store cannot be opened or the node cannot start or
     /// bootstrap.
-    pub async fn ignite_consensus(&self) -> anyhow::Result<Option<peryx_replication::raft::RaftNode>> {
+    pub async fn ignite_consensus(&self) -> anyhow::Result<Option<Arc<dyn peryx_driver::state::OwnershipAuthority>>> {
         match &self.consensus {
-            Some(plan) => Ok(Some(plan.ignite().await?)),
+            Some(plan) => {
+                let node = plan.ignite().await?;
+                let group: Arc<dyn peryx_driver::state::OwnershipAuthority> =
+                    Arc::new(raft::OwnershipGroup::new(node, plan.home()));
+                Ok(Some(group))
+            }
             None => Ok(None),
         }
     }

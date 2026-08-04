@@ -1,5 +1,6 @@
 //! Serving tests for the OCI driver, driven end to end through the router with a wiremock upstream.
 
+mod authority;
 mod bearer_tests;
 mod conformance_tests;
 mod contents_tests;

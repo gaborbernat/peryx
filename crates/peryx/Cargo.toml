@@ -57,6 +57,7 @@ peryx-index.workspace = true
 peryx-ecosystem-pypi = { workspace = true, features = ["serving"] }
 peryx-ecosystem-oci.workspace = true
 async-trait.workspace = true
+openraft.workspace = true
 peryx-identity.workspace = true
 peryx-policy.workspace = true
 peryx-replication.workspace = true

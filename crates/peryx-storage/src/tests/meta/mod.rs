@@ -3,6 +3,7 @@ use crate::meta::MetaStore;
 mod analytics_tests;
 mod blob_placement_tests;
 mod bootstrap_tests;
+mod cross_dc_copy_tests;
 mod driver_txn_tests;
 mod error_tests;
 mod external_identity_tests;

@@ -12,6 +12,7 @@ use redb::{Database, ReadOnlyDatabase, ReadableDatabase as _, TableDefinition};
 mod analytics;
 mod blob_placement;
 mod bootstrap;
+mod cross_dc_copy;
 mod error;
 mod external_identity;
 mod frontier;
@@ -39,6 +40,10 @@ pub use blob_placement::{
     DataCenterId, MAX_PLACEMENTS_PER_DIGEST, PlacementKeyError,
 };
 pub use bootstrap::AdministratorBootstrapError;
+pub use cross_dc_copy::{
+    CopyBacklogEntry, CopyBacklogError, CopyBacklogPage, CopyPlan, CrossDcCopy, MAX_COPY_BACKLOG_BATCH, VerifiedSource,
+    plan_cross_dc_copy,
+};
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use external_identity::ExternalIdentityStoreError;
 pub use index::DriverTxn;

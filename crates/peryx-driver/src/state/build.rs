@@ -320,6 +320,7 @@ impl AppState {
                 downloads: crate::download::DownloadRegistry::default(),
                 metrics,
                 search,
+                required_views: std::sync::Arc::from(super::derived_views::REQUIRED_VIEWS),
                 rate_limits: RateLimiter::new(rate_limit),
                 upstream_limits: UpstreamLimits::new(upstream_limits.clone()),
                 metadata_upstream_limits: UpstreamLimits::new(upstream_limits),

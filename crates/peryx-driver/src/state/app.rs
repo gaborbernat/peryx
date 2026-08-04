@@ -82,6 +82,12 @@ pub struct ServingState {
     pub metrics: Metrics,
     /// Derived package search index, refreshed from storage when the mutation epoch advances.
     pub search: PackageSearch,
+    /// The views a read must wait for before this process exposes a serial. A single-node or
+    /// metadata-only replica requires only the search view; a replica running the blob plane adds its
+    /// blob view so a metadata commit stays hidden until the referenced bytes are present. Held per
+    /// instance rather than as a constant because a node that never advances the blob view must not
+    /// gate every read on it.
+    pub required_views: std::sync::Arc<[&'static str]>,
     /// Per-client HTTP request limits. The bucket cache has a fixed capacity.
     pub rate_limits: RateLimiter,
     /// Per-cached-index upstream fetch gates, keyed by configured index name.

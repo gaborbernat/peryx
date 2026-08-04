@@ -21,6 +21,7 @@ mod journal;
 mod placement;
 mod policy_decision;
 mod quota;
+mod reclamation;
 mod repository;
 mod revocation;
 mod role_grant;
@@ -56,6 +57,10 @@ pub use policy_decision::{
 pub use quota::{
     AccountingClass, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage, QuotaRepairReport,
     QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
+};
+pub use reclamation::{
+    ObservedFrontier, ReadyOutcome, ReclamationError, ReclamationProgress, ReclamationState, ReclamationStatus,
+    ReclamationTombstone, SelectOutcome, SkipReason,
 };
 pub use repository::{
     CreateRepositoryError, DesiredRepository, NewRepository, ReconcileAction, ReconcileRepositoryError,
@@ -125,6 +130,7 @@ const BLOB_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("blob_
 /// The durable transfer attempts populating blob placements: one current attempt and a bounded retry
 /// history per `(digest, backend, data center, location)`, keyed by placement then attempt sequence.
 const TRANSFER_ATTEMPT: TableDefinition<&str, &[u8]> = TableDefinition::new("transfer_attempt");
+const RECLAMATION_TOMBSTONE: TableDefinition<&str, &[u8]> = TableDefinition::new("reclamation_tombstone");
 const REPOSITORY: TableDefinition<&str, &[u8]> = TableDefinition::new("repository");
 const REPOSITORY_ROUTE: TableDefinition<&str, &str> = TableDefinition::new("repository_route");
 const SCOPED_TOKEN: TableDefinition<&str, &[u8]> = TableDefinition::new("scoped_token");
@@ -250,6 +256,7 @@ impl MetaStore {
             txn.open_table(ARTIFACT_PLACEMENT)?;
             txn.open_table(BLOB_PLACEMENT)?;
             txn.open_table(TRANSFER_ATTEMPT)?;
+            txn.open_table(RECLAMATION_TOMBSTONE)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;
             txn.open_table(SCOPED_TOKEN)?;

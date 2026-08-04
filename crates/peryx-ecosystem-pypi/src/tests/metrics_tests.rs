@@ -7,14 +7,9 @@ use wiremock::{Mock, ResponseTemplate};
 use super::http::{get, get_bytes_with_headers, harness};
 
 fn settle(metrics: &Metrics, done: impl Fn(&Metrics) -> bool) {
-    // The aggregator runs on its own thread; poll until the last event lands.
-    for _ in 0..500 {
-        if done(metrics) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!("metrics aggregator never settled");
+    // Drain the off-thread aggregator through its barrier, then assert the state it settled on.
+    metrics.settle();
+    assert!(done(metrics), "metrics settled on an unexpected state");
 }
 
 #[test]

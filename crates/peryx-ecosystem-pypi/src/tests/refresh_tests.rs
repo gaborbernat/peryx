@@ -29,13 +29,9 @@ fn drilled(state: &Arc<peryx_driver::state::AppState>, field: &str) -> u64 {
 }
 
 fn settle(state: &Arc<peryx_driver::state::AppState>, field: &str, want: u64) {
-    for _ in 0..500 {
-        if drilled(state, field) >= want {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!("metric {field} never reached {want}");
+    state.metrics.settle();
+    let got = drilled(state, field);
+    assert!(got >= want, "metric {field} settled at {got}, want >= {want}");
 }
 
 fn policy(configure: impl FnOnce(&mut PolicyConfig)) -> Policy {

@@ -197,12 +197,7 @@ async fn test_metrics_exposes_bounded_role_counters() {
     let file_url = format!("{}/files/flask.whl", h.server.uri());
     mount_detail(&h.server, digest.as_str(), &file_url, None).await;
     get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
-    for _ in 0..500 {
-        if h.state.metrics.index_totals().contains_key("pypi") {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    h.state.metrics.settle();
     // A second route makes the exposition ordering observable.
     h.state.metrics.record(peryx_events::metrics::Event::Page {
         route: "hosted".to_owned(),
@@ -213,17 +208,7 @@ async fn test_metrics_exposes_bounded_role_counters() {
         outcome: peryx_events::metrics::CatalogSyncOutcome::Published,
         projects: Some(700_000),
     });
-    for _ in 0..500 {
-        let totals = h.state.metrics.index_totals();
-        if totals.len() == 2
-            && totals
-                .get("pypi")
-                .is_some_and(|counters| counters.cached.catalog_syncs == 1)
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    h.state.metrics.settle();
     let (status, _, body) = get(&h.state, "/metrics", None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("peryx_pages_served_total{ecosystem=\"pypi\",role=\"hosted\"} 1"));
@@ -272,12 +257,7 @@ async fn test_metrics_omit_hostile_values_and_bound_series_count() {
             bytes: 1,
         });
     }
-    for _ in 0..500 {
-        if state.metrics.index_totals().len() == 64 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    state.metrics.settle();
 
     let (status, _, body) = get(&state, "/metrics", None).await;
 

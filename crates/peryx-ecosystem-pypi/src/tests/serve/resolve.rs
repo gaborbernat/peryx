@@ -394,12 +394,7 @@ async fn test_stats_endpoint_drills_by_index_and_project() {
     let file_url = format!("{}/files/flask.whl", h.server.uri());
     mount_json_page(&h.server, &detail_json(digest.as_str(), &file_url)).await;
     get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
-    for _ in 0..500 {
-        if !h.state.metrics.index_totals().is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    h.state.metrics.settle();
     // `/+stats` names repositories, so the drill authenticates as an operator.
     let authorization = crate::tests::administrator_header(&h.state).await;
     let credentials = [(axum::http::header::AUTHORIZATION.as_str(), authorization.as_str())];

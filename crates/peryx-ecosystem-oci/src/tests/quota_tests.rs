@@ -579,19 +579,14 @@ async fn test_quota_decisions_increment_the_admitted_and_rejected_counters() {
     assert_eq!(push_blob(&app, "store/app", b"too-large").await, StatusCode::FORBIDDEN);
 
     let want = std::collections::BTreeMap::from([("quota_admitted", 1), ("quota_rejected", 1)]);
-    for _ in 0..500 {
-        let counters = state.metrics.index_totals();
-        if counters
+    state.metrics.settle();
+    let counters = state.metrics.index_totals();
+    assert!(
+        counters
             .get("store")
-            .is_some_and(|store| want.iter().all(|(key, value)| store.ecosystem.get(key) == Some(value)))
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!(
-        "quota metrics never settled: {:?}",
-        state.metrics.index_totals().get("store")
+            .is_some_and(|store| want.iter().all(|(key, value)| store.ecosystem.get(key) == Some(value))),
+        "quota metrics settled on an unexpected state: {:?}",
+        counters.get("store")
     );
 }
 

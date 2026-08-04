@@ -43,20 +43,9 @@ async fn test_metadata_served_verified_and_counted() {
     assert_eq!(status2, StatusCode::OK);
     assert_eq!(body2, body);
 
-    // Metadata counters are folded in by the off-thread aggregator, so poll until both siblings land
+    // Metadata counters are folded in by the off-thread aggregator, so drain it through the barrier
     // before reading `/metrics`; a bare read races the aggregator and flakes on slow runners.
-    for _ in 0..500 {
-        if h.state
-            .metrics
-            .index_totals()
-            .get("pypi")
-            .and_then(|totals| totals.ecosystem.get("metadata").copied())
-            == Some(2)
-        {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    }
+    h.state.metrics.settle();
     let (_, _, metrics) = get(&h.state, "/metrics", None).await;
     assert!(
         metrics.contains("peryx_metadata_served_total{ecosystem=\"pypi\",role=\"cached\"} 2"),

@@ -110,6 +110,7 @@ toml = { workspace = true, optional = true }
 html5ever = { workspace = true, optional = true }
 
 [dev-dependencies]
+peryx-events = { workspace = true, features = ["test-util"] }
 peryx-http.workspace = true
 httpdate.workspace = true
 rstest.workspace = true

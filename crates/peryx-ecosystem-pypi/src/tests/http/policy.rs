@@ -421,19 +421,15 @@ async fn test_policy_quota_records_admitted_and_rejected_metrics() {
     );
 
     let expected = BTreeMap::from([("quota_admitted", 1), ("quota_rejected", 1)]);
-    for _ in 0..500 {
-        let counters = h.state.metrics.index_totals();
-        if counters.get("hosted").is_some_and(|hosted| {
+    h.state.metrics.settle();
+    let counters = h.state.metrics.index_totals();
+    assert!(
+        counters.get("hosted").is_some_and(|hosted| {
             expected
                 .iter()
                 .all(|(key, value)| hosted.ecosystem.get(key) == Some(value))
-        }) {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    panic!(
-        "quota metrics never settled: {:?}",
-        h.state.metrics.index_totals().get("hosted")
+        }),
+        "quota metrics settled on an unexpected state: {:?}",
+        counters.get("hosted")
     );
 }

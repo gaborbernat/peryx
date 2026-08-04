@@ -367,19 +367,11 @@ async fn test_backend_without_local_tail_records_the_committed_download() {
         .unwrap();
     drop(sender);
     assert_eq!(streamed, body);
-    for _ in 0..500 {
-        if h.state
-            .metrics
-            .index_totals()
-            .get("pypi")
-            .is_some_and(|totals| totals.base.downloads == 1)
-        {
-            assert_eq!(h.state.metrics.index_totals()["pypi"].base.bytes, body.len() as u64);
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!("download metric never settled");
+    h.state.metrics.settle();
+    let totals = h.state.metrics.index_totals();
+    let pypi = totals.get("pypi").expect("pypi counters present after settle");
+    assert_eq!(pypi.base.downloads, 1);
+    assert_eq!(pypi.base.bytes, body.len() as u64);
 }
 
 #[tokio::test]

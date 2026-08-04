@@ -9,17 +9,12 @@ use super::{auth, hosted_writable, oci_digest, send, send_body};
 const TOKEN: &str = "s3cret";
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
-/// The aggregator runs on its own thread; poll the store's counters until the events land.
+/// Drain the off-thread aggregator through its barrier, then assert the store counters it settled on.
 fn settle(state: &AppState, done: impl Fn(&peryx_events::metrics::Counters) -> bool) {
-    for _ in 0..500 {
-        if let Some(counters) = state.metrics.index_totals().get("store")
-            && done(counters)
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!("metrics aggregator never settled");
+    state.metrics.settle();
+    let counters = state.metrics.index_totals();
+    let store = counters.get("store").expect("store counters present after settle");
+    assert!(done(store), "metrics settled on an unexpected state: {store:?}");
 }
 
 #[tokio::test]

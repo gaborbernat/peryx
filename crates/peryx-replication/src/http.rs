@@ -8,14 +8,13 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use peryx_storage::blob::{BlobErrorKind, BlobRead, BlobReadBody, BlobStorage, Digest};
+use peryx_storage::blob::{BlobErrorKind, BlobRead, BlobReadBody, BlobStorage, Digest, RangeRequest, parse_range};
 use peryx_storage::meta::MetaStore;
 use reqwest::Url;
 use serde::Deserialize;
 use tokio::io::AsyncReadExt as _;
 use tokio_util::io::ReaderStream;
 
-use crate::blob_range::{RangeRequest, parse_range};
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION, Primary};
 
 const CHANGES_PATH: &str = "+replication/v1/changes";

@@ -16,7 +16,6 @@ mod blob_piece;
 mod blob_placement;
 mod blob_plane;
 mod blob_pull;
-mod blob_range;
 mod blob_reassembly;
 mod blob_routing;
 mod channel;
@@ -56,7 +55,6 @@ pub use blob_piece::{PieceError, blob_piece};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
 pub use blob_plane::{BLOB_VIEW, BlobPlaneReport, advance_blob_frontier, pull_outstanding, pull_referenced};
 pub use blob_pull::{PullError, pull_ranged};
-pub use blob_range::{RangeRequest, parse_range};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
@@ -124,8 +122,6 @@ mod blob_placement_tests;
 mod blob_plane_tests;
 #[cfg(test)]
 mod blob_pull_tests;
-#[cfg(test)]
-mod blob_range_tests;
 #[cfg(test)]
 mod blob_reassembly_tests;
 #[cfg(test)]

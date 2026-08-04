@@ -12,6 +12,7 @@ mod blob;
 mod blob_availability;
 mod blob_fetch;
 mod blob_http;
+mod blob_piece;
 mod blob_placement;
 mod blob_range;
 mod blob_reassembly;
@@ -49,6 +50,7 @@ pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackB
 pub use blob_availability::{BlobAvailability, ReferencedBlob, blob_availability};
 pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 pub use blob_http::{HttpBlobError, HttpBlobTransport};
+pub use blob_piece::{PieceError, blob_piece};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
 pub use blob_range::{RangeRequest, parse_range};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
@@ -110,6 +112,8 @@ mod blob_availability_tests;
 mod blob_fetch_tests;
 #[cfg(test)]
 mod blob_http_tests;
+#[cfg(test)]
+mod blob_piece_tests;
 #[cfg(test)]
 mod blob_placement_tests;
 #[cfg(test)]

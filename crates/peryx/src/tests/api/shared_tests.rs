@@ -17,6 +17,7 @@ fn test_openapi_document_covers_every_endpoint() {
         "/+analytics/versions",
         "/+api",
         "/+availability/topology",
+        "/+availability/topology/stream",
         "/+grants",
         "/+grants/{id}",
         "/+health",

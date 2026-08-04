@@ -7,8 +7,8 @@ use leptos::prelude::*;
 
 use crate::data::load_topology;
 use crate::model::{
-    HealthLabel, LocalNode, RoleFilter, TopologyNode, TopologySnapshot, format_instant, liveness_health, mode_label,
-    role_label,
+    HealthLabel, LocalNode, RoleFilter, StreamStatus, TopologyNode, TopologySnapshot, format_instant, liveness_health,
+    mode_label, role_label, stream_status_label,
 };
 
 #[component]
@@ -33,39 +33,47 @@ fn TopologyBody(snapshot: TopologySnapshot) -> impl IntoView {
     let (filter, set_filter) = signal(RoleFilter::All);
     let mode = mode_label(snapshot.mode).to_owned();
     let group = snapshot.group.clone();
-    let captured = format_instant(snapshot.captured_at);
     let node_count = snapshot.node_count;
     let shown = snapshot.nodes.len();
     let capped = node_count > shown;
     let show_address = snapshot.nodes.iter().any(|node| node.address.is_some());
-    let local = snapshot.local.clone();
-    let nodes = snapshot.nodes;
-    let rows_nodes = nodes.clone();
+    let node_roles = snapshot.nodes.iter().map(|node| node.role).collect::<Vec<_>>();
+
+    let live = RwSignal::new(snapshot);
+    let status = RwSignal::new(StreamStatus::Live);
+    // The static render carries no feed badge: a claim about the live connection is meaningful only once
+    // the browser opens the stream, so the badge appears after hydration rather than on the server render.
+    let streaming = RwSignal::new(false);
+    watch_topology(live, status, streaming);
+
     let rows = move || {
         let current = filter.get();
-        rows_nodes
+        live.get()
+            .nodes
             .iter()
             .filter(|node| current.matches(node.role))
             .map(|node| node_row(node, show_address))
             .collect_view()
     };
-    let visible = move || nodes.iter().filter(|node| filter.get().matches(node.role)).count();
+    let visible = move || node_roles.iter().filter(|role| filter.get().matches(**role)).count();
     view! {
         <div class="ops-title">
             <h1>"Availability topology"</h1>
             <span class="badge">"read-only"</span>
+            {move || streaming.get().then(|| view! { <StreamBadge status /> })}
             <a href="/+availability/topology"><code>"/+availability/topology"</code></a>
         </div>
         <p class="dim">
-            "A single role-filtered picture of the availability group, taken at one instant. Peer liveness \
-             stays "<em>"unknown"</em>" until a consensus layer observes it, so stale peer data never reads \
-             as healthy. Fields above your access are withheld rather than shown."
+            "A single role-filtered picture of the availability group that updates live as this node's own \
+             frontier and liveness move. Peer liveness stays "<em>"unknown"</em>" until a consensus layer \
+             observes it, so stale peer data never reads as healthy. Fields above your access are withheld \
+             rather than shown, and a paused feed shows as such so stale data cannot look fresh."
         </p>
         <div class="stat-row topology-summary">
             <div class="stat"><strong>{mode}</strong><span>"mode"</span></div>
             <div class="stat"><strong>{group.unwrap_or_else(|| "—".to_owned())}</strong><span>"group"</span></div>
             <div class="stat"><strong>{node_count}</strong><span>"roster nodes"</span></div>
-            <div class="stat"><strong>{captured.clone()}</strong><span>"snapshot taken (UTC)"</span></div>
+            <div class="stat"><strong>{move || format_instant(live.get().captured_at)}</strong><span>"snapshot taken (UTC)"</span></div>
         </div>
         {capped.then(|| view! {
             <p class="usage-retention" role="note">
@@ -73,7 +81,11 @@ fn TopologyBody(snapshot: TopologySnapshot) -> impl IntoView {
             </p>
         })}
         <h2>"This node"</h2>
-        <LocalNodePanel local captured />
+        {move || {
+            let snapshot = live.get();
+            let captured = format_instant(snapshot.captured_at);
+            view! { <LocalNodePanel local=snapshot.local captured /> }
+        }}
         <h2>"Roster"</h2>
         {if node_count == 0 {
             view! {
@@ -163,4 +175,59 @@ fn node_row(node: &TopologyNode, show_address: bool) -> AnyView {
 #[component]
 fn HealthBadge(health: HealthLabel) -> impl IntoView {
     view! { <span class=format!("badge {}", health.class)>{health.text}</span> }
+}
+
+#[component]
+fn StreamBadge(status: RwSignal<StreamStatus>) -> impl IntoView {
+    view! {
+        {move || {
+            let label = stream_status_label(status.get());
+            view! {
+                <span class=format!("badge {}", label.class) role="status" aria-live="polite">
+                    "feed: "{label.text}
+                </span>
+            }
+        }}
+    }
+}
+
+/// Subscribe the page to live snapshot deltas, holding the stream for the page's lifetime. The browser
+/// half opens an `EventSource`; the server render and the script-free fallback keep the one-shot
+/// snapshot, so the page stays complete without the stream.
+fn watch_topology(live: RwSignal<TopologySnapshot>, status: RwSignal<StreamStatus>, streaming: RwSignal<bool>) {
+    #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+    {
+        // Run after hydration so the server render and the browser's first render agree on an absent
+        // badge; only then open the stream and reveal it.
+        Effect::new(move |_| {
+            match crate::data::subscribe_topology(move |snapshot| live.set(snapshot), move |state| status.set(state)) {
+                // The stream holds JS closures, so it cannot cross into the `Send + Sync` cleanup
+                // callback. Park it in a thread-local the callback reaches on navigation, like uploads.
+                Some(stream) => {
+                    drop(TOPOLOGY_STREAM.with(|slot| slot.borrow_mut().replace(stream)));
+                    streaming.set(true);
+                    on_cleanup(close_topology_stream);
+                }
+                None => {
+                    streaming.set(true);
+                    status.set(StreamStatus::Offline);
+                }
+            }
+        });
+    }
+    #[cfg(not(all(not(feature = "ssr"), feature = "hydrate")))]
+    {
+        let _ = (live, status, streaming);
+    }
+}
+
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+thread_local! {
+    static TOPOLOGY_STREAM: std::cell::RefCell<Option<crate::data::TopologyStream>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+fn close_topology_stream() {
+    drop(TOPOLOGY_STREAM.with(|slot| slot.borrow_mut().take()));
 }

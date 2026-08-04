@@ -753,6 +753,30 @@
         ]
       }
     },
+    "/+availability/topology/stream": {
+      "get": {
+        "description": "The same role-filtered snapshot as `/+availability/topology`, pushed as a bounded stream of Server-Sent Events so an operator surface updates live without polling. The first event carries the current snapshot; a later event fires only when the meaningful state changes, so traffic tracks the change rate rather than the roster size or the number of open pages, and `captured_at` advancing on its own emits nothing. An idle stream carries only keep-alive comments every fifteen seconds. Each event's `id` increases monotonically, so a browser resumes from `Last-Event-ID` on reconnect; a disconnect the browser cannot recover reads as a frozen feed rather than fresh data. A slow reader coalesces to the latest snapshot because each sample re-reads live state and the connection buffers no backlog. Authentication, the per-class field filtering, and the `no-store` policy match the one-shot endpoint.",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "example": "id: 1\nevent: topology\ndata: {\"mode\":\"dc\",\"group\":\"east\",\"captured_at\":1800000000,\"node_count\":2,\"local\":{\"role\":\"writer\",\"liveness\":\"live\",\"frontier\":42},\"nodes\":[]}\n\n"
+              }
+            },
+            "description": "An event stream of availability topology snapshots"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Availability topology stream",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+grants": {
       "get": {
         "description": "Returns a bounded page of role grants in stable identifier order. A `user` filter reads one user's grants and a `resource` filter one reach's; both need administration authority over what they select, so a repository administrator may list its own repository but not the whole server.",

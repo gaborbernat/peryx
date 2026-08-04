@@ -49,11 +49,13 @@ console_error_panic_hook = { workspace = true, optional = true }
 send_wrapper = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true, features = [
     "Blob",
+    "EventSource",
     "File",
     "FileList",
     "FormData",
     "HtmlInputElement",
     "Location",
+    "MessageEvent",
     "ProgressEvent",
     "XmlHttpRequest",
     "XmlHttpRequestEventTarget",

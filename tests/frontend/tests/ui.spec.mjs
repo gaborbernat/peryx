@@ -1261,10 +1261,20 @@ test("availability topology renders roster health and filters by role", async ({
   await page.route("**/+availability/topology", (route) =>
     route.fulfill({ contentType: "application/json", body: JSON.stringify(topologySnapshot) }),
   );
+  // The page opens a live stream after hydration; feed it the same snapshot so the live update is a
+  // no-op over the mocked roster instead of the fixture's empty public one.
+  await page.route("**/+availability/topology/stream", (route) =>
+    route.fulfill({
+      contentType: "text/event-stream",
+      body: `id: 1\nevent: topology\ndata: ${JSON.stringify(topologySnapshot)}\n\n`,
+    }),
+  );
   await goto(page, "/");
   await page.locator(".nav-links a", { hasText: "Topology" }).click();
   await expect(page).toHaveURL(/\/admin\/topology$/);
   await expect(page.locator("h1", { hasText: "Availability topology" })).toBeVisible();
+  // The live feed badge appears once the browser subscribes to the stream after hydration.
+  await expect(page.locator(".ops-title .badge", { hasText: "feed:" })).toBeVisible();
 
   const rows = page.locator(".topology-table tbody tr");
   await expect(rows).toHaveCount(3);

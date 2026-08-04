@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{Body, BodyDataStream};
 use axum::http::{Request, StatusCode, header};
+use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::StreamExt as _;
 use peryx_core::{NodeRole, TopologyConfig, TopologyMember, TopologyMode};
 use peryx_driver::authz::AuthorizationService;
 use peryx_driver::state::AppState;
@@ -216,4 +218,156 @@ async fn test_topology_read_only_primary_reports_the_writer_role() {
         body["local"]["role"], "writer",
         "a read-only primary writes, so it is the writer: {body}",
     );
+}
+
+async fn stream(state: &Arc<AppState>, credential: Option<(&str, &str)>) -> Response {
+    let mut request = Request::builder().uri("/+availability/topology/stream");
+    if let Some((user, password)) = credential {
+        request = request.header(
+            header::AUTHORIZATION,
+            format!("Basic {}", STANDARD.encode(format!("{user}:{password}"))),
+        );
+    }
+    crate::router(state.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+/// Reads one Server-Sent Events message at a time from a streaming response body, so a test can inspect
+/// events one by one instead of draining a body that never ends.
+struct SseReader {
+    stream: BodyDataStream,
+    buffer: String,
+}
+
+impl SseReader {
+    fn new(response: Response) -> Self {
+        Self {
+            stream: response.into_body().into_data_stream(),
+            buffer: String::new(),
+        }
+    }
+
+    /// The next raw message block, without its terminating blank line.
+    async fn message(&mut self) -> String {
+        loop {
+            if let Some(end) = self.buffer.find("\n\n") {
+                let message = self.buffer[..end].to_owned();
+                self.buffer.drain(..end + 2);
+                return message;
+            }
+            let chunk = self.stream.next().await.expect("stream ended").expect("stream chunk");
+            self.buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    }
+
+    /// The next `topology` data event as `(id, snapshot)`, skipping keep-alive comments.
+    async fn data_event(&mut self) -> (u64, serde_json::Value) {
+        loop {
+            let message = self.message().await;
+            if let Some(event) = parse_data_event(&message) {
+                return event;
+            }
+        }
+    }
+}
+
+fn parse_data_event(message: &str) -> Option<(u64, serde_json::Value)> {
+    let mut id = None;
+    let mut event = None;
+    let mut data = None;
+    for line in message.lines() {
+        let Some((field, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "id" => id = value.parse().ok(),
+            "event" => event = Some(value.to_owned()),
+            "data" => data = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    if event.as_deref() != Some("topology") {
+        return None;
+    }
+    Some((id?, serde_json::from_str(&data?).ok()?))
+}
+
+#[tokio::test]
+async fn test_topology_stream_emits_the_initial_snapshot_as_an_event() {
+    let (_dir, state) = app(false, true, NodeRole::Writer).await;
+    let response = stream(&state, Some(("Olivia", USER_PASSWORD))).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(
+        response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream"),
+    );
+
+    let (id, snapshot) = SseReader::new(response).data_event().await;
+    assert_eq!(
+        id, 1,
+        "the first event carries id 1 so a reconnect resumes from a known point"
+    );
+    assert_eq!(snapshot["local"]["liveness"], "live");
+    assert_eq!(
+        node(&snapshot, "writer-a")["frontier"].as_u64(),
+        snapshot["local"]["frontier"].as_u64()
+    );
+}
+
+#[tokio::test]
+async fn test_topology_stream_filters_the_public_view() {
+    let (_dir, state) = app(false, true, NodeRole::Writer).await;
+    let response = stream(&state, None).await;
+
+    let (_, snapshot) = SseReader::new(response).data_event().await;
+    assert!(
+        snapshot["local"].get("liveness").is_none(),
+        "a public stream withholds liveness: {snapshot}"
+    );
+    assert!(node(&snapshot, "writer-a").get("frontier").is_none(), "{snapshot}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_topology_stream_coalesces_unchanged_state_into_heartbeats() {
+    let (_dir, state) = app(false, true, NodeRole::Writer).await;
+    let mut reader = SseReader::new(stream(&state, Some(("Olivia", USER_PASSWORD))).await);
+
+    let (first, _) = reader.data_event().await;
+    assert_eq!(first, 1);
+    let quiet = reader.message().await;
+    assert!(
+        parse_data_event(&quiet).is_none(),
+        "an unchanged snapshot emits no event: {quiet}"
+    );
+    assert!(
+        quiet.contains("heartbeat"),
+        "an idle stream carries only keep-alive comments: {quiet}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_topology_stream_emits_a_new_event_when_state_changes() {
+    let (dir, state) = app(false, false, NodeRole::Writer).await;
+    let mut reader = SseReader::new(stream(&state, Some(("Olivia", USER_PASSWORD))).await);
+
+    let (first_id, unhealthy) = reader.data_event().await;
+    assert_eq!(first_id, 1);
+    assert_eq!(unhealthy["local"]["liveness"], "unready");
+
+    // Replace the blocking regular file with a real directory, so the next health probe succeeds and the
+    // node's liveness moves from unready to live.
+    let blob_root = dir.path().join("blobs");
+    std::fs::remove_file(&blob_root).unwrap();
+    std::fs::create_dir(&blob_root).unwrap();
+
+    let (second_id, healthy) = reader.data_event().await;
+    assert_eq!(second_id, 2, "each change advances the event id monotonically");
+    assert_eq!(healthy["local"]["liveness"], "live");
 }

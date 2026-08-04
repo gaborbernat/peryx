@@ -39,6 +39,8 @@ pub use stats::load_stats;
 pub use status::{load_admin_snapshot, load_snapshot};
 pub use topology::load_topology;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+pub use topology::{TopologyStream, subscribe_topology};
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 pub use trash::load_trash;
 
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]

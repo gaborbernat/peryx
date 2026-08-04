@@ -5134,6 +5134,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "futures-util",
  "http-body-util",
  "mockall",
  "peryx-core",

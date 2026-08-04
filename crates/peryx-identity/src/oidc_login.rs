@@ -108,6 +108,16 @@ impl OidcLoginProvider {
         Self::build(settings, false)
     }
 
+    /// Build a login client that accepts an `http` issuer and redirect URI, so a test can point the flow
+    /// at a local mock provider. Available only under `test-util`; production always pins `https`.
+    ///
+    /// # Errors
+    /// Same validation as [`new`](Self::new), minus the transport-security check.
+    #[cfg(feature = "test-util")]
+    pub fn insecure(settings: OidcProviderSettings) -> Result<Self, OidcProviderBuildError> {
+        Self::build(settings, true)
+    }
+
     fn build(settings: OidcProviderSettings, allow_insecure: bool) -> Result<Self, OidcProviderBuildError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let issuer = secure_url(&settings.issuer, allow_insecure).ok_or(OidcProviderBuildError::InvalidIssuer)?;

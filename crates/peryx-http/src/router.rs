@@ -80,6 +80,10 @@ fn service_routes() -> Router<Arc<AppState>> {
         .route("/+health", get(handlers::health))
         .route("/+ready", get(handlers::readiness))
         .route("/+acl", get(handlers::acl))
+        .route("/_/login/{provider}", get(handlers::login_start))
+        .route("/_/login/{provider}/callback", get(handlers::login_callback))
+        .route("/_/logout", post(handlers::logout))
+        .route("/_/session", get(handlers::session))
         .route("/+availability/topology", get(handlers::availability_topology))
         .route(
             "/+availability/topology/stream",
@@ -159,6 +163,7 @@ async fn reject_replica_mutation(State(state): State<Arc<AppState>>, request: Re
 fn is_read_only_post(state: &AppState, request: &Request) -> bool {
     let path = request.uri().path();
     path == "/+query"
+        || path == "/_/logout"
         || state.drivers().any(|driver| {
             driver
                 .classify_service_post(path.trim_start_matches('/'), request.headers())

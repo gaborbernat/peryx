@@ -45,9 +45,11 @@ fields: version, coarse health, and the basic index list stay public so the brow
 counters and per-ecosystem rollups need `operator:read`; and the per-index upstream hosts, upload-token state, and
 recent uploads need `administration:read`. `GET /+stats` needs `operator:read` because its drill names repositories and
 projects. The neutral discovery endpoints and the aggregate `GET /metrics` remain public; `/metrics` carries only
-ecosystem-and-role labels, so restrict it at the reverse proxy per the Prometheus security model. LDAP resolves server
-users for login consumers but does not add an HTTP login or browser session in this release. PyPI publishing can use a
-configured CI provider's OIDC identity without making OIDC a general login source.
+ecosystem-and-role labels, so restrict it at the reverse proxy per the Prometheus security model. OpenID Connect adds
+browser sign-in and a read-only web session; the session authenticates only the UI, so every package operation still
+presents a token. LDAP resolves server users for login consumers but does not add an HTTP login yet. PyPI publishing can
+separately use a configured CI provider's OIDC identity for trusted publishing, a machine path distinct from browser
+login.
 
 ## Server roles and protected responses
 
@@ -182,6 +184,65 @@ distinct errors without exposing the username, password, subject, groups, or CA 
 The provider service returns a stable local user ID after the provider-subject link commits. It does not mint a token,
 create a session, accept HTTP Basic credentials, or change a package route; those are separate consumers of the login
 service.
+
+### OIDC login providers
+
+Each `[[auth.oidc_provider]]` configures one OpenID Connect issuer for browser sign-in through the Authorization Code
+flow with PKCE. Peryx builds the provider at startup without a network call; the first login fetches and caches the
+issuer's discovery document and signing keys and pins the configured issuer. A signing key is required: the browser
+session cookie is sealed with a key derived from `[auth].signing_key`, so an `[[auth.oidc_provider]]` without a
+configured `signing_key` is rejected at startup.
+
+```toml
+[[auth.oidc_provider]]
+id = "corporate"
+issuer = "https://idp.example/realms/main"
+client_id = "peryx"
+client_secret_file = "/run/secrets/peryx-oidc-secret"
+redirect_uri = "https://registry.example/_/login/corporate/callback"
+scopes = ["openid", "email", "groups"]
+subject_claim = "sub"
+display_name_claim = "name"
+groups_claim = "groups"
+clock_skew_secs = 30
+request_timeout_secs = 8
+
+[[auth.oidc_provider.group_mapping]]
+group = "registry-admins"
+role = "administrator"
+
+[[auth.oidc_provider.group_mapping]]
+group = "packagers"
+role = "repository_reader"
+repository = "packages"
+```
+
+`issuer` and `redirect_uri` must be `https` and carry no fragment, and the issuer must carry no query. Register
+`redirect_uri` verbatim with the provider; it is the `/_/login/{id}/callback` route peryx serves. Omit `client_secret`
+(and its `_file` and `_env` siblings) for a public client that relies on PKCE alone, or set exactly one of them for a
+confidential client. `scopes` always includes `openid`. `subject_claim` names the stable, opaque claim that identifies
+the user; an email or a display name, which can be reassigned, does not belong here. `display_name_claim` supplies the
+initial local name. `groups_claim` is optional; when present its values select `group_mapping` entries the way LDAP
+groups do — a mapping without `repository` grants a server-scoped role, one with `repository` must name a configured
+index.
+
+**The login flow.** `GET /_/login/{id}` mints `state`, a `nonce`, and a PKCE verifier, seals them into a single-use,
+short-lived cookie, and redirects the browser to the provider. The provider returns to `/_/login/{id}/callback`, where
+peryx re-opens the sealed handoff and validates the response: the `state` must match, and the ID token must carry the
+pinned issuer, this client's audience, a matching `nonce`, and a signature from the issuer's current keys, all within
+`clock_skew_secs`. Any mismatch fails the login. A rotated signing key is picked up on a bounded metadata refresh.
+
+**The session.** A completed login seals the resolved user into a `peryx_session` cookie — `HttpOnly`, `Secure`,
+`SameSite=Lax`, and short-lived — and redirects to the dashboard. The session authenticates only the read-only web UI.
+Every state-changing request — a PyPI upload, a `docker push`, a token or grant mutation — still authenticates with an
+`Authorization`-header token exactly as before; the session cookie is never accepted as authorization for a mutation, so
+it opens no CSRF surface. `GET /_/session` reports the signed-in user and the configured providers for the login page,
+and `POST /_/logout` clears the cookie.
+
+**Outages.** Discovery, key, token, and user-info requests are bounded by `request_timeout_secs`, and once a session
+exists no request reaches the provider. A provider outage fails an in-progress browser login with a retryable `503` and
+never touches API-token authentication, so uploads and pulls keep working while the identity provider is down. A
+metadata-fetch failure keeps the cached keys and never disables signature validation.
 
 `default_anonymous_read = false` makes every index's ACL deny anonymous reads by default. It closes the enforced OCI and
 project-presentation paths; the public paths listed above stay open. An index that should stay open sets

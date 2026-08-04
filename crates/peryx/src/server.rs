@@ -15,7 +15,7 @@ use peryx_events::webhook::{WebhookRuntime, WebhookTargetConfig};
 use peryx_http::router;
 use peryx_identity::{
     Action, LdapBindMode, LdapLoginService, LdapProvider, LdapProviderSettings, OidcLoginProvider, OidcLoginService,
-    OidcProviderSettings, Signer,
+    OidcProviderSettings, SessionSealer, Signer,
 };
 use peryx_policy::{Policy, PolicyDecisionRecorder, PolicyEvaluation};
 use peryx_storage::blob::{BlobStorage, S3Config};
@@ -184,6 +184,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         if key.trim().is_empty() {
             bail!("token realm signing key must not be empty");
         }
+        state.set_session_sealer(SessionSealer::new(key.as_bytes()));
         let signer = Signer::new(key.as_bytes(), peryx_ecosystem_oci::TOKEN_SERVICE);
         if let Some(runtime) = trusted_publishing(config, signer.clone())? {
             state.set_trusted_publishing(runtime);

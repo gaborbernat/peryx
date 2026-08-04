@@ -442,7 +442,7 @@ fn test_default_anonymous_read_closes_every_index_that_does_not_open_itself() {
     assert!(hosted("anonymous_read = true\n").acl(&auth).unwrap().anonymous_read);
 }
 
-const OIDC_FULL: &str = "[[auth.oidc_provider]]\nid = \"corporate\"\nissuer = \"https://idp.example/realms/main\"\n\
+const OIDC_FULL: &str = "[auth]\nsigning_key = \"key\"\n[[auth.oidc_provider]]\nid = \"corporate\"\nissuer = \"https://idp.example/realms/main\"\n\
      client_id = \"peryx\"\nclient_secret_env = \"OIDC_SECRET\"\n\
      redirect_uri = \"https://registry.example/oidc/corporate/callback\"\nscopes = [\"openid\", \"email\", \"groups\"]\n\
      subject_claim = \"sub\"\ndisplay_name_claim = \"name\"\ngroups_claim = \"groups\"\n\
@@ -565,7 +565,7 @@ fn test_oidc_provider_rejects_invalid_settings(#[case] id: &str, #[case] body: &
 fn test_oidc_provider_ids_are_unique() {
     let provider = "[[auth.oidc_provider]]\nid = \"corporate\"\nissuer = \"https://idp.example\"\n\
          client_id = \"peryx\"\nredirect_uri = \"https://registry.example/callback\"\n";
-    let config = toml_config(&format!("{provider}{provider}"));
+    let config = toml_config(&format!("[auth]\nsigning_key = \"key\"\n{provider}{provider}"));
 
     assert_eq!(
         config.validate().unwrap_err().to_string(),
@@ -574,9 +574,24 @@ fn test_oidc_provider_ids_are_unique() {
 }
 
 #[test]
-fn test_oidc_group_mapping_repository_must_name_a_configured_index() {
+fn test_oidc_providers_require_a_signing_key() {
+    // Browser login seals its session cookie with a key derived from the token-realm signing key, so a
+    // provider without one cannot mint sessions; the config layer rejects it up front.
     let config = toml_config(
         "[[auth.oidc_provider]]\nid = \"corporate\"\nissuer = \"https://idp.example\"\nclient_id = \"peryx\"\n\
+         redirect_uri = \"https://registry.example/callback\"\n",
+    );
+
+    assert_eq!(
+        config.validate().unwrap_err().to_string(),
+        "auth: `signing_key` is required when OIDC login providers are configured"
+    );
+}
+
+#[test]
+fn test_oidc_group_mapping_repository_must_name_a_configured_index() {
+    let config = toml_config(
+        "[auth]\nsigning_key = \"key\"\n[[auth.oidc_provider]]\nid = \"corporate\"\nissuer = \"https://idp.example\"\nclient_id = \"peryx\"\n\
          redirect_uri = \"https://registry.example/callback\"\n\
          [[auth.oidc_provider.group_mapping]]\ngroup = \"team\"\nrole = \"repository_reader\"\nrepository = \"absent\"\n",
     );

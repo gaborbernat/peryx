@@ -10,6 +10,7 @@ mod admin;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 mod analytics;
 mod archive;
+mod login;
 mod manifest;
 mod placement;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
@@ -29,6 +30,7 @@ pub use admin::admin_request;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 pub use analytics::load_analytics;
 pub use archive::{load_member_chunk, load_members};
+pub use login::load_login;
 pub use manifest::{load_layer_chunk, load_layer_members, load_manifest};
 pub use placement::load_placements;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]

@@ -57,6 +57,9 @@ pub enum OperationKind {
     CacheFill,
     OciPush,
     OciDelete,
+    /// A trash, restore, revoke, or lift transition; the specific action rides in the payload so a
+    /// follower routes the envelope to its visibility apply state.
+    Visibility,
 }
 
 impl OperationKind {
@@ -69,6 +72,7 @@ impl OperationKind {
             Self::CacheFill => "cache-fill",
             Self::OciPush => "oci-push",
             Self::OciDelete => "oci-delete",
+            Self::Visibility => "visibility",
         }
     }
 }

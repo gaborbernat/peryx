@@ -17,8 +17,10 @@ use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::{ArtifactSource, MetaStore};
 
 use crate::blob::BlobTransport;
+use crate::blob_availability::{BlobAvailability, ReferencedBlob, blob_availability};
 use crate::blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 use crate::error::SyncError;
+use crate::protocol::PlacementAvailability;
 
 /// The derived-view name whose frontier tracks how far a replica's metadata is backed by blobs it holds.
 ///
@@ -92,6 +94,53 @@ pub async fn pull_referenced<T: BlobTransport>(
     }
 }
 
+/// Advance the [`BLOB_VIEW`] frontier as far as this replica's local blobs allow, and return the serial
+/// it reached.
+///
+/// The frontier re-derives from durable state alone: it reads the journal tail after the current
+/// [`BLOB_VIEW`] frontier, bounded to `batch` records, and folds each referenced blob's local presence
+/// through [`blob_availability`]. No separate durable cursor is kept, so a restart recomputes the same
+/// serial from the journal and the blob store. The `batch` bound caps the work: a persistently-missing
+/// blob pins the frontier at that serial at `O(batch)` cost per pass rather than an unbounded rescan, and
+/// the frontier simply advances one batch at a time when the plane keeps up. It moves only the frontier,
+/// committing no bytes and no metadata.
+///
+/// # Errors
+/// Returns a store error reading the journal, probing blob presence, or writing the frontier.
+pub async fn advance_blob_frontier(
+    meta: &MetaStore,
+    blobs: &BlobStorage,
+    batch: NonZeroUsize,
+) -> Result<u64, SyncError> {
+    let frontier = meta.view_frontier(BLOB_VIEW)?.unwrap_or(0);
+    let (_authority, records) = meta.journal_page_after(frontier, batch.get())?;
+    // The bounded batch is the ceiling this pass can reach: the frontier advances at most to the highest
+    // serial examined, so serials past the batch are left for a later pass rather than assumed backed.
+    let batch_end = records.last().map_or(frontier, |record| record.serial);
+    let mut referenced = Vec::new();
+    for record in &records {
+        for blob in &record.blobs {
+            let present_locally = match Digest::from_hex(&blob.sha256) {
+                Some(digest) => blobs.head(&digest).await?.is_some(),
+                // A journal digest that cannot parse cannot be served, so it holds the frontier closed.
+                None => false,
+            };
+            referenced.push(ReferencedBlob {
+                serial: record.serial,
+                digest: blob.sha256.clone(),
+                // #830: a whole-blob #826 page advertises no placement, so a referenced blob is treated as
+                // Verified and only local presence gates it; when placement descriptors ride in the page,
+                // the real advertised availability replaces this.
+                availability: PlacementAvailability::Verified,
+                present_locally,
+            });
+        }
+    }
+    let BlobAvailability { serial, .. } = blob_availability(batch_end, &referenced);
+    meta.set_view_frontier(BLOB_VIEW, serial)?;
+    Ok(serial)
+}
+
 /// Commit one verified blob's bytes under its digest and record it locally present.
 async fn commit_blob(
     blobs: &BlobStorage,
@@ -100,11 +149,12 @@ async fn commit_blob(
     size: u64,
     bytes: Vec<u8>,
 ) -> Result<(), SyncError> {
-    if bytes.len() as u64 != size {
+    let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if actual != size {
         return Err(SyncError::BlobSizeMismatch {
             digest: digest.as_str().to_owned(),
             expected: size,
-            actual: bytes.len() as u64,
+            actual,
         });
     }
     let mut write = blobs.begin().await?;

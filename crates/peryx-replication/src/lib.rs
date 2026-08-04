@@ -54,7 +54,7 @@ pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 pub use blob_http::{HttpBlobError, HttpBlobTransport};
 pub use blob_piece::{PieceError, blob_piece};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
-pub use blob_plane::{BLOB_VIEW, BlobPlaneReport, pull_referenced};
+pub use blob_plane::{BLOB_VIEW, BlobPlaneReport, advance_blob_frontier, pull_referenced};
 pub use blob_pull::{PullError, pull_ranged};
 pub use blob_range::{RangeRequest, parse_range};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};

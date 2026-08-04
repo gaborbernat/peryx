@@ -7,7 +7,7 @@ use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
 
 use crate::blob::{BlobRequest, BlobTransport, LoopbackBlobSource};
-use crate::blob_plane::{BlobPlaneReport, pull_referenced};
+use crate::blob_plane::{BLOB_VIEW, BlobPlaneReport, advance_blob_frontier, pull_referenced};
 use crate::error::SyncError;
 use crate::peer::{TransferLimits, TransportError};
 
@@ -141,4 +141,71 @@ async fn test_pull_referenced_fails_closed_on_a_wrong_sized_blob() {
     assert_eq!(actual, bytes.len() as u64);
     // The wrong-sized blob is not left present.
     assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+fn seed_serial(meta: &MetaStore, after: u64, blobs: &[(&str, u64)]) {
+    meta.commit_replica_txn(after, |txn| {
+        for (sha256, size) in blobs {
+            txn.reference_blob(sha256, *size);
+        }
+        Ok::<_, SyncError>(((), vec![format!("event-{}", after + 1).into_bytes()]))
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_advance_holds_below_an_absent_blob_then_moves_past_it_once_present() {
+    let (_dir, meta, blobs) = stores();
+    let one = Digest::of(b"blob-one");
+    let two = Digest::of(b"blob-two");
+    seed_serial(&meta, 0, &[(one.as_str(), 8)]);
+    seed_serial(&meta, 1, &[(two.as_str(), 8)]);
+    seed_local(&blobs, &one, b"blob-one").await;
+
+    // `two` is absent, so the frontier holds at serial 1.
+    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 1);
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
+
+    // Once `two`'s byte lands the next pass advances past it.
+    seed_local(&blobs, &two, b"blob-two").await;
+    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 2);
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(2));
+
+    // Re-deriving from the same durable journal and blob store is idempotent.
+    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 2);
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(2));
+}
+
+#[tokio::test]
+async fn test_advance_is_bounded_by_the_batch() {
+    let (_dir, meta, blobs) = stores();
+    for (after, content) in [(0, b"one" as &[u8]), (1, b"two"), (2, b"three")] {
+        let digest = Digest::of(content);
+        seed_serial(&meta, after, &[(digest.as_str(), content.len() as u64)]);
+        seed_local(&blobs, &digest, content).await;
+    }
+
+    // A batch of two examines serials 1 and 2 only, so the frontier reaches 2 this pass, not 3.
+    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(2)).await.unwrap(), 2);
+    // The next pass carries it the rest of the way.
+    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(2)).await.unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_advance_lets_a_serial_without_blobs_through() {
+    let (_dir, meta, blobs) = stores();
+    seed_serial(&meta, 0, &[]);
+
+    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 1);
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
+}
+
+#[tokio::test]
+async fn test_advance_fails_closed_on_an_unparseable_journal_digest() {
+    let (_dir, meta, blobs) = stores();
+    seed_serial(&meta, 0, &[("not-a-valid-sha256", 4)]);
+
+    // The digest cannot be probed, so the blob counts as absent and the frontier holds below serial 1.
+    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 0);
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), None);
 }

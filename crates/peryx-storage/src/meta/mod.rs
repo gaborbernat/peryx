@@ -31,6 +31,7 @@ mod role_grant;
 mod scoped_token;
 mod transfer_attempt;
 mod user;
+mod visibility;
 mod webhook;
 mod writer;
 
@@ -149,12 +150,14 @@ const REPOSITORY_ROUTE: TableDefinition<&str, &str> = TableDefinition::new("repo
 const SCOPED_TOKEN: TableDefinition<&str, &[u8]> = TableDefinition::new("scoped_token");
 const SCOPED_TOKEN_REACH: TableDefinition<&str, &str> = TableDefinition::new("scoped_token_reach");
 const SCOPED_TOKEN_VERIFIER: TableDefinition<&str, &str> = TableDefinition::new("scoped_token_verifier");
+const VISIBILITY_SNAPSHOT: TableDefinition<&str, &[u8]> = TableDefinition::new("visibility_snapshot");
 const SERIAL_KEY: &str = "serial";
 const WEBHOOK_SERIAL_KEY: &str = "webhook_delivery";
 const JOB_SERIAL_KEY: &str = "job_run";
 const POLICY_DECISION_SERIAL_KEY: &str = "policy_decision";
 const ANALYTICS_KEY: &str = "downloads";
 const ANALYTICS_DAILY_KEY: &str = "daily_usage";
+const VISIBILITY_SNAPSHOT_KEY: &str = "current";
 const WRITER_KEY: &str = "active";
 
 /// A set of driver-owned writes to apply in one transaction.
@@ -257,6 +260,7 @@ impl MetaStore {
             txn.open_table(JOURNAL_BLOBS)?;
             txn.open_table(DRIVER_KV)?;
             txn.open_table(ANALYTICS)?;
+            txn.open_table(VISIBILITY_SNAPSHOT)?;
             txn.open_table(USER)?;
             txn.open_table(USER_NAME)?;
             txn.open_table(USER_EVENT)?;

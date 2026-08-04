@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::{Seek as _, SeekFrom};
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -14,8 +15,10 @@ use peryx_storage::blob::{BlobErrorKind, BlobRead, BlobReadBody, BlobStorage, Di
 use peryx_storage::meta::MetaStore;
 use reqwest::Url;
 use serde::Deserialize;
+use tokio::io::AsyncReadExt as _;
 use tokio_util::io::ReaderStream;
 
+use crate::blob_range::{RangeRequest, parse_range};
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION, Primary};
 
 const CHANGES_PATH: &str = "+replication/v1/changes";
@@ -239,21 +242,74 @@ async fn serve_blob(
     let Some(digest) = Digest::from_hex(&encoded) else {
         return (StatusCode::BAD_REQUEST, "invalid sha256 digest").into_response();
     };
-    let read = match state.blobs.open(&digest, None).await {
+    let requested = match headers.get(header::RANGE).and_then(|value| value.to_str().ok()) {
+        None => None,
+        Some(range) => {
+            let size = match state.blobs.head(&digest).await {
+                Ok(Some(metadata)) => metadata.bytes,
+                Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            match parse_range(Some(range), size) {
+                RangeRequest::Whole => None,
+                RangeRequest::Unsatisfiable => return unsatisfiable_range(size),
+                RangeRequest::Partial(range) => Some(range),
+            }
+        }
+    };
+    let partial = requested.is_some();
+    let read = match state.blobs.open(&digest, requested).await {
         Ok(read) => read,
         Err(error) if error.kind() == BlobErrorKind::NotFound => return StatusCode::NOT_FOUND.into_response(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    Response::builder()
+    blob_content_response(read, partial)
+}
+
+fn blob_content_response(read: BlobRead, partial: bool) -> Response {
+    let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CACHE_CONTROL, "private, no-store")
+        .header(header::ACCEPT_RANGES, "bytes");
+    if partial {
+        builder = builder
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_LENGTH, read.range.end - read.range.start)
+            .header(
+                header::CONTENT_RANGE,
+                format!(
+                    "bytes {}-{}/{}",
+                    read.range.start,
+                    read.range.end - 1,
+                    read.metadata.bytes
+                ),
+            );
+    }
+    builder
         .body(blob_body(read))
-        .expect("static replication response headers are valid")
+        .expect("replication blob response headers are valid")
+}
+
+fn unsatisfiable_range(size: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+        .body(Body::empty())
+        .expect("replication range response headers are valid")
 }
 
 pub fn blob_body(read: BlobRead) -> Body {
     match read.body {
-        BlobReadBody::File(file) => Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file))),
+        BlobReadBody::File(mut file) => {
+            // `open` hands back a whole-file handle plus the selected range; position it so the body
+            // streams only that range. A regular blob file seeks to an offset `open` already bounded to
+            // its size, so this cannot fail in practice.
+            file.seek(SeekFrom::Start(read.range.start))
+                .expect("a stored blob file seeks to its validated range start");
+            let length = read.range.end - read.range.start;
+            Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file).take(length)))
+        }
         BlobReadBody::Stream(stream) => Body::from_stream(stream),
     }
 }

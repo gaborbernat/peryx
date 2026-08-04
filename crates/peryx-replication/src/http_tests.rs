@@ -289,6 +289,101 @@ async fn test_primary_router_reports_an_unreadable_blob() {
 }
 
 #[tokio::test]
+async fn test_primary_router_serves_a_byte_range() {
+    let stores = TestStores::new();
+    let digest = stores.blobs.put_bytes(b"0123456789").await.unwrap();
+
+    let response = stores
+        .router()
+        .oneshot(range_request(&digest, "bytes=2-5"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let content_range = response.headers()[header::CONTENT_RANGE].clone();
+    let content_length = response.headers()[header::CONTENT_LENGTH].clone();
+    let accept_ranges = response.headers()[header::ACCEPT_RANGES].clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(content_range, "bytes 2-5/10");
+    assert_eq!(content_length, "4");
+    assert_eq!(accept_ranges, "bytes");
+    assert_eq!(body, "2345");
+}
+
+#[tokio::test]
+async fn test_primary_router_rejects_an_unsatisfiable_range() {
+    let stores = TestStores::new();
+    let digest = stores.blobs.put_bytes(b"0123456789").await.unwrap();
+
+    let response = stores
+        .router()
+        .oneshot(range_request(&digest, "bytes=20-30"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let content_range = response.headers()[header::CONTENT_RANGE].clone();
+
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(content_range, "bytes */10");
+}
+
+#[tokio::test]
+async fn test_primary_router_ignores_a_malformed_range_and_serves_the_whole_blob() {
+    let stores = TestStores::new();
+    let digest = stores.blobs.put_bytes(b"0123456789").await.unwrap();
+
+    let response = stores
+        .router()
+        .oneshot(range_request(&digest, "bytes=not-a-range"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "0123456789");
+}
+
+#[tokio::test]
+async fn test_primary_router_reports_a_missing_blob_for_a_range() {
+    let stores = TestStores::new();
+    let digest = Digest::of(b"absent");
+
+    let response = stores
+        .router()
+        .oneshot(range_request(&digest, "bytes=0-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_primary_router_reports_a_range_head_failure() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let blobs_dir = dir.path().join("blobs");
+    let blobs = BlobStorage::filesystem(blobs_dir.clone());
+    let digest = blobs.put_bytes(b"payload").await.unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let router = primary_router("primary-a", TOKEN, meta, blobs).unwrap();
+    // Drop search permission on the store root so the ranged request's size lookup fails to stat.
+    std::fs::set_permissions(&blobs_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let status = router
+        .oneshot(range_request(&digest, "bytes=0-3"))
+        .await
+        .unwrap()
+        .status();
+
+    std::fs::set_permissions(&blobs_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
 async fn test_primary_router_protects_blob_requests() {
     let stores = TestStores::new();
     let digest = Digest::of(b"missing");
@@ -408,6 +503,14 @@ async fn test_http_primary_reports_an_invalid_change_page() {
 fn authenticated_request(uri: &str, token: &str) -> Request<Body> {
     Request::get(uri)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn range_request(digest: &Digest, range: &str) -> Request<Body> {
+    Request::get(format!("/+replication/v1/blobs/sha256/{}", digest.as_str()))
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .header(header::RANGE, range)
         .body(Body::empty())
         .unwrap()
 }

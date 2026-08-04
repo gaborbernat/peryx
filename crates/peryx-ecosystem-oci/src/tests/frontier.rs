@@ -7,7 +7,7 @@ use axum::http::{Method, StatusCode};
 use peryx_driver::state::SEARCH_VIEW;
 use rstest::rstest;
 
-use super::{app_with_journal, auth, oci_digest, proxy, replica_router, send, send_body, writable_index};
+use super::{app_with_journal, auth, oci_digest, oci_index, proxy, replica_router, send, send_body, writable_index};
 
 const TOKEN: &str = "s3cret";
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -128,6 +128,47 @@ async fn test_primary_serves_a_hosted_tag_regardless_of_the_search_view() {
     assert_eq!(push_manifest(&app, "v1", MANIFEST).await, StatusCode::CREATED);
     let (status, ..) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// A virtual index (`team`) that layers a hosted store surfaces the store's manifest, so a replica holds
+/// the virtual tag read behind the readable frontier exactly as it holds the store's own route, then
+/// serves it once the search view catches up.
+#[tokio::test]
+async fn test_replica_holds_a_virtual_read_of_a_hosted_member_until_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = app_with_journal(&dir, vec![writable_index("store", "store", false, TOKEN)], true);
+    assert_eq!(push_manifest(&app, "v1", MANIFEST).await, StatusCode::CREATED);
+    let published = state.meta.current_serial().unwrap();
+    assert!(published > 0, "the push advanced the journal");
+
+    let (_replica_state, replica) = replica_router(
+        &state,
+        vec![
+            writable_index("store", "store", false, TOKEN),
+            oci_index(
+                "team",
+                "team",
+                peryx_index::IndexKind::Virtual {
+                    layers: vec![0],
+                    upload: Some(0),
+                },
+            ),
+        ],
+    );
+    let (held, ..) = send(&replica, Method::GET, "/v2/team/app/manifests/v1").await;
+    assert_eq!(
+        held,
+        StatusCode::NOT_FOUND,
+        "the virtual index leaked a member below the frontier"
+    );
+
+    state.meta.set_view_frontier(SEARCH_VIEW, published).unwrap();
+    let (served, _, body) = send(&replica, Method::GET, "/v2/team/app/manifests/v1").await;
+    assert_eq!(served, StatusCode::OK);
+    assert!(
+        std::str::from_utf8(&body).unwrap().contains(r#""schemaVersion":2"#),
+        "{body:?}"
+    );
 }
 
 #[tokio::test]

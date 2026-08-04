@@ -32,19 +32,34 @@ use super::{Format, METADATA_FAMILY, PROVENANCE_FAMILY, negotiate, path_error_re
 use crate::attestation;
 
 /// On a replica, whether serving content at `last_serial` would expose metadata past the readable
-/// frontier — a serial a required derived view (the search index) has not caught up to yet. A replica
-/// holds such a read and serves the older contiguous view (a surviving cached page) or a not-found
-/// instead, so a search that misses the new metadata and a page that shows it never disagree. The
-/// primary is never read-only, so its freshness is unchanged.
+/// frontier — a serial a required derived view (the search or blob view) has not caught up to yet. A
+/// replica holds such a read and serves the older contiguous view (a surviving cached page) or a
+/// not-found instead, so a search that misses the new metadata and a page that shows it never disagree,
+/// and a listed file's blob is present before its page serves. The primary is never read-only, so its
+/// freshness is unchanged.
 ///
-/// Only a hosted index's `last_serial` is a local journal serial the frontier governs; a cached index
-/// reports its upstream's serial and a virtual index has none, so neither is gated. A page with no
-/// serial cannot be past the frontier, and an unreadable frontier reads as zero, so a replica fails
-/// closed.
+/// A hosted index's `last_serial` is a local journal serial the frontier governs. A cached index
+/// reports its upstream's serial, which it does not, so it is never gated. A virtual index carries no
+/// serial of its own but may surface a hosted member's content, so it inherits its hosted members'
+/// serials: the gate holds it until every hosted member it layers is readable. An unreadable frontier
+/// reads as zero and a member whose serial cannot be read counts as past it, so a replica fails closed.
 fn holds_below_readable_frontier(state: &ServingState, index: &Index, last_serial: Option<u64>) -> bool {
-    state.read_only
-        && matches!(index.kind, IndexKind::Hosted { .. })
-        && last_serial.is_some_and(|serial| serial > state.readable_frontier().unwrap_or_default().serial)
+    if !state.read_only {
+        return false;
+    }
+    let frontier = state.readable_frontier().unwrap_or_default().serial;
+    match &index.kind {
+        IndexKind::Hosted { .. } => last_serial.is_some_and(|serial| serial > frontier),
+        IndexKind::Cached { .. } => false,
+        // A virtual index is readable only up to the least-readable of its members, so it holds until
+        // every hosted member it layers is readable: the max over its hosted members' serials past the
+        // frontier. Hosted members share the local journal, so that max is the store's current serial,
+        // which a member whose read fails counts as past the frontier, failing closed.
+        IndexKind::Virtual { layers, .. } => {
+            peryx_index::layers_include_hosted(&state.indexes, layers)
+                && state.meta.current_serial().map_or(true, |serial| serial > frontier)
+        }
+    }
 }
 
 /// `GET /{route}/...` serves the project list, project detail, or a file/metadata download for the

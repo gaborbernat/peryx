@@ -59,9 +59,23 @@ pub fn shadow_order(indexes: &[Index], layers: &[usize]) -> Vec<usize> {
     ordered
 }
 
+/// Whether a virtual index's `layers` reach a hosted index, directly or through a nested virtual member.
+///
+/// A hosted member is the only kind that carries a local journal serial, so a replica's readable-frontier
+/// gate uses this to tell whether a virtual index inherits one and must be held until its members catch
+/// up. A cached member reports upstream state the frontier does not govern, so it does not count.
+#[must_use]
+pub fn layers_include_hosted(indexes: &[Index], layers: &[usize]) -> bool {
+    layers.iter().any(|&position| match &indexes[position].kind {
+        IndexKind::Hosted { .. } => true,
+        IndexKind::Cached { .. } => false,
+        IndexKind::Virtual { layers, .. } => layers_include_hosted(indexes, layers),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RouteResolver, remainder, shadow_order};
+    use super::{RouteResolver, layers_include_hosted, remainder, shadow_order};
     use crate::index::{Index, IndexKind};
     use peryx_core::Ecosystem;
     use peryx_identity::IndexAcl;
@@ -121,6 +135,27 @@ mod tests {
         assert_eq!(shadow_order(&indexes, &[0, 1, 2]), vec![0, 2, 1]);
     }
 
+    #[test]
+    fn test_layers_include_hosted_reaches_a_hosted_member_through_a_nested_virtual() {
+        let indexes = vec![
+            index("hosted", "h", hosted()),
+            index("pypi", "c", cached()),
+            index("inner", "inner", virtual_layers(&[0])),
+        ];
+        // The cached member (position 1) is inspected first and does not count; the nested virtual
+        // (position 2) reaches the hosted member, so the layer set inherits a journal serial.
+        assert!(layers_include_hosted(&indexes, &[1, 2]));
+    }
+
+    #[test]
+    fn test_layers_include_hosted_is_false_when_no_member_reaches_a_hosted_index() {
+        let indexes = vec![
+            index("pypi", "c", cached()),
+            index("proxy-only", "p", virtual_layers(&[0])),
+        ];
+        assert!(!layers_include_hosted(&indexes, &[0, 1]));
+    }
+
     fn index(name: &str, route: &str, kind: IndexKind) -> Index {
         Index {
             name: name.to_owned(),
@@ -141,5 +176,12 @@ mod tests {
 
     const fn hosted() -> IndexKind {
         IndexKind::Hosted { volatile: false }
+    }
+
+    fn virtual_layers(layers: &[usize]) -> IndexKind {
+        IndexKind::Virtual {
+            layers: layers.to_vec(),
+            upload: None,
+        }
     }
 }

@@ -83,6 +83,40 @@ async fn test_replica_does_not_gate_a_cached_index() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// A virtual index (`root/pypi`) that layers the hosted store surfaces the store's page, so a replica
+/// holds the virtual read behind the readable frontier exactly as it holds the member's own hosted
+/// route: the member's serial is not yet readable, so the virtual page is a not-found until the search
+/// view catches up, then serves. Covers the Simple HTML and PEP 691 JSON representations.
+#[rstest]
+#[case::html("/root/pypi/simple/peryxpkg/", Some("text/html"))]
+#[case::json("/root/pypi/simple/peryxpkg/", Some("application/json"))]
+#[tokio::test]
+async fn test_replica_holds_a_virtual_read_of_a_hosted_member_until_readable(
+    #[case] uri: &str,
+    #[case] accept: Option<&str>,
+) {
+    let h = harness().await;
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let published = h.state.meta.current_serial().unwrap();
+    assert!(published > 0, "the upload advanced the journal");
+    let replica = replica_state(&h);
+
+    let (held, ..) = get(&replica, uri, accept).await;
+    assert_eq!(
+        held,
+        StatusCode::NOT_FOUND,
+        "the virtual index leaked a member below the frontier"
+    );
+
+    h.state.meta.set_view_frontier(SEARCH_VIEW, published).unwrap();
+    let (served, _, body) = get(&replica, uri, accept).await;
+    assert_eq!(served, StatusCode::OK);
+    assert!(body.contains("peryxpkg"));
+}
+
 #[tokio::test]
 async fn test_apply_replicated_changes_retires_only_the_changed_projects() {
     let h = harness().await;

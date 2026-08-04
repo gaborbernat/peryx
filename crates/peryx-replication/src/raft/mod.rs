@@ -18,6 +18,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect};
 
+pub mod log_store;
+pub mod network;
+mod state_machine;
+
+pub use state_machine::OwnershipStateMachine;
+
+#[cfg(test)]
+mod state_machine_tests;
+
 openraft::declare_raft_types!(
     /// The type map binding peryx's ownership types to `OpenRaft`.
     ///

@@ -268,13 +268,15 @@ fn cost_gate(ast: &Ast, schema: &DomainSchema) -> Result<(), PqlError> {
     }
 }
 
-/// The cost gate's leading filter for a predicate over a schema: the first equality or membership on
-/// a cheaply-indexed column, lowered to concrete values.
+/// The cost gate's leading filter: the first equality or membership on a pushdown column.
 ///
-/// This is both what admits an unbounded domain (a `Some` result means the query is affordable) and
-/// what the executor hands to [`crate::source::DataSource::fetch`] so the source narrows through its
-/// index rather than scanning the whole domain (constraint 6). A leading `and` term satisfies it; an
-/// `or`, `not`, or an unbound parameter does not.
+/// The column must be one the source pushes its fetch down on ([`DomainSchema::pushdown`]), and the
+/// values are lowered to concrete literals. This is both what admits an unbounded domain (a `Some`
+/// result means the query is affordable) and what the executor hands to
+/// [`crate::source::DataSource::fetch`] so the source narrows through its index rather than scanning the
+/// whole domain (constraint 6). Restricting it to the pushdown set keeps the two aligned: an unbounded
+/// domain is never admitted on a cheap-to-group column the fetch would not actually narrow on. A leading
+/// `and` term satisfies it; an `or`, `not`, or an unbound parameter does not.
 #[must_use]
 pub fn leading_filter(predicate: &Predicate, schema: &DomainSchema) -> Option<FetchFilter> {
     match predicate {
@@ -290,7 +292,9 @@ pub fn leading_filter(predicate: &Predicate, schema: &DomainSchema) -> Option<Fe
 }
 
 fn cheap_filter(field: &str, literals: &[Literal], schema: &DomainSchema) -> Option<FetchFilter> {
-    let column = schema.column(field).filter(|column| column.indexability.is_cheap())?;
+    let column = schema
+        .column(field)
+        .filter(|column| schema.pushdown.contains(&column.name))?;
     let values: Vec<Value> = literals.iter().map(literal_value).collect();
     if values.iter().any(|value| matches!(value, Value::Null)) {
         return None;

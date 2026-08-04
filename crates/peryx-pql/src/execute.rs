@@ -144,6 +144,12 @@ fn scope_filter(rows: Vec<Row>, scope: &QueryScope, schema: &DomainSchema) -> Ve
 }
 
 fn validate_join(keys: &[String], outer: &DomainSchema, probe: &DomainSchema) -> Result<(), PqlError> {
+    // The text parser guarantees at least one key, but a future JSON-AST front-end reaches this without
+    // that guarantee. With no keys `join_key` hashes every row to the same empty string, turning the
+    // join into an all-rows cross product, so enforce the invariant here where every front-end passes.
+    if keys.is_empty() {
+        return Err(PqlError::Validation("a join needs at least one key".to_owned()));
+    }
     for key in keys {
         if outer.column(key).is_none() {
             return Err(PqlError::Validation(format!(
@@ -185,6 +191,7 @@ fn merge_schemas(outer: &DomainSchema, probe: &DomainSchema) -> DomainSchema {
         auth: outer.auth,
         natural_order: outer.natural_order,
         bounded: outer.bounded && probe.bounded,
+        pushdown: outer.pushdown,
     }
 }
 

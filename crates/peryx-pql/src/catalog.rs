@@ -102,6 +102,11 @@ pub struct DomainSchema {
     /// Whether the whole domain is small enough that a full authorized scan is always affordable.
     /// A bounded domain needs no indexed leading predicate; an unbounded one does.
     pub bounded: bool,
+    /// The columns the source's `fetch` narrows the store read on, its true pushdown set. This is
+    /// stricter than [`Indexability::is_cheap`]: a column can be cheap to group or probe on yet not one
+    /// the fetch filters by, and admitting an unbounded domain on such a column would page the whole
+    /// domain into memory. The cost gate admits a leading filter only on a column named here.
+    pub pushdown: &'static [&'static str],
 }
 
 impl DomainSchema {

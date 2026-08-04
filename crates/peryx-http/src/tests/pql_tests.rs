@@ -281,6 +281,25 @@ async fn test_query_narrows_read_through_project_index() {
 }
 
 #[tokio::test]
+async fn test_query_multi_value_project_filter_pages_without_the_index() {
+    // A multi-value `project in (...)` is a pushdown column but not a single-equality the store's project
+    // index can serve, so the source pages the domain and the executor filters in memory; the result
+    // still stays exact.
+    let (_dir, meta, app) = app(false).await;
+    seed(&meta);
+    let (status, _headers, document) = post(
+        &app,
+        json!({"query": "from policy.decisions where project in (\"alpha\", \"beta\")"}),
+        Some(("Alice", PASSWORD)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut got = projects(&document);
+    got.sort();
+    assert_eq!(got, ["alpha", "beta"]);
+}
+
+#[tokio::test]
 async fn test_query_aggregates_counts_by_state() {
     let (_dir, meta, app) = app(false).await;
     seed(&meta);

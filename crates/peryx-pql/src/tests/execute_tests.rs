@@ -541,3 +541,15 @@ fn test_execute_join_admits_bounded_outer_with_leading_filter() {
     .expect("runs");
     assert!(!page.rows.is_empty());
 }
+
+#[test]
+fn test_execute_join_refuses_an_empty_key_set() {
+    // The text parser guarantees a key; build the join a JSON-AST front-end could produce instead by
+    // clearing the keys after parsing. An empty key set would cross-product every row.
+    let mut ast = parse(r#"from big join policy.decisions on repository where repository == "pypi""#).expect("parses");
+    ast.join.as_mut().expect("has a join").on.clear();
+
+    let result = execute(&ast, &operator_scope(), None, &TestSource::new(rows()));
+
+    assert!(matches!(result, Err(PqlError::Validation(_))));
+}

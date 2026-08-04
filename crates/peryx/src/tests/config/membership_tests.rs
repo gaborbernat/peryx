@@ -158,6 +158,18 @@ fn test_group_and_roster_must_appear_together(#[case] text: String, #[case] expe
     member("w", "dc-1", " ", "writer") + &member("r", "dc-2", "https://r:1", "replica"),
     "member `address` must not be empty"
 )]
+#[case::bare_host_address(
+    member("w", "dc-1", "10.0.0.1:8443", "writer") + &member("r", "dc-2", "https://r:1", "replica"),
+    "must be an http or https URL"
+)]
+#[case::non_http_scheme_address(
+    member("w", "dc-1", "ftp://a:1", "writer") + &member("r", "dc-2", "https://r:1", "replica"),
+    "must be an http or https URL"
+)]
+#[case::non_url_address(
+    member("w", "dc-1", "not a url", "writer") + &member("r", "dc-2", "https://r:1", "replica"),
+    "must be an http or https URL"
+)]
 fn test_group_rejects_invalid_topologies(#[case] roster: String, #[case] expected: &str) {
     let error = dc_config(&roster).unwrap_err();
     assert!(error.to_string().contains(expected), "{error}");

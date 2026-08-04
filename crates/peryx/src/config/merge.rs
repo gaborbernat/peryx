@@ -14,6 +14,7 @@ use peryx_identity::{ExternalGroup, ExternalGroupGrant, GrantScope, ProviderId};
 use peryx_upstream::{CredentialFailure, ExecCredentialConfig, ExecCredentialConfigError};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use url::Url;
 
 use std::collections::HashSet;
 
@@ -450,7 +451,7 @@ fn resolve_members(group: &str, raw: Vec<RawDcMember>) -> Result<Vec<DcMember>, 
         members.push(DcMember {
             node,
             dc: non_blank(member.dc, "member `dc`")?,
-            address: non_blank(member.address, "member `address`")?,
+            address: member_address(member.address)?,
             role: member.role,
         });
     }
@@ -489,6 +490,23 @@ fn non_blank(value: String, field: &str) -> Result<String, ConfigError> {
         return Err(membership_error(format!("{field} must not be empty")));
     }
     Ok(value)
+}
+
+/// A member's advertised address is the base a peer-to-peer transport reaches it on, so it must be an
+/// `http(s)` URL a client can build requests from, not a bare host or an opaque string. This applies the
+/// same check [`HttpPeerTransport::new`] and [`HttpBlobTransport::new`] make on their base, at config
+/// time, so a misconfigured address is refused before any peer work starts. The blank check runs first,
+/// keeping its distinct "must not be empty" reason.
+fn member_address(value: String) -> Result<String, ConfigError> {
+    let address = non_blank(value, "member `address`")?;
+    let usable_base =
+        Url::parse(&address).is_ok_and(|url| matches!(url.scheme(), "http" | "https") && !url.cannot_be_a_base());
+    if !usable_base {
+        return Err(membership_error(format!(
+            "member `address` {address:?} must be an http or https URL"
+        )));
+    }
+    Ok(address)
 }
 
 fn membership_error(reason: impl Into<String>) -> ConfigError {

@@ -11,6 +11,7 @@ mod integration_tests;
 mod job_lease_tests;
 mod job_tests;
 mod journal_tests;
+mod placement_reconcile_tests;
 mod placement_tests;
 mod policy_decision_tests;
 mod quota_tests;

@@ -21,6 +21,7 @@ mod job;
 mod job_lease;
 mod journal;
 mod placement;
+mod placement_reconcile;
 mod policy_decision;
 mod quota;
 mod reclamation;
@@ -56,6 +57,9 @@ pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSna
 pub use placement::{
     ArtifactOrigin, ArtifactPlacement, ArtifactPlacementPage, ArtifactPlacementQuery, ArtifactPlacementQueryError,
     ArtifactPlacementRow, ArtifactSource, ByteAvailability, MAX_REPAIR_BATCH, PlacementEvent, PlacementRepairPage,
+};
+pub use placement_reconcile::{
+    DigestReconciliation, MAX_PLACEMENT_RECONCILE_BATCH, PlacementReconcileError, PlacementReconcilePage,
 };
 pub use policy_decision::{
     NewPolicyDecision, PolicyDecisionItem, PolicyDecisionPage, PolicyDecisionQuery, PolicyDecisionQueryError,

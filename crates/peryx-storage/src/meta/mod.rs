@@ -49,8 +49,8 @@ pub use job::{
 pub use job_lease::{ClaimOutcome, JobLease, JobLeaseError, LeaseState};
 pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSnapshot};
 pub use placement::{
-    ArtifactOrigin, ArtifactPlacement, ArtifactSource, ByteAvailability, MAX_REPAIR_BATCH, PlacementEvent,
-    PlacementRepairPage,
+    ArtifactOrigin, ArtifactPlacement, ArtifactPlacementPage, ArtifactPlacementQuery, ArtifactPlacementQueryError,
+    ArtifactPlacementRow, ArtifactSource, ByteAvailability, MAX_REPAIR_BATCH, PlacementEvent, PlacementRepairPage,
 };
 pub use policy_decision::{
     NewPolicyDecision, PolicyDecisionItem, PolicyDecisionPage, PolicyDecisionQuery, PolicyDecisionQueryError,

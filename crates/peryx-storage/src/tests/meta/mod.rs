@@ -7,6 +7,7 @@ mod cross_dc_copy_tests;
 mod driver_txn_tests;
 mod error_tests;
 mod external_identity_tests;
+mod ingress_intent_tests;
 mod integration_tests;
 mod job_lease_tests;
 mod job_tests;

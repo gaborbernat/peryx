@@ -1333,6 +1333,7 @@ fn test_build_state_installs_lazy_named_oidc_logins() {
                 oidc_provider("corporate", Some(SecretSource::Literal("client-secret".to_owned()))),
                 oidc_provider("partners", None),
             ],
+            signing_key: Some(SecretSource::Literal("realm-key".to_owned())),
             ..AuthConfig::default()
         },
         ..Config::default()
@@ -1356,6 +1357,7 @@ fn test_build_state_reports_an_unreadable_oidc_client_secret() {
                 "corporate",
                 Some(SecretSource::File(PathBuf::from("/nonexistent/peryx/oidc-secret"))),
             )],
+            signing_key: Some(SecretSource::Literal("realm-key".to_owned())),
             ..AuthConfig::default()
         },
         ..Config::default()
@@ -1377,6 +1379,7 @@ fn test_build_state_rejects_an_invalid_oidc_provider() {
         data_dir: dir.path().to_path_buf(),
         auth: AuthConfig {
             oidc_providers: vec![provider],
+            signing_key: Some(SecretSource::Literal("realm-key".to_owned())),
             ..AuthConfig::default()
         },
         ..Config::default()

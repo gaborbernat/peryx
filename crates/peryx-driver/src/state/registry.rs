@@ -186,4 +186,10 @@ impl AppState {
             .map(|service| (service.id().to_string(), Arc::new(service)))
             .collect();
     }
+
+    /// Install the sealer for browser session and login-handoff cookies, replacing any set before
+    /// serving started.
+    pub fn set_session_sealer(&mut self, sealer: peryx_identity::SessionSealer) {
+        self.serving_mut().session_sealer = Some(Arc::new(sealer));
+    }
 }

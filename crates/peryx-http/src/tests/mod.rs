@@ -4,6 +4,7 @@ mod availability_tests;
 mod fallback_tests;
 mod grant_tests;
 mod job_tests;
+mod login_tests;
 mod oidc_tests;
 mod placements_tests;
 mod policy_decision_tests;

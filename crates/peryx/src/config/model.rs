@@ -385,6 +385,11 @@ impl Config {
                 });
             }
         }
+        if !self.auth.oidc_providers.is_empty() && self.auth.signing_key.is_none() {
+            return Err(ConfigError::Auth {
+                reason: "`signing_key` is required when OIDC login providers are configured",
+            });
+        }
         let mut oidc_ids = HashSet::new();
         for provider in &self.auth.oidc_providers {
             if !oidc_ids.insert(&provider.id) {

@@ -33,6 +33,7 @@ mod password;
 mod revocation;
 mod roles;
 mod scoped_token;
+mod session;
 mod token;
 mod trusted_publisher;
 mod user;
@@ -62,6 +63,7 @@ pub use password::{PasswordCheck, PasswordError, PasswordPolicy, PasswordVerifie
 pub use revocation::{ArtifactDigest, ArtifactDigestError, DigestDecision, RevocationReason, RevocationReasonError};
 pub use roles::{GrantScope, Resource, Role, RoleGrant, Scope, can_manage_grants, grants_permit};
 pub use scoped_token::{TokenId, TokenName, TokenNameError, TokenSecret, TokenVerifier};
+pub use session::{PRE_AUTH_COOKIE, SESSION_COOKIE, SessionSealer};
 pub use token::{Signer, TokenError, VerifiedToken};
 pub use trusted_publisher::{PublishClaims, PublishDenial, TrustedPublisher, authorize_publish};
 pub use user::{ServerUser, UserId, UserLifecycleChange, UserLifecycleEvent, UserName, UserNameError, UserState};

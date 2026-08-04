@@ -36,7 +36,7 @@ pub mod style;
 pub mod url;
 
 use pages::{
-    AdminStatus, ArtifactPlacements, AvailabilityTopology, Browse, Dashboard, PolicyDecisions, Search,
+    AdminStatus, ArtifactPlacements, AvailabilityTopology, Browse, Dashboard, Login, PolicyDecisions, Search,
     ShadowInspection, Stats, Trash, Upload, UsageAnalytics,
 };
 
@@ -93,6 +93,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/search") view=Search ssr=SsrMode::Async />
                     <Route path=path!("/stats") view=Stats ssr=SsrMode::Async />
                     <Route path=path!("/upload") view=Upload ssr=SsrMode::Async />
+                    <Route path=path!("/login") view=Login ssr=SsrMode::Async />
                 </Routes>
             </main>
         </Router>
@@ -123,6 +124,7 @@ fn Header() -> impl IntoView {
                     <a href="/admin/trash">"Trash"</a>
                     <a href="/admin/analytics">"Usage"</a>
                     <a href="/upload">"Upload"</a>
+                    <a href="/login">"Login"</a>
                     <a href=DOCS_URL rel=external_link_rel(DOCS_URL)>"Docs"</a>
                     <a href=REPO_URL rel=external_link_rel(REPO_URL)>"GitHub"</a>
                     <ThemeToggle />

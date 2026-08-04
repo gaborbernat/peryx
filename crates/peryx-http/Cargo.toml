@@ -29,6 +29,9 @@ tokio = { workspace = true, features = ["sync", "rt", "fs", "time"] }
 [dev-dependencies]
 async-trait.workspace = true
 base64.workspace = true
+jsonwebtoken.workspace = true
+peryx-identity = { workspace = true, features = ["test-util"] }
+url.workspace = true
 peryx-events = { workspace = true, features = ["test-util"] }
 peryx-upstream.workspace = true
 rstest.workspace = true

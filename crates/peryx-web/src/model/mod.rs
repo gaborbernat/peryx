@@ -4,6 +4,7 @@
 //! (`/+status` and the PEP 691 simple endpoints), so both sides render identical pages.
 
 mod analytics;
+mod login;
 mod placement;
 mod policy_decision;
 mod project;
@@ -18,6 +19,7 @@ pub use analytics::{
     AnalyticsFilters, AnalyticsView, UiInterval, UiPackageRow, UiSourceRow, UiTimelineRow, UiUnusedRow, UiUsagePage,
     UiUsageRows, UiVersionRow, format_instant,
 };
+pub use login::UiLoginState;
 pub use placement::{PlacementHealth, PlacementRow, PlacementView};
 pub use policy_decision::{PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage};
 pub use project::{

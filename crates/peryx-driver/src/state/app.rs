@@ -114,6 +114,9 @@ pub struct ServingState {
     pub retention_gates: crate::retention::RetentionGates,
     /// Named browser OIDC login services. The login and callback routes select one by provider ID.
     pub(super) oidc_logins: HashMap<String, Arc<peryx_identity::OidcLoginService<MetaStore>>>,
+    /// Seals the browser session and login-handoff cookies. Present only when a token-realm signing key
+    /// is configured, since the sealing key derives from it.
+    pub(super) session_sealer: Option<Arc<peryx_identity::SessionSealer>>,
 }
 
 /// The whole process state: the serving data every handler needs, plus the driver registry only the
@@ -259,6 +262,13 @@ impl ServingState {
         let mut providers = self.oidc_logins.keys().map(String::as_str).collect::<Vec<_>>();
         providers.sort_unstable();
         providers
+    }
+
+    /// The sealer for browser session and login-handoff cookies, present when a token-realm signing key
+    /// is configured.
+    #[must_use]
+    pub fn session_sealer(&self) -> Option<&peryx_identity::SessionSealer> {
+        self.session_sealer.as_deref()
     }
 }
 

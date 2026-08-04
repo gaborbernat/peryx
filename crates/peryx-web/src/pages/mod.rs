@@ -23,6 +23,7 @@ mod project;
 mod search;
 mod shadow;
 mod stats;
+mod topology;
 mod trash;
 mod upload;
 
@@ -34,6 +35,7 @@ pub use policy_decisions::PolicyDecisions;
 pub use search::Search;
 pub use shadow::ShadowInspection;
 pub use stats::Stats;
+pub use topology::AvailabilityTopology;
 pub use trash::Trash;
 pub use upload::Upload;
 

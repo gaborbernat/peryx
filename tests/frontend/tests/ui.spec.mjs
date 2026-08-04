@@ -1240,3 +1240,52 @@ test("usage analytics nav link reaches the route", async ({ page }) => {
   await expect(page).toHaveURL(/\/admin\/analytics$/);
   await expect(page.locator("h1", { hasText: "Usage analytics" })).toBeVisible();
 });
+
+// The administrator view of the availability topology: a local writer plus two replicas in distinct
+// health states. A client-side nav to the page runs the loader in the browser, so this mock stands in
+// for the `/+availability/topology` snapshot without configuring a live roster in the fixture.
+const topologySnapshot = {
+  mode: "dc",
+  group: "east",
+  captured_at: 1_800_000_000,
+  node_count: 3,
+  local: { role: "writer", liveness: "live", frontier: 42 },
+  nodes: [
+    { node: "writer-a", dc: "east-1", role: "writer", local: true, liveness: "live", frontier: 42, address: "writer-a.internal:8443" },
+    { node: "replica-b", dc: "east-2", role: "replica", local: false, liveness: "unknown", address: "replica-b.internal:8443" },
+    { node: "replica-c", dc: "east-3", role: "replica", local: false, liveness: "unready", address: "replica-c.internal:8443" },
+  ],
+};
+
+test("availability topology renders roster health and filters by role", async ({ page }) => {
+  await page.route("**/+availability/topology", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify(topologySnapshot) }),
+  );
+  await goto(page, "/");
+  await page.locator(".nav-links a", { hasText: "Topology" }).click();
+  await expect(page).toHaveURL(/\/admin\/topology$/);
+  await expect(page.locator("h1", { hasText: "Availability topology" })).toBeVisible();
+
+  const rows = page.locator(".topology-table tbody tr");
+  await expect(rows).toHaveCount(3);
+  await expect(page.locator(".topology-table")).toContainText("writer-a");
+  await expect(page.locator(".topology-table")).toContainText("replica-b");
+  // Every health state carries its own word, so the roster reads correctly without colour.
+  await expect(page.locator(".topology-table .health-live")).toHaveText("Live");
+  await expect(page.locator(".topology-table .health-unknown")).toHaveText("Unknown");
+  await expect(page.locator(".topology-table .health-unready")).toHaveText("Unready");
+  await expect(page.locator(".topology-table")).toContainText("replica-b.internal:8443");
+
+  await page.locator("#topology-role").selectOption("replica");
+  await expect(rows).toHaveCount(2);
+  await expect(page.locator(".topology-table")).not.toContainText("writer-a");
+  await expect(page.locator(".result-count")).toHaveText("Showing 2 of 3 roster nodes.");
+
+  await page.locator("#topology-role").selectOption("writer");
+  await expect(rows).toHaveCount(1);
+  await expect(page.locator(".topology-table")).toContainText("writer-a");
+  await expect(page.locator(".topology-table")).not.toContainText("replica-b");
+
+  await page.locator("#topology-role").selectOption("all");
+  await expect(rows).toHaveCount(3);
+});

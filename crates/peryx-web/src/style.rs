@@ -170,6 +170,17 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .badge.status-archived { color: var(--text-soft); border-color: var(--border-strong); }
 .badge.status-quarantined { color: var(--bad); border-color: var(--bad); }
 .badge.status-deprecated { color: var(--warn); border-color: var(--warn); }
+/* #550 availability topology: role and node-health chips. Colour only reinforces the word each chip
+   already spells out, so an unknown or restricted peer never reads as healthy on colour alone. */
+.badge.role-writer { color: var(--accent); border-color: var(--accent); }
+.badge.role-replica { color: #2f81f7; border-color: #2f81f7; }
+.badge.topology-self { color: var(--ok); border-color: var(--ok); }
+.badge.health-live { color: var(--ok); border-color: var(--ok); }
+.badge.health-unready { color: var(--warn); border-color: var(--warn); }
+.badge.health-unknown { color: var(--text-soft); border-color: var(--border-strong); }
+.badge.health-restricted { color: var(--text-soft); border-color: var(--border); font-style: italic; }
+.topology-summary, .topology-local { margin: 0.6rem 0; }
+.topology-filters { margin-bottom: 0.4rem; }
 .yank-reason { color: var(--text-soft); font-size: 0.85rem; margin-left: 0.35rem; }
 .project-head .badge { margin-left: 0.5rem; vertical-align: middle; }
 .status-reason { color: var(--text-soft); font-size: 0.9rem; margin-left: 0.4rem; }

@@ -20,9 +20,9 @@ use peryx_http::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
 };
 use peryx_replication::{
-    BlobSources, CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpBlobTransport, HttpPrimary,
-    LivenessTracker, Replica, SyncError, SyncOutcome, TransferLimits, advance_blob_frontier, liveness_router,
-    primary_router, pull_outstanding,
+    BlobPlaneReport, BlobSources, CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpBlobTransport,
+    HttpPrimary, LivenessTracker, Replica, SyncError, SyncOutcome, TransferLimits, advance_blob_frontier,
+    liveness_router, primary_router, pull_outstanding,
 };
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
@@ -59,6 +59,8 @@ struct ReplicaObservation {
     changes: u64,
     errors: u64,
     readable_serial: u64,
+    blobs_fetched: u64,
+    blobs_pending: u64,
 }
 
 struct ReplicaMonitor {
@@ -76,6 +78,8 @@ impl ReplicaMonitor {
                 changes: 0,
                 errors: 0,
                 readable_serial: 0,
+                blobs_fetched: 0,
+                blobs_pending: 0,
             }),
         }
     }
@@ -107,6 +111,21 @@ impl ReplicaMonitor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         observation.readable_serial = serial;
+    }
+
+    /// Record what one blob-plane pass made of its outstanding blobs: add the blobs it committed to the
+    /// cumulative fetched counter and set the pending gauge to how many it left for a later pass. A backlog
+    /// that the plane cannot drain shows as a pending gauge stuck above zero while the readable serial
+    /// stalls, so a stuck blob is visible before the readable frontier lags.
+    fn record_blobs(&self, report: BlobPlaneReport) {
+        let mut observation = self
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        observation.blobs_fetched = observation
+            .blobs_fetched
+            .saturating_add(u64::try_from(report.fetched).unwrap_or(u64::MAX));
+        observation.blobs_pending = u64::try_from(report.pending).unwrap_or(u64::MAX);
     }
 
     fn record_error(&self, error: &SyncError) {
@@ -174,8 +193,14 @@ impl PrometheusSource for ReplicaMonitor {
             body,
             "# HELP peryx_replication_readable_serial Highest serial every required derived view has applied.\n\
              # TYPE peryx_replication_readable_serial gauge\n\
-             peryx_replication_readable_serial {}\n",
-            observation.readable_serial
+             peryx_replication_readable_serial {}\n\
+             # HELP peryx_replication_blobs_fetched_total Blobs the dual-plane blob fetch committed.\n\
+             # TYPE peryx_replication_blobs_fetched_total counter\n\
+             peryx_replication_blobs_fetched_total {}\n\
+             # HELP peryx_replication_blobs_pending Blobs the last blob-plane pass left outstanding.\n\
+             # TYPE peryx_replication_blobs_pending gauge\n\
+             peryx_replication_blobs_pending {}\n",
+            observation.readable_serial, observation.blobs_fetched, observation.blobs_pending
         );
         if let Some(primary_serial) = observation.primary_serial {
             let _ = write!(
@@ -411,10 +436,13 @@ impl ReplicaLoop {
             }
         };
         apply_replicated_page(&self.app, outcome, &changed_keys);
-        if let Err(error) = self.pull_blobs().await {
-            self.monitor.record_error(&error);
-            self.metrics.record_error(&error, elapsed);
-            tracing::error!(%error, "replica blob plane failed");
+        match self.pull_blobs().await {
+            Ok(report) => self.monitor.record_blobs(report),
+            Err(error) => {
+                self.monitor.record_error(&error);
+                self.metrics.record_error(&error, elapsed);
+                tracing::error!(%error, "replica blob plane failed");
+            }
         }
         self.monitor.record(outcome);
         let readable = self.app.readable_frontier().map_or(0, |frontier| frontier.serial);
@@ -423,7 +451,7 @@ impl ReplicaLoop {
         outcome.caught_up()
     }
 
-    async fn pull_blobs(&self) -> Result<(), SyncError> {
+    async fn pull_blobs(&self) -> Result<BlobPlaneReport, SyncError> {
         // A replica draws every blob whole from its upstream primary until placement descriptors ride in
         // the replicated page and name the peers that hold each blob; with no delegates every blob is
         // single-source and takes the whole-blob path.
@@ -433,7 +461,7 @@ impl ReplicaLoop {
             delegates: &delegates,
             local_dc: "",
         };
-        pull_outstanding(
+        let report = pull_outstanding(
             &sources,
             &self.meta,
             &self.blobs,
@@ -442,7 +470,7 @@ impl ReplicaLoop {
         )
         .await?;
         advance_blob_frontier(&self.meta, &self.blobs, self.page_size).await?;
-        Ok(())
+        Ok(report)
     }
 }
 
@@ -620,7 +648,10 @@ impl ReplicationRuntime {
 mod tests {
     use std::sync::Arc;
 
-    use super::{WorkerShared, worker_reason};
+    use peryx_driver::PrometheusSource;
+    use peryx_replication::BlobPlaneReport;
+
+    use super::{ReplicaMonitor, WorkerShared, worker_reason};
 
     #[test]
     fn test_worker_reason_names_only_a_failed_domain() {
@@ -630,5 +661,23 @@ mod tests {
         let failed = Arc::new(WorkerShared::for_replica());
         failed.record_panic();
         assert_eq!(worker_reason(Some(&failed)), Some("worker_unhealthy"));
+    }
+
+    #[test]
+    fn test_monitor_surfaces_blob_fetched_and_pending_counts() {
+        let monitor = ReplicaMonitor::new(0);
+        monitor.record_blobs(BlobPlaneReport { fetched: 2, pending: 3 });
+
+        let mut body = String::new();
+        monitor.write_metrics(&mut body);
+        assert!(body.contains("peryx_replication_blobs_fetched_total 2\n"), "{body}");
+        assert!(body.contains("peryx_replication_blobs_pending 3\n"), "{body}");
+
+        // The fetched counter accumulates across passes while the pending gauge takes the latest value.
+        monitor.record_blobs(BlobPlaneReport { fetched: 1, pending: 0 });
+        let mut body = String::new();
+        monitor.write_metrics(&mut body);
+        assert!(body.contains("peryx_replication_blobs_fetched_total 3\n"), "{body}");
+        assert!(body.contains("peryx_replication_blobs_pending 0\n"), "{body}");
     }
 }

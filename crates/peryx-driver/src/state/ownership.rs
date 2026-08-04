@@ -20,8 +20,8 @@ pub enum HomeClaim {
 /// exposes membership without leaking the internal transport topology.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ClusterStatus {
-    /// The consensus id of the current leader, or `None` when this node knows of none.
-    pub leader: Option<u64>,
+    /// The datacenter of the current leader, or `None` when this node knows of none.
+    pub leader: Option<String>,
     /// The current leadership term, the group's monotonic authority epoch.
     pub term: u64,
     /// The datacenters this node's committed membership holds as voters.
@@ -111,7 +111,7 @@ mod tests {
 
         fn cluster_status(&self) -> ClusterStatus {
             ClusterStatus {
-                leader: Some(1),
+                leader: Some("east".to_owned()),
                 term: 3,
                 voters: vec!["east".to_owned()],
             }
@@ -164,7 +164,7 @@ mod tests {
         }
         .cluster_status();
 
-        assert_eq!(status.leader, Some(1));
+        assert_eq!(status.leader, Some("east".to_owned()));
         assert_eq!(status.term, 3);
         assert_eq!(status.voters, vec!["east".to_owned()]);
     }

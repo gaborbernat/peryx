@@ -63,6 +63,7 @@ fn plan_at(log_path: PathBuf, local: u64, roster: BTreeMap<u64, PeryxNode>) -> C
     ConsensusPlan {
         local,
         home: DatacenterId("east".to_owned()),
+        seed: true,
         roster,
         log_path,
         group: "ownership".to_owned(),
@@ -465,7 +466,7 @@ async fn test_cluster_status_reports_the_leader_and_voter_membership() {
 
     let status = group.cluster_status();
 
-    assert_eq!(status.leader, Some(1));
+    assert_eq!(status.leader, Some("east".to_owned()));
     assert!(status.term >= 1, "an elected leader holds a nonzero term");
     assert_eq!(status.voters, vec!["east".to_owned()]);
 }

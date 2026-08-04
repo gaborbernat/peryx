@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use axum::http::{Method, StatusCode};
-use peryx_driver::state::{HomeClaim, OwnershipAuthority, OwnershipError};
+use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError};
 
 use super::{auth, hosted_writable, send_body};
 
@@ -65,6 +65,15 @@ impl OwnershipAuthority for RecordingAuthority {
         } else {
             self.homed.lock().unwrap().insert(authority.to_owned());
             Ok(HomeClaim::AssignedHere)
+        }
+    }
+
+    fn cluster_status(&self) -> ClusterStatus {
+        // A recording double runs no consensus group, so it reports none.
+        ClusterStatus {
+            leader: None,
+            term: 0,
+            voters: Vec::new(),
         }
     }
 }

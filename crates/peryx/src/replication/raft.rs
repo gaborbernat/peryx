@@ -23,7 +23,7 @@ use peryx_replication::{AuthorityKey, DatacenterId, OwnershipCommand, OwnershipE
 use peryx_storage::raft::RaftLogStore;
 use url::Url;
 
-use crate::config::{AvailabilityConfig, Config, DcMembership, ReplicationConfig};
+use crate::config::{AvailabilityConfig, Config, DcMembership, DcRole, ReplicationConfig};
 
 /// The `u64` voter handle `OpenRaft` keys a node by. Derived from the datacenter identity so every node
 /// computes the same id for each voter from the shared roster, without a coordination round or a
@@ -45,6 +45,9 @@ const LOG_STORE_SUBPATH: &str = "raft/ownership-log.redb";
 pub(super) struct ConsensusPlan {
     local: VoterId,
     home: DatacenterId,
+    /// Whether this node initializes the group. Exactly the writer seeds it; the replicas start empty and
+    /// join through the seed's replication, so only one node ever calls `initialize`.
+    seed: bool,
     roster: BTreeMap<VoterId, PeryxNode>,
     log_path: PathBuf,
     group: String,
@@ -85,13 +88,17 @@ impl ConsensusPlan {
             .as_deref()
             .context("an `ha` consensus roster needs a `writer-identity` to find this node in it")?;
         let roster = build_roster(membership)?;
-        let local_dc = local_datacenter(membership, identity)?;
-        let local = voter_id(&local_dc);
+        let local = membership
+            .members
+            .iter()
+            .find(|member| member.node == identity)
+            .with_context(|| format!("this node's identity {identity:?} is not a member of the roster"))?;
         let (ReplicationConfig::Primary { token, .. } | ReplicationConfig::Replica { token, .. }) = replication;
         let token = token.read().context("read the shared consensus peer token")?;
         Ok(Some(Self {
-            local,
-            home: DatacenterId(local_dc),
+            local: voter_id(&local.dc),
+            home: DatacenterId(local.dc.clone()),
+            seed: local.role == DcRole::Writer,
             roster,
             log_path: config.data_dir.join(LOG_STORE_SUBPATH),
             group: membership.group.clone(),
@@ -128,9 +135,13 @@ impl ConsensusPlan {
         )
         .await
         .context("start the ownership consensus node")?;
-        node.bootstrap(self.roster.clone())
-            .await
-            .context("bootstrap the ownership consensus group")?;
+        // Only the writer seeds the group; a replica starts empty and joins through the seed's
+        // replication, so exactly one node ever calls initialize and the group cannot split at bootstrap.
+        if self.seed {
+            node.bootstrap(self.roster.clone())
+                .await
+                .context("bootstrap the ownership consensus group")?;
+        }
         Ok(node)
     }
 }
@@ -179,15 +190,17 @@ impl OwnershipAuthority for OwnershipGroup {
 
     fn cluster_status(&self) -> ClusterStatus {
         let metrics = self.node.metrics().borrow().clone();
-        let membership = metrics.membership_config.membership();
-        let voters = membership
-            .voter_ids()
-            .filter_map(|id| membership.get_node(&id).map(|node| node.datacenter.0.clone()))
-            .collect();
+        let membership = &metrics.membership_config;
+        let leader = metrics.current_leader.and_then(|leader| {
+            membership
+                .nodes()
+                .find(|(id, _)| **id == leader)
+                .map(|(_, node)| node.datacenter.0.clone())
+        });
         ClusterStatus {
-            leader: metrics.current_leader,
+            leader,
             term: metrics.current_term,
-            voters,
+            voters: membership.nodes().map(|(_, node)| node.datacenter.0.clone()).collect(),
         }
     }
 }
@@ -210,16 +223,6 @@ fn build_roster(membership: &DcMembership) -> anyhow::Result<BTreeMap<VoterId, P
         }
     }
     Ok(roster)
-}
-
-/// The datacenter of the member whose identity is this process, so its voter id names the local node.
-fn local_datacenter(membership: &DcMembership, identity: &str) -> anyhow::Result<String> {
-    membership
-        .members
-        .iter()
-        .find(|member| member.node == identity)
-        .map(|member| member.dc.clone())
-        .with_context(|| format!("this node's identity {identity:?} is not a member of the roster"))
 }
 
 /// The bare `host:port` authority a peer's Raft RPCs dial, extracted from the member's advertised URL.

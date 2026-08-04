@@ -28,6 +28,16 @@ name = "sim_campaign"
 path = "tests/sim_campaign.rs"
 required-features = ["sim-campaign"]
 
+[[test]]
+name = "observability"
+path = "tests/observability.rs"
+required-features = ["availability-e2e"]
+
+[[test]]
+name = "cluster"
+path = "tests/cluster.rs"
+required-features = ["availability-e2e"]
+
 [features]
 # Multi-process availability harness self-tests: spawn real peryx binaries, apply Toxiproxy network
 # faults, and observe them over HTTP. Off by default (they need the toxiproxy-server binary and are

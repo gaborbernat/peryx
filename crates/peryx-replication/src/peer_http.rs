@@ -29,8 +29,6 @@ pub enum HttpPeerError {
     EmptyToken,
     #[error("invalid peer URL {0:?}")]
     InvalidBase(String),
-    #[error("build replication HTTP client: {0}")]
-    Client(#[source] reqwest::Error),
 }
 
 /// A bearer-authenticated HTTP [`PeerTransport`] that pulls one bounded batch per fetch from a peer's
@@ -65,8 +63,11 @@ impl HttpPeerTransport {
     /// batch with `limits`.
     ///
     /// # Errors
-    /// Returns [`HttpPeerError`] for an empty token, a URL that is not a usable HTTP(S) base, or an
-    /// HTTP client that fails to build.
+    /// Returns [`HttpPeerError`] for an empty token or a URL that is not a usable HTTP(S) base.
+    ///
+    /// # Panics
+    /// Panics if the HTTP client cannot be built, which a static user agent and a duration timeout over
+    /// the guaranteed `rustls` provider never provoke.
     pub fn new(
         base: &str,
         token: impl Into<String>,
@@ -94,7 +95,7 @@ impl HttpPeerTransport {
             .user_agent(USER_AGENT)
             .timeout(timeout)
             .build()
-            .map_err(HttpPeerError::Client)?;
+            .expect("a reqwest client with a static user agent and a duration timeout always builds");
         Ok(Self {
             http,
             changes_url,

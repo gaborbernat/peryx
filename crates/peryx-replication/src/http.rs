@@ -39,8 +39,6 @@ pub enum HttpPrimaryError {
     InvalidBase(String),
     #[error("primary replication token must not be empty")]
     EmptyToken,
-    #[error("build replication HTTP client: {0}")]
-    Client(#[source] reqwest::Error),
     #[error("request primary: {0}")]
     Request(#[source] reqwest::Error),
     #[error("decode primary change page: {0}")]
@@ -65,7 +63,11 @@ impl HttpPrimary {
     /// Build a client rooted at the primary server URL.
     ///
     /// # Errors
-    /// Returns an error for an empty token, invalid HTTP(S) URL, or HTTP client construction failure.
+    /// Returns an error for an empty token or an invalid HTTP(S) URL.
+    ///
+    /// # Panics
+    /// Panics if the HTTP client cannot be built, which a static user agent over the guaranteed `rustls`
+    /// provider never provokes.
     pub fn new(base: &str, token: impl Into<String>) -> Result<Self, HttpPrimaryError> {
         let token = token.into();
         if token.is_empty() {
@@ -87,7 +89,7 @@ impl HttpPrimary {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .build()
-            .map_err(HttpPrimaryError::Client)?;
+            .expect("a reqwest client with a static user agent always builds");
         Ok(Self {
             http,
             changes_url,

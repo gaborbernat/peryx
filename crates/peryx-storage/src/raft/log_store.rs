@@ -52,20 +52,14 @@ pub struct StoredSnapshot {
     pub data: Vec<u8>,
 }
 
-/// A rejected Raft log-store operation. Every variant leaves the store unchanged.
-#[derive(Debug, thiserror::Error)]
-pub enum RaftLogError {
-    #[error(transparent)]
-    Database(#[from] redb::DatabaseError),
-    #[error(transparent)]
-    Transaction(#[from] redb::TransactionError),
-    #[error(transparent)]
-    Table(#[from] redb::TableError),
-    #[error(transparent)]
-    Storage(#[from] redb::StorageError),
-    #[error(transparent)]
-    Commit(#[from] redb::CommitError),
-}
+/// A rejected Raft log-store operation, always leaving the store unchanged.
+///
+/// redb reports each failing operation as one of several sub-errors — opening the database, beginning a
+/// transaction, opening a table, a storage fault, a commit — that all fold into its own [`redb::Error`],
+/// so this is that type. Distinguishing the sub-errors bought nothing here: the adapter above renders
+/// any store failure as a single fatal `openraft` storage error, and no deterministic test can tell one
+/// redb fault from another. Keeping one error keeps the one conversion on a tested path.
+pub type RaftLogError = redb::Error;
 
 /// A durable Raft log over redb. Cloning shares the one underlying database, so the `openraft` adapter
 /// and its log reader hand out cheap handles to the same store.

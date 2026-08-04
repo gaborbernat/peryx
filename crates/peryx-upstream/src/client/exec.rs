@@ -387,7 +387,7 @@ mod tests {
     use command_group::AsyncCommandGroup as _;
     use tokio::process::Command;
 
-    use super::terminate;
+    use super::{CredentialFailure, ExecCredentialConfig, MAX_OUTPUT_BYTES, terminate};
 
     fn spawn(script: &str) -> command_group::AsyncGroupChild {
         Command::new("/bin/sh")
@@ -418,6 +418,29 @@ mod tests {
                 .map(|status| status.success()),
             Some(true)
         );
+    }
+
+    // The helper writes one byte past the output limit and then stays alive, so the reader fills and
+    // finishes while the child is still running. That drives the loop's over-limit branch deterministically
+    // on every run, rather than only when the helper happens to have exited in time. PATH is inherited so
+    // the shell resolves its commands after `execute` clears the environment.
+    #[tokio::test]
+    async fn test_execute_rejects_output_over_the_limit() {
+        let script = format!("head -c {} /dev/zero; sleep 30", MAX_OUTPUT_BYTES + 1);
+        let config = ExecCredentialConfig::new(
+            vec!["/bin/sh".to_owned(), "-c".to_owned(), script],
+            Duration::from_secs(10),
+            vec!["PATH".to_owned()],
+            CredentialFailure::Fail,
+        )
+        .expect("the helper config is valid");
+
+        let error = config
+            .execute(b"request")
+            .await
+            .expect_err("output past the limit is rejected");
+
+        assert!(error.to_string().contains("exceeded its limit"), "{error}");
     }
 
     #[tokio::test]

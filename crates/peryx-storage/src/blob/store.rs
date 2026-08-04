@@ -7,7 +7,7 @@ use std::time::Duration;
 use sha2::{Digest as _, Sha256};
 
 use super::error::{BlobError, BlobScanError};
-use super::{BlobMetadata, Digest, sync_parent, to_hex};
+use super::{BlobMetadata, Digest, DurabilityCapabilities, PlacementReceipt, sync_parent, to_hex};
 
 /// Settle a no-clobber move of a freshly written temp blob into its content-addressed `dest`.
 ///
@@ -407,23 +407,35 @@ impl BlobStore {
         })
     }
 
-    /// Move a staged blob into the store.
+    /// Move a staged blob into the store, returning a [`PlacementReceipt`] proving it is durable.
+    ///
+    /// The staged file was already synced when it was finished; this crosses the rest of the durability
+    /// boundary by atomically renaming it into its content-addressed path and syncing the parent
+    /// directory. An already-present blob is durable too, so the idempotent early return still yields a
+    /// receipt.
     ///
     /// # Errors
     /// Returns [`BlobError::Io`] on a filesystem failure.
     ///
     /// # Panics
     /// Never in practice: blob paths always sit inside the store root, so a parent exists.
-    pub fn commit_staged(&self, staged: StagedBlob) -> Result<(), BlobError> {
+    pub fn commit_staged(&self, staged: StagedBlob) -> Result<PlacementReceipt, BlobError> {
+        let receipt = PlacementReceipt {
+            digest: staged.digest.clone(),
+            size: staged.len,
+            durability: DurabilityCapabilities::FILESYSTEM,
+        };
         let dest = self.path_for(&staged.digest);
         if dest.is_file() {
-            return Ok(());
+            return Ok(receipt);
         }
         std::fs::create_dir_all(dest.parent().expect("blob paths always have a parent"))?;
-        commit_placement(staged.path.persist_noclobber(&dest).map_err(|err| err.error), &dest)
+        commit_placement(staged.path.persist_noclobber(&dest).map_err(|err| err.error), &dest)?;
+        Ok(receipt)
     }
 
-    /// Finish a streamed write: verify the digest and move the blob into place.
+    /// Finish a streamed write: verify the digest, move the blob into place, and return its
+    /// [`PlacementReceipt`].
     ///
     /// # Errors
     /// Returns [`BlobError::DigestMismatch`] when the streamed bytes hash differently, or
@@ -431,7 +443,7 @@ impl BlobStore {
     ///
     /// # Panics
     /// Never in practice: blob paths always sit inside the store root, so a parent exists.
-    pub fn commit(&self, pending: PendingBlob, expected: &Digest) -> Result<(), BlobError> {
+    pub fn commit(&self, pending: PendingBlob, expected: &Digest) -> Result<PlacementReceipt, BlobError> {
         let staged = pending.finish()?;
         if staged.digest() != expected {
             return Err(BlobError::digest_mismatch(expected, staged.digest()));

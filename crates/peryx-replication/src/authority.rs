@@ -13,11 +13,14 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::envelope::AuthorityEpoch;
 
 /// The canonical key of an authority whose epoch fences its work: a project or repository home.
 /// Distinct authorities fence independently, each with its own committed epoch.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct AuthorityKey(pub String);
 
 /// Whether a [`commit`](AuthorityFence::commit) advanced an authority's committed epoch.

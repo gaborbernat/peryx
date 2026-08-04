@@ -30,6 +30,7 @@ mod ownership;
 mod peer;
 mod peer_http;
 mod protocol;
+pub mod raft;
 mod readiness;
 mod reconcile;
 mod replica;

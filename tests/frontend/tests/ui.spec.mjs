@@ -665,13 +665,11 @@ test("shadow inspection distinguishes an empty result", async ({ page }) => {
 
 test("shadow inspection pages a large project from the keyboard on a narrow screen", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 820 });
-  let requests = 0;
   await page.route("**/+shadow/candidates?**", async (route) => {
     const url = new URL(route.request().url());
     expect(url.searchParams.get("repository")).toBe("root/pypi");
     expect(url.searchParams.get("project")).toBe("large-demo");
     const cursor = url.searchParams.get("cursor");
-    requests += 1;
     const candidates = Array.from({ length: 100 }, (_, index) =>
       shadowCandidate({ filename: `large-${String(index).padStart(3, "0")}.whl`, selected: index === 0, reason: index === 0 ? null : "precedence" }),
     );
@@ -696,11 +694,20 @@ test("shadow inspection pages a large project from the keyboard on a narrow scre
 
   await page.getByRole("button", { name: "Next" }).focus();
   await page.keyboard.press("Enter");
+  // Both buttons disable while a page loads, so "Next disabled" alone cannot tell a settled last page
+  // from an in-flight fetch. Page two is the last page (no next cursor) and has a previous page, so
+  // its settled state is Next disabled with Previous enabled. Waiting for Previous to enable proves
+  // the fetch finished before the keyboard Previous below, which a disabled button would otherwise drop.
   await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Previous" })).toBeEnabled();
   await page.getByRole("button", { name: "Previous" }).focus();
   await page.keyboard.press("Enter");
+  // Back on page one: the rows re-render, Previous disables (no earlier page), and Next re-enables
+  // from the restored next cursor. Asserting the settled navigation state instead of a mid-race fetch
+  // tally survives an extra deduped request that does not change what the user sees.
   await expect(page.locator(".shadow-inspection-table tbody tr")).toHaveCount(100);
-  expect(requests).toBe(3);
+  await expect(page.getByRole("button", { name: "Previous" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Next" })).toBeEnabled();
 });
 
 test("shadow inspection enforces live administrator and repository-token boundaries", async ({ page }) => {

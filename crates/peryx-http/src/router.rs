@@ -104,6 +104,18 @@ fn service_routes() -> Router<Arc<AppState>> {
         )
         .route("/+quota", get(handlers::quota_summary))
         .route("/+quota/repository", get(handlers::quota_repository))
+        .route(
+            "/+repositories",
+            get(handlers::list_repositories)
+                .merge(post(handlers::create_repository).layer(DefaultBodyLimit::max(64 * 1024))),
+        )
+        .route(
+            "/+repositories/{id}",
+            get(handlers::inspect_repository)
+                .merge(put(handlers::update_repository).layer(DefaultBodyLimit::max(64 * 1024))),
+        )
+        .route("/+repositories/{id}/disable", post(handlers::disable_repository))
+        .route("/+repositories/{id}/enable", post(handlers::enable_repository))
         .route("/+shadow/candidates", get(handlers::shadow_candidates))
         .route("/+retention/plan", post(handlers::retention_plan))
         .route("/+retention/export", post(handlers::retention_export))

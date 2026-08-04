@@ -19,6 +19,7 @@ mod policy_decisions;
 mod pql;
 mod query;
 mod quota;
+mod repositories;
 mod retention;
 mod revocations;
 mod shadow;
@@ -47,6 +48,10 @@ pub use policy_decisions::{PolicyDecisionsQuery, policy_decision_error_response,
 pub use pql::pql_query;
 pub use query::{search, search_error_response, search_response, search_response_offloaded};
 pub use quota::{quota_repository, quota_summary};
+pub use repositories::{
+    RepositoriesQuery, create_repository, disable_repository, enable_repository, inspect_repository, list_repositories,
+    update_repository,
+};
 pub use retention::{retention_export, retention_plan};
 pub use revocations::{DigestRevocationsQuery, inspect_revocation, lift_revocation, list_revocations, put_revocation};
 pub use shadow::{shadow_candidates, shadow_error_response};

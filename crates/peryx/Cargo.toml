@@ -18,7 +18,16 @@ name = "e2e"
 path = "tests/e2e.rs"
 required-features = ["e2e"]
 
+[[test]]
+name = "availability"
+path = "tests/availability.rs"
+required-features = ["availability-e2e"]
+
 [features]
+# Multi-process availability harness self-tests: spawn real peryx binaries, apply Toxiproxy network
+# faults, and observe them over HTTP. Off by default (they need the toxiproxy-server binary and are
+# not part of the coverage gate); CI runs them in a dedicated job.
+availability-e2e = []
 # End-to-end tests that drive real pip/uv/twine against a spawned peryx binary. Off by default
 # (they need the clients and are not part of the coverage gate); CI runs them explicitly. `e2e` is
 # the fast, hermetic matrix (peryx proxies a local fixture index — no external network, no flake);
@@ -80,6 +89,7 @@ tracing-journald = "0.3"
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
 rstest.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json"] }
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 http-body-util.workspace = true
@@ -94,6 +104,11 @@ wiremock.workspace = true
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
 rcgen = "0.13.2"
+
+# The availability harness signals process groups through nix, a unix-only API; its callers are
+# `cfg(unix)`-gated, so other platforms compile the harness without it.
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29", features = ["signal"] }
 
 [lints]
 workspace = true

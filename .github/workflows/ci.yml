@@ -172,7 +172,7 @@ jobs:
       - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace ${{ matrix.features }} -E 'not(binary(e2e))'
+      - run: cargo nextest run --workspace ${{ matrix.features }} -E 'not(binary(e2e)) & not(binary(availability))'
       - name: Cancel remaining jobs on failure
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure
@@ -294,6 +294,43 @@ jobs:
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure
 
+  # The multi-process availability harness: spawns real peryx binaries and injects network faults
+  # through Toxiproxy. Off the default test matrix (it needs the toxiproxy-server binary); run here.
+  availability:
+    needs: changes
+    if: >-
+      needs.changes.outputs.shared == 'true' || github.event_name == 'push' ||
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: cargo-nextest
+      - name: Install toxiproxy-server
+        env:
+          TOXIPROXY_VERSION: "2.12.0"
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
+            "https://github.com/Shopify/toxiproxy/releases/download/v${TOXIPROXY_VERSION}/toxiproxy-server-linux-amd64"
+          chmod +x "${RUNNER_TEMP}/toxiproxy-server"
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+      - name: Build availability harness tests
+        run: cargo build -p peryx --features availability-e2e --tests
+      - name: Run availability harness tests
+        run: cargo nextest run -p peryx --features availability-e2e
+      - name: Cancel remaining jobs on failure
+        if: failure() && !cancelled()
+        uses: ./.github/actions/cancel-on-failure
+
   # The hydrated web UI, driven by Playwright: the wasm bundle is built with cargo-leptos and the
   # suite exercises search, the project page, the archive browser, and token-authenticated actions.
   frontend:
@@ -368,7 +405,7 @@ jobs:
   # skipped; fails if any failed or was cancelled.
   ci-gate:
     if: always()
-    needs: [changes, lint, test, coverage, e2e, e2e-live, frontend, docs]
+    needs: [changes, lint, test, coverage, e2e, e2e-live, availability, frontend, docs]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify no required job failed

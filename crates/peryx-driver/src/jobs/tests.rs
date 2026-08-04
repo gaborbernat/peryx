@@ -869,7 +869,7 @@ async fn test_metrics_expose_a_kinds_full_lifecycle_series() {
 }
 
 fn context(state: Arc<ServingState>, cancel: CancellationToken) -> JobContext {
-    JobContext { state, cancel }
+    JobContext { state, cancel, fence: 0 }
 }
 
 #[tokio::test]

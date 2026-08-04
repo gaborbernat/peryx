@@ -292,9 +292,16 @@ async fn run_persisted(
         },
         None => None,
     };
+    // Snapshot the authority epoch as the lease's fence: a run that outlives an authority transfer keeps
+    // writing under the epoch it started with, which the newer holder fences out.
+    let fence = match job.repository() {
+        Some(repository) => shared.state.committed_authority_epoch(repository).await,
+        None => 0,
+    };
     let context = JobContext {
         state: shared.state.clone(),
         cancel: cancel.clone(),
+        fence,
     };
     let (result, panicked) = AssertUnwindSafe(job.run(&context)).catch_unwind().await.map_or_else(
         |_| (Err(JobFailure::new("job_panic", "node-local job panicked")), true),

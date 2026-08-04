@@ -76,6 +76,10 @@ impl OwnershipAuthority for RecordingAuthority {
             voters: Vec::new(),
         }
     }
+
+    async fn committed_epoch(&self, _authority: &str) -> u64 {
+        0
+    }
 }
 
 /// Push the fixture manifest to `store/app` under `reference` and return the response status.

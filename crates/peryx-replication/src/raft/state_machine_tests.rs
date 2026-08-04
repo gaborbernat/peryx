@@ -211,3 +211,15 @@ async fn test_home_of_reads_the_applied_home() {
         Some(DatacenterId("east".to_owned()))
     );
 }
+
+#[tokio::test]
+async fn test_epoch_of_reads_the_committed_epoch() {
+    let mut machine = OwnershipStateMachine::default();
+    assert_eq!(machine.epoch_of(&key("proj")).await, AuthorityEpoch(0));
+
+    machine.apply(vec![normal(1, assign("proj", "east"))]).await.unwrap();
+    assert_eq!(machine.epoch_of(&key("proj")).await, AuthorityEpoch(1));
+
+    machine.apply(vec![normal(2, advance("proj"))]).await.unwrap();
+    assert_eq!(machine.epoch_of(&key("proj")).await, AuthorityEpoch(2));
+}

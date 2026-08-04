@@ -169,6 +169,14 @@ impl OwnershipAuthority for OwnershipGroup {
             .is_some()
     }
 
+    async fn committed_epoch(&self, authority: &str) -> u64 {
+        self.node
+            .state_machine()
+            .epoch_of(&AuthorityKey(authority.to_owned()))
+            .await
+            .0
+    }
+
     async fn claim_home(&self, authority: &str) -> Result<HomeClaim, OwnershipError> {
         let command = OwnershipCommand::AssignHome {
             authority: AuthorityKey(authority.to_owned()),

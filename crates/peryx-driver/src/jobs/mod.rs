@@ -128,10 +128,12 @@ impl std::fmt::Display for JobFailure {
 
 impl std::error::Error for JobFailure {}
 
-/// What a running job sees: the serving state to work over, and a cooperative cancellation signal.
+/// What a running job sees: the serving state to work over, a cooperative cancellation signal, and the
+/// authority fence its writes carry.
 pub struct JobContext {
     state: Arc<ServingState>,
     cancel: tokio_util::sync::CancellationToken,
+    fence: u64,
 }
 
 impl JobContext {
@@ -139,6 +141,17 @@ impl JobContext {
     #[must_use]
     pub const fn state(&self) -> &Arc<ServingState> {
         &self.state
+    }
+
+    /// The committed authority epoch for this job's repository, snapshotted when the lease was taken.
+    ///
+    /// A job stamps this onto the records it writes so a later holder fences it out: if the authority
+    /// transfers mid-run and its epoch advances, this run's writes carry the older epoch and lose to the
+    /// new holder's. `0` for a node-wide job that names no repository, the closed sentinel the placement
+    /// fence rejects.
+    #[must_use]
+    pub const fn authority_fence(&self) -> u64 {
+        self.fence
     }
 
     /// Whether shutdown has asked this job to stop; a cooperative job polls it between units of work.

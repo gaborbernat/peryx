@@ -23,8 +23,8 @@ use openraft::{
 };
 use tokio::sync::Mutex;
 
-use crate::AuthorityKey;
 use crate::ownership::{DatacenterId, OwnershipState};
+use crate::{AuthorityEpoch, AuthorityKey};
 use crate::raft::{OwnershipResponse, PeryxNode, TypeConfig};
 
 /// The `u64` voter handle `OpenRaft` keys nodes by. See [`crate::raft`] for why it is not the datacenter
@@ -67,6 +67,17 @@ impl OwnershipStateMachine {
     /// so a stale `None` costs one rejected assignment, never a wrong home.
     pub async fn home_of(&self, authority: &AuthorityKey) -> Option<DatacenterId> {
         self.inner.lock().await.state.home(authority).cloned()
+    }
+
+    /// The committed authority epoch of `authority` in this node's applied ownership state, or the
+    /// unassigned sentinel [`AuthorityEpoch(0)`](crate::AuthorityEpoch) when no committed command has
+    /// homed it.
+    ///
+    /// A local read like [`home_of`](Self::home_of): current on the leader, possibly behind on a
+    /// follower. It is the fence value a writer stamps onto work it produces, so a former holder's stale
+    /// epoch is fenced out once the authority advances.
+    pub async fn epoch_of(&self, authority: &AuthorityKey) -> AuthorityEpoch {
+        self.inner.lock().await.state.epoch(authority)
     }
 }
 

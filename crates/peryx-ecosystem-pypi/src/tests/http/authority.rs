@@ -77,6 +77,10 @@ impl OwnershipAuthority for RecordingAuthority {
             voters: Vec::new(),
         }
     }
+
+    async fn committed_epoch(&self, _authority: &str) -> u64 {
+        0
+    }
 }
 
 /// Publish the sdist fixture (project `peryxpkg`) to the hosted index and return the response.

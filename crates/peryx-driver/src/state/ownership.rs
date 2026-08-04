@@ -66,6 +66,13 @@ pub trait OwnershipAuthority: Send + Sync {
     /// availability status resource. Read from local metrics, so it is current on the leader and may lag
     /// on a follower.
     fn cluster_status(&self) -> ClusterStatus;
+
+    /// The committed authority epoch for `authority`, or `0` when no committed command has homed it.
+    ///
+    /// The fence value a writer stamps onto the work it produces: a background job reads it at lease time
+    /// so a former holder's stale-epoch write is fenced out once the authority advances. A local read,
+    /// current on the leader and possibly behind on a follower.
+    async fn committed_epoch(&self, authority: &str) -> u64;
 }
 
 /// Claim `authority`'s home on its first publish, best effort, when this process runs a group.
@@ -93,6 +100,7 @@ mod tests {
     struct Fake {
         homed: bool,
         claim: Result<HomeClaim, OwnershipError>,
+        epoch: u64,
     }
 
     #[async_trait::async_trait]
@@ -116,10 +124,14 @@ mod tests {
                 voters: vec!["east".to_owned()],
             }
         }
+
+        async fn committed_epoch(&self, _authority: &str) -> u64 {
+            self.epoch
+        }
     }
 
     fn group(homed: bool, claim: Result<HomeClaim, OwnershipError>) -> Arc<dyn OwnershipAuthority> {
-        Arc::new(Fake { homed, claim })
+        Arc::new(Fake { homed, claim, epoch: 7 })
     }
 
     #[tokio::test]
@@ -156,11 +168,19 @@ mod tests {
         claim_first_publish_home(None, "proj").await;
     }
 
+    #[tokio::test]
+    async fn test_committed_epoch_reports_the_group_epoch() {
+        let group = group(false, Ok(HomeClaim::AlreadyHomed));
+
+        assert_eq!(group.committed_epoch("proj").await, 7);
+    }
+
     #[test]
     fn test_cluster_status_snapshots_the_group() {
         let status = Fake {
             homed: false,
             claim: Ok(HomeClaim::AlreadyHomed),
+            epoch: 0,
         }
         .cluster_status();
 

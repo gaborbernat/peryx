@@ -39,6 +39,7 @@ pub fn usage_schema() -> DomainSchema {
         auth: DomainAuth::RepositoryOrOperator,
         natural_order: "hits",
         bounded: true,
+        pushdown: &["repository", "project"],
     }
 }
 
@@ -50,6 +51,7 @@ pub fn usage_scan_schema() -> DomainSchema {
         auth: DomainAuth::RepositoryOrOperator,
         natural_order: "hits",
         bounded: true,
+        pushdown: &[],
     }
 }
 
@@ -88,6 +90,7 @@ pub fn keyless_schema() -> DomainSchema {
         auth: DomainAuth::OperatorOnly,
         natural_order: "id",
         bounded: true,
+        pushdown: &["id"],
     }
 }
 
@@ -149,6 +152,7 @@ pub fn schema() -> DomainSchema {
         auth: DomainAuth::RepositoryOrOperator,
         natural_order: "evaluated_at",
         bounded: true,
+        pushdown: &["repository", "project", "evaluated_at"],
     }
 }
 
@@ -169,6 +173,37 @@ pub fn big_schema() -> DomainSchema {
         auth: DomainAuth::RepositoryOrOperator,
         natural_order: "name",
         bounded: false,
+        pushdown: &["repository"],
+    }
+}
+
+/// An unbounded domain whose `shard` column is cheap to index (`Indexed`) yet outside the source's
+/// fetch pushdown. A cost gate keyed on [`Indexability::is_cheap`] would admit an unbounded scan led by
+/// `shard`; the aligned gate refuses it because the fetch would not narrow on it.
+#[must_use]
+pub fn unpushed_cheap_schema() -> DomainSchema {
+    DomainSchema {
+        name: BIG_DOMAIN,
+        columns: vec![
+            Column::new(
+                "repository",
+                ValueType::Str,
+                FieldClass::Repository,
+                Indexability::Indexed,
+                false,
+            ),
+            Column::new(
+                "shard",
+                ValueType::Str,
+                FieldClass::Repository,
+                Indexability::Indexed,
+                false,
+            ),
+        ],
+        auth: DomainAuth::RepositoryOrOperator,
+        natural_order: "repository",
+        bounded: false,
+        pushdown: &["repository"],
     }
 }
 

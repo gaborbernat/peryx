@@ -5,7 +5,7 @@ use crate::plan::{DEFAULT_LIMIT, MAX_LIMIT, leading_filter, plan};
 use crate::source::FetchFilter;
 use crate::value::{Value, ValueType};
 
-use super::support::{big_schema, schema};
+use super::support::{big_schema, schema, unpushed_cheap_schema};
 
 fn filter_of(text: &str) -> Option<FetchFilter> {
     let ast = parse(text).expect("parses");
@@ -218,6 +218,27 @@ fn test_cost_gate_unbounded_requires_cheap_leading_filter() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn test_cost_gate_refuses_a_cheap_column_the_source_does_not_push_down() {
+    let schema = unpushed_cheap_schema();
+
+    // `shard` is `Indexed`, so a gate keyed on `is_cheap` would admit an unbounded scan led by it, but
+    // the source does not narrow its fetch on `shard`, so the aligned gate refuses.
+    let refuse = plan(&parse("from big where shard == \"a\"").expect("parses"), &schema);
+    assert!(matches!(refuse, Err(PqlError::CostExceeded(_))));
+
+    // The pushdown column still admits.
+    assert!(plan(&parse("from big where repository == \"a\"").expect("parses"), &schema).is_ok());
+}
+
+#[test]
+fn test_leading_filter_skips_a_cheap_but_unpushed_column() {
+    let ast = parse("from big where shard == \"a\"").expect("parses");
+    let predicate = ast.predicate.as_ref().expect("has a predicate");
+
+    assert_eq!(leading_filter(predicate, &unpushed_cheap_schema()), None);
 }
 
 #[test]

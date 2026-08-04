@@ -548,6 +548,9 @@ fn policy_schema() -> DomainSchema {
         auth: DomainAuth::RepositoryOrOperator,
         natural_order: "evaluated_at",
         bounded: true,
+        // `fetch_policy` narrows the store read only on `project` (`indexed_project`); `repository` is
+        // scoped by auth, not the predicate, and `evaluated_at` has no store-side seek.
+        pushdown: &["project"],
     }
 }
 
@@ -558,6 +561,9 @@ fn usage_schema() -> DomainSchema {
         auth: DomainAuth::RepositoryOrOperator,
         natural_order: "downloads",
         bounded: true,
+        // `fetch_usage` reads pre-aggregated totals and ignores the leading filter, so it narrows on
+        // nothing.
+        pushdown: &[],
     }
 }
 

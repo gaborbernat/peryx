@@ -505,6 +505,18 @@ pub struct ReplicationRuntime {
     consensus: Option<raft::ConsensusPlan>,
 }
 
+/// The running ownership consensus an `ha` process holds for its lifetime.
+///
+/// Carries the group handle the mutation path submits first-publish claims to, and the peer RPC router
+/// the process mounts on its peer-facing listener so remote voters can exchange raft RPCs with this node.
+/// Dropping it shuts the raft runtime down.
+pub struct Consensus {
+    /// The group handle to register on the [`AppState`] for the mutation path.
+    pub authority: Arc<dyn peryx_driver::state::OwnershipAuthority>,
+    /// The receive-side raft RPC routes to mount on the peer-facing (availability) listener.
+    pub peer_router: Router,
+}
+
 impl ReplicationRuntime {
     /// Prepare the configured replication role without starting background work.
     ///
@@ -614,13 +626,15 @@ impl ReplicationRuntime {
     /// # Errors
     /// Returns an error when the consensus log store cannot be opened or the node cannot start or
     /// bootstrap.
-    pub async fn ignite_consensus(&self) -> anyhow::Result<Option<Arc<dyn peryx_driver::state::OwnershipAuthority>>> {
+    pub async fn ignite_consensus(&self) -> anyhow::Result<Option<Consensus>> {
         match &self.consensus {
             Some(plan) => {
                 let node = plan.ignite().await?;
-                let group: Arc<dyn peryx_driver::state::OwnershipAuthority> =
+                let peer_router = peryx_replication::raft::network::raft_rpc_router(plan.token(), node.rpc_handler())
+                    .context("build the raft peer rpc router")?;
+                let authority: Arc<dyn peryx_driver::state::OwnershipAuthority> =
                     Arc::new(raft::OwnershipGroup::new(node, plan.home()));
-                Ok(Some(group))
+                Ok(Some(Consensus { authority, peer_router }))
             }
             None => Ok(None),
         }

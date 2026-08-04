@@ -13,13 +13,19 @@
 
 use std::collections::BTreeMap;
 
+use std::sync::Arc;
+
+use bytes::Bytes;
 use openraft::error::{ClientWriteError, Fatal, InitializeError, RaftError};
+use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 use openraft::storage::RaftLogStorage;
 use openraft::{ConfigError, Raft, RaftMetrics, RaftNetworkFactory};
+use serde::Serialize;
 use tokio::sync::watch;
 
 use crate::ownership::OwnershipCommand;
 use crate::raft::config::RaftConfig;
+use crate::raft::network::{RaftRpc, RaftRpcHandler, RaftRpcRejection};
 use crate::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, TypeConfig};
 
 /// The `u64` voter handle `OpenRaft` keys nodes by. See [`crate::raft`] for why it is not the datacenter
@@ -163,4 +169,50 @@ impl RaftNode {
     pub const fn state_machine(&self) -> &OwnershipStateMachine {
         &self.state_machine
     }
+
+    /// The server-side RPC handler that drives this node's raft core from a peer's inbound RPCs.
+    ///
+    /// Mount it behind [`raft_rpc_router`](crate::raft::network::raft_rpc_router) on the peer-facing
+    /// listener so remote voters can exchange `AppendEntries`, Vote, and `InstallSnapshot` with this
+    /// node. Without it a node sends peer RPCs but receives none, so a group never reaches quorum.
+    #[must_use]
+    pub fn rpc_handler(&self) -> Arc<dyn RaftRpcHandler> {
+        Arc::new(OwnershipRpcHandler {
+            raft: self.raft.clone(),
+        })
+    }
+}
+
+/// The receive side of the peer transport: decodes a peer's RPC, drives the local raft core, and encodes
+/// the reply the client decodes as `Result<Response, RaftError>`.
+struct OwnershipRpcHandler {
+    raft: Raft<TypeConfig>,
+}
+
+#[async_trait::async_trait]
+impl RaftRpcHandler for OwnershipRpcHandler {
+    async fn handle(&self, rpc: RaftRpc, body: Bytes) -> Result<Vec<u8>, RaftRpcRejection> {
+        match rpc {
+            RaftRpc::AppendEntries => {
+                let request: AppendEntriesRequest<TypeConfig> = decode(&body)?;
+                Ok(encode(&self.raft.append_entries(request).await))
+            }
+            RaftRpc::Vote => {
+                let request: VoteRequest<NodeId> = decode(&body)?;
+                Ok(encode(&self.raft.vote(request).await))
+            }
+            RaftRpc::InstallSnapshot => {
+                let request: InstallSnapshotRequest<TypeConfig> = decode(&body)?;
+                Ok(encode(&self.raft.install_snapshot(request).await))
+            }
+        }
+    }
+}
+
+fn decode<T: serde::de::DeserializeOwned>(body: &Bytes) -> Result<T, RaftRpcRejection> {
+    serde_json::from_slice(body).map_err(|_| RaftRpcRejection::Malformed)
+}
+
+fn encode<T: Serialize>(response: &T) -> Vec<u8> {
+    serde_json::to_vec(response).expect("a raft rpc response serializes to JSON")
 }

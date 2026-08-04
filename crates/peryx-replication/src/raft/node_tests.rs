@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use openraft::ServerState;
+use axum::body::Bytes;
 use openraft::error::{ClientWriteError, Fatal, ForwardToLeader, InitializeError, RaftError};
+use openraft::raft::InstallSnapshotRequest;
+use openraft::{ServerState, SnapshotMeta, Vote};
 use tempfile::TempDir;
 
 use peryx_storage::raft::RaftLogStore;
@@ -10,8 +12,8 @@ use peryx_storage::raft::RaftLogStore;
 use crate::AuthorityKey;
 use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect, Rejection};
 use crate::raft::log_store::RaftLogStoreAdapter;
-use crate::raft::network::PeerRaftNetworkFactory;
-use crate::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode, StartError};
+use crate::raft::network::{PeerRaftNetworkFactory, RaftRpc, RaftRpcRejection, raft_rpc_router};
+use crate::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode, StartError, TypeConfig};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -241,4 +243,101 @@ async fn test_a_reassignment_is_rejected_through_the_shared_state() {
     // The app reads applied state through this shared handle behind a linearizable barrier.
     node.raft().ensure_linearizable().await.unwrap();
     let _ = node.state_machine();
+}
+
+#[tokio::test]
+async fn test_a_three_node_group_forms_quorum_over_the_mounted_rpc_endpoints() {
+    // Build a node behind each of three peer listeners and serve its rpc handler, so the voters can
+    // exchange vote and append-entries RPCs. This is the end-to-end proof that a mounted receive router
+    // lets a real cluster form; without it the group would never reach quorum.
+    const CLUSTER_TOKEN: &str = "cluster-secret";
+    let mut nodes = Vec::new();
+    let mut roster = BTreeMap::new();
+    let mut guards = Vec::new();
+    for id in 1..=3u64 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let guard = tempfile::tempdir().unwrap();
+        let store = RaftLogStore::open(guard.path().join("raft.redb")).unwrap();
+        let node = RaftNode::start(
+            id,
+            RaftConfig::default(),
+            "ownership",
+            PeerRaftNetworkFactory::new(CLUSTER_TOKEN, RPC_TIMEOUT),
+            RaftLogStoreAdapter::new(store),
+            OwnershipStateMachine::default(),
+        )
+        .await
+        .unwrap();
+        let rpc_router = raft_rpc_router(CLUSTER_TOKEN, node.rpc_handler()).unwrap();
+        tokio::spawn(async move { axum::serve(listener, rpc_router).await.unwrap() });
+        roster.insert(id, peer(&format!("dc{id}"), &addr.to_string()));
+        guards.push(guard);
+        nodes.push(node);
+    }
+
+    // Seed the three-voter roster from one node; the others join as voters over the network.
+    nodes[0].bootstrap(roster).await.unwrap();
+
+    // A leader emerges only if a quorum exchanged votes across the mounted endpoints.
+    let mut elected = None;
+    for _ in 0..100 {
+        let current = nodes[0].metrics().borrow().current_leader;
+        if let Some(id) = current {
+            elected = Some(id);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let elected = elected.expect("the three-node group elects a leader");
+
+    let voters = nodes[0].metrics().borrow().membership_config.nodes().count();
+    assert_eq!(voters, 3, "all three voters are in the membership");
+
+    // A committed write proves append-entries reached a quorum, not just an election.
+    let response = nodes[usize::try_from(elected - 1).unwrap()]
+        .submit(OwnershipCommand::AssignHome {
+            authority: AuthorityKey("proj".to_owned()),
+            home: DatacenterId("dc1".to_owned()),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        response,
+        OwnershipResponse::Applied(OwnershipEffect::Assigned { .. })
+    ));
+
+    for node in &nodes {
+        node.raft().shutdown().await.unwrap();
+    }
+    drop(guards);
+}
+
+#[tokio::test]
+async fn test_the_rpc_handler_serves_install_snapshot_and_rejects_a_malformed_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = start_node(&dir, RaftConfig::default()).await.unwrap();
+    let handler = node.rpc_handler();
+
+    // A body that is not a valid request for the rpc is a malformed rejection, never a panic.
+    assert!(matches!(
+        handler
+            .handle(RaftRpc::AppendEntries, Bytes::from_static(b"not a request"))
+            .await,
+        Err(RaftRpcRejection::Malformed)
+    ));
+
+    // A well-formed install-snapshot request drives the core and returns an encoded reply. The
+    // append-entries and vote arms ride the three-node cluster test.
+    let request = InstallSnapshotRequest::<TypeConfig> {
+        vote: Vote::default(),
+        meta: SnapshotMeta::default(),
+        offset: 0,
+        data: Vec::new(),
+        done: true,
+    };
+    let body = Bytes::from(serde_json::to_vec(&request).unwrap());
+    let reply = handler.handle(RaftRpc::InstallSnapshot, body).await.unwrap();
+
+    assert!(!reply.is_empty());
 }

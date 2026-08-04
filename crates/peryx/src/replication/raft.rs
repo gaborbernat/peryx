@@ -68,6 +68,11 @@ impl ConsensusPlan {
         self.home.clone()
     }
 
+    /// The shared peer credential the receive-side RPC router authenticates inbound voter RPCs with.
+    pub(super) fn token(&self) -> &str {
+        &self.token
+    }
+
     pub(super) fn from_config(config: &Config) -> anyhow::Result<Option<Self>> {
         let AvailabilityConfig::Ha(replication) = &config.availability else {
             return Ok(None);

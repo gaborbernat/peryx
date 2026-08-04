@@ -147,6 +147,9 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
         }
     }
     attach_policy_decision_recorders(&meta, &mut indexes)?;
+    if !read_only {
+        crate::config::reconcile_configured_repositories(&meta, &configs);
+    }
     let oci_settings = build_index_settings(&configs)?;
     let webhooks = build_webhooks(&configs)?;
     let search_path = config.data_dir.join("search-v1");

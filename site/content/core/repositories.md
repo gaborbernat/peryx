@@ -132,11 +132,15 @@ $ curl -sS -u "$ADMIN" -X POST -H "if-match: $etag" \
     https://packages.example/+repositories/repo_2f7e6a1b9c4d4e2f8a1b2c3d4e5f6a7b/disable
 ```
 
-## Relationship to `[[index]]` configuration
+## Migrating from `[[index]]` configuration
 
-Repositories defined statically under `[[index]]` in the configuration file continue to route exactly as before; the
-configuration file remains their source of truth. The management API operates on repository records in the store and is
-the way to create, rename, and disable repositories at runtime without reloading the process. Bringing configured
-`[[index]]` repositories under API management — reconciling each into a stored record with a stable id derived from its
-route, so a restart is idempotent and a later rename does not re-home references — lands with the server-startup change
-that owns configuration parsing; the store already provides the idempotent reconcile primitive it builds on.
+Repositories defined statically under `[[index]]` route exactly as before; the configuration file stays their source of
+truth for routing. On startup an authoritative node reconciles each configured index into a stored record, matched by
+route. A route with no record yet mints one, keyed to that route in the store; a route that already has a record reuses
+its id, so a restart assigns nothing new and a later rename through the API never re-homes a reference. Reconciling an
+unchanged configuration is a no-op that bumps no version. A read-only replica skips the reconcile and receives records
+through its normal replication path.
+
+The migration is one-way onboarding, not a two-way sync. It gives a configured route a stable id and a record to manage;
+it does not push later API edits back into the configuration file, and it does not delete a record when its `[[index]]`
+entry goes away.

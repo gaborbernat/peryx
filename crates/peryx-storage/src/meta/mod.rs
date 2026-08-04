@@ -17,6 +17,7 @@ mod error;
 mod external_identity;
 mod frontier;
 mod index;
+mod ingress_intent;
 mod job;
 mod job_lease;
 mod journal;
@@ -50,6 +51,7 @@ pub use cross_dc_copy::{
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use external_identity::ExternalIdentityStoreError;
 pub use index::DriverTxn;
+pub use ingress_intent::{IntentPhase, IntentStageOutcome, IntentTransition, StagedIntent};
 pub use job::{
     FinishJobRun, JobKind, JobOutcome, JobRunPage, JobRunQuery, JobRunQueryError, JobRunRecord, JobRunStoreError,
     JobState, NewJobRun,
@@ -112,6 +114,9 @@ const JOB_LEASE: TableDefinition<&str, &[u8]> = TableDefinition::new("job_lease"
 /// The durable outcome of each admitted write, keyed by operation id so a retry replays the original
 /// result instead of running a second mutation.
 const OPERATION_OUTCOME: TableDefinition<&str, &[u8]> = TableDefinition::new("operation_outcome");
+/// The ingress DC's durably staged write intents, keyed by client-scoped identity so a retried
+/// admission is idempotent and a restart recovers the intents a home DC has yet to finalize.
+const INGRESS_INTENT: TableDefinition<&str, &[u8]> = TableDefinition::new("ingress_intent");
 const POLICY_DECISION: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_decision");
 const POLICY_DECISION_CURRENT: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current");
 const POLICY_DECISION_CURRENT_ID: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current_id");
@@ -283,6 +288,7 @@ impl MetaStore {
             txn.open_table(TRANSFER_ATTEMPT)?;
             txn.open_table(RECLAMATION_TOMBSTONE)?;
             txn.open_table(OPERATION_OUTCOME)?;
+            txn.open_table(INGRESS_INTENT)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;
             txn.open_table(SCOPED_TOKEN)?;

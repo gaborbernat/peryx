@@ -42,6 +42,11 @@ pub struct RuntimeOptions<I> {
     /// How many days of daily version-and-source usage buckets to retain; `None` keeps them without
     /// limit. Older buckets expire on the aggregator thread, never on the request path.
     pub usage_retention_days: Option<u32>,
+    /// The derived views a read must not outrun, seeding [`ServingState::required_views`]. The default is
+    /// search only; a dual-plane replica adds its blob-availability view so a metadata serial stays
+    /// hidden until its blobs are local. This crate never names those views: the caller supplies the set,
+    /// so a blob-plane view name stays out of the neutral driver.
+    pub required_views: std::sync::Arc<[&'static str]>,
 }
 
 /// How long an outage may be papered over with a stale page, when an operator configures no bound.
@@ -163,6 +168,7 @@ impl AppState {
                 hot_cache_bytes: DEFAULT_HOT_CACHE_BYTES,
                 max_stale_secs: DEFAULT_MAX_STALE_SECS,
                 usage_retention_days: None,
+                required_views: std::sync::Arc::from(super::derived_views::REQUIRED_VIEWS),
             },
         )
     }
@@ -223,6 +229,7 @@ impl AppState {
                 hot_cache_bytes: DEFAULT_HOT_CACHE_BYTES,
                 max_stale_secs: DEFAULT_MAX_STALE_SECS,
                 usage_retention_days: None,
+                required_views: std::sync::Arc::from(super::derived_views::REQUIRED_VIEWS),
             },
         )
     }
@@ -254,6 +261,7 @@ impl AppState {
                 hot_cache_bytes: DEFAULT_HOT_CACHE_BYTES,
                 max_stale_secs: DEFAULT_MAX_STALE_SECS,
                 usage_retention_days: None,
+                required_views: std::sync::Arc::from(super::derived_views::REQUIRED_VIEWS),
             },
         )
     }
@@ -277,6 +285,7 @@ impl AppState {
             hot_cache_bytes,
             max_stale_secs,
             usage_retention_days,
+            required_views,
         } = runtime;
         let configured: HashMap<_, _> = upstream_concurrency.into_iter().collect();
         let upstream_limits = indexes
@@ -320,7 +329,7 @@ impl AppState {
                 downloads: crate::download::DownloadRegistry::default(),
                 metrics,
                 search,
-                required_views: std::sync::Arc::from(super::derived_views::REQUIRED_VIEWS),
+                required_views,
                 rate_limits: RateLimiter::new(rate_limit),
                 upstream_limits: UpstreamLimits::new(upstream_limits.clone()),
                 metadata_upstream_limits: UpstreamLimits::new(upstream_limits),

@@ -264,6 +264,9 @@ pub enum ReplicationConfig {
         token: SecretSource,
         poll_interval: Duration,
         page_size: NonZeroUsize,
+        /// Gate reads on whole-blob availability, not just metadata: run the async blob plane and
+        /// hold the readable frontier at the slower of the metadata and blob views.
+        dual_plane: bool,
     },
 }
 

@@ -37,6 +37,7 @@ fn test_ha_replica_replication_from_toml_uses_defaults() {
             token: SecretSource::Literal("secret".to_owned()),
             poll_interval: Duration::from_secs(1),
             page_size: NonZeroUsize::new(100).unwrap(),
+            dual_plane: false,
         })
     );
 }
@@ -51,6 +52,7 @@ fn test_replica_replication_from_toml_accepts_runtime_bounds() {
     let AvailabilityConfig::Dc(ReplicationConfig::Replica {
         poll_interval,
         page_size,
+        dual_plane,
         ..
     }) = config.availability
     else {
@@ -58,6 +60,23 @@ fn test_replica_replication_from_toml_accepts_runtime_bounds() {
     };
     assert_eq!(poll_interval, Duration::from_secs(30));
     assert_eq!(page_size, NonZeroUsize::new(250).unwrap());
+    assert!(
+        !dual_plane,
+        "a replica gates on metadata alone unless dual_plane opts in"
+    );
+}
+
+#[test]
+fn test_replica_replication_from_toml_enables_the_dual_plane() {
+    let config = toml_config(
+        "[availability]\nmode = \"dc\"\n[availability.replication]\nrole = \"replica\"\n\
+         upstream = \"https://primary.example/\"\ntoken = \"secret\"\ndual_plane = true\n",
+    );
+
+    let AvailabilityConfig::Dc(ReplicationConfig::Replica { dual_plane, .. }) = config.availability else {
+        panic!("expected a dc replica configuration");
+    };
+    assert!(dual_plane);
 }
 
 #[rstest]

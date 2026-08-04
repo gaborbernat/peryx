@@ -31,6 +31,18 @@ use crate::config::{
     SecretSource, UpstreamTlsConfig, WebhookSecret,
 };
 
+/// The derived views a read must not outrun. A dual-plane replica also gates reads on whole-blob
+/// availability, so its readable frontier holds at the slower of the metadata and blob views; every
+/// other role gates on metadata alone.
+fn required_views(config: &Config) -> Arc<[&'static str]> {
+    match config.availability.replication() {
+        Some(ReplicationConfig::Replica { dual_plane: true, .. }) => {
+            Arc::from([peryx_driver::state::SEARCH_VIEW, peryx_replication::BLOB_VIEW])
+        }
+        _ => Arc::from([peryx_driver::state::SEARCH_VIEW]),
+    }
+}
+
 /// Leave S3 credential resolution with the SDK provider chain.
 ///
 /// # Errors
@@ -152,6 +164,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
             hot_cache_bytes: config.hot_cache_bytes,
             max_stale_secs: config.max_stale_secs,
             usage_retention_days: config.usage_retention_days,
+            required_views: required_views(config),
         },
     )
     .context(format!("open search index {}", search_path.display()))?;

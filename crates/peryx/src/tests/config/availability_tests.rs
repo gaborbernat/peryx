@@ -74,6 +74,7 @@ fn test_dc_and_ha_carry_distinct_topology() {
         token: SecretSource::Literal("secret".to_owned()),
         poll_interval: Duration::from_secs(1),
         page_size: NonZeroUsize::MIN,
+        dual_plane: false,
     };
 
     assert_ne!(AvailabilityConfig::Dc(replica()), AvailabilityConfig::Ha(replica()));

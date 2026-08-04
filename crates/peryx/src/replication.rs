@@ -19,8 +19,9 @@ use peryx_http::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
 };
 use peryx_replication::{
-    DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpPrimary, LivenessTracker, Replica, SyncError, SyncOutcome,
-    liveness_router, primary_router,
+    CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpBlobTransport, HttpPrimary, LivenessTracker,
+    Replica, SyncError, SyncOutcome, TransferLimits, advance_blob_frontier, liveness_router, primary_router,
+    pull_outstanding,
 };
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
@@ -349,6 +350,21 @@ fn availability_response(status: StatusCode, body: serde_json::Map<String, Value
     response
 }
 
+/// How much of the primary's blob traffic one dual-plane fetch pass may hold in flight, and how long a
+/// single blob request may run before it is a retryable loss.
+const BLOB_FETCH_CONCURRENCY: std::num::NonZeroUsize = std::num::NonZeroUsize::new(8).expect("8 is non-zero");
+const BLOB_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Which planes a replica cycle drives. A unified replica commits metadata and blobs together in
+/// [`Replica::sync_once`]; a dual-plane replica commits metadata first, then pulls whole blobs on an
+/// independent frontier so a lagging blob never stalls metadata.
+enum ReplicaMode {
+    Unified,
+    Dual {
+        transport: CapacityLimited<HttpBlobTransport>,
+    },
+}
+
 struct ReplicaLoop {
     app: Arc<AppState>,
     primary: HttpPrimary,
@@ -358,6 +374,7 @@ struct ReplicaLoop {
     poll_interval: Duration,
     monitor: Arc<ReplicaMonitor>,
     metrics: Arc<AvailabilityMetrics>,
+    mode: ReplicaMode,
 }
 
 fn log_replica_page(outcome: SyncOutcome) {
@@ -395,6 +412,13 @@ impl ReplicaLoop {
     }
 
     async fn cycle(&self) -> bool {
+        match &self.mode {
+            ReplicaMode::Unified => self.unified_cycle().await,
+            ReplicaMode::Dual { transport } => self.dual_cycle(transport).await,
+        }
+    }
+
+    async fn unified_cycle(&self) -> bool {
         let started = Instant::now();
         let result = Replica::new(&self.meta, &self.blobs, self.page_size)
             .sync_once(&self.primary)
@@ -416,6 +440,52 @@ impl ReplicaLoop {
                 true
             }
         }
+    }
+
+    /// Drive both planes for one pass. Metadata commits and its search view advances first, so a blob
+    /// still in flight never holds up metadata; the blob plane then pulls the tail's outstanding bytes
+    /// and moves the blob frontier only over serials whose blobs are all local. The readable frontier
+    /// the loop records is the slower of the two views, so reads never outrun the bytes they name. A
+    /// blob loss records and retries — the metadata plane keeps advancing regardless.
+    async fn dual_cycle(&self, transport: &CapacityLimited<HttpBlobTransport>) -> bool {
+        let started = Instant::now();
+        let result = Replica::new(&self.meta, &self.blobs, self.page_size)
+            .sync_metadata(&self.primary)
+            .await;
+        let elapsed = started.elapsed();
+        let (outcome, changed_keys) = match result {
+            Ok((outcome, changed_keys, _referenced)) => (outcome, changed_keys),
+            Err(error) => {
+                self.monitor.record_error(&error);
+                self.metrics.record_error(&error, elapsed);
+                tracing::error!(%error, "replica metadata synchronization failed");
+                return true;
+            }
+        };
+        apply_replicated_page(&self.app, outcome, &changed_keys);
+        if let Err(error) = self.pull_blobs(transport).await {
+            self.monitor.record_error(&error);
+            self.metrics.record_error(&error, elapsed);
+            tracing::error!(%error, "replica blob plane failed");
+        }
+        self.monitor.record(outcome);
+        let readable = self.app.readable_frontier().map_or(0, |frontier| frontier.serial);
+        self.monitor.record_readable(readable);
+        self.metrics.record_cycle(outcome, elapsed);
+        outcome.caught_up()
+    }
+
+    async fn pull_blobs(&self, transport: &CapacityLimited<HttpBlobTransport>) -> Result<(), SyncError> {
+        pull_outstanding(
+            transport,
+            &self.meta,
+            &self.blobs,
+            self.page_size,
+            BLOB_FETCH_CONCURRENCY,
+        )
+        .await?;
+        advance_blob_frontier(&self.meta, &self.blobs, self.page_size).await?;
+        Ok(())
     }
 }
 
@@ -491,8 +561,19 @@ impl ReplicationRuntime {
                 token,
                 poll_interval,
                 page_size,
+                dual_plane,
             }) => {
                 let token = token.read().context("read the replica replication token")?;
+                let replica_mode = if *dual_plane {
+                    let transport =
+                        HttpBlobTransport::new(upstream, token.clone(), TransferLimits::default(), BLOB_FETCH_TIMEOUT)
+                            .context("build replica blob transport")?;
+                    ReplicaMode::Dual {
+                        transport: CapacityLimited::new(transport, BLOB_FETCH_CONCURRENCY),
+                    }
+                } else {
+                    ReplicaMode::Unified
+                };
                 let primary = HttpPrimary::new(upstream, token).context("build replica HTTP client")?;
                 let monitor = Arc::new(ReplicaMonitor::new(
                     state.meta.current_serial().context("read the replica serial")?,
@@ -527,6 +608,7 @@ impl ReplicationRuntime {
                             poll_interval: *poll_interval,
                             monitor,
                             metrics,
+                            mode: replica_mode,
                         },
                         runtime,
                     )),

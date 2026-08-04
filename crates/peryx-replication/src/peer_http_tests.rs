@@ -245,25 +245,12 @@ async fn test_fetch_maps_a_refused_connection_to_disconnected() {
 
 #[tokio::test]
 async fn test_fetch_maps_a_truncated_body_to_disconnected() {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request).await;
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
-                .await;
-        }
-    });
-    let transport = transport(&format!("http://{address}/"), limits(256, 4 << 20));
+    let server = crate::testsupport::TruncatedBodyServer::start(100, b"").await;
+    let transport = transport(server.url(), limits(256, 4 << 20));
 
     let error = transport.fetch_batch(request(0, 10)).await.unwrap_err();
 
     assert_eq!(error, TransportError::Disconnected);
-    task.abort();
 }
 
 #[tokio::test]

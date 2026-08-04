@@ -177,6 +177,8 @@ mod status_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod testsupport;
+#[cfg(test)]
 mod versions_tests;
 #[cfg(test)]
 mod visibility_tests;

@@ -4898,6 +4898,7 @@ dependencies = [
  "ipnet",
  "mimalloc",
  "nix 0.29.0",
+ "openraft",
  "peryx-core",
  "peryx-driver",
  "peryx-ecosystem-oci",

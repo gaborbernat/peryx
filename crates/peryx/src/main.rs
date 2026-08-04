@@ -101,8 +101,12 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
     runtime.block_on(async {
         let state = peryx::server::build_state(config)?;
         let replication = peryx::replication::ReplicationRuntime::new(config, &state)?;
-        // Held for the process lifetime: dropping the handle shuts the ownership Raft runtime down.
-        let _consensus = replication.ignite_consensus().await?;
+        // Held for the process lifetime: dropping the handle shuts the ownership Raft runtime down. The
+        // mutation path reaches the same group through the state registration.
+        let consensus = replication.ignite_consensus().await?;
+        if let Some(group) = &consensus {
+            state.set_ownership_authority(group.clone());
+        }
         if !replication.is_replica() {
             for index in &state.indexes {
                 if let peryx_driver::IndexKind::Cached { client, offline: false } = &index.kind {

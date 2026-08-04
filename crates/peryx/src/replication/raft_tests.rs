@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
+use peryx_driver::state::{HomeClaim, OwnershipAuthority as _, OwnershipError};
 use peryx_replication::DatacenterId;
-use peryx_replication::raft::PeryxNode;
+use peryx_replication::raft::log_store::RaftLogStoreAdapter;
+use peryx_replication::raft::network::PeerRaftNetworkFactory;
+use peryx_replication::raft::{OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
 use peryx_storage::raft::RaftLogStore;
 use tempfile::TempDir;
 
-use super::{ConsensusPlan, authority, build_roster, voter_id};
+use super::{ConsensusPlan, OwnershipGroup, authority, build_roster, voter_id};
 use crate::config::{AvailabilityConfig, Config, DcMember, DcMembership, DcRole, ReplicationConfig, SecretSource};
 
 const TOKEN: &str = "group-secret";
@@ -58,6 +62,7 @@ fn one_voter(dc: &str, addr: &str) -> BTreeMap<u64, PeryxNode> {
 fn plan_at(log_path: PathBuf, local: u64, roster: BTreeMap<u64, PeryxNode>) -> ConsensusPlan {
     ConsensusPlan {
         local,
+        home: DatacenterId("east".to_owned()),
         roster,
         log_path,
         group: "ownership".to_owned(),
@@ -370,4 +375,74 @@ async fn test_ignite_fails_to_bootstrap_a_roster_without_the_local_node() {
     let error = plan.ignite().await.err().unwrap().to_string();
 
     assert!(error.contains("bootstrap the ownership consensus group"), "{error}");
+}
+
+async fn started_node(dir: &TempDir) -> RaftNode {
+    let store = RaftLogStore::open(dir.path().join("raft.redb")).unwrap();
+    RaftNode::start(
+        1,
+        RaftConfig::default(),
+        "ownership",
+        PeerRaftNetworkFactory::new(TOKEN, Duration::from_secs(1)),
+        RaftLogStoreAdapter::new(store),
+        OwnershipStateMachine::default(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn leader_node(dir: &TempDir) -> RaftNode {
+    let node = started_node(dir).await;
+    node.bootstrap(BTreeMap::from([(
+        1,
+        PeryxNode {
+            datacenter: DatacenterId("east".to_owned()),
+            addr: "east.internal:4460".to_owned(),
+        },
+    )]))
+    .await
+    .unwrap();
+    for _ in 0..50 {
+        if node.leader().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    node
+}
+
+#[tokio::test]
+async fn test_claim_home_assigns_on_first_publish_then_reports_already_homed() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert_eq!(group.claim_home("proj").await.unwrap(), HomeClaim::AssignedHere);
+    // The home persists in the group, so a repeat publish, or a race another datacenter won, reads as
+    // already homed rather than reassigning.
+    assert_eq!(group.claim_home("proj").await.unwrap(), HomeClaim::AlreadyHomed);
+}
+
+#[tokio::test]
+async fn test_claim_home_without_a_leader_reports_not_leader() {
+    let dir = tempfile::tempdir().unwrap();
+    // An unbootstrapped node has no leader, so the claim cannot commit here and names no forward target.
+    let group = OwnershipGroup::new(started_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group.claim_home("proj").await,
+        Err(OwnershipError::NotLeader { leader: None })
+    ));
+}
+
+#[tokio::test]
+async fn test_claim_home_on_a_stopped_group_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = leader_node(&dir).await;
+    node.raft().shutdown().await.unwrap();
+    let group = OwnershipGroup::new(node, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group.claim_home("proj").await,
+        Err(OwnershipError::Unavailable(_))
+    ));
 }

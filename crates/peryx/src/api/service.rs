@@ -196,6 +196,12 @@ fn availability_paths(paths: PathsBuilder) -> PathsBuilder {
                 .operation(HttpMethod::Get, availability_topology_stream())
                 .build(),
         )
+        .path(
+            "/+availability/placements",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, availability_placements())
+                .build(),
+        )
 }
 
 /// Register the scoped-token lifecycle paths, kept apart so the service path list stays short.
@@ -486,6 +492,55 @@ fn availability_topology_stream() -> OperationBuilder {
                             "data: {\"mode\":\"dc\",\"group\":\"east\",\"captured_at\":1800000000,\"node_count\":2,",
                             "\"local\":{\"role\":\"writer\",\"liveness\":\"live\",\"frontier\":42},\"nodes\":[]}\n\n",
                         ))))
+                        .build(),
+                ),
+        )
+}
+
+fn availability_placements() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Artifact placement health"))
+        .description(Some(
+            "How the store's bytes are placed, filtered to the caller's class, so an administrator watches \
+             convergence without paging every artifact by hand. The `health` aggregate counts artifacts by \
+             byte availability across the whole store and needs operator authority. The per-digest `rows` \
+             carry a content digest, so they need administrator authority and page in digest order: a full \
+             page carries a `next_cursor` pointing at its last digest, and `limit` bounds the page at 1 to \
+             100 rows. A caller below operator reads nothing, `captured_at` dates the view, and the \
+             response is `no-store`. A digest names an artifact without revealing where it lives or who \
+             owns it.",
+        ))
+        .parameter(
+            ParameterBuilder::new()
+                .name("cursor")
+                .parameter_in(ParameterIn::Query)
+                .description(Some("Resume the row page after this digest, exclusive"))
+                .example(Some(json!("sha256:0f1e"))),
+        )
+        .parameter(
+            ParameterBuilder::new()
+                .name("limit")
+                .parameter_in(ParameterIn::Query)
+                .description(Some("Rows per page, 1 to 100 (default 25)"))
+                .example(Some(json!(25))),
+        )
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "200",
+            ResponseBuilder::new()
+                .description("The artifact placement-health view")
+                .content(
+                    "application/json",
+                    ContentBuilder::new()
+                        .example(Some(json!({
+                            "captured_at": 1_800_000_000,
+                            "health": {"local": 3, "remote_only": 1, "unavailable": 2, "total": 6},
+                            "rows": [
+                                {"digest": "sha256:0f1e", "source": "proxy", "availability": "remote_only"}
+                            ],
+                            "next_cursor": "sha256:0f1e"
+                        })))
                         .build(),
                 ),
         )

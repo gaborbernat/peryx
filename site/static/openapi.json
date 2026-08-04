@@ -700,6 +700,62 @@
         ]
       }
     },
+    "/+availability/placements": {
+      "get": {
+        "description": "How the store's bytes are placed, filtered to the caller's class, so an administrator watches convergence without paging every artifact by hand. The `health` aggregate counts artifacts by byte availability across the whole store and needs operator authority. The per-digest `rows` carry a content digest, so they need administrator authority and page in digest order: a full page carries a `next_cursor` pointing at its last digest, and `limit` bounds the page at 1 to 100 rows. A caller below operator reads nothing, `captured_at` dates the view, and the response is `no-store`. A digest names an artifact without revealing where it lives or who owns it.",
+        "parameters": [
+          {
+            "description": "Resume the row page after this digest, exclusive",
+            "example": "sha256:0f1e",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows per page, 1 to 100 (default 25)",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "captured_at": 1800000000,
+                  "health": {
+                    "local": 3,
+                    "remote_only": 1,
+                    "total": 6,
+                    "unavailable": 2
+                  },
+                  "next_cursor": "sha256:0f1e",
+                  "rows": [
+                    {
+                      "availability": "remote_only",
+                      "digest": "sha256:0f1e",
+                      "source": "proxy"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The artifact placement-health view"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Artifact placement health",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+availability/topology": {
       "get": {
         "description": "One immutable picture of the availability group, taken at a single instant and filtered to the caller's class, so an operator surface renders it without traversing live membership and storage state. The mode, group, node identities, datacenters, and roles are public; each node's liveness and this node's committed frontier need operator authority; the advertised peer addresses need administrator authority. A peer's liveness is `unknown` until a consensus layer observes it, so stale peer data never reads as healthy. `captured_at` dates the snapshot, `node_count` reports the full roster size when the node list is capped, and the response is `no-store`. The example shows the administrator view.",

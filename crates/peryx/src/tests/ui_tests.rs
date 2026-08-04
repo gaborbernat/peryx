@@ -864,6 +864,64 @@ async fn test_ui_topology_reports_a_standalone_node_without_a_roster(ui_router: 
     assert!(body.contains("runs standalone"), "{body}");
 }
 
+/// The `ui_router_admin` fixture with one artifact of each byte-availability state recorded, so the
+/// placement page renders the health counts and a per-digest row for each source and availability.
+async fn ui_router_placements() -> (tempfile::TempDir, axum::Router, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = build_state(&ui_config(&dir)).unwrap();
+    {
+        let state = std::sync::Arc::get_mut(&mut state).expect("a freshly built state is uniquely owned");
+        state
+            .meta
+            .record_artifact_placement("sha256:aaa", peryx_storage::meta::ArtifactSource::Hosted, true)
+            .unwrap();
+        state
+            .meta
+            .record_artifact_placement("sha256:bbb", peryx_storage::meta::ArtifactSource::Proxy, false)
+            .unwrap();
+        state
+            .meta
+            .record_artifact_placement("sha256:ccc", peryx_storage::meta::ArtifactSource::Generated, false)
+            .unwrap();
+    }
+    let authorization = seed_administrator(&state).await;
+    (dir, router_for(state), authorization)
+}
+
+#[tokio::test]
+async fn test_ui_placements_renders_health_and_rows_for_administrator() {
+    let (_dir, router, authorization) = ui_router_placements().await;
+    let (status, body) = get_authorized(&router, "/admin/placements", &authorization).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Artifact placement health"), "{body}");
+    assert!(body.contains("total artifacts"), "{body}");
+    assert!(body.contains("sha256:aaa") && body.contains("sha256:ccc"), "{body}");
+    // The per-digest chips reuse the package page's source and availability words.
+    assert!(
+        body.contains("src-hosted") && body.contains("src-proxy") && body.contains("src-generated"),
+        "{body}"
+    );
+    assert!(
+        body.contains("avail-local") && body.contains("avail-remote-only") && body.contains("avail-unavailable"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn test_ui_placements_withholds_the_view_from_anonymous() {
+    let (_dir, router, _authorization) = ui_router_placements().await;
+    let (status, body) = get(&router, "/admin/placements").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.contains("do not have access"),
+        "an anonymous caller reads no placement view: {body}"
+    );
+    assert!(
+        !body.contains("sha256:aaa"),
+        "no digest leaks to an anonymous caller: {body}"
+    );
+}
+
 #[rstest]
 #[tokio::test]
 async fn test_ui_browse_lists_projects_after_upload(ui_router: (tempfile::TempDir, axum::Router)) {

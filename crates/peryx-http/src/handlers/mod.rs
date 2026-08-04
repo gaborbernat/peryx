@@ -13,6 +13,7 @@ mod dispatch;
 mod grants;
 mod jobs;
 mod oidc;
+mod placements;
 mod policy_decisions;
 mod pql;
 mod query;
@@ -39,6 +40,7 @@ pub use dispatch::{dispatch_delete, dispatch_get, dispatch_post, dispatch_put, n
 pub use grants::{GrantsQuery, create_grant, inspect_grant, list_grants, revoke_grant};
 pub use jobs::cancel_job;
 pub use oidc::{oidc_audience, oidc_mint_token};
+pub use placements::placements;
 pub use policy_decisions::{PolicyDecisionsQuery, policy_decision_error_response, policy_decisions};
 pub use pql::pql_query;
 pub use query::{search, search_error_response, search_response, search_response_offloaded};

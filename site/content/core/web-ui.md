@@ -72,6 +72,27 @@ resumes from the last one it saw on reconnect; while it retries, the badge shows
 `Offline`. A paused feed stops the snapshot time from advancing and never reads as `Live`, so a frozen render shows as
 stale rather than passing for health.
 
+## Artifact placement health
+
+`/admin/placements` reads `GET /+availability/placements` and shows how the store's bytes are placed: how many artifacts
+serve from local storage, how many have no local bytes but a reachable upstream, and how many have neither. The three
+counts and their total cover the whole store, aggregated before serialization so the summary never scales with the
+object count. The view carries the UTC time it was taken, so an old render shows as age rather than health.
+
+The aggregate needs operator access. A per-digest table needs administrator access, because a digest identifies an
+artifact; it lists each digest with its source (`hosted`, `proxy`, or `generated`) and byte availability (`local`,
+`remote-only`, or `unavailable`), the same two chips the package page pairs on every file. Each row carries a digest and
+those two words alone, never a file path, repository, or owner, so inspecting convergence exposes no tenant data. An
+operator who cannot read the rows sees the counts and a note rather than an empty table, so a filtered view never reads
+as a converged store.
+
+The table pages in digest order. Each page is capped at the supported limit and carries a cursor to the next; the
+default page is the API's default, and the browser walks forward a page at a time or jumps back to the first without
+reloading. Every source and availability state carries a text label, so the states stay distinguishable without colour,
+and a caller below operator reads nothing at all.
+
+Pending-operation visibility, the other half of this surface, waits on the operations ledger and is not shown yet.
+
 ## Policy decisions
 
 `/admin/policy-decisions` queries the bounded [policy decision history](@/core/policy-decisions.md). Administrators can

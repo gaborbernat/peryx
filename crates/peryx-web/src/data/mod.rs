@@ -11,6 +11,7 @@ mod admin;
 mod analytics;
 mod archive;
 mod manifest;
+mod placement;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 mod policy_decisions;
 mod search;
@@ -29,6 +30,7 @@ pub use admin::admin_request;
 pub use analytics::load_analytics;
 pub use archive::{load_member_chunk, load_members};
 pub use manifest::{load_layer_chunk, load_layer_members, load_manifest};
+pub use placement::load_placements;
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 pub use policy_decisions::load_policy_decisions;
 pub use search::load_search;

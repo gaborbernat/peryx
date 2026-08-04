@@ -181,6 +181,10 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .badge.health-restricted { color: var(--text-soft); border-color: var(--border); font-style: italic; }
 .topology-summary, .topology-local { margin: 0.6rem 0; }
 .topology-filters { margin-bottom: 0.4rem; }
+/* #551 placement health: whole-store availability counts over a paged per-digest table. */
+.placement-summary { margin: 0.6rem 0; }
+.placement-pager { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.6rem; }
+.placement-pager .result-count { margin: 0; }
 .yank-reason { color: var(--text-soft); font-size: 0.85rem; margin-left: 0.35rem; }
 .project-head .badge { margin-left: 0.5rem; vertical-align: middle; }
 .status-reason { color: var(--text-soft); font-size: 0.9rem; margin-left: 0.4rem; }

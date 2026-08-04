@@ -2,6 +2,7 @@
 //! plus the data builders the resource fetchers use during server rendering.
 
 mod archive;
+mod placement;
 mod router;
 mod search;
 mod simple;
@@ -9,6 +10,7 @@ mod snapshot;
 mod topology;
 
 pub use archive::{member_chunk, members};
+pub use placement::placements;
 pub use router::{UiState, ui_router};
 pub use search::search;
 pub use simple::{layer_chunk, layer_members, manifest, project_view, projects};

@@ -75,27 +75,6 @@ fn replica_config(upstream: &str, page_size: usize) -> ReplicationConfig {
         token: SecretSource::Literal(TOKEN.to_owned()),
         poll_interval: Duration::from_millis(1),
         page_size: NonZeroUsize::new(page_size).unwrap(),
-        dual_plane: false,
-    }
-}
-
-fn dual_replica_config(upstream: &str, page_size: usize) -> ReplicationConfig {
-    let ReplicationConfig::Replica {
-        upstream,
-        token,
-        poll_interval,
-        page_size,
-        ..
-    } = replica_config(upstream, page_size)
-    else {
-        unreachable!("replica_config builds a replica")
-    };
-    ReplicationConfig::Replica {
-        upstream,
-        token,
-        poll_interval,
-        page_size,
-        dual_plane: true,
     }
 }
 
@@ -377,7 +356,6 @@ fn test_apply_replicated_page_dispatches_a_changed_page_to_drivers() {
         &state,
         SyncOutcome {
             changes: 1,
-            blobs: 0,
             serial: 1,
             primary_serial: 1,
         },
@@ -405,7 +383,6 @@ fn test_apply_replicated_page_ignores_a_page_with_no_changes() {
         &state,
         SyncOutcome {
             changes: 0,
-            blobs: 0,
             serial: 0,
             primary_serial: 0,
         },
@@ -451,7 +428,7 @@ async fn test_dual_replica_advances_both_planes_when_the_blob_is_available() {
         .unwrap();
     let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
     let replica_dir = tempfile::tempdir().unwrap();
-    let config = config(&replica_dir, Some(dual_replica_config(&server.url, 10)));
+    let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
     let runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
@@ -478,7 +455,7 @@ async fn test_dual_replica_advances_metadata_while_a_missing_blob_holds_the_blob
         .unwrap();
     let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
     let replica_dir = tempfile::tempdir().unwrap();
-    let config = config(&replica_dir, Some(dual_replica_config(&server.url, 10)));
+    let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
     let runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
@@ -511,7 +488,7 @@ async fn test_dual_replica_heals_the_blob_frontier_after_the_blob_arrives() {
     let server =
         TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs.clone()).unwrap()).await;
     let replica_dir = tempfile::tempdir().unwrap();
-    let config = config(&replica_dir, Some(dual_replica_config(&server.url, 10)));
+    let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
     let runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
@@ -537,7 +514,7 @@ async fn test_dual_replica_retries_after_a_metadata_sync_error() {
     let url = format!("http://{}/", listener.local_addr().unwrap());
     drop(listener);
     let dir = tempfile::tempdir().unwrap();
-    let config = config(&dir, Some(dual_replica_config(&url, 10)));
+    let config = config(&dir, Some(replica_config(&url, 10)));
     let state = build_state(&config).unwrap();
     let runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
@@ -553,26 +530,14 @@ async fn test_dual_replica_retries_after_a_metadata_sync_error() {
 }
 
 #[tokio::test]
-async fn test_dual_replica_requires_the_blob_view() {
-    let replica_dir = tempfile::tempdir().unwrap();
-    let config = config(&replica_dir, Some(dual_replica_config("https://primary.example/", 10)));
-    let state = build_state(&config).unwrap();
-
-    assert_eq!(
-        &*state.serving.required_views,
-        [peryx_driver::state::SEARCH_VIEW, BLOB_VIEW].as_slice()
-    );
-}
-
-#[tokio::test]
-async fn test_unified_replica_keeps_the_default_required_views() {
+async fn test_replica_requires_the_blob_view() {
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config("https://primary.example/", 10)));
     let state = build_state(&config).unwrap();
 
     assert_eq!(
         &*state.serving.required_views,
-        [peryx_driver::state::SEARCH_VIEW].as_slice()
+        [peryx_driver::state::SEARCH_VIEW, BLOB_VIEW].as_slice()
     );
 }
 
@@ -720,7 +685,7 @@ async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
         serde_json::json!({
             "mode": "dc", "role": "replica", "ready": false, "reasons": ["frontier_lag"],
             "serial": 2, "primary_serial": 3, "lag": 1,
-            "synced_changes": 2, "synced_blobs": 0, "sync_errors": 0,
+            "synced_changes": 2, "sync_errors": 0,
         })
     );
     let (_, body) = get(&router, "/metrics").await;
@@ -738,7 +703,7 @@ async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
         serde_json::json!({
             "mode": "dc", "role": "replica", "ready": true, "reasons": [],
             "serial": 3, "primary_serial": 3, "lag": 0,
-            "synced_changes": 3, "synced_blobs": 0, "sync_errors": 0,
+            "synced_changes": 3, "sync_errors": 0,
         })
     );
     let (_, body) = get(&router, "/metrics").await;
@@ -922,7 +887,6 @@ fn test_replica_runtime_disables_local_writers() {
     token: SecretSource::File("missing-replica-token".into()),
     poll_interval: Duration::from_secs(1),
     page_size: NonZeroUsize::new(10).unwrap(),
-    dual_plane: false,
 }, "read the replica replication token")]
 fn test_replication_runtime_reports_secret_errors(#[case] replication: ReplicationConfig, #[case] expected: &str) {
     let dir = tempfile::tempdir().unwrap();

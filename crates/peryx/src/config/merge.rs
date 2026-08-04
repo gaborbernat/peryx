@@ -322,7 +322,6 @@ fn classify_replication(raw: RawReplication) -> Result<ReplicationConfig, Config
             token_file,
             poll_interval_secs,
             page_size,
-            dual_plane,
         } => {
             if upstream.trim().is_empty() {
                 return Err(ConfigError::Replication {
@@ -351,7 +350,6 @@ fn classify_replication(raw: RawReplication) -> Result<ReplicationConfig, Config
                 token: required_token(token, token_file)?,
                 poll_interval: Duration::from_secs(poll_interval_secs),
                 page_size,
-                dual_plane: dual_plane.unwrap_or(false),
             })
         }
     }

@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-use futures_util::StreamExt as _;
-use peryx_storage::blob::{BlobStorage, Digest};
+use peryx_storage::blob::Digest;
 use peryx_storage::meta::MetaStore;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +22,6 @@ pub struct ReplicaState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncOutcome {
     pub changes: usize,
-    pub blobs: usize,
     pub serial: u64,
     pub primary_serial: u64,
 }
@@ -39,18 +37,13 @@ impl SyncOutcome {
 /// A follower that verifies and commits one primary page at a time.
 pub struct Replica<'store> {
     meta: &'store MetaStore,
-    blobs: &'store BlobStorage,
     page_limit: NonZeroUsize,
 }
 
 impl<'store> Replica<'store> {
     #[must_use]
-    pub const fn new(meta: &'store MetaStore, blobs: &'store BlobStorage, page_limit: NonZeroUsize) -> Self {
-        Self {
-            meta,
-            blobs,
-            page_limit,
-        }
+    pub const fn new(meta: &'store MetaStore, page_limit: NonZeroUsize) -> Self {
+        Self { meta, page_limit }
     }
 
     /// Read the durable resume state.
@@ -72,83 +65,17 @@ impl<'store> Replica<'store> {
         Ok(state)
     }
 
-    /// Fetch, verify, and apply the next page after the durable cursor.
+    /// Fetch and apply the next page after the durable cursor, committing its metadata, journal entries,
+    /// cursor, and blob references in one transaction without fetching the bytes.
     ///
-    /// Blob downloads finish before one transaction commits metadata, copied journal entries, and
-    /// the next cursor. A failed transfer resumes from the prior serial.
-    ///
-    /// # Errors
-    /// Returns an error for a source failure, invalid page, digest mismatch, or local store failure.
-    pub async fn sync_once<P: Primary>(&self, primary: &P) -> Result<(SyncOutcome, Vec<String>), SyncError> {
-        let state = self.state()?;
-        let after = state.as_ref().map_or(0, |state| state.serial);
-        let page = primary
-            .changes(after, self.page_limit.get())
-            .await
-            .map_err(SyncError::primary)?;
-        let validated = ValidatedPage::new(page, after, self.page_limit.get(), state.as_ref())?;
-        let fetched = self.fetch_blobs(&validated.blobs, primary).await?;
-        if validated.journal.is_empty() {
-            return Ok((
-                SyncOutcome {
-                    changes: 0,
-                    blobs: fetched,
-                    serial: after,
-                    primary_serial: validated.primary_serial,
-                },
-                Vec::new(),
-            ));
-        }
-        let next_state = serde_json::to_vec(&ReplicaState {
-            source: validated.source,
-            serial: validated.through,
-        })?;
-        let changes = validated.journal.len();
-        let changed_keys = validated.metadata.keys().cloned().collect();
-        self.meta.commit_replica_txn(after, |txn| {
-            for (key, value) in validated.metadata {
-                match value {
-                    Some(value) => txn.put(&key, &value)?,
-                    None => {
-                        txn.remove(&key)?;
-                    }
-                }
-            }
-            for (digest, size) in validated.blobs.values() {
-                txn.reference_blob(digest.as_str(), *size);
-            }
-            txn.put_local(REPLICA_STATE_KEY, &next_state)?;
-            Ok::<_, SyncError>(((), validated.journal))
-        })?;
-        Ok((
-            SyncOutcome {
-                changes,
-                blobs: fetched,
-                serial: validated.through,
-                primary_serial: validated.primary_serial,
-            },
-            changed_keys,
-        ))
-    }
-
-    /// Commit the next page's metadata, journal, cursor, and blob references WITHOUT fetching bytes, and
-    /// return the blobs it referenced for the async blob plane to pull.
-    ///
-    /// This is the dual-plane counterpart to [`sync_once`](Self::sync_once): where `sync_once` downloads
-    /// every referenced blob inline before committing, so a committed serial is always byte-backed, this
-    /// commits the metadata immediately and hands the referenced `(digest, size)` set back. The bytes
-    /// arrive on a separate plane, and the blob-availability frontier holds a serial out of the readable
-    /// frontier until its blobs are present — so committing metadata ahead of bytes never exposes a
-    /// record whose bytes this replica cannot yet serve. `SyncOutcome::blobs` is `0` here: this path
-    /// fetches nothing, and the blob plane reports its own progress.
-    ///
-    /// The commit body mirrors `sync_once`'s deliberately: `sync_once` stays byte-identical for the
-    /// unified path this replaces only under dual mode, so the two share no code until the unified path
-    /// is retired (#827).
+    /// The `(digest, size)` set the page referenced is returned for the blob plane to pull on its own
+    /// frontier. The blob-availability frontier holds a serial out of the readable frontier until its
+    /// blobs are present, so committing metadata ahead of bytes never exposes a record whose bytes this
+    /// replica cannot yet serve.
     ///
     /// # Errors
     /// Returns an error for a source failure, invalid page, or local store failure.
-    pub async fn sync_metadata<P: Primary>(
+    pub async fn sync<P: Primary>(
         &self,
         primary: &P,
     ) -> Result<(SyncOutcome, Vec<String>, Vec<(Digest, u64)>), SyncError> {
@@ -164,7 +91,6 @@ impl<'store> Replica<'store> {
             return Ok((
                 SyncOutcome {
                     changes: 0,
-                    blobs: 0,
                     serial: after,
                     primary_serial: validated.primary_serial,
                 },
@@ -196,80 +122,12 @@ impl<'store> Replica<'store> {
         Ok((
             SyncOutcome {
                 changes,
-                blobs: 0,
                 serial: validated.through,
                 primary_serial: validated.primary_serial,
             },
             changed_keys,
             referenced,
         ))
-    }
-
-    /// Verify each blob the page references is present and intact, downloading the ones this replica
-    /// lacks, and return how many it fetched. A mismatched size or a corrupt local copy fails the sync.
-    async fn fetch_blobs<P: Primary>(
-        &self,
-        blobs: &BTreeMap<String, (Digest, u64)>,
-        primary: &P,
-    ) -> Result<usize, SyncError> {
-        let mut fetched = 0;
-        for (digest, size) in blobs.values() {
-            if let Some(metadata) = self.blobs.head(digest).await? {
-                if metadata.bytes != *size {
-                    return Err(SyncError::BlobSizeMismatch {
-                        digest: digest.as_str().to_owned(),
-                        expected: *size,
-                        actual: metadata.bytes,
-                    });
-                }
-                if !self.blobs.verify(digest).await? {
-                    return Err(SyncError::CorruptBlob(digest.as_str().to_owned()));
-                }
-                continue;
-            }
-            let mut pending = self.blobs.begin().await?;
-            let mut stream = match primary.blob(digest).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    pending.abort().await?;
-                    return Err(SyncError::primary(error));
-                }
-            };
-            let mut actual = 0_u64;
-            while let Some(chunk) = stream.next().await {
-                let chunk = match chunk {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
-                        pending.abort().await?;
-                        return Err(SyncError::primary(error));
-                    }
-                };
-                let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-                if chunk_len > size - actual {
-                    let error = SyncError::BlobSizeMismatch {
-                        digest: digest.as_str().to_owned(),
-                        expected: *size,
-                        actual: actual.saturating_add(chunk_len),
-                    };
-                    pending.abort().await?;
-                    return Err(error);
-                }
-                actual += chunk_len;
-                pending.write_chunk(chunk).await?;
-            }
-            if actual != *size {
-                let error = SyncError::BlobSizeMismatch {
-                    digest: digest.as_str().to_owned(),
-                    expected: *size,
-                    actual,
-                };
-                pending.abort().await?;
-                return Err(error);
-            }
-            pending.commit(digest).await?;
-            fetched += 1;
-        }
-        Ok(fetched)
     }
 }
 

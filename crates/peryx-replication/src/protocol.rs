@@ -1,8 +1,6 @@
 use std::error::Error;
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 
 /// The wire format version for replication pages.
@@ -79,15 +77,12 @@ pub struct ChangePage {
 }
 
 /// The authenticated primary boundary. HTTP transport and credentials live outside the replay
-/// engine; implementations expose decoded pages and streamed blob bytes.
+/// engine; implementations expose decoded pages of authoritative changes.
 #[async_trait]
 pub trait Primary: Sync {
     type Error: Error + Send + Sync + 'static;
-    type BlobStream: Stream<Item = Result<Bytes, Self::Error>> + Send + Unpin;
 
     async fn changes(&self, after: u64, limit: usize) -> Result<ChangePage, Self::Error>;
-
-    async fn blob(&self, digest: &peryx_storage::blob::Digest) -> Result<Self::BlobStream, Self::Error>;
 }
 
 /// The routing state a peer advertises for one blob placement, without the storage crate's internal

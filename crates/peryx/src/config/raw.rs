@@ -190,7 +190,6 @@ pub enum RawReplication {
         token_file: Option<PathBuf>,
         poll_interval_secs: Option<u64>,
         page_size: Option<usize>,
-        dual_plane: Option<bool>,
     },
 }
 

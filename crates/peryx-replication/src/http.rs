@@ -1,6 +1,5 @@
 use std::fmt;
 use std::io::{Seek as _, SeekFrom};
-use std::pin::Pin;
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -9,8 +8,6 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use bytes::Bytes;
-use futures_util::{Stream, TryStreamExt as _};
 use peryx_storage::blob::{BlobErrorKind, BlobRead, BlobReadBody, BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
 use reqwest::Url;
@@ -22,7 +19,6 @@ use crate::blob_range::{RangeRequest, parse_range};
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION, Primary};
 
 const CHANGES_PATH: &str = "+replication/v1/changes";
-const BLOBS_PATH: &str = "+replication/v1/blobs/sha256/";
 const USER_AGENT: &str = concat!("peryx-replication/", env!("CARGO_PKG_VERSION"));
 
 /// The largest change page the primary HTTP endpoint accepts.
@@ -57,7 +53,6 @@ pub enum HttpPrimaryError {
 pub struct HttpPrimary {
     http: reqwest::Client,
     changes_url: Url,
-    blobs_url: Url,
     token: String,
 }
 
@@ -89,7 +84,6 @@ impl HttpPrimary {
         base_url.set_query(None);
         base_url.set_fragment(None);
         let changes_url = endpoint_url(&base_url, CHANGES_PATH);
-        let blobs_url = endpoint_url(&base_url, BLOBS_PATH);
         let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
@@ -98,7 +92,6 @@ impl HttpPrimary {
         Ok(Self {
             http,
             changes_url,
-            blobs_url,
             token,
         })
     }
@@ -109,7 +102,6 @@ impl fmt::Debug for HttpPrimary {
         formatter
             .debug_struct("HttpPrimary")
             .field("changes_url", &self.changes_url)
-            .field("blobs_url", &self.blobs_url)
             .field("token", &"<redacted>")
             .finish_non_exhaustive()
     }
@@ -118,7 +110,6 @@ impl fmt::Debug for HttpPrimary {
 #[async_trait]
 impl Primary for HttpPrimary {
     type Error = HttpPrimaryError;
-    type BlobStream = Pin<Box<dyn Stream<Item = Result<Bytes, Self::Error>> + Send>>;
 
     async fn changes(&self, after: u64, limit: usize) -> Result<ChangePage, Self::Error> {
         let mut url = self.changes_url.clone();
@@ -136,23 +127,6 @@ impl Primary for HttpPrimary {
             .map_err(HttpPrimaryError::Request)?;
         let bytes = response.bytes().await.map_err(HttpPrimaryError::Request)?;
         serde_json::from_slice(&bytes).map_err(HttpPrimaryError::Decode)
-    }
-
-    async fn blob(&self, digest: &Digest) -> Result<Self::BlobStream, Self::Error> {
-        let Ok(url) = self.blobs_url.join(digest.as_str()) else {
-            return Err(HttpPrimaryError::InvalidBase(self.blobs_url.to_string()));
-        };
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(&self.token)
-            .header(header::ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .map_err(HttpPrimaryError::Request)?
-            .error_for_status()
-            .map_err(HttpPrimaryError::Request)?;
-        Ok(Box::pin(response.bytes_stream().map_err(HttpPrimaryError::Request)))
     }
 }
 

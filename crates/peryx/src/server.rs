@@ -31,12 +31,12 @@ use crate::config::{
     SecretSource, UpstreamTlsConfig, WebhookSecret,
 };
 
-/// The derived views a read must not outrun. A dual-plane replica also gates reads on whole-blob
-/// availability, so its readable frontier holds at the slower of the metadata and blob views; every
-/// other role gates on metadata alone.
+/// The derived views a read must not outrun. A replica gates reads on whole-blob availability as well
+/// as the search view, so its readable frontier holds at the slower of the metadata and blob views;
+/// every other role gates on the search view alone.
 fn required_views(config: &Config) -> Arc<[&'static str]> {
     match config.availability.replication() {
-        Some(ReplicationConfig::Replica { dual_plane: true, .. }) => {
+        Some(ReplicationConfig::Replica { .. }) => {
             Arc::from([peryx_driver::state::SEARCH_VIEW, peryx_replication::BLOB_VIEW])
         }
         _ => Arc::from([peryx_driver::state::SEARCH_VIEW]),

@@ -13,6 +13,7 @@ pub mod ecosystem;
 pub mod lexicon;
 pub mod lifecycle;
 pub mod path;
+pub mod placement;
 pub mod role;
 pub mod shadow;
 pub mod topology;
@@ -22,6 +23,7 @@ pub mod view;
 pub use ecosystem::{Ecosystem, UnknownEcosystem};
 pub use lexicon::{Lexicon, LexiconRegistry};
 pub use lifecycle::{TRASH_GRACE_SECS, TrashInfo, TrashRecord, TrashState, UnknownTrashState};
+pub use placement::{PlacementHealth, PlacementRow, PlacementView};
 pub use role::Role;
 pub use shadow::{ShadowCandidate, ShadowReason, ShadowSource};
 pub use topology::{

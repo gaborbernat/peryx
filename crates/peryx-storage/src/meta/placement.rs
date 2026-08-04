@@ -200,6 +200,26 @@ pub struct ArtifactPlacementPage {
     pub next_cursor: Option<String>,
 }
 
+/// The counts a placement-health view shows.
+///
+/// How many artifacts serve locally, how many are reachable only upstream, and how many cannot be served
+/// at all: three numbers regardless of table size, so the aggregate stays bounded output even when the
+/// table it summarizes is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct ArtifactPlacementHealth {
+    pub local: u64,
+    pub remote_only: u64,
+    pub unavailable: u64,
+}
+
+impl ArtifactPlacementHealth {
+    /// The total placements across the three availability states.
+    #[must_use]
+    pub const fn total(self) -> u64 {
+        self.local + self.remote_only + self.unavailable
+    }
+}
+
 /// A rejected placement list.
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactPlacementQueryError {
@@ -303,6 +323,29 @@ impl MetaStore {
         let next_cursor = (rows.len() > query.limit).then(|| rows[query.limit - 1].digest.clone());
         rows.truncate(query.limit);
         Ok(ArtifactPlacementPage { rows, next_cursor })
+    }
+
+    /// Bucket every artifact placement by byte availability in one read pass, giving a placement-health
+    /// view its aggregate without paging the whole table itself. The output is three counts regardless of
+    /// table size, so the summary aggregates before serialization; the read scans the placement table once
+    /// off the request path's paged reads.
+    ///
+    /// # Errors
+    /// Returns a store error if a row cannot be read or decoded.
+    pub fn artifact_placement_health(&self) -> Result<ArtifactPlacementHealth, MetaError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(ARTIFACT_PLACEMENT)?;
+        let mut health = ArtifactPlacementHealth::default();
+        for entry in table.iter()? {
+            let (_key, value) = entry?;
+            let placement: ArtifactPlacement = serde_json::from_slice(value.value())?;
+            match placement.availability {
+                ByteAvailability::Local => health.local += 1,
+                ByteAvailability::RemoteOnly => health.remote_only += 1,
+                ByteAvailability::Unavailable => health.unavailable += 1,
+            }
+        }
+        Ok(health)
     }
 
     /// Record a newly seen artifact of `source` whose verified bytes are `present`, replacing any prior

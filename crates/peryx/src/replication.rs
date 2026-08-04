@@ -1,6 +1,7 @@
 //! Process-level replication configuration and follower scheduling.
 
 mod availability_metrics;
+mod raft;
 mod worker;
 
 use std::collections::HashMap;
@@ -499,6 +500,9 @@ pub struct ReplicationRuntime {
     primary: Option<Router>,
     replica: Option<(ReplicaLoop, AvailabilityRuntime)>,
     availability: Option<AvailabilityNode>,
+    /// The ownership consensus seed for an `ha` process, resolved synchronously here and ignited into a
+    /// running node once the async runtime is up. `None` under `none` and `dc`, which run no group.
+    consensus: Option<raft::ConsensusPlan>,
 }
 
 impl ReplicationRuntime {
@@ -598,7 +602,23 @@ impl ReplicationRuntime {
             primary,
             replica,
             availability,
+            consensus: raft::ConsensusPlan::from_config(config)?,
         })
+    }
+
+    /// Ignite the ownership consensus node, when this process runs an `ha` group, returning the running
+    /// handle for the caller to hold for the process lifetime. A `none` or `dc` process runs no group and
+    /// returns `None`. This is the async step the synchronous [`new`](Self::new) defers: it opens the
+    /// durable log store and bootstraps the group.
+    ///
+    /// # Errors
+    /// Returns an error when the consensus log store cannot be opened or the node cannot start or
+    /// bootstrap.
+    pub async fn ignite_consensus(&self) -> anyhow::Result<Option<peryx_replication::raft::RaftNode>> {
+        match &self.consensus {
+            Some(plan) => Ok(Some(plan.ignite().await?)),
+            None => Ok(None),
+        }
     }
 
     /// Whether this process follows a primary and must avoid local writers.

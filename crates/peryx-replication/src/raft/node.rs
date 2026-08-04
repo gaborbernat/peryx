@@ -121,10 +121,7 @@ impl RaftNode {
     /// leader mid-election. Only when the error carries no leader does this fall back to the metrics
     /// view.
     #[must_use]
-    pub fn forward_target(
-        &self,
-        error: &RaftError<NodeId, ClientWriteError<NodeId, PeryxNode>>,
-    ) -> Option<PeryxNode> {
+    pub fn forward_target(&self, error: &RaftError<NodeId, ClientWriteError<NodeId, PeryxNode>>) -> Option<PeryxNode> {
         if let RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) = error
             && let Some(node) = &forward.leader_node
         {

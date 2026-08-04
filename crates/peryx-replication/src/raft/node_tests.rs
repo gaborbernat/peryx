@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use openraft::error::{ClientWriteError, Fatal, ForwardToLeader, InitializeError, RaftError};
 use openraft::ServerState;
+use openraft::error::{ClientWriteError, Fatal, ForwardToLeader, InitializeError, RaftError};
 use tempfile::TempDir;
 
 use peryx_storage::raft::RaftLogStore;
 
+use crate::AuthorityKey;
 use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect, Rejection};
 use crate::raft::log_store::RaftLogStoreAdapter;
 use crate::raft::network::PeerRaftNetworkFactory;
 use crate::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode, StartError};
-use crate::AuthorityKey;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(1);
 

@@ -19,6 +19,10 @@ use super::{ARTIFACT_PLACEMENT, MetaError, MetaStore};
 /// pass stays bounded and never holds a read span over the whole table.
 pub const MAX_REPAIR_BATCH: usize = 1_000;
 
+/// The largest page [`MetaStore::list_artifact_placements`] returns, bounding a placement-health view's
+/// per-request work so it never scales with the object count.
+const MAX_QUERY_LIMIT: usize = 100;
+
 /// Where an artifact's bytes came from. Persisted and intrinsic: it does not change when the bytes are
 /// cached or evicted, only when a different artifact takes the digest's place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +166,49 @@ pub trait ArtifactOrigin {
     fn artifact_source(&self) -> ArtifactSource;
 }
 
+/// One row of a placement listing: a digest and its neutral source and byte availability, the shape a
+/// placement-health view reads without exposing internal file paths or tenant data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArtifactPlacementRow {
+    pub digest: String,
+    pub source: ArtifactSource,
+    pub availability: ByteAvailability,
+}
+
+/// A bounded, cursor-paginated query over artifact placements in digest order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactPlacementQuery {
+    /// Resume after this digest, exclusive; `None` starts at the first.
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+impl Default for ArtifactPlacementQuery {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: 25,
+        }
+    }
+}
+
+/// One bounded page of placement rows in digest order, with a cursor to resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ArtifactPlacementPage {
+    pub rows: Vec<ArtifactPlacementRow>,
+    /// The digest to resume after, present only when more rows remain past this page.
+    pub next_cursor: Option<String>,
+}
+
+/// A rejected placement list.
+#[derive(Debug, thiserror::Error)]
+pub enum ArtifactPlacementQueryError {
+    #[error(transparent)]
+    Store(#[from] MetaError),
+    #[error("limit must be between 1 and {MAX_QUERY_LIMIT}")]
+    InvalidLimit,
+}
+
 /// The outcome of one bounded [`MetaStore::repair_artifact_placements`] pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacementRepairPage {
@@ -211,6 +258,51 @@ impl MetaStore {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(ARTIFACT_PLACEMENT)?;
         Ok(table.len()?)
+    }
+
+    /// List artifact placements in digest order with an exclusive cursor, giving a placement-health view
+    /// a bounded data source of per-digest `{digest, source, availability}` rows.
+    ///
+    /// Reads one row past `limit` to decide whether more remain: a full page carries a `next_cursor`
+    /// pointing at its last digest, and a page that reaches the end carries none. The read span is
+    /// bounded by the validated limit, so a large table never turns into one unbounded scan.
+    ///
+    /// # Errors
+    /// Returns [`ArtifactPlacementQueryError::InvalidLimit`] for a limit outside `1..=MAX_QUERY_LIMIT`,
+    /// or a store error when a row cannot be read or decoded.
+    pub fn list_artifact_placements(
+        &self,
+        query: &ArtifactPlacementQuery,
+    ) -> Result<ArtifactPlacementPage, ArtifactPlacementQueryError> {
+        if !(1..=MAX_QUERY_LIMIT).contains(&query.limit) {
+            return Err(ArtifactPlacementQueryError::InvalidLimit);
+        }
+        let txn = self.db.begin_read().map_err(MetaError::from)?;
+        let table = txn.open_table(ARTIFACT_PLACEMENT).map_err(MetaError::from)?;
+        let entries = query
+            .cursor
+            .as_ref()
+            .map_or_else(
+                || table.iter(),
+                |cursor| table.range::<&str>((Excluded(cursor.as_str()), Unbounded)),
+            )
+            .map_err(MetaError::from)?;
+        let mut rows = Vec::with_capacity(query.limit + 1);
+        for entry in entries {
+            let (key, value) = entry.map_err(MetaError::from)?;
+            let placement: ArtifactPlacement = serde_json::from_slice(value.value()).map_err(MetaError::from)?;
+            rows.push(ArtifactPlacementRow {
+                digest: key.value().to_owned(),
+                source: placement.source,
+                availability: placement.availability,
+            });
+            if rows.len() > query.limit {
+                break;
+            }
+        }
+        let next_cursor = (rows.len() > query.limit).then(|| rows[query.limit - 1].digest.clone());
+        rows.truncate(query.limit);
+        Ok(ArtifactPlacementPage { rows, next_cursor })
     }
 
     /// Record a newly seen artifact of `source` whose verified bytes are `present`, replacing any prior
@@ -383,7 +475,12 @@ fn collect_repairs(
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactOrigin, ArtifactPlacement, ArtifactSource, ByteAvailability, MetaStore, PlacementEvent};
+    use rstest::rstest;
+
+    use super::{
+        ArtifactOrigin, ArtifactPlacement, ArtifactPlacementPage, ArtifactPlacementQuery, ArtifactPlacementQueryError,
+        ArtifactPlacementRow, ArtifactSource, ByteAvailability, MetaStore, PlacementEvent,
+    };
 
     struct Cached;
     impl ArtifactOrigin for Cached {
@@ -569,6 +666,112 @@ mod tests {
             meta.get_artifact_placement("a3").unwrap().unwrap().availability,
             ByteAvailability::Local
         );
+    }
+
+    fn row(digest: &str, source: ArtifactSource, availability: ByteAvailability) -> ArtifactPlacementRow {
+        ArtifactPlacementRow {
+            digest: digest.to_owned(),
+            source,
+            availability,
+        }
+    }
+
+    #[test]
+    fn test_list_on_an_empty_table_returns_no_rows() {
+        let (_dir, meta) = store();
+        let page = meta
+            .list_artifact_placements(&ArtifactPlacementQuery::default())
+            .unwrap();
+        assert!(page.rows.is_empty());
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn test_list_returns_rows_in_digest_order_with_source_and_availability() {
+        let (_dir, meta) = store();
+        meta.record_artifact_placement("a2", ArtifactSource::Hosted, true)
+            .unwrap();
+        meta.record_artifact_placement("a1", ArtifactSource::Proxy, false)
+            .unwrap();
+        let page = meta
+            .list_artifact_placements(&ArtifactPlacementQuery::default())
+            .unwrap();
+        assert_eq!(
+            page.rows,
+            vec![
+                row("a1", ArtifactSource::Proxy, ByteAvailability::RemoteOnly),
+                row("a2", ArtifactSource::Hosted, ByteAvailability::Local),
+            ]
+        );
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn test_list_paginates_after_an_exclusive_cursor() {
+        let (_dir, meta) = store();
+        for digest in ["a1", "a2", "a3"] {
+            meta.record_artifact_placement(digest, ArtifactSource::Proxy, false)
+                .unwrap();
+        }
+        let first = meta
+            .list_artifact_placements(&ArtifactPlacementQuery { cursor: None, limit: 2 })
+            .unwrap();
+        assert_eq!(
+            first.rows.iter().map(|r| r.digest.as_str()).collect::<Vec<_>>(),
+            ["a1", "a2"]
+        );
+        assert_eq!(first.next_cursor.as_deref(), Some("a2"));
+        let second = meta
+            .list_artifact_placements(&ArtifactPlacementQuery {
+                cursor: first.next_cursor,
+                limit: 2,
+            })
+            .unwrap();
+        assert_eq!(
+            second.rows.iter().map(|r| r.digest.as_str()).collect::<Vec<_>>(),
+            ["a3"]
+        );
+        assert_eq!(second.next_cursor, None);
+    }
+
+    #[test]
+    fn test_list_page_that_exactly_fills_carries_no_next_cursor() {
+        let (_dir, meta) = store();
+        meta.record_artifact_placement("a1", ArtifactSource::Proxy, false)
+            .unwrap();
+        meta.record_artifact_placement("a2", ArtifactSource::Proxy, false)
+            .unwrap();
+        let page = meta
+            .list_artifact_placements(&ArtifactPlacementQuery { cursor: None, limit: 2 })
+            .unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn test_a_placement_page_serializes_to_the_view_wire_shape() {
+        let page = ArtifactPlacementPage {
+            rows: vec![row("aa", ArtifactSource::Proxy, ByteAvailability::RemoteOnly)],
+            next_cursor: Some("aa".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_value(&page).unwrap(),
+            serde_json::json!({
+                "rows": [{"digest": "aa", "source": "proxy", "availability": "remote_only"}],
+                "next_cursor": "aa",
+            })
+        );
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(101)]
+    fn test_list_rejects_an_out_of_range_limit(#[case] limit: usize) {
+        let (_dir, meta) = store();
+        let error = meta
+            .list_artifact_placements(&ArtifactPlacementQuery { cursor: None, limit })
+            .unwrap_err();
+        assert!(matches!(error, ArtifactPlacementQueryError::InvalidLimit));
     }
 
     #[test]

@@ -202,6 +202,12 @@ fn availability_paths(paths: PathsBuilder) -> PathsBuilder {
                 .operation(HttpMethod::Get, availability_placements())
                 .build(),
         )
+        .path(
+            "/+availability/placements/{digest}",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, availability_blob_placements())
+                .build(),
+        )
 }
 
 /// Register the scoped-token lifecycle paths, kept apart so the service path list stays short.
@@ -492,6 +498,47 @@ fn availability_topology_stream() -> OperationBuilder {
                             "data: {\"mode\":\"dc\",\"group\":\"east\",\"captured_at\":1800000000,\"node_count\":2,",
                             "\"local\":{\"role\":\"writer\",\"liveness\":\"live\",\"frontier\":42},\"nodes\":[]}\n\n",
                         ))))
+                        .build(),
+                ),
+        )
+}
+
+fn availability_blob_placements() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Blob placement across datacenters"))
+        .description(Some(
+            "Where one blob's bytes are placed across datacenters, keyed by its content digest, so an \
+             administrator reads which datacenters hold a blob and in what state. Administrator only, \
+             because the datacenter layout is topology an operator does not read; a caller below \
+             administrator reads nothing. Each entry names its datacenter and lifecycle (`pending`, \
+             `verified`, `failed`, or `revoked`) with the verified byte size, but never the backend or \
+             the on-disk location, so the view reveals convergence without an internal path. Entries come \
+             in datacenter order, are capped by the store's per-digest placement bound, and the response \
+             is `no-store`.",
+        ))
+        .parameter(
+            ParameterBuilder::new()
+                .name("digest")
+                .parameter_in(ParameterIn::Path)
+                .description(Some("The blob's content digest, for example `sha256:0f1e…`"))
+                .example(Some(json!("sha256:0f1e"))),
+        )
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "200",
+            ResponseBuilder::new()
+                .description("The blob's placement across datacenters")
+                .content(
+                    "application/json",
+                    ContentBuilder::new()
+                        .example(Some(json!({
+                            "digest": "sha256:0f1e",
+                            "datacenters": [
+                                {"data_center": "east-1", "status": "verified", "size": 4096, "updated_at": 1_800_000_000},
+                                {"data_center": "west-2", "status": "pending", "updated_at": 1_800_000_050}
+                            ]
+                        })))
                         .build(),
                 ),
         )

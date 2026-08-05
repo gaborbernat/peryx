@@ -5,9 +5,10 @@
 
 use leptos::prelude::*;
 
-use crate::data::load_placements;
+use crate::data::{load_blob_placement, load_placements};
 use crate::model::{
-    PlacementHealth, PlacementRow, PlacementView, byte_availability_label, file_source_label, format_instant,
+    BlobDatacenterPlacement, BlobPlacementView, PlacementHealth, PlacementRow, PlacementView,
+    blob_placement_status_label, byte_availability_label, file_source_label, format_instant,
 };
 
 #[component]
@@ -98,11 +99,16 @@ fn PlacementRows(
         .into_any();
     }
     let count = rows.len();
-    let table_rows = rows.into_iter().map(placement_row).collect_view();
+    // The digest a reader has drilled into, whose per-datacenter placement the detail panel shows.
+    let selected = RwSignal::new(None::<String>);
+    let table_rows = rows
+        .into_iter()
+        .map(move |row| placement_row(row, selected))
+        .collect_view();
     view! {
         <div class="table-scroll">
             <table class="files ops-table placement-table">
-                <caption>"Recorded artifact placements, one row per digest, in digest order."</caption>
+                <caption>"Recorded artifact placements, one row per digest, in digest order. Select a digest to see which datacenters hold it."</caption>
                 <thead>
                     <tr>
                         <th scope="col">"Digest"</th>
@@ -113,6 +119,7 @@ fn PlacementRows(
                 <tbody>{table_rows}</tbody>
             </table>
         </div>
+        <BlobPlacementDetail selected />
         <div class="pager placement-pager">
             <p class="result-count" role="status" aria-live="polite">
                 {format!("Showing {count} placement rows on this page.")}
@@ -126,18 +133,97 @@ fn PlacementRows(
     .into_any()
 }
 
-fn placement_row(row: PlacementRow) -> AnyView {
+fn placement_row(row: PlacementRow, selected: RwSignal<Option<String>>) -> AnyView {
     let source = file_source_label(row.source);
     let availability = byte_availability_label(row.availability);
+    let digest = row.digest;
+    let drill = digest.clone();
     view! {
         <tr>
-            <td><code>{row.digest}</code></td>
+            <td>
+                <button
+                    type="button"
+                    class="digest-drill"
+                    title="Show which datacenters hold this blob"
+                    on:click=move |_| selected.set(Some(drill.clone()))
+                >
+                    <code>{digest}</code>
+                </button>
+            </td>
             <td><span class=format!("badge placement-source src-{}", source.key) title=source.hint>{source.text}</span></td>
             <td>
                 <span class=format!("badge placement-avail avail-{}", availability.key) title=availability.hint>
                     {availability.text}
                 </span>
             </td>
+        </tr>
+    }
+    .into_any()
+}
+
+/// The per-datacenter placement of the digest a reader has drilled into, loaded on demand.
+///
+/// Empty until a digest is selected; an error or an empty datacenter list reads as such rather than as
+/// convergence.
+#[component]
+fn BlobPlacementDetail(selected: RwSignal<Option<String>>) -> impl IntoView {
+    let detail = Resource::new(
+        move || selected.get(),
+        |digest| async move {
+            match digest {
+                Some(digest) => Some(load_blob_placement(digest).await),
+                None => None,
+            }
+        },
+    );
+    view! {
+        <Suspense>
+            {move || Suspend::new(async move {
+                match detail.await {
+                    None => ().into_any(),
+                    Some(Ok(view)) => blob_placement_detail(&view).into_any(),
+                    Some(Err(error)) => view! { <p class="error" role="alert">{error}</p> }.into_any(),
+                }
+            })}
+        </Suspense>
+    }
+}
+
+fn blob_placement_detail(view: &BlobPlacementView) -> AnyView {
+    if view.datacenters.is_empty() {
+        return view! {
+            <p class="dim placement-detail" role="status">
+                {format!("No datacenter holds {} yet.", view.digest)}
+            </p>
+        }
+        .into_any();
+    }
+    let rows = view.datacenters.iter().map(datacenter_row).collect_view();
+    view! {
+        <div class="table-scroll placement-detail">
+            <table class="files ops-table placement-dc-table">
+                <caption>{format!("Datacenters holding {}", view.digest)}</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">"Datacenter"</th>
+                        <th scope="col">"Status"</th>
+                        <th scope="col" class="num">"Size"</th>
+                    </tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+        </div>
+    }
+    .into_any()
+}
+
+fn datacenter_row(placement: &BlobDatacenterPlacement) -> AnyView {
+    let status = blob_placement_status_label(placement.status);
+    view! {
+        <tr>
+            <td>{placement.data_center.clone()}</td>
+            <td><span class=format!("badge {}", status.class)>{status.text}</span></td>
+            <td class="num">{placement.size.map_or_else(|| "—".to_owned(), |size| size.to_string())}</td>
         </tr>
     }
     .into_any()

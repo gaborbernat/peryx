@@ -20,7 +20,10 @@ pub use analytics::{
     UiUsageRows, UiVersionRow, format_instant,
 };
 pub use login::UiLoginState;
-pub use placement::{PlacementHealth, PlacementRow, PlacementView};
+pub use placement::{
+    BlobDatacenterPlacement, BlobPlacementStatus, BlobPlacementView, PlacementHealth, PlacementRow, PlacementView,
+    blob_placement_status_label,
+};
 pub use policy_decision::{PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage};
 pub use project::{
     PlacementLabel, UiArtifactRef, UiArtifactSource, UiAttestation, UiByteAvailability, UiFile, UiManifest, UiMember,

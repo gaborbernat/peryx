@@ -23,7 +23,9 @@ pub mod view;
 pub use ecosystem::{Ecosystem, UnknownEcosystem};
 pub use lexicon::{Lexicon, LexiconRegistry};
 pub use lifecycle::{TRASH_GRACE_SECS, TrashInfo, TrashRecord, TrashState, UnknownTrashState};
-pub use placement::{PlacementHealth, PlacementRow, PlacementView};
+pub use placement::{
+    BlobDatacenterPlacement, BlobPlacementStatus, BlobPlacementView, PlacementHealth, PlacementRow, PlacementView,
+};
 pub use role::Role;
 pub use shadow::{ShadowCandidate, ShadowReason, ShadowSource};
 pub use topology::{

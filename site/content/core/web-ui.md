@@ -91,6 +91,13 @@ default page is the API's default, and the browser walks forward a page at a tim
 reloading. Every source and availability state carries a text label, so the states stay distinguishable without colour,
 and a caller below operator reads nothing at all.
 
+Selecting a digest drills into where that blob's bytes are placed across datacenters. The detail reads
+`GET /+availability/placements/{digest}` and lists each datacenter holding the blob with its state — `verified`,
+`pending`, `failed`, or `revoked` — and the verified byte size. This view is administrator-only, because the datacenter
+layout is topology an operator does not read, and it names the datacenter alone: never the storage backend or the
+on-disk location, so reading convergence exposes no internal path. A single node records no cross-datacenter placement,
+so the detail is empty until a group replicates a blob.
+
 Pending-operation visibility, the other half of this surface, waits on the operations ledger and is not shown yet.
 
 ## Policy decisions

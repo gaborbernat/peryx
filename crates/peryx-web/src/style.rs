@@ -185,6 +185,9 @@ main { max-width: 70rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
 .placement-summary { margin: 0.6rem 0; }
 .placement-pager { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.6rem; }
 .placement-pager .result-count { margin: 0; }
+.digest-drill { background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+.digest-drill:hover code, .digest-drill:focus-visible code { text-decoration: underline; }
+.placement-detail { margin-top: 0.6rem; }
 .yank-reason { color: var(--text-soft); font-size: 0.85rem; margin-left: 0.35rem; }
 .project-head .badge { margin-left: 0.5rem; vertical-align: middle; }
 .status-reason { color: var(--text-soft); font-size: 0.9rem; margin-left: 0.4rem; }

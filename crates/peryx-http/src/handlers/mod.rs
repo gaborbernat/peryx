@@ -42,7 +42,7 @@ pub use grants::{GrantsQuery, create_grant, inspect_grant, list_grants, revoke_g
 pub use jobs::cancel_job;
 pub use login::{login_callback, login_start, logout, session, session_user};
 pub use oidc::{oidc_audience, oidc_mint_token};
-pub use placements::placements;
+pub use placements::{blob_placements, placements};
 pub use policy_decisions::{PolicyDecisionsQuery, policy_decision_error_response, policy_decisions};
 pub use pql::pql_query;
 pub use query::{search, search_error_response, search_response, search_response_offloaded};

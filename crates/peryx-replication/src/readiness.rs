@@ -135,6 +135,12 @@ pub fn group_readiness(members: &[MemberFrontier], policy: DurabilityPolicy) -> 
 /// re-litigate it. The backup frontier bounds the replicated frontier: a serial the backup has not yet
 /// stored stays retained even after the replicas hold it, because a restore from that backup would
 /// otherwise arrive without the operation.
+///
+/// Authority epochs are contiguous from one and a superseded epoch is fully drained before the next
+/// begins, so the frontier marks every epoch below `epoch` covered without bound and the current `epoch`
+/// covered only through its durable serial. Without the drained epochs an entry whose high-water sits in
+/// a superseded epoch never clears the frontier and is retained forever, even though no operation in that
+/// epoch can still arrive.
 #[must_use]
 pub fn visibility_compaction_frontier(
     members: &[MemberFrontier],
@@ -144,6 +150,9 @@ pub fn visibility_compaction_frontier(
 ) -> VisibilityFrontier {
     let replicated = group_readiness(members, policy).durable_frontier;
     let mut frontier = VisibilityFrontier::default();
+    for drained in 1..epoch {
+        frontier.acknowledge(drained, u64::MAX);
+    }
     frontier.acknowledge(epoch, replicated.min(backup_applied));
     frontier
 }

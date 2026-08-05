@@ -250,3 +250,102 @@ fn test_search_during_a_rebuild_serves_the_prior_index() {
     assert_eq!(served.get(), Some(2));
     assert_eq!(total(&search, &stores, &lexicons), 3);
 }
+
+fn pypi_doc(name: &str, text: &str) -> PackageDocument {
+    PackageDocument {
+        display_name: name.to_owned(),
+        normalized_name: name.to_owned(),
+        route: "root".to_owned(),
+        index: "root".to_owned(),
+        ecosystem: "pypi".to_owned(),
+        source: PackageSource::Cached,
+        available_locally: false,
+        summary: None,
+        text: text.to_owned(),
+    }
+}
+
+fn hits(search: &PackageSearch, stores: &Stores, lexicons: &LexiconRegistry, query: &str) -> usize {
+    search
+        .search(
+            &stores.ctx(lexicons),
+            SearchParams {
+                query: query.to_owned(),
+                ..SearchParams::default()
+            },
+        )
+        .unwrap()
+        .total
+}
+
+#[test]
+fn test_update_project_replaces_only_the_named_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(NamedDocs(Arc::new(Mutex::new(vec![
+        "alpha".to_owned(),
+        "beta".to_owned(),
+    ])))));
+    // Build the index once; a scoped update never bumps the epoch, so it alone changes what follows.
+    assert_eq!(total(&search, &stores, &lexicons), 2);
+
+    search
+        .update_project(
+            &[pypi_doc("alpha", "alpha renamed")],
+            &crate::project_key("root", "alpha"),
+        )
+        .unwrap();
+
+    assert_eq!(
+        hits(&search, &stores, &lexicons, "renamed"),
+        1,
+        "alpha reflects its new text"
+    );
+    assert_eq!(hits(&search, &stores, &lexicons, "beta"), 1, "beta is untouched");
+    assert_eq!(total(&search, &stores, &lexicons), 2, "no project was added or dropped");
+}
+
+#[test]
+fn test_update_project_retires_a_project_given_no_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(NamedDocs(Arc::new(Mutex::new(vec![
+        "alpha".to_owned(),
+        "beta".to_owned(),
+    ])))));
+    assert_eq!(total(&search, &stores, &lexicons), 2);
+
+    search
+        .update_project(&[], &crate::project_key("root", "alpha"))
+        .unwrap();
+
+    assert_eq!(hits(&search, &stores, &lexicons, "alpha"), 0, "alpha was retired");
+    assert_eq!(total(&search, &stores, &lexicons), 1, "only beta remains");
+}
+
+#[test]
+fn test_update_project_is_idempotent_across_a_repeated_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(NamedDocs(Arc::new(Mutex::new(vec!["alpha".to_owned()])))));
+    assert_eq!(total(&search, &stores, &lexicons), 1);
+
+    // Re-running the same delete-then-add, as a crash-recovery replay does, reaches the same index.
+    for _ in 0..2 {
+        search
+            .update_project(&[pypi_doc("alpha", "alpha")], &crate::project_key("root", "alpha"))
+            .unwrap();
+    }
+
+    assert_eq!(
+        total(&search, &stores, &lexicons),
+        1,
+        "the project is present exactly once"
+    );
+}

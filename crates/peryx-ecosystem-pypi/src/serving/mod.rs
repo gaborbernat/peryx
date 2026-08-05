@@ -23,12 +23,13 @@ use peryx_driver::discovery::BaseUrl;
 use peryx_driver::not_found;
 use peryx_driver::rate_limit::RouteClass;
 use peryx_driver::serving::{EcosystemDriver, RefreshSweep};
-use peryx_driver::state::{IndexDescription, ServingState};
+use peryx_driver::state::{IndexDescription, SEARCH_VIEW, ServingState, ViewBlock};
 use peryx_events::metrics::MetricFamily;
 use peryx_identity::{
     Action, Denial, Grant, Identity, VerifiedToken, authorize_grants, parse_basic, strip_auth_scheme,
 };
 use peryx_index::{Index, IndexKind};
+use peryx_search::{IndexerCtx, PackageSearch, SearchError, project_key};
 use peryx_storage::blob::Digest;
 
 use crate::attestation;
@@ -472,16 +473,73 @@ impl EcosystemDriver for PypiServing {
             .map_err(|err| err.user_message())
     }
 
-    fn apply_replicated_changes(&self, state: &ServingState, changed_keys: &[String]) {
-        let mut invalidated = std::collections::BTreeSet::new();
+    fn apply_replicated_changes(&self, state: &ServingState, changed_keys: &[String]) -> Result<(), ViewBlock> {
+        let ctx = state.indexer_ctx();
+        let mut views: std::collections::BTreeSet<(usize, &str)> = std::collections::BTreeSet::new();
         for key in changed_keys {
-            if let Some(project) = crate::store::project_of_key(key)
-                && invalidated.insert(project)
-            {
-                state.invalidate_project(project);
+            if let Some((index, normalized)) = crate::store::project_of_key(key) {
+                for position in serving_positions(ctx.indexes, index) {
+                    views.insert((position, normalized));
+                }
             }
         }
+        let mut hot_retired = std::collections::BTreeSet::new();
+        let mut block = None;
+        for (position, normalized) in views {
+            let index = &ctx.indexes[position];
+            if let Err(error) = rebuild_project_view(&ctx, &state.search, index, normalized) {
+                tracing::error!(%error, index = %index.name, project = normalized, view = SEARCH_VIEW, "replica search-view rebuild failed; holding the readable frontier");
+                block = Some(ViewBlock {
+                    view: SEARCH_VIEW.to_owned(),
+                });
+            }
+            if hot_retired.insert(normalized) {
+                state.invalidate_hot_pages(normalized);
+            }
+        }
+        block.map_or(Ok(()), Err)
     }
+}
+
+/// The positions of the indexes whose search document for a project on `base` a replica must rebuild:
+/// `base` itself and every virtual index that reaches it, because a virtual page merges the member it
+/// layers, so the member's change shows through the virtual index's own document. An unknown index name
+/// resolves to nothing.
+fn serving_positions(indexes: &[Index], base: &str) -> Vec<usize> {
+    let Some(base_position) = indexes.iter().position(|index| index.name == base) else {
+        return Vec::new();
+    };
+    let mut positions = vec![base_position];
+    for (position, index) in indexes.iter().enumerate() {
+        if let IndexKind::Virtual { layers, .. } = &index.kind
+            && layers_reach(indexes, layers, base_position)
+        {
+            positions.push(position);
+        }
+    }
+    positions
+}
+
+/// Whether `layers` reach the index at `target`, directly or through a nested virtual member.
+fn layers_reach(indexes: &[Index], layers: &[usize], target: usize) -> bool {
+    layers.iter().any(|&position| {
+        position == target
+            || matches!(&indexes[position].kind, IndexKind::Virtual { layers, .. } if layers_reach(indexes, layers, target))
+    })
+}
+
+/// Re-derive `normalized`'s document as it appears on `index` and replace only that document in the
+/// search index, retiring it when the project no longer has files.
+fn rebuild_project_view(
+    ctx: &IndexerCtx<'_>,
+    search: &PackageSearch,
+    index: &Index,
+    normalized: &str,
+) -> Result<(), SearchError> {
+    let docs: Vec<_> = crate::search_pypi::package_document(ctx, index, normalized)?
+        .into_iter()
+        .collect();
+    search.update_project(&docs, &project_key(&index.route, normalized))
 }
 
 fn safe_filename(raw: &str) -> Result<String, PathSafetyError> {

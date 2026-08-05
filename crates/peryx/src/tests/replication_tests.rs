@@ -471,6 +471,44 @@ fn test_apply_replicated_page_dispatches_a_changed_page_to_drivers() {
         hot,
         "a page with changes reached the PyPI driver, which retired flask's pages",
     );
+    assert_eq!(
+        state.meta.view_frontier(peryx_driver::state::SEARCH_VIEW).unwrap(),
+        Some(1),
+        "every affected view rebuilt, so the search view frontier advanced over the applied serial",
+    );
+}
+
+#[test]
+fn test_apply_replicated_page_holds_the_frontier_when_a_view_rebuild_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, None);
+    let state = build_state(&config).unwrap();
+    // A corrupt upload record for flask makes deriving its search document fail, so the driver reports a
+    // blocked view rather than rebuilding it.
+    peryx_ecosystem_pypi::store::put_upload(
+        &state.meta,
+        "hosted",
+        "flask",
+        "flask-1.0-py3-none-any.whl",
+        b"not json",
+    )
+    .unwrap();
+
+    crate::replication::apply_replicated_page(
+        &state,
+        SyncOutcome {
+            changes: 1,
+            serial: 1,
+            primary_serial: 1,
+        },
+        &["pypi\u{0}u\u{0}hosted/flask/flask-1.0-py3-none-any.whl".to_owned()],
+    );
+
+    assert_eq!(
+        state.meta.view_frontier(peryx_driver::state::SEARCH_VIEW).unwrap(),
+        None,
+        "a required view that could not rebuild holds the frontier at its prior value",
+    );
 }
 
 #[test]
@@ -854,9 +892,10 @@ async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
     let (_, body) = get(&router, "/metrics").await;
     let body = String::from_utf8(body).unwrap();
     assert!(body.contains("peryx_replication_lag 0\n"), "{body}");
-    // Caught up to the primary at serial 3, yet readability holds at 0: applying the metadata
-    // invalidated the search view, so no read is served ahead of it until the index refreshes.
-    assert!(body.contains("peryx_replication_readable_serial 0\n"), "{body}");
+    // Caught up to the primary at serial 3, and readability reaches it: applying each page rebuilt the
+    // affected derived views and advanced the search view frontier before the serial became visible, so
+    // no read waits on a later search to refresh the index.
+    assert!(body.contains("peryx_replication_readable_serial 3\n"), "{body}");
     assert!(body.contains("peryx_availability_pending_serials 0\n"), "{body}");
     assert!(body.contains("peryx_availability_sync_cycles_total 2\n"), "{body}");
 }

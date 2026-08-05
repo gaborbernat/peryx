@@ -3,8 +3,26 @@
 use super::support::*;
 use bytes::Bytes;
 use peryx_core::Ecosystem;
-use peryx_driver::state::{REQUIRED_VIEWS, ReadableFrontier, SEARCH_VIEW, readable_frontier};
+use peryx_driver::state::{REQUIRED_VIEWS, ReadableFrontier, SEARCH_VIEW, ViewBlock, readable_frontier};
+use peryx_search::SearchParams;
 use rstest::rstest;
+
+const PERYXPKG_WHEEL: &str = "peryxpkg-1.0-py3-none-any.whl";
+
+/// The number of search hits for `query` on `state`'s own derived index.
+fn search_hits(state: &Arc<AppState>, query: &str) -> usize {
+    state
+        .search
+        .search(
+            &state.search_ctx(),
+            SearchParams {
+                query: query.to_owned(),
+                ..SearchParams::default()
+            },
+        )
+        .unwrap()
+        .total
+}
 
 /// Every hosted read that carries a journal serial is held on a replica whose search view lags, across
 /// the Simple HTML detail, PEP 691 JSON detail, legacy JSON, and Simple index representations.
@@ -143,7 +161,9 @@ async fn test_apply_replicated_changes_retires_only_the_changed_projects() {
         format!("pypi\u{0}p\u{0}hosted/alpha"),
         "pypi\u{0}f\u{0}deadbeef".to_owned(),
     ];
-    driver.apply_replicated_changes(h.state.serving.as_ref(), &changed);
+    driver
+        .apply_replicated_changes(h.state.serving.as_ref(), &changed)
+        .unwrap();
 
     // alpha's epoch advanced, so its current key is a miss; beta's key is unchanged and still a hit.
     let hot_alpha_now = h.state.hot_key("hosted", "alpha", cache::SIMPLE_HTML);
@@ -197,5 +217,73 @@ fn test_a_derived_view_frontier_survives_a_store_reopen() {
             serial: 5,
             blocking: None
         }
+    );
+}
+
+#[tokio::test]
+async fn test_a_replicated_per_file_removal_retires_the_project_view() {
+    let h = harness().await;
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let replica = replica_state(&h);
+    // Build the replica's index from the shared store; peryxpkg is present on its hosted route and, once
+    // merged, on the virtual index that layers it.
+    assert!(
+        search_hits(&replica, "peryxpkg") > 0,
+        "the upload is indexed before the removal"
+    );
+
+    // A replicated removal deletes the only file's upload record. Its raw key names no project marker, so
+    // before the fix a replica retired nothing; now it maps back to (hosted, peryxpkg).
+    assert!(
+        h.state
+            .meta
+            .delete_upload("hosted", "peryxpkg", PERYXPKG_WHEEL, 0)
+            .unwrap(),
+        "the upload record existed"
+    );
+    let driver = h.state.driver_for(Ecosystem::Pypi).unwrap().clone();
+    driver
+        .apply_replicated_changes(
+            replica.serving.as_ref(),
+            &[format!("pypi\u{0}u\u{0}hosted/peryxpkg/{PERYXPKG_WHEEL}")],
+        )
+        .unwrap();
+
+    assert_eq!(
+        search_hits(&replica, "peryxpkg"),
+        0,
+        "the project's document was retired on every index that served it",
+    );
+}
+
+#[tokio::test]
+async fn test_apply_reports_a_block_when_a_project_view_cannot_rebuild() {
+    let h = harness().await;
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let replica = replica_state(&h);
+    // A corrupt upload record makes deriving peryxpkg's document fail, so the rebuild cannot complete.
+    h.state
+        .meta
+        .put_upload("hosted", "peryxpkg", PERYXPKG_WHEEL, b"not json")
+        .unwrap();
+
+    let driver = h.state.driver_for(Ecosystem::Pypi).unwrap().clone();
+    let outcome = driver.apply_replicated_changes(
+        replica.serving.as_ref(),
+        &[format!("pypi\u{0}u\u{0}hosted/peryxpkg/{PERYXPKG_WHEEL}")],
+    );
+
+    assert_eq!(
+        outcome,
+        Err(ViewBlock {
+            view: SEARCH_VIEW.to_owned(),
+        }),
+        "a failed required-view rebuild reports the blocking view so the caller holds the frontier",
     );
 }

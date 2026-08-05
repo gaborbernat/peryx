@@ -18,6 +18,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use peryx_driver::state::SEARCH_VIEW;
 use peryx_driver::{AppState, PrometheusSource};
 use peryx_http::handlers::status_authorization;
 use peryx_http::response_security::{
@@ -401,18 +402,37 @@ fn log_replica_page(outcome: SyncOutcome) {
     );
 }
 
-/// Apply the effects of one replicated page: log it, refresh the search view, and hand the changed keys
-/// to every ecosystem driver so each retires the derived views those keys touch. A page with no changes
-/// does nothing. This is synchronous and independent of the async sync loop, so a direct test covers it
-/// deterministically rather than riding on async scheduling.
+/// Apply the effects of one replicated page: log it, rebuild the derived views the changed keys touch,
+/// and advance the readable frontier over the applied serial once every required view reflects it.
+///
+/// Each ecosystem driver rebuilds its own affected views. When they all succeed the search view frontier
+/// advances to `outcome.serial`, so a read the gate held becomes visible only after the view it depends
+/// on caught up. When a driver reports a [`ViewBlock`](peryx_driver::state::ViewBlock) the frontier stays
+/// where it was — the read stays held — and the lazy full refresh a later search runs recovers it. The
+/// mutation-epoch bump keeps that recovery path armed for every ecosystem, the OCI views included. A page
+/// with no changes does nothing. This is synchronous and independent of the async sync loop, so a direct
+/// test covers it deterministically rather than riding on async scheduling.
 pub(crate) fn apply_replicated_page(app: &AppState, outcome: SyncOutcome, changed_keys: &[String]) {
-    if outcome.changes > 0 {
-        log_replica_page(outcome);
-        app.bump_search_epoch();
-        let state = app.serving.as_ref();
-        for driver in app.drivers() {
-            driver.apply_replicated_changes(state, changed_keys);
+    if outcome.changes == 0 {
+        return;
+    }
+    log_replica_page(outcome);
+    app.bump_search_epoch();
+    let state = app.serving.as_ref();
+    let mut blocked = None;
+    for driver in app.drivers() {
+        if let Err(block) = driver.apply_replicated_changes(state, changed_keys) {
+            blocked = Some(block);
         }
+    }
+    if let Some(block) = blocked {
+        tracing::warn!(
+            view = %block.view,
+            serial = outcome.serial,
+            "held the readable frontier: a required derived view could not rebuild"
+        );
+    } else if let Err(error) = state.meta.set_view_frontier(SEARCH_VIEW, outcome.serial) {
+        tracing::error!(%error, serial = outcome.serial, "advancing the search view frontier failed");
     }
 }
 

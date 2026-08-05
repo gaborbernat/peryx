@@ -73,3 +73,33 @@ fn test_rebuild_persists_the_store_frontier_it_indexed() {
 
     assert_eq!(stores.meta.view_frontier(SEARCH_VIEW).unwrap(), Some(3));
 }
+
+#[test]
+fn test_update_project_leaves_the_view_frontier_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(OneDoc));
+    advance_serial(&stores, 3);
+
+    // The scoped update commits a document but never records a frontier; the apply path advances it only
+    // after every affected project is current, so this alone must not move it.
+    search
+        .update_project(
+            &[PackageDocument {
+                display_name: "pkg".to_owned(),
+                normalized_name: "pkg".to_owned(),
+                route: "root".to_owned(),
+                index: "root".to_owned(),
+                ecosystem: "pypi".to_owned(),
+                source: PackageSource::Cached,
+                available_locally: false,
+                summary: None,
+                text: "pkg".to_owned(),
+            }],
+            &crate::project_key("root", "pkg"),
+        )
+        .unwrap();
+
+    assert_eq!(stores.meta.view_frontier(SEARCH_VIEW).unwrap(), None);
+}

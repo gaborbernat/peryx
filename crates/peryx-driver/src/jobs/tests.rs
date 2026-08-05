@@ -43,7 +43,8 @@ fn test_apply_replicated_changes_defaults_to_a_no_op() {
     // A driver with no replicated derived views inherits the neutral default, which retires nothing,
     // unlike an ecosystem that owns the changed keys.
     StubDriver::new(0, Ok(RefreshSweep::default()))
-        .apply_replicated_changes(&state, &["pypi\u{0}p\u{0}hosted/flask".to_owned()]);
+        .apply_replicated_changes(&state, &["pypi\u{0}p\u{0}hosted/flask".to_owned()])
+        .unwrap();
     assert_eq!(
         state.hot_key("hosted", "flask", "simple.html"),
         hot,

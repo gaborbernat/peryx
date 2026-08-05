@@ -24,8 +24,11 @@ backward, so a replayed or reordered catch-up cannot un-apply proven work, and a
 rebuild actually reached rather than one a crash left unfinished.
 
 The search index is the first required view every deployment runs. It persists its frontier when a refresh or a rebuild
-publishes, so the frontier tracks the serial the served index reflects. Ecosystems add their own views under #510 and
-#511, each advancing its own frontier as it rebuilds: PyPI simple pages and serials, OCI tags and manifests.
+publishes, so the frontier tracks the serial the served index reflects. As a replica applies each page, the PyPI driver
+rebuilds the search documents for exactly the projects the page changed — scoped by the `(index, project)` a changed
+project marker, upload record, or override names — and advances the search frontier only once every affected project is
+current. The rebuild is bounded: it re-derives one project at a time from that project's stored records rather than
+walking the whole index, so a large replica never loads every project to reflect one change.
 
 ## The readable frontier
 
@@ -38,9 +41,14 @@ A view that fails to rebuild keeps its prior frontier instead of advancing, so a
 frontier at the last consistent serial and reports itself as the blocker. Readability resumes only once the view
 rebuilds and advances its frontier.
 
-When a replica applies a page, it invalidates the search view so readability holds below the applied serial until the
-index refreshes to it. The replica exports the readable serial as `peryx_replication_readable_serial`, so a scrape shows
-how far derived views trail the metadata the replica has committed.
+When a replica applies a page, it rebuilds the affected project views *before* it advances the search frontier over the
+page's serial, so a record becomes readable only once the view that derives from it reflects it — never in between. If a
+project's rebuild fails, the driver reports the search view as blocked and the frontier holds at its prior serial; the
+lazy full refresh a later search runs re-derives every project and lifts the hold once the failing input is readable
+again. Rebuilding one project on one index deletes only that project's document and re-adds the fresh one, so re-running
+the same apply after a crash reaches the same index. The replica exports the readable serial as
+`peryx_replication_readable_serial`, so a scrape shows how far derived views trail the metadata the replica has
+committed.
 
 ## Restart behavior
 

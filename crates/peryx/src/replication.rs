@@ -1,5 +1,6 @@
 //! Process-level replication configuration and follower scheduling.
 
+mod analytics;
 mod availability_metrics;
 mod drain;
 mod raft;
@@ -557,6 +558,9 @@ pub struct ReplicationRuntime {
     primary: Option<Router>,
     replica: Option<(ReplicaLoop, AvailabilityRuntime)>,
     availability: Option<AvailabilityNode>,
+    /// The replica's analytics pull worker, spawned onto the availability runtime alongside the replica
+    /// loop. `None` unless this process follows an upstream to pull analytics batches from.
+    analytics_puller: Option<analytics::AnalyticsPuller>,
     /// The ownership consensus seed for an `ha` process, resolved synchronously here and ignited into a
     /// running node once the async runtime is up. `None` under `none` and `dc`, which run no group.
     consensus: Option<raft::ConsensusPlan>,
@@ -575,6 +579,49 @@ pub struct Consensus {
     pub control: Arc<dyn peryx_driver::state::MembershipControl>,
     /// The receive-side raft RPC routes to mount on the peer-facing (availability) listener.
     pub peer_router: Router,
+}
+
+/// Merge the producer's sealed-batch analytics endpoint into `router` when this node has an identity to
+/// stamp its intervals with, leaving `router` untouched otherwise.
+fn merge_analytics_endpoint(
+    router: Router,
+    config: &Config,
+    state: &Arc<AppState>,
+    token: &str,
+) -> anyhow::Result<Router> {
+    let Some(identity) = &config.node_identity else {
+        return Ok(router);
+    };
+    let epoch = analytics::resolve_producer_epoch(&state.serving.meta.analytics())
+        .context("resolve the analytics producer epoch")?;
+    Ok(router.merge(analytics::analytics_router(
+        token.to_owned(),
+        state.serving.metrics.clone(),
+        peryx_replication::ProducerId(identity.clone()),
+        epoch,
+    )))
+}
+
+/// Build the replica's background analytics pull worker, or `None` when this node is not a replica.
+fn build_analytics_puller(
+    config: &Config,
+    state: &Arc<AppState>,
+) -> anyhow::Result<Option<analytics::AnalyticsPuller>> {
+    let Some(ReplicationConfig::Replica {
+        upstream,
+        token,
+        poll_interval,
+        ..
+    }) = config.availability.replication()
+    else {
+        return Ok(None);
+    };
+    let token = token
+        .read()
+        .context("read the replica replication token for analytics")?;
+    let puller = analytics::AnalyticsPuller::new(upstream, token, state.serving.meta.analytics(), *poll_interval)
+        .context("build the analytics pull worker")?;
+    Ok(Some(puller))
 }
 
 impl ReplicationRuntime {
@@ -600,6 +647,7 @@ impl ReplicationRuntime {
                     state.serving.blobs.clone(),
                 )
                 .context("build primary replication routes")?;
+                let router = merge_analytics_endpoint(router, config, state, &token)?;
                 let liveness = primary_liveness(config);
                 let router = match &liveness {
                     Some(tracker) => {
@@ -682,6 +730,7 @@ impl ReplicationRuntime {
             primary,
             replica,
             availability,
+            analytics_puller: build_analytics_puller(config, state)?,
             consensus: raft::ConsensusPlan::from_config(config)?,
         })
     }
@@ -742,6 +791,9 @@ impl ReplicationRuntime {
     pub fn start(self) -> Option<AvailabilityRuntime> {
         let (replica, runtime) = self.replica?;
         let _ = runtime.try_spawn(Box::pin(replica.run()));
+        if let Some(puller) = self.analytics_puller {
+            let _ = runtime.try_spawn(Box::pin(puller.run()));
+        }
         Some(runtime)
     }
 

@@ -282,6 +282,77 @@ impl NodeJob for JobHistoryCleanup {
     }
 }
 
+/// How long a settled ingress intent is kept before the reaper prunes it, so a brief home-DC
+/// finalization lag never drops an intent a slow duplicate retry still resolves against.
+pub const INGRESS_INTENT_RETENTION_SECS: i64 = 3600;
+
+/// Bound the two write-idempotency ledgers so neither grows without end.
+///
+/// A hosted write stages a durable ingress intent and claims an operation id before it mutates; a retry
+/// replays both instead of remutating. Left alone each row would live forever: the ingress-intent table
+/// would fill to its admission cap and refuse new uploads, and the operation-outcome ledger would keep
+/// every terminal result. This drains the settled rows of both — an [`Admitted`] or [`Expired`] intent
+/// past its retention, and a terminal operation past its own expiry — so the idempotency guarantees stay
+/// bounded. A [`Pending`] intent is never dropped, since its write may still finalize.
+///
+/// [`Admitted`]: peryx_storage::meta::IntentPhase::Admitted
+/// [`Expired`]: peryx_storage::meta::IntentPhase::Expired
+/// [`Pending`]: peryx_storage::meta::IntentPhase::Pending
+pub(super) struct WriteLedgerReap;
+
+#[async_trait]
+impl NodeJob for WriteLedgerReap {
+    fn kind(&self) -> &'static str {
+        "write_ledger_reap"
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        let mut reaped = 0_u64;
+        loop {
+            if ctx.is_cancelled() {
+                break;
+            }
+            let now = (ctx.state().clock)();
+            let intents = ctx
+                .state()
+                .meta
+                .prune_ingress_intents(now, INGRESS_INTENT_RETENTION_SECS, MAX_JOB_RUNS)
+                .map_err(reap_storage_failure)?;
+            let outcomes = ctx
+                .state()
+                .meta
+                .prune_operation_outcomes(now, MAX_JOB_RUNS)
+                .map_err(reap_storage_failure)?;
+            reaped += reaped_count(intents) + reaped_count(outcomes);
+            if intents == 0 && outcomes == 0 {
+                break;
+            }
+        }
+        Ok(JobReport {
+            processed: reaped,
+            changed: reaped,
+        })
+    }
+}
+
+/// One reaped batch as a report count.
+fn reaped_count(batch: usize) -> u64 {
+    u64::try_from(batch).expect("bounded batch fits in u64")
+}
+
+/// Surface a ledger prune failure as a storage job failure.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "map_err hands the mapper an owned error; the message only needs to borrow it"
+)]
+fn reap_storage_failure(error: peryx_storage::meta::MetaError) -> JobFailure {
+    JobFailure::new("storage", error.to_string())
+}
+
 const SEARCH_REBUILD: &str = "search_rebuild";
 
 /// Rebuild the node's derived package search index from authoritative metadata.

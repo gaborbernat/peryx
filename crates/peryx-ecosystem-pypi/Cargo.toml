@@ -15,6 +15,7 @@ description = "The PyPI ecosystem driver for peryx: names, versions, the simple 
 default = ["serving"]
 serving = [
   "dep:peryx-driver",
+  "dep:peryx-replication",
   "dep:peryx-events",
   "dep:peryx-index",
   "dep:peryx-search",
@@ -69,6 +70,7 @@ xml-rs = "0.8"
 
 # Serving layer (enabled by the `serving` feature).
 peryx-driver = { workspace = true, optional = true }
+peryx-replication = { workspace = true, optional = true }
 peryx-events = { workspace = true, optional = true }
 peryx-index = { workspace = true, optional = true }
 peryx-search = { workspace = true, optional = true }

@@ -180,8 +180,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let oidc_logins = oidc_logins(&config.auth.oidc_providers, &state.meta)?;
     state.set_oidc_logins(oidc_logins);
     state.read_only = read_only;
-    state.set_availability_role(availability_role(config));
-    state.set_availability_topology(availability_topology(config, read_only));
+    configure_availability(&mut state, config, read_only);
     if let Some(source) = &config.auth.signing_key {
         let key = source.read().context("read the token realm signing key")?;
         if key.trim().is_empty() {
@@ -219,6 +218,14 @@ const fn availability_role(config: &Config) -> peryx_core::NodeRole {
 /// A writer knows its own roster identity, so it marks itself in the roster; a replica does not carry its
 /// identity, so it leaves the local mark unset and reports its own live status through the snapshot's
 /// dedicated local node instead.
+/// Install the resolved availability posture on the state: the authority role, the topology snapshot the
+/// process serves, and the write-ack quorum and deadline hosted writes are acknowledged against.
+fn configure_availability(state: &mut AppState, config: &Config, read_only: bool) {
+    state.set_availability_role(availability_role(config));
+    state.set_availability_topology(availability_topology(config, read_only));
+    state.set_write_ack(config.write_ack.policy, config.write_ack.deadline);
+}
+
 fn availability_topology(config: &Config, read_only: bool) -> peryx_core::TopologyConfig {
     let mode = match config.availability.mode() {
         AvailabilityMode::None => peryx_core::TopologyMode::None,

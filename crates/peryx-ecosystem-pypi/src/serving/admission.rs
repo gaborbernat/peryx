@@ -49,11 +49,21 @@ struct IngressIntent {
 
 /// The result of admitting an upload for durable ingress staging.
 pub(super) enum Admission {
-    /// The upload is durably staged and may proceed to storage.
-    Admitted,
+    /// The upload is durably staged and may proceed to storage, carrying the intent identity the handler
+    /// advances on publish and keys the operation ledger on.
+    Admitted(AdmittedIntent),
     /// The upload is refused: a conflicting resend, a full backlog, an unsupported backend, or a staging
     /// failure. Carries the response to return unchanged.
     Reject(Response),
+}
+
+/// The durable identity a fresh or deduplicated admission established.
+pub(super) struct AdmittedIntent {
+    /// The intent-ledger key, advanced [`Pending`](peryx_storage::meta::IntentPhase::Pending) to
+    /// [`Admitted`](peryx_storage::meta::IntentPhase::Admitted) once the write is durable.
+    pub intent_key: String,
+    /// The operation id a retry replays under, so the mutation runs once.
+    pub operation: String,
 }
 
 /// Admit `request` for durable ingress staging into `meta`, allowing at most `capacity` un-finalized
@@ -81,18 +91,22 @@ fn admit_staged(
         return Ok(reject);
     }
     let key = intent_key(request.tenant, request.authority, request.filename);
+    let operation = format!("{key}:{}", request.digest);
     let payload = serde_json::to_vec(&IngressIntent {
         tenant: request.tenant.to_owned(),
         authority: request.authority.to_owned(),
         digest: request.digest.to_owned(),
         size: request.size,
         ingress_dc: request.ingress_dc.to_owned(),
-        operation: format!("{key}:{}", request.digest),
+        operation: operation.clone(),
     })
     .expect("an ingress intent serializes");
     let outcome = meta.stage_intent(&key, request.digest, request.size, &payload, capacity, now)?;
     Ok(match stage_gate(outcome, request.filename) {
-        Ok(()) => Admission::Admitted,
+        Ok(()) => Admission::Admitted(AdmittedIntent {
+            intent_key: key,
+            operation,
+        }),
         Err(reject) => reject,
     })
 }
@@ -187,7 +201,7 @@ mod tests {
     fn reject_status(admission: Admission) -> Option<StatusCode> {
         match admission {
             Admission::Reject(response) => Some(response.status()),
-            Admission::Admitted => None,
+            Admission::Admitted(_) => None,
         }
     }
 
@@ -205,7 +219,7 @@ mod tests {
                 &request,
                 10
             ),
-            Admission::Admitted
+            Admission::Admitted(_)
         ));
 
         let staged = meta
@@ -249,7 +263,7 @@ mod tests {
                 &request,
                 10
             ),
-            Admission::Admitted
+            Admission::Admitted(_)
         ));
         assert!(matches!(
             admit(
@@ -259,7 +273,7 @@ mod tests {
                 &request,
                 20
             ),
-            Admission::Admitted
+            Admission::Admitted(_)
         ));
 
         assert_eq!(meta.count_staged_intents().unwrap(), 1);

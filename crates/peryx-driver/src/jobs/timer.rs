@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     CACHE_MAINTENANCE, CatalogSyncParameters, DcCopyParameters, JobHistoryCleanup, JobScheduler, MAINTENANCE_INTERVAL,
-    scheduled_job, submit_dc_copy, submit_maintenance,
+    WriteLedgerReap, scheduled_job, submit_dc_copy, submit_maintenance,
 };
 use crate::state::AppState;
 
@@ -97,6 +97,7 @@ pub async fn run_schedules(
         }
         let interval = if index == cleanup {
             scheduler.submit(Arc::new(JobHistoryCleanup));
+            scheduler.submit(Arc::new(WriteLedgerReap));
             MAINTENANCE_INTERVAL
         } else {
             let schedule = &plan[index];

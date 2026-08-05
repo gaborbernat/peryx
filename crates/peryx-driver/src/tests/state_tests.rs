@@ -221,3 +221,20 @@ fn test_running_a_search_persists_the_view_frontier_and_lifts_readability() {
         }
     );
 }
+
+#[test]
+fn test_write_ack_defaults_to_local_and_takes_the_installed_quorum() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
+    let mut state = AppState::new(meta, blobs, 60, Vec::new());
+    assert_eq!(state.write_ack_policy(), peryx_replication::DurabilityPolicy::Local);
+    assert_eq!(state.write_ack_deadline(), std::time::Duration::from_secs(5));
+
+    state.set_write_ack(
+        peryx_replication::DurabilityPolicy::Majority,
+        std::time::Duration::from_secs(30),
+    );
+    assert_eq!(state.write_ack_policy(), peryx_replication::DurabilityPolicy::Majority);
+    assert_eq!(state.write_ack_deadline(), std::time::Duration::from_secs(30));
+}

@@ -11,6 +11,7 @@ use peryx_driver::jobs::{
 };
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
 use peryx_identity::{ExternalGroup, ExternalGroupGrant, GrantScope, ProviderId};
+use peryx_replication::DurabilityPolicy;
 use peryx_upstream::{CredentialFailure, ExecCredentialConfig, ExecCredentialConfigError};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -22,16 +23,16 @@ use super::ConfigError;
 use super::model::{
     AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityListenerConfig, AvailabilityListenerTls, AvailabilityMode,
     BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE,
-    DEFAULT_REPLICA_POLL_INTERVAL_SECS, DcMember, DcMembership, DcRole, IndexConfig, IndexKind, JobsConfig,
-    LdapBindConfig, LdapProviderConfig, LogConfig, OidcProviderConfig, ReplicationConfig, S3StorageConfig,
-    SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig,
-    UpstreamTlsConfig, WebhookConfig, WebhookSecret,
+    DEFAULT_REPLICA_POLL_INTERVAL_SECS, DEFAULT_WRITE_ACK_DEADLINE_SECS, DcMember, DcMembership, DcRole, IndexConfig,
+    IndexKind, JobsConfig, LdapBindConfig, LdapProviderConfig, LogConfig, OidcProviderConfig, ReplicationConfig,
+    S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig,
+    UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret, WriteAckConfig,
 };
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
     RawAcme, RawAvailability, RawAvailabilityListener, RawBlobStorage, RawCredentialExec, RawDcMember,
     RawExternalGroupGrant, RawIndex, RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawReplication,
-    RawScheduledJob, RawTls, RawToken, RawUpstream, RawWebhook,
+    RawScheduledJob, RawTls, RawToken, RawUpstream, RawWebhook, RawWriteAck, RawWriteAckPolicy,
 };
 
 impl Config {
@@ -90,9 +91,11 @@ impl Config {
             let group = availability.group.take();
             let members = availability.members.take();
             let listener = availability.listener.take();
+            let write_ack = availability.write_ack.take();
             self.availability = classify_availability(availability)?;
             self.dc_membership = classify_membership(self.availability.mode(), group, members)?;
             self.availability_listener = classify_listener(self.availability.mode(), listener)?;
+            self.write_ack = classify_write_ack(self.availability.mode(), write_ack)?;
         }
         if let Some(blob) = partial.blob {
             self.blob = classify_blob(blob)?;
@@ -312,6 +315,35 @@ fn classify_availability(raw: RawAvailability) -> Result<AvailabilityConfig, Con
             reason: "`dc` and `ha` modes need a `[availability.replication]` role",
         }),
     }
+}
+
+/// Resolve `[availability.write_ack]`. `none` mode acknowledges from local durability and rejects a
+/// stronger quorum override; `dc` and `ha` default to a majority quorum and accept `local`, `majority`,
+/// or `everywhere`. A zero deadline is rejected so a write always has a positive window to prove durable.
+fn classify_write_ack(mode: AvailabilityMode, raw: Option<RawWriteAck>) -> Result<WriteAckConfig, ConfigError> {
+    let raw = raw.unwrap_or_default();
+    let deadline_secs = raw.deadline_secs.unwrap_or(DEFAULT_WRITE_ACK_DEADLINE_SECS);
+    if deadline_secs == 0 {
+        return Err(ConfigError::Availability {
+            reason: "`write_ack.deadline-secs` must be positive",
+        });
+    }
+    let policy = match (mode, raw.policy) {
+        (AvailabilityMode::None, Some(_)) => {
+            return Err(ConfigError::Availability {
+                reason: "`none` mode acknowledges from local durability; remove `write_ack.policy`",
+            });
+        }
+        (AvailabilityMode::None, None) | (_, Some(RawWriteAckPolicy::Local)) => DurabilityPolicy::Local,
+        (AvailabilityMode::Dc | AvailabilityMode::Ha, None | Some(RawWriteAckPolicy::Majority)) => {
+            DurabilityPolicy::Majority
+        }
+        (_, Some(RawWriteAckPolicy::Everywhere)) => DurabilityPolicy::Everywhere,
+    };
+    Ok(WriteAckConfig {
+        policy,
+        deadline: Duration::from_secs(deadline_secs),
+    })
 }
 
 fn classify_replication(raw: RawReplication) -> Result<ReplicationConfig, ConfigError> {

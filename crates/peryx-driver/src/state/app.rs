@@ -72,6 +72,12 @@ pub struct ServingState {
     /// The fixed availability topology this process was configured with, projected per request into a
     /// role-filtered snapshot. Single-node `none` mode holds an empty roster.
     pub(super) availability_topology: peryx_core::TopologyConfig,
+    /// The durability quorum a hosted write must reach before it is acknowledged, resolved from the
+    /// `[availability.write_ack]` config. Single-node `none` mode acknowledges from local durability.
+    pub(super) write_ack_policy: peryx_replication::DurabilityPolicy,
+    /// The deadline the client waits for a write to prove durable before the write is reported
+    /// retry-safe-unknown rather than a definite failure.
+    pub(super) write_ack_deadline: std::time::Duration,
     /// Immutable repository-route positions for request dispatch.
     pub(super) route_resolver: RouteResolver,
     pub indexes: Vec<Index>,
@@ -214,6 +220,18 @@ impl ServingState {
     #[must_use]
     pub const fn availability_topology(&self) -> &peryx_core::TopologyConfig {
         &self.availability_topology
+    }
+
+    /// The durability quorum a hosted write must reach before it is acknowledged.
+    #[must_use]
+    pub const fn write_ack_policy(&self) -> peryx_replication::DurabilityPolicy {
+        self.write_ack_policy
+    }
+
+    /// The deadline the client waits for a write to prove durable before it is reported retry-safe.
+    #[must_use]
+    pub const fn write_ack_deadline(&self) -> std::time::Duration {
+        self.write_ack_deadline
     }
 
     /// The authority role this node was configured with, from its replication role rather than its

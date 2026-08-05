@@ -122,6 +122,27 @@ pub struct RawAvailability {
     pub members: Option<Vec<RawDcMember>>,
     /// The `[availability.listener]` table: the private control listener a `dc` or `ha` node exposes.
     pub listener: Option<RawAvailabilityListener>,
+    /// The `[availability.write_ack]` table: the durability quorum and client deadline a hosted write
+    /// must reach before it is acknowledged. Absent takes the mode's default.
+    pub write_ack: Option<RawWriteAck>,
+}
+
+/// The raw `[availability.write_ack]` table before quorum and deadline resolution.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RawWriteAck {
+    pub policy: Option<RawWriteAckPolicy>,
+    /// The client write-ack deadline in seconds; a rosterless default applies when omitted.
+    pub deadline_secs: Option<u64>,
+}
+
+/// The durability quorum a hosted write must reach across the datacenter's members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RawWriteAckPolicy {
+    Local,
+    Majority,
+    Everywhere,
 }
 
 /// The raw `[availability.listener]` table before address and TLS validation.

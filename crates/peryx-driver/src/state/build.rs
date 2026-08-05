@@ -324,6 +324,8 @@ impl AppState {
                 read_only: false,
                 availability_role: peryx_core::NodeRole::Writer,
                 availability_topology: peryx_core::TopologyConfig::default(),
+                write_ack_policy: peryx_replication::DurabilityPolicy::Local,
+                write_ack_deadline: std::time::Duration::from_secs(5),
                 route_resolver: peryx_index::RouteResolver::new(&indexes),
                 indexes,
                 cache: peryx_index::ServingCache::new(hot_cache_bytes, ttl_secs),

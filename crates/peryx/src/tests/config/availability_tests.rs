@@ -161,3 +161,59 @@ fn test_listener_rejects_unsafe_or_malformed_tables(#[case] text: &str, #[case] 
 
     assert!(error.to_string().contains(expected), "{error}");
 }
+
+#[test]
+fn test_write_ack_defaults_to_local_durability_under_none() {
+    let write_ack = Config::default().write_ack;
+    assert_eq!(write_ack.policy, peryx_replication::DurabilityPolicy::Local);
+    assert_eq!(write_ack.deadline, Duration::from_secs(5));
+
+    let explicit = toml_config("[availability]\nmode = \"none\"\n").write_ack;
+    assert_eq!(explicit.policy, peryx_replication::DurabilityPolicy::Local);
+}
+
+#[test]
+fn test_write_ack_defaults_to_a_majority_quorum_under_dc() {
+    let write_ack = toml_config(DC_PRIMARY).write_ack;
+    assert_eq!(write_ack.policy, peryx_replication::DurabilityPolicy::Majority);
+    assert_eq!(write_ack.deadline, Duration::from_secs(5));
+}
+
+#[rstest]
+#[case::local("local", peryx_replication::DurabilityPolicy::Local)]
+#[case::majority("majority", peryx_replication::DurabilityPolicy::Majority)]
+#[case::everywhere("everywhere", peryx_replication::DurabilityPolicy::Everywhere)]
+fn test_write_ack_resolves_the_configured_quorum(
+    #[case] policy: &str,
+    #[case] expected: peryx_replication::DurabilityPolicy,
+) {
+    let text = format!("{DC_PRIMARY}[availability.write_ack]\npolicy = \"{policy}\"\ndeadline-secs = 30\n");
+    let write_ack = toml_config(&text).write_ack;
+    assert_eq!(write_ack.policy, expected);
+    assert_eq!(write_ack.deadline, Duration::from_secs(30));
+}
+
+#[rstest]
+#[case::policy_under_none(
+    "[availability]\nmode = \"none\"\n[availability.write_ack]\npolicy = \"majority\"\n",
+    "acknowledges from local durability"
+)]
+#[case::zero_deadline(
+    "[availability]\nmode = \"dc\"\n[availability.replication]\nrole = \"primary\"\nsource = \"a\"\ntoken = \"b\"\n[availability.write_ack]\ndeadline-secs = 0\n",
+    "must be positive"
+)]
+fn test_write_ack_rejects_impossible_combinations(#[case] text: &str, #[case] expected: &str) {
+    let error = config::from_toml("x.toml".into(), text)
+        .and_then(|partial| Config::default().apply(partial))
+        .unwrap_err();
+
+    assert!(error.to_string().contains(expected), "{error}");
+}
+
+#[test]
+fn test_write_ack_config_supports_debug_clone_and_equality() {
+    let config = Config::default().write_ack;
+    assert_eq!(config, config);
+    assert_eq!(config, config.clone());
+    assert!(format!("{config:?}").contains("Local"));
+}

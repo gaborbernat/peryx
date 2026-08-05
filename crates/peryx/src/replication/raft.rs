@@ -16,8 +16,8 @@ use std::time::Duration;
 use std::collections::BTreeSet;
 
 use anyhow::{Context as _, bail};
-use openraft::LogId;
 use openraft::error::{ClientWriteError, RaftError};
+use openraft::{LogId, StoredMembership};
 use peryx_driver::state::{
     ClusterStatus, CommandOutcome, CommandReceipt, ControlCommand, ControlError, HomeClaim, MembershipControl,
     OwnershipAuthority, OwnershipError, TransferOutcome, plan_voter_roster,
@@ -300,8 +300,17 @@ impl OwnershipGroup {
             datacenter: DatacenterId(datacenter.to_owned()),
             addr: address,
         };
+        // A learner does not vote, so the voter roster is unchanged: old and new are the current voters.
+        let metrics = self.node.metrics().borrow().clone();
+        let voters: BTreeSet<u64> = metrics.membership_config.voter_ids().collect();
+        let voters = voter_names(&metrics.membership_config, &voters);
         match self.node.raft().add_learner(voter_id(datacenter), node, false).await {
-            Ok(response) => Ok(committed_receipt(&response.log_id, CommandOutcome::Committed)),
+            Ok(response) => Ok(committed_receipt(
+                &response.log_id,
+                CommandOutcome::Committed,
+                voters.clone(),
+                voters,
+            )),
             Err(error) => Err(map_write_error(&error)),
         }
     }
@@ -318,8 +327,12 @@ impl OwnershipGroup {
         } else {
             CommandOutcome::Committed
         };
+        // Name the voter roster the rewrite moves between, so the audit records the transition. The
+        // promoted learner already sits in the roster as a node, so its id resolves to a name.
+        let old_voters = voter_names(&metrics.membership_config, &current);
+        let new_voters = voter_names(&metrics.membership_config, &planned);
         match self.node.raft().change_membership(planned, false).await {
-            Ok(response) => Ok(committed_receipt(&response.log_id, outcome)),
+            Ok(response) => Ok(committed_receipt(&response.log_id, outcome, old_voters, new_voters)),
             Err(error) => Err(map_write_error(&error)),
         }
     }
@@ -332,20 +345,47 @@ impl OwnershipGroup {
                 OwnershipResponse::Applied(OwnershipEffect::Rejected(rejection)) => {
                     Err(ControlError::Invalid(rejection_reason(rejection).to_owned()))
                 }
-                _ => Ok(committed_receipt(&response.log_id, CommandOutcome::Committed)),
+                // A transfer or epoch command does not touch the voter roster, so it carries no transition.
+                _ => Ok(committed_receipt(
+                    &response.log_id,
+                    CommandOutcome::Committed,
+                    Vec::new(),
+                    Vec::new(),
+                )),
             },
             Err(error) => Err(map_write_error(&error)),
         }
     }
 }
 
-/// The committed identity of a log entry: the term and index the receipt reports.
-const fn committed_receipt(log_id: &LogId<u64>, outcome: CommandOutcome) -> CommandReceipt {
+/// The committed identity of a log entry: its term and index, plus the voter roster the command moved the
+/// group between, so the audit records the transition. A command that does not touch the roster passes
+/// empty sets.
+const fn committed_receipt(
+    log_id: &LogId<u64>,
+    outcome: CommandOutcome,
+    old_voters: Vec<String>,
+    new_voters: Vec<String>,
+) -> CommandReceipt {
     CommandReceipt {
         term: log_id.leader_id.term,
         index: log_id.index,
         outcome,
+        old_voters,
+        new_voters,
     }
+}
+
+/// The datacenter names of the roster's voters named by `voter_ids`, in sorted order, for the audit's
+/// roster transition. A learner in the roster is excluded, so the set is the voting membership alone.
+fn voter_names(membership: &StoredMembership<u64, PeryxNode>, voter_ids: &BTreeSet<u64>) -> Vec<String> {
+    membership
+        .nodes()
+        .filter(|(id, _)| voter_ids.contains(*id))
+        .map(|(_, node)| node.datacenter.0.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Map a client-write failure to a control error, reading the forward target from a not-leader rejection

@@ -11,6 +11,8 @@
 //! Dispatching to peers and awaiting their receipts under a deadline is the caller's; this is the
 //! deterministic core it feeds and reads.
 
+use std::collections::BTreeSet;
+
 use peryx_storage::blob::Digest;
 
 use crate::ack::AckDecision;
@@ -29,20 +31,20 @@ pub enum ReceiptOutcome {
     Ignored,
 }
 
-/// One filesystem write's gathered receipts, held against its digest, member count, and durability
+/// One filesystem write's gathered receipts, held against its digest, member set, and durability
 /// policy to decide its datacenter acknowledgement.
 #[derive(Debug, Clone)]
 pub struct FilesystemAck {
     digest: Digest,
-    members: usize,
+    members: BTreeSet<String>,
     policy: DurabilityPolicy,
     receipts: Vec<ReceiptAck>,
 }
 
 impl FilesystemAck {
-    /// A write awaiting quorum for `digest` across `members` configured nodes under `policy`.
+    /// A write awaiting quorum for `digest` across the configured `members` under `policy`.
     #[must_use]
-    pub const fn new(digest: Digest, members: usize, policy: DurabilityPolicy) -> Self {
+    pub const fn new(digest: Digest, members: BTreeSet<String>, policy: DurabilityPolicy) -> Self {
         Self {
             digest,
             members,
@@ -51,11 +53,15 @@ impl FilesystemAck {
         }
     }
 
-    /// Record one node's receipt. A receipt for another digest, or a second receipt from a node this
-    /// write already holds, is [`Ignored`](ReceiptOutcome::Ignored), so a duplicated or misrouted
-    /// response never inflates the quorum and the held set stays bounded by the member count.
+    /// Record one node's receipt. A receipt for another digest, one from a node outside the configured
+    /// members, or a second receipt from a node this write already holds is
+    /// [`Ignored`](ReceiptOutcome::Ignored), so a duplicated, misrouted, or stray response never inflates
+    /// the quorum and the held set stays bounded by the members.
     pub fn record(&mut self, receipt: ReceiptAck) -> ReceiptOutcome {
-        if receipt.digest != self.digest || self.receipts.iter().any(|held| held.node == receipt.node) {
+        if receipt.digest != self.digest
+            || !self.members.contains(&receipt.node)
+            || self.receipts.iter().any(|held| held.node == receipt.node)
+        {
             return ReceiptOutcome::Ignored;
         }
         self.receipts.push(receipt);
@@ -75,7 +81,7 @@ impl FilesystemAck {
     /// the deadline is live, and unknown rather than failed once the deadline expires unproven.
     #[must_use]
     pub fn decide(&self, metadata: AckDecision, deadline: Deadline) -> DcAck {
-        let byte_ack = decide_byte_ack(&self.digest, &self.receipts, self.members, self.policy);
+        let byte_ack = decide_byte_ack(&self.digest, &self.receipts, &self.members, self.policy);
         decide_dc_ack(metadata, &ByteEvidence::Filesystem(byte_ack), deadline)
     }
 }

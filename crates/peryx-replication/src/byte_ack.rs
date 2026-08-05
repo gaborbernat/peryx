@@ -10,6 +10,8 @@
 //! The caller that gathers receipts under a deadline, and fails the write when the deadline expires
 //! before quorum, composes this decision on top.
 
+use std::collections::BTreeSet;
+
 use peryx_storage::blob::Digest;
 
 use crate::readiness::DurabilityPolicy;
@@ -34,8 +36,8 @@ impl ByteAckDecision {
     }
 }
 
-/// Decide whether `digest`'s bytes are datacenter-acknowledged given the `acks` received so far, a group
-/// of `configured` independent members, and its [`DurabilityPolicy`].
+/// Decide whether `digest`'s bytes are datacenter-acknowledged given the `acks` received so far, the
+/// group's `members`, and its [`DurabilityPolicy`].
 ///
 /// Folds the evidence through [`assess_byte_durability`] and reports the write's acknowledgement: a
 /// durable result acknowledges, and a pending one carries how many more independent receipts remain, so
@@ -44,10 +46,10 @@ impl ByteAckDecision {
 pub fn decide_byte_ack(
     digest: &Digest,
     acks: &[ReceiptAck],
-    configured: usize,
+    members: &BTreeSet<String>,
     policy: DurabilityPolicy,
 ) -> ByteAckDecision {
-    match assess_byte_durability(digest, acks, configured, policy) {
+    match assess_byte_durability(digest, acks, members, policy) {
         ByteDurability::Durable { nodes } => ByteAckDecision::Acknowledged { nodes },
         ByteDurability::Pending { nodes, required } => ByteAckDecision::Pending {
             remaining: required - nodes.len(),

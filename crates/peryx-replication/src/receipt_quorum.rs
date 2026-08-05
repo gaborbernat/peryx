@@ -50,28 +50,31 @@ impl ByteDurability {
     }
 }
 
-/// Decide whether `digest`'s bytes are datacenter-durable given the `acks` received so far, a group of
-/// `configured` independent members, and its [`DurabilityPolicy`].
+/// Decide whether `digest`'s bytes are datacenter-durable given the `acks` received so far, the group's
+/// `members`, and its [`DurabilityPolicy`].
 ///
-/// Only receipts for `digest` count, and each node counts once however many it returned, so two staging
-/// paths on one node or a duplicated response never inflate the tally. The bytes are durable once the
-/// distinct node count reaches [`DurabilityPolicy::required_acks`]; below that the result is pending and
-/// still carries the acknowledging nodes, so a retry resumes from the copies already made.
+/// A receipt counts only when it is for `digest` and comes from a configured member, so a receipt for
+/// another digest, a stray one from a node outside the group, or a second path on a node already counted
+/// never inflates the tally. The quorum required is [`DurabilityPolicy::required_acks`] over the member
+/// count, floored at one: a datacenter never proves an artifact durable without at least one independent
+/// node holding it, which is what `Everywhere` over an empty roster would otherwise claim vacuously. The
+/// bytes are durable once the distinct member count reaches that quorum; below it the result is pending
+/// and carries the acknowledging nodes, so a retry resumes from the copies already made.
 #[must_use]
 pub fn assess_byte_durability(
     digest: &Digest,
     acks: &[ReceiptAck],
-    configured: usize,
+    members: &BTreeSet<String>,
     policy: DurabilityPolicy,
 ) -> ByteDurability {
     let nodes: Vec<String> = acks
         .iter()
-        .filter(|ack| &ack.digest == digest)
+        .filter(|ack| &ack.digest == digest && members.contains(&ack.node))
         .map(|ack| ack.node.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let required = policy.required_acks(configured);
+    let required = policy.required_acks(members.len()).max(1);
     if nodes.len() >= required {
         ByteDurability::Durable { nodes }
     } else {

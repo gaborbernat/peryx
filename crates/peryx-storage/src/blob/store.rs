@@ -76,13 +76,20 @@ fn prune_empty_parents(path: &Path, stop_at: &Path) {
 }
 
 fn remove_pending(path: &Path) -> Result<(), BlobError> {
+    remove_pending_with(path, std::thread::sleep)
+}
+
+/// Delete a pending stage, retrying a transient `PermissionDenied` (a straggling handle on Windows)
+/// with a doubling backoff up to 64ms. `wait` receives each backoff before the retry; production
+/// sleeps, and a test records the schedule so it neither sleeps nor races a real clock.
+fn remove_pending_with(path: &Path, mut wait: impl FnMut(Duration)) -> Result<(), BlobError> {
     let mut backoff = Duration::from_millis(1);
     loop {
         match std::fs::remove_file(path) {
             Ok(()) => return Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
             Err(error) if error.kind() == ErrorKind::PermissionDenied && backoff < Duration::from_millis(64) => {
-                std::thread::sleep(backoff);
+                wait(backoff);
                 backoff *= 2;
             }
             Err(error) => return Err(error.into()),
@@ -577,8 +584,13 @@ mod placement_tests {
 #[cfg(test)]
 mod stage_tests {
     #[cfg(unix)]
+    use std::time::Duration;
+
+    #[cfg(unix)]
     use super::discard_stage;
     use super::remove_pending;
+    #[cfg(unix)]
+    use super::remove_pending_with;
 
     #[test]
     fn test_remove_pending_treats_a_missing_stage_as_removed() {
@@ -588,7 +600,7 @@ mod stage_tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_remove_pending_reports_a_persistent_denial() {
+    fn test_remove_pending_backs_off_then_reports_a_persistent_denial() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let locked = dir.path().join("locked");
@@ -596,9 +608,18 @@ mod stage_tests {
         let target = locked.join("stage");
         std::fs::write(&target, b"x").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = remove_pending(&target);
+
+        // Record the backoff schedule instead of sleeping, so the retry stays deterministic and fast.
+        let mut waits = Vec::new();
+        let result = remove_pending_with(&target, |backoff| waits.push(backoff));
+
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(result.unwrap_err().kind(), crate::blob::BlobErrorKind::Io);
+        assert_eq!(
+            waits,
+            [1, 2, 4, 8, 16, 32].map(Duration::from_millis),
+            "a persistent denial doubles the backoff up to the 64ms ceiling"
+        );
     }
 
     #[cfg(unix)]

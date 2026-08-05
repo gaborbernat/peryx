@@ -466,13 +466,15 @@ fn spawn_revalidation(
 /// Hand off the revalidation the serving path spawned. The request already answered from the stale
 /// bytes, so production drops the handle. A test build instead captures it against `state`, so
 /// [`settle_revalidations`] can await the refresh at a deterministic point rather than poll for it.
+#[cfg_attr(not(test), allow(unused_variables, clippy::needless_pass_by_value))]
 fn detach_revalidation(state: &Arc<ServingState>, refresh: Option<tokio::task::JoinHandle<()>>) {
+    // Production drops the handle at the end of this body, detaching the refresh; only a test build
+    // captures it. An empty production body beats a `#[cfg(not(test))]` statement that no coverage-run
+    // test executes, which read as an uncovered line under the test-cfg coverage build.
     #[cfg(test)]
     if let Some(refresh) = refresh {
         revalidation_probe::capture(state, refresh);
     }
-    #[cfg(not(test))]
-    let _ = (state, refresh);
 }
 
 /// Revalidate one page and release the single-flight hold however it ends. The request that spawned

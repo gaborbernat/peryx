@@ -12,22 +12,38 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use mockall::mock;
 use redb::backends::InMemoryBackend;
 use redb::{Database, StorageBackend as _, WriteTransaction};
 
 use super::{MetaDatabase, MetaStore};
 
-mock! {
-    #[derive(Debug)]
-    pub Backend {}
+/// A redb backend that delegates to an in-memory backend until its fault is armed, then fails the
+/// chosen operation. Hand-written rather than mocked so no macro-generated arm sits uncovered.
+#[derive(Debug)]
+struct FaultBackend {
+    inner: Arc<InMemoryBackend>,
+    fault: Arc<Fault>,
+}
 
-    impl redb::StorageBackend for Backend {
-        fn len(&self) -> io::Result<u64>;
-        fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()>;
-        fn set_len(&self, len: u64) -> io::Result<()>;
-        fn sync_data(&self) -> io::Result<()>;
-        fn write(&self, offset: u64, data: &[u8]) -> io::Result<()>;
+impl redb::StorageBackend for FaultBackend {
+    fn len(&self) -> io::Result<u64> {
+        self.fault.pass().and_then(|()| self.inner.len())
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
+        self.fault.pass().and_then(|()| self.inner.read(offset, out))
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.fault.pass().and_then(|()| self.inner.set_len(len))
+    }
+
+    fn sync_data(&self) -> io::Result<()> {
+        self.fault.pass().and_then(|()| self.inner.sync_data())
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        self.fault.pass().and_then(|()| self.inner.write(offset, data))
     }
 }
 
@@ -62,40 +78,19 @@ impl Fault {
     }
 }
 
-fn mock(inner: Arc<InMemoryBackend>, fault: Arc<Fault>) -> MockBackend {
-    let mut backend = MockBackend::new();
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_len()
-        .returning(move || fail.pass().and_then(|()| storage.len()));
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_read()
-        .returning(move |offset, out| fail.pass().and_then(|()| storage.read(offset, out)));
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_set_len()
-        .returning(move |len| fail.pass().and_then(|()| storage.set_len(len)));
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_sync_data()
-        .returning(move || fail.pass().and_then(|()| storage.sync_data()));
-    backend
-        .expect_write()
-        .returning(move |offset, data| fault.pass().and_then(|()| inner.write(offset, data)));
-    backend
+fn faulted(inner: &Arc<InMemoryBackend>, fault: &Arc<Fault>) -> FaultBackend {
+    FaultBackend {
+        inner: inner.clone(),
+        fault: fault.clone(),
+    }
 }
 
 fn database(inner: &Arc<InMemoryBackend>, fault: &Arc<Fault>) -> Database {
-    // A zeroed cache keeps tree pages crossing the mocked boundary after a fault is armed, so reads
-    // reach the mock instead of an in-process page copy.
+    // A zeroed cache keeps tree pages crossing the fault boundary after it is armed, so reads reach
+    // the fault backend instead of an in-process page copy.
     Database::builder()
         .set_cache_size(0)
-        .create_with_backend(mock(inner.clone(), fault.clone()))
+        .create_with_backend(faulted(inner, fault))
         .unwrap()
 }
 
@@ -141,18 +136,18 @@ fn test_backend_delegates_every_call_then_faults_on_demand() {
     // Drive each StorageBackend method directly: redb does not exercise all five in the store tests,
     // yet every one must delegate to the inner backend when disarmed and fail once armed.
     let (inner, fault) = backend();
-    let mock = mock(inner.clone(), fault.clone());
+    let disk = faulted(&inner, &fault);
 
-    mock.set_len(64).unwrap();
-    mock.write(0, b"hello").unwrap();
-    mock.sync_data().unwrap();
-    assert_eq!(mock.len().unwrap(), inner.len().unwrap());
+    disk.set_len(64).unwrap();
+    disk.write(0, b"hello").unwrap();
+    disk.sync_data().unwrap();
+    assert_eq!(disk.len().unwrap(), inner.len().unwrap());
     let mut buf = [0_u8; 5];
-    mock.read(0, &mut buf).unwrap();
+    disk.read(0, &mut buf).unwrap();
     assert_eq!(&buf, b"hello");
 
     fault.arm(0);
-    assert!(mock.len().is_err());
+    assert!(disk.len().is_err());
     fault.disable();
-    assert!(mock.len().is_ok());
+    assert!(disk.len().is_ok());
 }

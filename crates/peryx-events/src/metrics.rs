@@ -915,7 +915,8 @@ fn collect_daily(event: &Event, clock: &Clock, out: &mut Vec<(DailyKey, u64)>) {
 ///
 /// Split out of [`aggregate`] so the retention flush runs on the caller's thread. The aggregator calls
 /// it from a spawned thread whose coverage x86 llvm-cov does not capture reliably, so a direct unit
-/// test drives this — and the `expire_daily` call inside it — on the test thread instead.
+/// test drives this on the test thread instead. Every statement stays a single unconditional region:
+/// no embedded closure or `clock()` sub-expression that x86 llvm-cov splits into a flapping dead arm.
 fn apply_daily_batch(
     downloads: Vec<(DailyKey, u64)>,
     daily: &RwLock<DailyBuckets>,
@@ -933,12 +934,17 @@ fn apply_daily_batch(
         totals.bytes += bytes;
     }
     if let Some(days) = retention_days {
-        expire_daily(&mut daily, clock(), days);
+        let now = clock();
+        expire_daily(&mut daily, now, days);
     }
-    let pending = store.is_some().then(|| snapshot_daily(&daily));
+    let snapshot = match store {
+        Some(_) => Some(snapshot_daily(&daily)),
+        None => None,
+    };
     drop(daily);
-    if let (Some(store), Some(snapshot)) = (store, pending) {
-        let _ = store.save_daily(&serde_json::to_vec(&snapshot).expect("serialize daily usage snapshot"));
+    if let (Some(store), Some(snapshot)) = (store, snapshot) {
+        let encoded = serde_json::to_vec(&snapshot).expect("serialize daily usage snapshot");
+        let _ = store.save_daily(&encoded);
     }
 }
 
@@ -1449,21 +1455,42 @@ mod tests {
         // on the aggregator's spawned thread.
         let (_dir, meta) = store();
         let mut seeded = DailyBuckets::new();
-        seeded.insert(bucket(10, "1.0"), DailyTotals { downloads: 5, bytes: 50 });
+        seeded.insert(
+            bucket(10, "1.0"),
+            DailyTotals {
+                downloads: 5,
+                bytes: 50,
+            },
+        );
         let daily = RwLock::new(seeded);
 
-        apply_daily_batch(vec![(bucket(30, "2.0"), 9)], &daily, Some(7), &clock_on_day(30), Some(&meta.analytics()));
+        apply_daily_batch(
+            vec![(bucket(30, "2.0"), 9)],
+            &daily,
+            Some(7),
+            &clock_on_day(30),
+            Some(&meta.analytics()),
+        );
 
         let rows = daily_rows(&daily.read().unwrap());
         assert_eq!(rows.len(), 1, "the aged day-10 bucket survived retention: {rows:?}");
         assert_eq!((rows[0].day, rows[0].downloads, rows[0].bytes), (30, 1, 9));
-        assert!(meta.analytics().load_daily().unwrap().is_some(), "the batch was not persisted");
+        assert!(
+            meta.analytics().load_daily().unwrap().is_some(),
+            "the batch was not persisted"
+        );
     }
 
     #[test]
     fn test_apply_daily_batch_without_retention_or_store_keeps_every_bucket() {
         let mut seeded = DailyBuckets::new();
-        seeded.insert(bucket(10, "1.0"), DailyTotals { downloads: 5, bytes: 50 });
+        seeded.insert(
+            bucket(10, "1.0"),
+            DailyTotals {
+                downloads: 5,
+                bytes: 50,
+            },
+        );
         let daily = RwLock::new(seeded);
 
         apply_daily_batch(vec![(bucket(30, "2.0"), 9)], &daily, None, &clock_on_day(30), None);

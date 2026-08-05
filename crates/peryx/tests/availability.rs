@@ -8,9 +8,9 @@
 
 mod harness;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use harness::{HarnessError, MemberSpec, OwnershipControl, Role, Topology, Toxiproxy};
+use harness::{HarnessError, MemberSpec, Node, OwnershipControl, Role, Topology, Toxiproxy};
 
 #[test]
 fn test_spawns_a_node_and_reports_ready() {
@@ -241,4 +241,78 @@ fn test_ha_replica_metrics_exposes_the_replication_series() {
         body.contains("peryx_replication_"),
         "an ha replica exports the replication series: {body}"
     );
+}
+
+fn metric(node: &Node, series: &str) -> u64 {
+    let (_, body) = node.metrics().expect("metrics reachable");
+    body.lines()
+        .find_map(|line| line.strip_prefix(series).and_then(|rest| rest.trim().parse().ok()))
+        .unwrap_or(0)
+}
+
+/// Poll until the replica records a metadata transport error, asserting it keeps serving read-only the
+/// whole time, or fail after a generous deadline. Deterministic in outcome: it waits for the transition
+/// rather than sleeping a fixed span and hoping.
+fn await_sync_error(node: &Node) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        assert!(
+            node.is_ready(),
+            "the replica keeps serving read-only through the metadata outage"
+        );
+        if metric(node, "peryx_replication_sync_errors_total ") > 0 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the replica never recorded a metadata transport loss after the writer died");
+}
+
+fn await_caught_up(node: &Node) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if metric(node, "peryx_replication_caught_up ") == 1 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the replica did not catch up: {:?}", node.metrics());
+}
+
+#[test]
+fn test_replica_recovers_metadata_after_a_writer_disconnect() {
+    // A real dc replica follows the writer over the bounded metadata transport. Killing the writer
+    // disconnects the metadata link: the replica keeps serving read-only and its transport records the
+    // loss (disconnect during a batch). Restarting the writer heals the link and the replica catches up
+    // again, its durable frontier keeping the re-poll from replaying an already-applied change (response
+    // loss after apply).
+    let mut cluster = Topology::dc(
+        "east",
+        vec![
+            MemberSpec::new("writer-a", "east-1", Role::Writer),
+            MemberSpec::new("replica-b", "east-2", Role::Replica),
+        ],
+    )
+    .start()
+    .expect("dc cluster starts");
+    let writer = cluster
+        .nodes()
+        .iter()
+        .position(|node| node.identity() == "writer-a")
+        .unwrap();
+    let replica = cluster
+        .nodes()
+        .iter()
+        .position(|node| node.identity() == "replica-b")
+        .unwrap();
+
+    await_caught_up(&cluster.nodes()[replica]);
+
+    cluster.nodes_mut()[writer].kill();
+    await_sync_error(&cluster.nodes()[replica]);
+
+    cluster.nodes_mut()[writer]
+        .restart()
+        .expect("the writer restarts on its port");
+    await_caught_up(&cluster.nodes()[replica]);
 }

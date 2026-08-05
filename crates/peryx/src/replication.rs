@@ -21,9 +21,10 @@ use peryx_http::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
 };
 use peryx_replication::{
-    BlobPlaneReport, BlobSources, CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_SUSPECT_AFTER, HttpBlobTransport,
-    HttpPrimary, LivenessTracker, Replica, SyncError, SyncOutcome, TransferLimits, advance_blob_frontier,
-    liveness_router, primary_router, pull_outstanding,
+    BatchRequest, BlobPlaneReport, BlobSources, CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_RECONNECT_POLICY,
+    DEFAULT_SUSPECT_AFTER, DEFAULT_TRANSFER_LIMITS, HttpBlobTransport, HttpPeerTransport, LivenessTracker,
+    PeerTransport, ReconnectPolicy, Replica, Retry, SyncError, SyncOutcome, TransferLimits, TransportError,
+    advance_blob_frontier, liveness_router, primary_router, pull_outstanding,
 };
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
@@ -373,9 +374,12 @@ fn availability_response(status: StatusCode, body: serde_json::Map<String, Value
 const BLOB_FETCH_CONCURRENCY: std::num::NonZeroUsize = std::num::NonZeroUsize::new(8).expect("8 is non-zero");
 const BLOB_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+const METADATA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct ReplicaLoop {
     app: Arc<AppState>,
-    primary: HttpPrimary,
+    metadata: HttpPeerTransport,
+    policy: ReconnectPolicy,
     meta: MetaStore,
     blobs: BlobStorage,
     page_size: std::num::NonZeroUsize,
@@ -409,12 +413,39 @@ pub(crate) fn apply_replicated_page(app: &AppState, outcome: SyncOutcome, change
     }
 }
 
+/// The delay the replica loop waits after one pass: nothing between pages that still have more to pull,
+/// the poll interval once caught up, and a reconnect-policy backoff after a retryable transport loss,
+/// falling back to the poll interval once the policy gives up, so a peer that never recovers keeps trying
+/// at the base cadence rather than spinning. `attempt` counts consecutive transport losses and resets on
+/// any pass that applied.
+pub(crate) fn schedule_delay(
+    result: &Result<bool, TransportError>,
+    attempt: &mut u32,
+    policy: &ReconnectPolicy,
+    poll_interval: Duration,
+) -> Duration {
+    match result {
+        Ok(caught_up) => {
+            *attempt = 0;
+            if *caught_up { poll_interval } else { Duration::ZERO }
+        }
+        Err(error) => {
+            *attempt += 1;
+            match policy.on_error(error, *attempt) {
+                Retry::After(delay) => delay,
+                Retry::GiveUp { .. } => poll_interval,
+            }
+        }
+    }
+}
+
 impl ReplicaLoop {
     async fn run(self) {
+        let mut attempt: u32 = 0;
         loop {
-            if self.cycle().await {
-                tokio::time::sleep(self.poll_interval).await;
-            }
+            let result = self.cycle().await;
+            let delay = schedule_delay(&result, &mut attempt, &self.policy, self.poll_interval);
+            tokio::time::sleep(delay).await;
         }
     }
 
@@ -423,19 +454,33 @@ impl ReplicaLoop {
     /// and moves the blob frontier only over serials whose blobs are all local. The readable frontier
     /// the loop records is the slower of the two views, so reads never outrun the bytes they name. A
     /// blob loss records and retries; the metadata plane keeps advancing regardless.
-    async fn cycle(&self) -> bool {
+    ///
+    /// Returns `Ok(caught_up)` after a page applies, or `Err` on a retryable metadata transport loss so
+    /// the run loop backs off. A page that fails validation or commit records the failure and returns
+    /// `Ok(true)`, since re-fetching the same cursor at the poll cadence is the recovery, not a backoff.
+    async fn cycle(&self) -> Result<bool, TransportError> {
         let started = Instant::now();
-        let result = Replica::new(&self.meta, self.page_size).sync(&self.primary).await;
-        let elapsed = started.elapsed();
-        let (outcome, changed_keys) = match result {
-            Ok((outcome, changed_keys, _referenced)) => (outcome, changed_keys),
+        let replica = Replica::new(&self.meta, self.page_size);
+        let after = match replica.state() {
+            Ok(state) => state.map_or(0, |state| state.serial),
+            Err(error) => return Ok(self.record_metadata_error(&error, started.elapsed())),
+        };
+        let request = BatchRequest {
+            after,
+            max_operations: self.page_size,
+        };
+        let frame = match self.metadata.fetch_batch(request).await {
+            Ok(frame) => frame,
             Err(error) => {
-                self.monitor.record_error(&error);
-                self.metrics.record_error(&error, elapsed);
-                tracing::error!(%error, "replica metadata synchronization failed");
-                return true;
+                self.record_metadata_error(&SyncError::primary(error.clone()), started.elapsed());
+                return Err(error);
             }
         };
+        let (outcome, changed_keys) = match replica.apply_page(frame.into_page()) {
+            Ok((outcome, changed_keys, _referenced)) => (outcome, changed_keys),
+            Err(error) => return Ok(self.record_metadata_error(&error, started.elapsed())),
+        };
+        let elapsed = started.elapsed();
         apply_replicated_page(&self.app, outcome, &changed_keys);
         match self.pull_blobs().await {
             Ok(report) => self.monitor.record_blobs(report),
@@ -449,7 +494,16 @@ impl ReplicaLoop {
         let readable = self.app.readable_frontier().map_or(0, |frontier| frontier.serial);
         self.monitor.record_readable(readable);
         self.metrics.record_cycle(outcome, elapsed);
-        outcome.caught_up()
+        Ok(outcome.caught_up())
+    }
+
+    /// Record a metadata-plane failure on the monitor and the metrics, and report the pass as done so
+    /// the loop retries at its poll cadence. Returns `true` for the caught-up slot the cycle result carries.
+    fn record_metadata_error(&self, error: &SyncError, elapsed: Duration) -> bool {
+        self.monitor.record_error(error);
+        self.metrics.record_error(error, elapsed);
+        tracing::error!(%error, "replica metadata synchronization failed");
+        true
     }
 
     async fn pull_blobs(&self) -> Result<BlobPlaneReport, SyncError> {
@@ -564,7 +618,9 @@ impl ReplicationRuntime {
                 page_size,
             }) => {
                 let token = token.read().context("read the replica replication token")?;
-                let primary = HttpPrimary::new(upstream, token.clone()).context("build replica HTTP client")?;
+                let metadata =
+                    HttpPeerTransport::new(upstream, token.clone(), DEFAULT_TRANSFER_LIMITS, METADATA_FETCH_TIMEOUT)
+                        .context("build replica metadata transport")?;
                 let blob_transport =
                     HttpBlobTransport::new(upstream, token, TransferLimits::default(), BLOB_FETCH_TIMEOUT)
                         .context("build replica blob transport")?;
@@ -595,7 +651,8 @@ impl ReplicationRuntime {
                     Some((
                         ReplicaLoop {
                             app: state.clone(),
-                            primary,
+                            metadata,
+                            policy: DEFAULT_RECONNECT_POLICY,
                             meta: state.serving.meta.clone(),
                             blobs: state.serving.blobs.clone(),
                             page_size: *page_size,
@@ -677,7 +734,7 @@ impl ReplicationRuntime {
     #[cfg(test)]
     pub(crate) async fn sync_cycle(&self) -> Option<bool> {
         match &self.replica {
-            Some((replica, _)) => Some(replica.cycle().await),
+            Some((replica, _)) => Some(replica.cycle().await.unwrap_or(true)),
             None => None,
         }
     }

@@ -59,6 +59,13 @@ impl BatchFrame {
         &self.page
     }
 
+    /// Consume the frame for its decoded page, for a caller that applies the page and no longer needs
+    /// the framed byte length.
+    #[must_use]
+    pub fn into_page(self) -> ChangePage {
+        self.page
+    }
+
     /// The source identity and the serial the peer advertises as its current frontier.
     #[must_use]
     pub fn frontier(&self) -> (&str, u64) {

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -12,7 +12,9 @@ use http_body_util::BodyExt as _;
 use peryx_driver::IndexKind as RuntimeIndexKind;
 use peryx_driver::state::AppState;
 use peryx_identity::{Action, GrantScope, Role};
-use peryx_replication::{BLOB_VIEW, ChangePage, SyncOutcome, primary_router};
+use peryx_replication::{
+    BLOB_VIEW, ChangePage, DEFAULT_RECONNECT_POLICY, ReconnectPolicy, SyncOutcome, TransportError, primary_router,
+};
 use peryx_storage::blob::{BlobStore, Digest};
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
@@ -22,7 +24,7 @@ use crate::config::{
     AvailabilityConfig, Config, DcMember, DcMembership, DcRole, IndexKind, ReplicationConfig, SecretSource,
     TokenConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
 };
-use crate::replication::ReplicationRuntime;
+use crate::replication::{ReplicationRuntime, schedule_delay};
 use crate::server::{build_router, build_state, router_for};
 
 const TOKEN: &str = "replica-secret";
@@ -1015,5 +1017,120 @@ fn test_replication_runtime_rejects_an_invalid_upstream_url() {
         panic!("expected the invalid upstream URL to fail");
     };
 
-    assert!(error.to_string().contains("build replica HTTP client"), "{error}");
+    assert!(
+        error.to_string().contains("build replica metadata transport"),
+        "{error}"
+    );
+}
+
+fn bounded_policy(max_attempts: u32) -> ReconnectPolicy {
+    ReconnectPolicy::new(
+        Duration::from_millis(100),
+        NonZeroU32::new(2).unwrap(),
+        Duration::from_secs(30),
+        NonZeroU32::new(max_attempts).unwrap(),
+    )
+}
+
+#[test]
+fn test_schedule_delay_waits_the_poll_interval_when_caught_up() {
+    let mut attempt = 4;
+    let delay = schedule_delay(
+        &Ok(true),
+        &mut attempt,
+        &DEFAULT_RECONNECT_POLICY,
+        Duration::from_secs(5),
+    );
+    assert_eq!(delay, Duration::from_secs(5));
+    assert_eq!(attempt, 0, "an applied pass resets the failure count");
+}
+
+#[test]
+fn test_schedule_delay_pulls_the_next_page_at_once_when_more_remains() {
+    let mut attempt = 2;
+    let delay = schedule_delay(
+        &Ok(false),
+        &mut attempt,
+        &DEFAULT_RECONNECT_POLICY,
+        Duration::from_secs(5),
+    );
+    assert_eq!(delay, Duration::ZERO);
+    assert_eq!(attempt, 0);
+}
+
+#[test]
+fn test_schedule_delay_backs_off_a_retryable_transport_loss() {
+    let mut attempt = 0;
+    let delay = schedule_delay(
+        &Err(TransportError::Disconnected),
+        &mut attempt,
+        &bounded_policy(10),
+        Duration::from_secs(5),
+    );
+    assert_eq!(attempt, 1);
+    assert_eq!(
+        delay,
+        Duration::from_millis(100),
+        "the first backoff is the policy base"
+    );
+}
+
+#[test]
+fn test_schedule_delay_falls_back_to_the_poll_interval_once_the_policy_gives_up() {
+    let mut attempt = 0;
+    let delay = schedule_delay(
+        &Err(TransportError::Disconnected),
+        &mut attempt,
+        &bounded_policy(1),
+        Duration::from_secs(5),
+    );
+    assert_eq!(attempt, 1);
+    assert_eq!(
+        delay,
+        Duration::from_secs(5),
+        "an exhausted budget keeps trying at the base cadence"
+    );
+}
+
+#[tokio::test]
+async fn test_replica_cycle_records_a_transport_loss_and_reports_the_pass_done() {
+    // The upstream URL is valid but nothing listens, so a metadata fetch fails to connect. The cycle
+    // records the loss and reports the pass as done, and the run loop backs it off rather than spinning.
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config("http://127.0.0.1:1/", 1)));
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let caught_up = runtime.sync_cycle().await;
+    drop(guard);
+
+    assert_eq!(
+        caught_up,
+        Some(true),
+        "a transport loss ends the pass so the loop can back off"
+    );
+}
+
+#[tokio::test]
+async fn test_replica_cycle_reports_a_local_cursor_mismatch() {
+    // Advance the local journal past the replica cursor so reading the durable resume state fails its
+    // consistency check before any fetch; the cycle records it and reports the pass done.
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config("http://127.0.0.1:1/", 1)));
+    let state = build_state(&config).unwrap();
+    state
+        .serving
+        .meta
+        .commit_driver_txn(|_| Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"stray".to_vec()])))
+        .unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let caught_up = runtime.sync_cycle().await;
+    drop(guard);
+
+    assert_eq!(caught_up, Some(true));
 }

@@ -40,6 +40,10 @@ pub struct Replica<'store> {
     page_limit: NonZeroUsize,
 }
 
+/// What applying one replicated page produced: the sync summary, the metadata keys it changed, and the
+/// `(digest, size)` blobs it referenced for the blob plane to pull on its own frontier.
+pub type AppliedPage = (SyncOutcome, Vec<String>, Vec<(Digest, u64)>);
+
 impl<'store> Replica<'store> {
     #[must_use]
     pub const fn new(meta: &'store MetaStore, page_limit: NonZeroUsize) -> Self {
@@ -75,16 +79,28 @@ impl<'store> Replica<'store> {
     ///
     /// # Errors
     /// Returns an error for a source failure, invalid page, or local store failure.
-    pub async fn sync<P: Primary>(
-        &self,
-        primary: &P,
-    ) -> Result<(SyncOutcome, Vec<String>, Vec<(Digest, u64)>), SyncError> {
-        let state = self.state()?;
-        let after = state.as_ref().map_or(0, |state| state.serial);
+    pub async fn sync<P: Primary>(&self, primary: &P) -> Result<AppliedPage, SyncError> {
+        let after = self.state()?.as_ref().map_or(0, |state| state.serial);
         let page = primary
             .changes(after, self.page_limit.get())
             .await
             .map_err(SyncError::primary)?;
+        self.apply_page(page)
+    }
+
+    /// Validate a fetched page against the durable cursor and commit it in one transaction, returning
+    /// the applied outcome, the changed metadata keys, and the blobs it referenced.
+    ///
+    /// The transport that produced the page does not reach here: the legacy single-primary sync and the
+    /// multi-peer puller both land their pages through this one apply, so page validation and the commit
+    /// boundary can never diverge between them.
+    ///
+    /// # Errors
+    /// Returns a [`SyncError`] when the page fails validation against the cursor, or when the commit
+    /// transaction fails.
+    pub fn apply_page(&self, page: ChangePage) -> Result<AppliedPage, SyncError> {
+        let state = self.state()?;
+        let after = state.as_ref().map_or(0, |state| state.serial);
         let validated = ValidatedPage::new(page, after, self.page_limit.get(), state.as_ref())?;
         let referenced: Vec<(Digest, u64)> = validated.blobs.values().cloned().collect();
         if validated.journal.is_empty() {

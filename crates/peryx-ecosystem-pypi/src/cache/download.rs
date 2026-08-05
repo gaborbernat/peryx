@@ -226,7 +226,7 @@ async fn pump_download(
 ) {
     let started = std::time::Instant::now();
     let outcome = match drain_to_blob(body, &mut pending, &producer).await {
-        Ok(()) => pending.commit(&digest).await.map_err(|err| err.to_string()),
+        Ok(()) => pending.commit(&digest).await.map(|_| ()).map_err(|err| err.to_string()),
         Err(error) => match pending.abort().await {
             Ok(()) => Err(error),
             Err(cleanup) => Err(cleanup.to_string()),

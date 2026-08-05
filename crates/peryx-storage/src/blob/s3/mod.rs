@@ -30,7 +30,7 @@ pub use self::config::{S3Addressing, S3Config, S3ConfigError, S3Settings};
 use super::store::BlobStore;
 use super::{
     BlobBackend, BlobCapabilities, BlobDurability, BlobError, BlobLease, BlobMetadata, BlobOperation, BlobRead,
-    BlobReadBody, BlobStaged, BlobSupport, BlobWrite, Digest, DurabilityCapabilities,
+    BlobReadBody, BlobStaged, BlobSupport, BlobWrite, Digest, DurabilityCapabilities, PlacementReceipt,
 };
 
 /// The S3-compatible blob backend.
@@ -557,7 +557,7 @@ impl S3Write {
         }))
     }
 
-    pub(crate) async fn commit(self, expected: &Digest) -> Result<(), BlobError> {
+    pub(crate) async fn commit(self, expected: &Digest) -> Result<PlacementReceipt, BlobError> {
         self.finish().await?.commit_as(expected).await
     }
 
@@ -592,9 +592,17 @@ impl S3Staged {
         &self.inner
     }
 
-    pub(crate) async fn commit(self) -> Result<(), BlobError> {
+    pub(crate) async fn commit(self) -> Result<PlacementReceipt, BlobError> {
         self.backend.upload(&self.inner).await?;
-        Box::pin(self.inner.abort()).await
+        // The object store proved the write durable at its own scope; capture the receipt before the
+        // local stage is discarded.
+        let receipt = PlacementReceipt {
+            digest: self.inner.digest().clone(),
+            size: self.inner.len(),
+            durability: self.backend.durability(),
+        };
+        Box::pin(self.inner.abort()).await?;
+        Ok(receipt)
     }
 
     pub(crate) async fn abort(self) -> Result<(), BlobError> {

@@ -135,6 +135,16 @@ uv-netrc = "0.0.62"
 strip = true
 lto = "fat"
 
+# openraft 0.9.25 guards its engine with a debug-only `debug_assert!(self.leader.is_none())` in
+# `following_handler` (engine_impl.rs:810) that treats a node holding leader state while it takes a
+# follower action as impossible. It is not: a leader that receives a higher term steps down, and under
+# scheduling starvation the follower action can run before the step-down clears `self.leader`. Release
+# builds omit the assert and complete the same transition correctly, so debug builds abort the RaftCore
+# on a state release handles fine. 0.9.25 is the latest 0.9 line and carries no fix, so drop openraft's
+# own debug assertions to match its release behaviour while keeping ours on every peryx crate.
+[profile.dev.package.openraft]
+debug-assertions = false
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

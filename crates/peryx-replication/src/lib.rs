@@ -28,6 +28,7 @@ mod error;
 mod http;
 mod ingress_intent;
 mod liveness;
+mod multi_peer;
 mod ownership;
 mod peer;
 mod peer_http;
@@ -80,6 +81,7 @@ pub use liveness::{
     DEFAULT_DEAD_AFTER, DEFAULT_MAX_HEARTBEAT_BYTES, DEFAULT_SUSPECT_AFTER, HeartbeatReport, LivenessRejection,
     LivenessTracker, PeerHealth, Suspicion, liveness_router,
 };
+pub use multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RoundReport, SetLimits};
 pub use ownership::{
     DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipError, OwnershipState, Rejection, TransferRecord,
 };
@@ -156,6 +158,8 @@ mod http_tests;
 mod ingress_intent_tests;
 #[cfg(test)]
 mod liveness_tests;
+#[cfg(test)]
+mod multi_peer_tests;
 #[cfg(test)]
 mod ownership_tests;
 #[cfg(test)]

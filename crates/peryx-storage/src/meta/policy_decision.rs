@@ -487,3 +487,7 @@ fn matches_query(record: &PolicyDecisionRecord, query: &PolicyDecisionQuery) -> 
 fn valid_cursor(cursor: &str) -> bool {
     cursor.len() == 19 && cursor.starts_with("pd_") && cursor[3..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
+
+#[cfg(test)]
+#[path = "policy_decision_fault_tests.rs"]
+mod fault_tests;

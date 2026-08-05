@@ -226,3 +226,7 @@ fn write_lease(txn: &redb::WriteTransaction, lease: &JobLease) -> Result<(), Met
         .insert(lease.job.as_str(), value.as_slice())?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "job_lease_fault_tests.rs"]
+mod fault_tests;

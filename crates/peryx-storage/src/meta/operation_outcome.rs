@@ -207,3 +207,7 @@ impl MetaStore {
         Ok(pruned)
     }
 }
+
+#[cfg(test)]
+#[path = "operation_outcome_fault_tests.rs"]
+mod fault_tests;

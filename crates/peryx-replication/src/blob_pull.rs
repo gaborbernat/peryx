@@ -37,17 +37,51 @@ pub enum PullError {
 /// Pull `digest` as `ranges` across `sources` in order and return the verified whole blob.
 ///
 /// Each range is fetched from the first source that answers, falling to the next on any
-/// [`TransportError`]; a stale placement plan or a wrong `Verified` peer does not block the fetch when
-/// another source has the blob. Running out of sources for a range is a [`PullError::Exhausted`] carrying
-/// each source's failure. Each fetched range becomes a [`BlobPiece`](crate::blob_reassembly::BlobPiece)
-/// through [`blob_piece`], which fails closed when a source returns the wrong number of bytes, and
-/// [`reassemble_verified`] tiles the pieces and digest-verifies the whole against `expected` — the check
-/// that keeps falling through safe. Nothing is committed; the caller commits the returned bytes.
+/// [`TransportError`], so a down or stale peer never blocks a range another source serves. A peer that
+/// answers with right-length wrong content is caught only when the reassembled whole fails its digest, so
+/// on that failure the pull drops the source that led the pass and reassembles again from the rest until a
+/// healthy source produces the verified blob or none remains. Running out of sources for a range is a
+/// [`PullError::Exhausted`] carrying each source's failure. Each fetched range becomes a
+/// [`BlobPiece`](crate::blob_reassembly::BlobPiece) through [`blob_piece`], which fails closed when a
+/// source returns the wrong number of bytes, and [`reassemble_verified`] tiles the pieces and
+/// digest-verifies the whole against `expected` — the check that keeps falling through safe. Nothing is
+/// committed; the caller commits the returned bytes.
 ///
 /// # Errors
-/// [`PullError`] when every source is exhausted for a range, a fetched range is the wrong length, or the
-/// reassembled blob does not verify against `expected`.
+/// [`PullError`] when every source is exhausted for a range, a fetched range is the wrong length, or no
+/// source's bytes reassemble to `expected`.
+///
+/// # Panics
+/// Never in practice: the loop runs at least one pass and records that pass's error, so the final
+/// `expect` on an all-passes-failed result is unreachable.
 pub async fn pull_ranged<T: BlobTransport>(
+    sources: &[&T],
+    digest: &Digest,
+    ranges: &[ByteRange],
+    total_length: usize,
+    expected: &Digest,
+) -> Result<Bytes, PullError> {
+    // A ranged fetch carries no per-chunk checksum, so a `Verified` peer returning right-length wrong
+    // content is caught only when the reassembled whole fails its digest. On that failure, drop the
+    // source that led the pass and reassemble again from the rest: without this, `fetch_range` keeps
+    // taking the poisoned peer's bytes for every range and the pull can never succeed even when a
+    // healthy source holds the blob, which is exactly the resilience this module promises. Each pass
+    // still falls through transport losses, so a down source never blocks a range another source serves.
+    // Keep the first pass's error: it ran over every source, so its failure list is the fullest account
+    // of why the blob could not be drawn, while a later pass sees only a subset.
+    let mut error = None;
+    for skip in 0..sources.len().max(1) {
+        match reassemble_pass(&sources[skip..], digest, ranges, total_length, expected).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(pass_error) => error = error.or(Some(pass_error)),
+        }
+    }
+    Err(error.expect("the loop runs at least once and records the pass error"))
+}
+
+/// One reassembly pass over `sources`: draw every range, adapt it to a piece, and digest-verify the
+/// tiled whole. The caller retries a failed pass over a reduced source set.
+async fn reassemble_pass<T: BlobTransport>(
     sources: &[&T],
     digest: &Digest,
     ranges: &[ByteRange],

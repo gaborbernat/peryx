@@ -11,6 +11,7 @@ use crate::peer::TransportError;
 enum Behavior {
     Serve(Bytes),
     Fail(TransportError),
+    Garbage,
 }
 
 struct Stub(Behavior);
@@ -26,6 +27,12 @@ impl BlobTransport for Stub {
                 Ok(content.slice(start..end).to_vec())
             }
             Behavior::Fail(error) => Err(error.clone()),
+            // Right length, wrong content: a `Verified` peer whose range bytes pass the length check but
+            // poison the reassembled digest.
+            Behavior::Garbage => {
+                let range = request.range.expect("pull_ranged always requests a range");
+                Ok(vec![0xFF; range.length])
+            }
         }
     }
 }
@@ -36,6 +43,10 @@ fn serve(content: &'static [u8]) -> Stub {
 
 fn fail(error: TransportError) -> Stub {
     Stub(Behavior::Fail(error))
+}
+
+fn garbage() -> Stub {
+    Stub(Behavior::Garbage)
 }
 
 fn range(offset: usize, length: usize) -> ByteRange {
@@ -112,6 +123,61 @@ async fn test_pull_ranged_rejects_a_blob_that_fails_verification() {
     let wrong = Digest::of(b"a different blob");
 
     let result = pull_ranged(&[&source], &wrong, &[range(0, 10)], 10, &wrong).await;
+
+    let Err(PullError::Reassembly(ReassemblyError::DigestMismatch { .. })) = result else {
+        panic!("expected a digest-mismatch reassembly error, got {result:?}");
+    };
+}
+
+#[tokio::test]
+async fn test_pull_ranged_falls_back_from_a_wrong_content_source() {
+    let content = b"0123456789";
+    let expected = Digest::of(content);
+    let poisoned = garbage();
+    let healthy = serve(content);
+
+    let bytes = pull_ranged(&[&poisoned, &healthy], &expected, &[range(0, 10)], 10, &expected).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(content)));
+}
+
+#[tokio::test]
+async fn test_pull_ranged_drops_a_wrong_content_source_across_several_ranges() {
+    let content = b"0123456789abcdef";
+    let expected = Digest::of(content);
+    let poisoned = garbage();
+    let healthy = serve(content);
+
+    let bytes = pull_ranged(
+        &[&poisoned, &healthy],
+        &expected,
+        &[range(0, 8), range(8, 8)],
+        16,
+        &expected,
+    )
+    .await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(content)));
+}
+
+#[tokio::test]
+async fn test_pull_ranged_skips_a_down_source_then_a_wrong_content_source() {
+    let content = b"0123456789";
+    let expected = Digest::of(content);
+    let down = fail(TransportError::Timeout);
+    let poisoned = garbage();
+    let healthy = serve(content);
+
+    let bytes = pull_ranged(&[&down, &poisoned, &healthy], &expected, &[range(0, 10)], 10, &expected).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(content)));
+}
+
+#[tokio::test]
+async fn test_pull_ranged_rejects_when_every_source_serves_wrong_content() {
+    let expected = Digest::of(b"0123456789");
+
+    let result = pull_ranged(&[&garbage(), &garbage()], &expected, &[range(0, 10)], 10, &expected).await;
 
     let Err(PullError::Reassembly(ReassemblyError::DigestMismatch { .. })) = result else {
         panic!("expected a digest-mismatch reassembly error, got {result:?}");

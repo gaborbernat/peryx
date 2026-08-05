@@ -1,7 +1,9 @@
 use std::sync::Weak;
 
 use super::error::MetaError;
-use super::{ANALYTICS, ANALYTICS_DAILY_KEY, ANALYTICS_KEY, MetaDatabase, MetaStore};
+use super::{
+    ANALYTICS, ANALYTICS_APPLY_KEY, ANALYTICS_DAILY_KEY, ANALYTICS_KEY, ANALYTICS_PRODUCER_KEY, MetaDatabase, MetaStore,
+};
 
 /// A shared, `Clone`-cheap handle onto the metadata store's analytics table.
 ///
@@ -60,6 +62,42 @@ impl AnalyticsHandle {
     /// Returns a store error if the write fails.
     pub fn save_daily(&self, snapshot: &[u8]) -> Result<(), MetaError> {
         self.write(ANALYTICS_DAILY_KEY, snapshot)
+    }
+
+    /// Read the receiving replica's converged analytics apply-state snapshot, or `None` before the first
+    /// save or after the store has dropped.
+    ///
+    /// # Errors
+    /// Returns a store error if the read fails.
+    pub fn load_apply(&self) -> Result<Option<Vec<u8>>, MetaError> {
+        self.read(ANALYTICS_APPLY_KEY)
+    }
+
+    /// Overwrite the receiving replica's converged analytics apply-state snapshot, or do nothing once the
+    /// store has dropped.
+    ///
+    /// # Errors
+    /// Returns a store error if the write fails.
+    pub fn save_apply(&self, snapshot: &[u8]) -> Result<(), MetaError> {
+        self.write(ANALYTICS_APPLY_KEY, snapshot)
+    }
+
+    /// Read the producing node's durable analytics generation and export watermark, or `None` before the
+    /// first save or after the store has dropped.
+    ///
+    /// # Errors
+    /// Returns a store error if the read fails.
+    pub fn load_producer(&self) -> Result<Option<Vec<u8>>, MetaError> {
+        self.read(ANALYTICS_PRODUCER_KEY)
+    }
+
+    /// Overwrite the producing node's durable analytics generation and export watermark, or do nothing
+    /// once the store has dropped.
+    ///
+    /// # Errors
+    /// Returns a store error if the write fails.
+    pub fn save_producer(&self, snapshot: &[u8]) -> Result<(), MetaError> {
+        self.write(ANALYTICS_PRODUCER_KEY, snapshot)
     }
 
     fn read(&self, key: &str) -> Result<Option<Vec<u8>>, MetaError> {

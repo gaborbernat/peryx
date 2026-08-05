@@ -19,7 +19,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use peryx_core::Role;
-use peryx_replication::{AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, IntervalId};
+use peryx_replication::{
+    AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, AuthorityEpoch, IntervalId, ProducerId,
+};
 use peryx_storage::meta::AnalyticsHandle;
 
 /// Unix seconds, the shape every peryx clock reports, so the aggregator can date a download's UTC
@@ -493,6 +495,58 @@ impl Metrics {
             })
             .collect();
         AnalyticsBatch { interval, rows }
+    }
+
+    /// Package each sealed UTC day after `after_day` as its own idempotent [`AnalyticsBatch`], one per
+    /// day in ascending order, stamped with a per-day [`IntervalId`] so a replica folds each day exactly
+    /// once.
+    ///
+    /// A day is sealed once it is strictly before the current UTC day, so its buckets can no longer grow;
+    /// only sealed days are exported, so a re-pull or a restart re-derives the same stable batches. The
+    /// day itself is the interval sequence, so the mapping from day to identity never shifts, and
+    /// `after_day` skips the days the caller has already acknowledged. `producer` and `epoch` stamp the
+    /// generation the sequence belongs to.
+    ///
+    /// # Panics
+    /// Panics if the aggregator thread panicked and poisoned the daily lock.
+    #[must_use]
+    pub fn export_sealed_day_batches(
+        &self,
+        producer: &ProducerId,
+        epoch: AuthorityEpoch,
+        after_day: i64,
+    ) -> Vec<AnalyticsBatch> {
+        let today = utc_day((self.clock)());
+        let mut by_day: BTreeMap<i64, Vec<AggregateRow>> = BTreeMap::new();
+        for usage in self.daily_usage() {
+            if usage.day <= after_day || usage.day >= today || usage.day < 0 {
+                continue;
+            }
+            by_day.entry(usage.day).or_default().push(AggregateRow {
+                key: AggregateKey {
+                    day: usage.day,
+                    repository: usage.repository,
+                    project: usage.project,
+                    version: usage.version,
+                    source: usage.source,
+                },
+                delta: AggregateDelta {
+                    downloads: usage.downloads,
+                    bytes: usage.bytes,
+                },
+            });
+        }
+        by_day
+            .into_iter()
+            .map(|(day, rows)| AnalyticsBatch {
+                interval: IntervalId {
+                    producer: producer.clone(),
+                    epoch,
+                    sequence: u64::try_from(day).unwrap_or(0),
+                },
+                rows,
+            })
+            .collect()
     }
 
     /// Record one event; never blocks, and a stopped aggregator is ignored.
@@ -1567,6 +1621,42 @@ mod tests {
                 bytes: 50
             }
         );
+    }
+
+    #[test]
+    fn test_export_sealed_day_batches_emits_one_batch_per_completed_day() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let (_dir, meta) = store();
+        let (day, clock) = steppable_clock();
+        let metrics = Metrics::start_durable(meta.analytics(), None, clock);
+
+        day.store(10, SeqCst);
+        metrics.record(download_of("pypi", "flask", "1.0", Some("up"), 100));
+        settle_and_assert(&metrics, || metrics.daily_usage().iter().any(|usage| usage.day == 10));
+        day.store(11, SeqCst);
+        metrics.record(download_of("pypi", "flask", "1.0", Some("up"), 200));
+        settle_and_assert(&metrics, || metrics.daily_usage().iter().any(|usage| usage.day == 11));
+        // The current day has activity too, but it is not yet sealed and must be withheld.
+        day.store(12, SeqCst);
+        metrics.record(download_of("pypi", "flask", "1.0", Some("up"), 5));
+        settle_and_assert(&metrics, || metrics.daily_usage().iter().any(|usage| usage.day == 12));
+
+        let producer = ProducerId("east".to_owned());
+        let batches = metrics.export_sealed_day_batches(&producer, AuthorityEpoch(1), -1);
+
+        assert_eq!(
+            batches.iter().map(|b| b.interval.sequence).collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(batches[0].interval.producer, producer);
+        assert_eq!(batches[0].interval.epoch, AuthorityEpoch(1));
+        assert_eq!(batches[0].rows[0].delta.downloads, 1);
+        assert_eq!(batches[0].rows[0].delta.bytes, 100);
+
+        // A watermark past day 10 withholds it and yields only day 11.
+        let after = metrics.export_sealed_day_batches(&producer, AuthorityEpoch(1), 10);
+        assert_eq!(after.iter().map(|b| b.interval.sequence).collect::<Vec<_>>(), vec![11]);
     }
 
     #[test]

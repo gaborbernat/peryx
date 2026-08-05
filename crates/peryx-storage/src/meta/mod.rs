@@ -176,6 +176,12 @@ const JOB_SERIAL_KEY: &str = "job_run";
 const POLICY_DECISION_SERIAL_KEY: &str = "policy_decision";
 const ANALYTICS_KEY: &str = "downloads";
 const ANALYTICS_DAILY_KEY: &str = "daily_usage";
+/// The receiving replica's converged analytics apply-state snapshot: accepted additive totals plus the
+/// replay set. Held under its own key so it evolves independently of the producer-side aggregates.
+const ANALYTICS_APPLY_KEY: &str = "apply_state";
+/// The producing node's durable analytics generation and the day watermark it has exported through, so a
+/// restart resumes without re-emitting or double-counting a sealed day.
+const ANALYTICS_PRODUCER_KEY: &str = "producer";
 const VISIBILITY_SNAPSHOT_KEY: &str = "current";
 const WRITER_KEY: &str = "active";
 

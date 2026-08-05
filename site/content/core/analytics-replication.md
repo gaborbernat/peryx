@@ -7,9 +7,8 @@ weight = 8
 A node records download usage into low-cardinality daily buckets, off the request path. Under the `dc` and `ha`
 [availability contracts](@/core/availability-contracts.md) a producer ships those buckets to a replica so a promoted
 replica reports the same totals a planned failover would. This page fixes the apply contract: what a batch carries, how
-a replica accepts each producer interval once, and how deduplication state stays bounded. The wire transfer that carries
-a batch between nodes and the durable apply state a replica keeps land with the multi-peer transport; in `none` mode
-nothing here runs and a package request performs no cross-node analytics call.
+a replica accepts each producer interval once, how the transfer moves batches, and how deduplication state stays
+bounded. In `none` mode nothing here runs and a package request performs no cross-node analytics call.
 
 ## The additive aggregate
 
@@ -39,6 +38,27 @@ a duplicate that never double-counts. A failover advances the producer's epoch, 
 distinct identities that apply rather than collide with the old authority's accepted work. Totals saturate rather than
 wrap, so a corrupt or hostile producer total can never move an accepted sum backward.
 
+## Producing and pulling batches
+
+A producer emits each completed UTC day as its own batch. A day is sealed once the current UTC day has moved past it, so
+its buckets can no longer grow, and the day itself is the interval sequence, so the mapping from a day to its identity
+never shifts. The current day is withheld until it seals. A producer serves its sealed batches after a requested day on
+`+replication/v1/analytics`, bearer-gated by the replication token, off the request path.
+
+A replica runs a background analytics worker on its bounded availability pool, the same place its metadata and blob
+pulls run. Each pass asks its upstream for the sealed days beyond the highest it has accepted, folds each batch into its
+durable apply state exactly once, and persists the converged state after any pass that applied something. It resumes
+from that cursor, so a batch it already holds is a recognized duplicate and a restart never re-folds an accepted day. A
+transport loss or a refused batch is logged and retried at the next poll rather than stopping the worker.
+
+The producing node's analytics generation is durable and assigned once, reused across restarts, so a re-served sealed
+day keeps the same identity and a replica recognizes the replay. A replica's durable apply state, its accepted totals,
+its per-producer cursor, and its frontier, restore together under a schema tag, so a snapshot written by an unrecognized
+build is refused rather than rebuilt from zero, which would double-count the next replay.
+
+Cross-process transfer under real replicas is exercised by a follow-up harness test ([#949]); the produce, transfer,
+apply, deduplicate, and compact path is proven in-process here.
+
 ## Frontiers, retention, and limits
 
 Replay protection costs memory: the replica retains each accepted interval's identity to recognize its replay. A
@@ -55,3 +75,5 @@ frontier releases room, rather than letting a stalled frontier grow deduplicatio
 The [`none` availability contract](@/core/high-availability.md) leaves usage node-local, so none of this runs. See
 [Monitor usage and cache health](@/core/monitor.md) for reading a single node's daily usage, and
 [Back up and restore](@/core/backup-restore.md) for the recovery point a replica's state is pinned to.
+
+[#949]: https://github.com/tox-dev/peryx/issues/949

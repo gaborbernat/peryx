@@ -1,6 +1,6 @@
 use crate::{
-    AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, ApplyError, ApplyLimits, ApplyOutcome, ApplyState,
-    AuthorityEpoch, DEFAULT_APPLY_LIMITS, Frontier, IntervalId, ProducerId, SnapshotError,
+    AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, AnalyticsReceiver, ApplyError, ApplyLimits,
+    ApplyOutcome, ApplyState, AuthorityEpoch, DEFAULT_APPLY_LIMITS, Frontier, IntervalId, ProducerId, SnapshotError,
 };
 
 fn key(day: i64, version: &str, source: &str) -> AggregateKey {
@@ -417,4 +417,151 @@ fn test_analytics_batch_round_trips_through_its_wire_form() {
     let decoded: AnalyticsBatch = serde_json::from_slice(&encoded).unwrap();
 
     assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_receiver_folds_a_new_interval_and_dedups_a_replay() {
+    let mut receiver = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    let one = batch(interval("dc-a", 1, 5), &[(key(5, "1.0", ""), 3, 300)]);
+
+    assert_eq!(receiver.apply(&one).unwrap(), ApplyOutcome::Applied);
+    assert_eq!(receiver.apply(&one).unwrap(), ApplyOutcome::Duplicate);
+
+    assert_eq!(
+        receiver.total(&key(5, "1.0", "")),
+        AggregateDelta {
+            downloads: 3,
+            bytes: 300
+        }
+    );
+    assert_eq!(receiver.retained_intervals(), 1);
+}
+
+#[test]
+fn test_receiver_cursor_tracks_the_highest_day_per_producer() {
+    let mut receiver = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    assert_eq!(receiver.after_day(&ProducerId("dc-a".to_owned())), -1);
+
+    receiver
+        .apply(&batch(interval("dc-a", 1, 7), &[(key(7, "1.0", ""), 1, 10)]))
+        .unwrap();
+    receiver
+        .apply(&batch(interval("dc-b", 1, 2), &[(key(2, "1.0", ""), 1, 10)]))
+        .unwrap();
+
+    assert_eq!(receiver.after_day(&ProducerId("dc-a".to_owned())), 7);
+    assert_eq!(receiver.after_day(&ProducerId("dc-b".to_owned())), 2);
+}
+
+#[test]
+fn test_receiver_converges_under_reordered_delivery() {
+    let mut in_order = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    let mut reordered = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    let day_one = batch(interval("dc-a", 1, 1), &[(key(1, "1.0", ""), 2, 20)]);
+    let day_three = batch(interval("dc-a", 1, 3), &[(key(3, "1.0", ""), 4, 40)]);
+
+    in_order.apply(&day_one).unwrap();
+    in_order.apply(&day_three).unwrap();
+    reordered.apply(&day_three).unwrap();
+    reordered.apply(&day_one).unwrap();
+
+    assert_eq!(reordered.total(&key(1, "1.0", "")), in_order.total(&key(1, "1.0", "")));
+    assert_eq!(reordered.total(&key(3, "1.0", "")), in_order.total(&key(3, "1.0", "")));
+    // The cursor is the highest accepted day, regardless of arrival order.
+    assert_eq!(reordered.after_day(&ProducerId("dc-a".to_owned())), 3);
+}
+
+#[test]
+fn test_receiver_compaction_releases_covered_keys_and_keeps_totals() {
+    let mut receiver = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    receiver
+        .apply(&batch(interval("dc-a", 1, 1), &[(key(1, "1.0", ""), 2, 20)]))
+        .unwrap();
+    receiver
+        .apply(&batch(interval("dc-a", 1, 2), &[(key(2, "1.0", ""), 5, 50)]))
+        .unwrap();
+
+    receiver.acknowledge(ProducerId("dc-a".to_owned()), AuthorityEpoch(1), 1);
+    receiver.compact();
+
+    // Day 1's replay key is released; day 2's stays. Both totals survive.
+    assert_eq!(receiver.retained_intervals(), 1);
+    assert_eq!(
+        receiver.total(&key(1, "1.0", "")),
+        AggregateDelta {
+            downloads: 2,
+            bytes: 20
+        }
+    );
+    assert_eq!(
+        receiver.total(&key(2, "1.0", "")),
+        AggregateDelta {
+            downloads: 5,
+            bytes: 50
+        }
+    );
+}
+
+#[test]
+fn test_receiver_snapshot_round_trips_state_cursor_and_frontier() {
+    let mut receiver = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    receiver
+        .apply(&batch(interval("dc-a", 1, 4), &[(key(4, "1.0", "pypi"), 6, 60)]))
+        .unwrap();
+    receiver.acknowledge(ProducerId("dc-a".to_owned()), AuthorityEpoch(1), 4);
+
+    let restored = AnalyticsReceiver::restore(&receiver.encode(), DEFAULT_APPLY_LIMITS).unwrap();
+
+    assert_eq!(
+        restored.total(&key(4, "1.0", "pypi")),
+        AggregateDelta {
+            downloads: 6,
+            bytes: 60
+        }
+    );
+    assert_eq!(restored.after_day(&ProducerId("dc-a".to_owned())), 4);
+    assert_eq!(restored.retained_intervals(), 1);
+    // The restored frontier still covers the acknowledged interval, so compaction releases it.
+    let mut restored = restored;
+    restored.compact();
+    assert_eq!(restored.retained_intervals(), 0);
+}
+
+#[test]
+fn test_receiver_restore_rejects_a_foreign_schema() {
+    let snapshot = br#"{"schema":999,"state":[],"cursors":[],"frontier":[]}"#;
+    let error = AnalyticsReceiver::restore(snapshot, DEFAULT_APPLY_LIMITS).unwrap_err();
+    assert!(matches!(
+        error,
+        SnapshotError::UnsupportedSchema {
+            expected: 1,
+            found: 999
+        }
+    ));
+}
+
+#[test]
+fn test_receiver_restore_rejects_malformed_bytes() {
+    let error = AnalyticsReceiver::restore(b"not json", DEFAULT_APPLY_LIMITS).unwrap_err();
+    assert!(matches!(error, SnapshotError::Malformed(_)));
+}
+
+#[test]
+fn test_receiver_apply_error_leaves_the_cursor_unmoved() {
+    let mut receiver = AnalyticsReceiver::new(ApplyLimits {
+        max_rows_per_batch: 16_384,
+        max_retained_intervals: 1,
+    });
+    receiver
+        .apply(&batch(interval("dc-a", 1, 1), &[(key(1, "1.0", ""), 1, 10)]))
+        .unwrap();
+
+    let error = receiver
+        .apply(&batch(interval("dc-a", 1, 2), &[(key(2, "1.0", ""), 1, 10)]))
+        .unwrap_err();
+
+    assert!(matches!(error, ApplyError::RetentionFull { limit: 1 }));
+    // The rejected interval neither folded nor advanced the cursor past the accepted day 1.
+    assert_eq!(receiver.after_day(&ProducerId("dc-a".to_owned())), 1);
+    assert_eq!(receiver.total(&key(2, "1.0", "")), AggregateDelta::default());
 }

@@ -171,6 +171,20 @@ impl Frontier {
             .and_then(|epochs| epochs.get(&interval.epoch))
             .is_some_and(|&acknowledged| interval.sequence <= acknowledged)
     }
+
+    /// Every `(producer, epoch, sequence)` the frontier holds, flattened for a snapshot to persist. A
+    /// nested integer-keyed map does not round-trip through JSON, so the durable form is this tuple list.
+    #[must_use]
+    pub fn acknowledgements(&self) -> Vec<(ProducerId, AuthorityEpoch, u64)> {
+        self.acknowledged
+            .iter()
+            .flat_map(|(producer, epochs)| {
+                epochs
+                    .iter()
+                    .map(move |(&epoch, &sequence)| (producer.clone(), epoch, sequence))
+            })
+            .collect()
+    }
 }
 
 /// The persisted serde shape of an [`ApplyState`]: a schema tag guarding the accepted totals and the
@@ -291,6 +305,158 @@ impl ApplyState {
             totals: snapshot.totals.into_iter().map(|row| (row.key, row.delta)).collect(),
             applied: snapshot.applied.into_iter().collect(),
             limits,
+        })
+    }
+}
+
+/// The receiving side of analytics replication on a replica.
+///
+/// It holds the converged [`ApplyState`], the per-producer sealed-day cursor a pull resumes from, and
+/// the durability [`Frontier`] compaction releases replay keys past.
+///
+/// The cursor is the highest sealed-day sequence this replica has accepted from each producer, so a pull
+/// asks only for days beyond it and a re-pull of an accepted day is a recognized duplicate. Compaction
+/// runs off a separate [`acknowledge`](Self::acknowledge) signal: a replay key is released only once it
+/// is durable everywhere, never merely because this replica applied it, since a producer may still resend
+/// it to a peer that has not caught up.
+#[derive(Debug, Clone)]
+pub struct AnalyticsReceiver {
+    state: ApplyState,
+    cursors: BTreeMap<ProducerId, i64>,
+    frontier: Frontier,
+}
+
+/// The persisted serde shape of an [`AnalyticsReceiver`], guarded by a schema tag so a format change is
+/// a deliberate migration rather than a silent misread.
+#[derive(Serialize, Deserialize)]
+struct ReceiverSnapshot {
+    schema: u32,
+    state: Vec<u8>,
+    cursors: Vec<(ProducerId, i64)>,
+    frontier: Vec<FrontierAck>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrontierAck {
+    producer: ProducerId,
+    epoch: AuthorityEpoch,
+    sequence: u64,
+}
+
+impl AnalyticsReceiver {
+    /// An empty receiver bounded by `limits`.
+    #[must_use]
+    pub fn new(limits: ApplyLimits) -> Self {
+        Self {
+            state: ApplyState::new(limits),
+            cursors: BTreeMap::new(),
+            frontier: Frontier::default(),
+        }
+    }
+
+    /// The last sealed day accepted from `producer`, or `-1` before any, so a pull requests every day
+    /// from day zero onward.
+    #[must_use]
+    pub fn after_day(&self, producer: &ProducerId) -> i64 {
+        self.cursors.get(producer).copied().unwrap_or(-1)
+    }
+
+    /// The highest sealed day accepted from any producer, or `-1` before any. A replica pulling one
+    /// upstream resumes from this, since that upstream's batches are the only ones advancing it.
+    #[must_use]
+    pub fn resume_day(&self) -> i64 {
+        self.cursors.values().copied().max().unwrap_or(-1)
+    }
+
+    /// Apply one pulled batch. A new interval folds its rows and advances the producer's cursor to its
+    /// day; an already-accepted interval is a [`Duplicate`](ApplyOutcome::Duplicate) that changes
+    /// nothing, so a reordered, delayed, or retried delivery converges to the same accepted totals.
+    ///
+    /// # Errors
+    /// Returns [`ApplyError`] when the batch breaches a bound, leaving the receiver unchanged.
+    pub fn apply(&mut self, batch: &AnalyticsBatch) -> Result<ApplyOutcome, ApplyError> {
+        let outcome = self.state.apply(batch)?;
+        if outcome == ApplyOutcome::Applied {
+            let day = i64::try_from(batch.interval.sequence).unwrap_or(i64::MAX);
+            let cursor = self.cursors.entry(batch.interval.producer.clone()).or_insert(-1);
+            *cursor = (*cursor).max(day);
+        }
+        Ok(outcome)
+    }
+
+    /// The accepted total for `key`.
+    #[must_use]
+    pub fn total(&self, key: &AggregateKey) -> AggregateDelta {
+        self.state.total(key)
+    }
+
+    /// The number of replay keys the receiver retains.
+    #[must_use]
+    pub fn retained_intervals(&self) -> usize {
+        self.state.retained_intervals()
+    }
+
+    /// Record that `(producer, epoch)` is durable everywhere through `sequence`, so a later
+    /// [`compact`](Self::compact) may release the replay keys it now covers.
+    pub fn acknowledge(&mut self, producer: ProducerId, epoch: AuthorityEpoch, sequence: u64) {
+        self.frontier.acknowledge(producer, epoch, sequence);
+    }
+
+    /// Release every replay key the durability frontier now covers, leaving the accepted totals intact.
+    pub fn compact(&mut self) {
+        self.state.compact(&self.frontier);
+    }
+
+    /// Serialize the receiver's converged state, per-producer cursors, and durability frontier.
+    ///
+    /// # Panics
+    /// Panics only if serializing to JSON fails, which the field types make unreachable.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let snapshot = ReceiverSnapshot {
+            schema: APPLY_STATE_SCHEMA,
+            state: self.state.encode(),
+            cursors: self
+                .cursors
+                .iter()
+                .map(|(producer, &day)| (producer.clone(), day))
+                .collect(),
+            frontier: self
+                .frontier
+                .acknowledgements()
+                .into_iter()
+                .map(|(producer, epoch, sequence)| FrontierAck {
+                    producer,
+                    epoch,
+                    sequence,
+                })
+                .collect(),
+        };
+        serde_json::to_vec(&snapshot).expect("a receiver snapshot always serializes to JSON")
+    }
+
+    /// Restore a receiver from its snapshot under `limits`, preserving the accepted totals, the cursors,
+    /// and the replay protection.
+    ///
+    /// # Errors
+    /// Returns [`SnapshotError::Malformed`] for unparseable bytes and [`SnapshotError::UnsupportedSchema`]
+    /// for a schema this build does not restore.
+    pub fn restore(bytes: &[u8], limits: ApplyLimits) -> Result<Self, SnapshotError> {
+        let snapshot: ReceiverSnapshot = serde_json::from_slice(bytes).map_err(SnapshotError::Malformed)?;
+        if snapshot.schema != APPLY_STATE_SCHEMA {
+            return Err(SnapshotError::UnsupportedSchema {
+                expected: APPLY_STATE_SCHEMA,
+                found: snapshot.schema,
+            });
+        }
+        let mut frontier = Frontier::default();
+        for ack in snapshot.frontier {
+            frontier.acknowledge(ack.producer, ack.epoch, ack.sequence);
+        }
+        Ok(Self {
+            state: ApplyState::restore(&snapshot.state, limits)?,
+            cursors: snapshot.cursors.into_iter().collect(),
+            frontier,
         })
     }
 }

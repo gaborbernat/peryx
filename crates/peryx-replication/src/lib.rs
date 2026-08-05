@@ -6,6 +6,7 @@
 
 mod ack;
 mod analytics;
+mod analytics_transfer;
 mod authority;
 mod backoff;
 mod blob;
@@ -50,8 +51,11 @@ mod visibility;
 
 pub use ack::{AckDecision, acknowledge};
 pub use analytics::{
-    APPLY_STATE_SCHEMA, AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, ApplyError, ApplyLimits,
-    ApplyOutcome, ApplyState, DEFAULT_APPLY_LIMITS, Frontier, IntervalId, ProducerId, SnapshotError,
+    APPLY_STATE_SCHEMA, AggregateDelta, AggregateKey, AggregateRow, AnalyticsBatch, AnalyticsReceiver, ApplyError,
+    ApplyLimits, ApplyOutcome, ApplyState, DEFAULT_APPLY_LIMITS, Frontier, IntervalId, ProducerId, SnapshotError,
+};
+pub use analytics_transfer::{
+    AnalyticsPullError, AnalyticsSource, HttpAnalyticsError, HttpAnalyticsSource, PullReport, pull,
 };
 pub use authority::{Admission, AuthorityFence, AuthorityKey, CommitOutcome};
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};

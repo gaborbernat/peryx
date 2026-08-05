@@ -1585,6 +1585,18 @@ async fn test_admit_authority_epoch_admits_all_work_without_a_group() {
 }
 
 #[tokio::test]
+async fn test_transfer_authority_home_delegates_to_the_group() {
+    let (_dir, state) = serving();
+
+    // A process running no consensus group cannot commit a transfer, so the delegate reports nothing moved.
+    assert_eq!(state.transfer_authority_home("proj", "west").await.unwrap(), None);
+
+    // With a group registered, the delegate forwards to it; this one commits nothing itself.
+    state.set_ownership_authority(Arc::new(MutableEpoch(Arc::new(std::sync::atomic::AtomicU64::new(5)))));
+    assert_eq!(state.transfer_authority_home("proj", "west").await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn test_a_run_under_the_current_epoch_is_not_fenced() {
     let (_dir, state) = serving();
     state.set_ownership_authority(Arc::new(MutableEpoch(Arc::new(std::sync::atomic::AtomicU64::new(5)))));

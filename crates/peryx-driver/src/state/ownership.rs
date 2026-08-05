@@ -340,6 +340,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_transfer_that_cannot_commit_surfaces_unavailable() {
+        let group = transferring_group(Err(OwnershipError::Unavailable("log store gone".to_owned())));
+
+        let error = transfer_authority_home(Some(&group), "proj", "west").await.unwrap_err();
+        assert!(matches!(error, OwnershipError::Unavailable(reason) if reason == "log store gone"));
+    }
+
+    #[tokio::test]
     async fn test_transfer_without_a_group_moves_nothing() {
         let moved = transfer_authority_home(None, "proj", "west")
             .await

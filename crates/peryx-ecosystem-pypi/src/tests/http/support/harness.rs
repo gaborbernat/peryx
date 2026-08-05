@@ -409,6 +409,14 @@ impl peryx_driver::state::OwnershipAuthority for AuthorityDouble {
             voters: Vec::new(),
         }
     }
+
+    async fn transfer_home(
+        &self,
+        _authority: &str,
+        _new_home: &str,
+    ) -> Result<Option<peryx_driver::state::TransferOutcome>, peryx_driver::state::OwnershipError> {
+        Ok(None)
+    }
 }
 
 /// Install `authority` as the process ownership group, so control mutations route through its epoch fence.

@@ -23,9 +23,9 @@ use openraft::{
 };
 use tokio::sync::Mutex;
 
-use crate::AuthorityKey;
 use crate::ownership::{DatacenterId, OwnershipState};
 use crate::raft::{OwnershipResponse, PeryxNode, TypeConfig};
+use crate::{Admission, AuthorityEpoch, AuthorityFence, AuthorityKey};
 
 /// The `u64` voter handle `OpenRaft` keys nodes by. See [`crate::raft`] for why it is not the datacenter
 /// identity.
@@ -67,6 +67,29 @@ impl OwnershipStateMachine {
     /// so a stale `None` costs one rejected assignment, never a wrong home.
     pub async fn home_of(&self, authority: &AuthorityKey) -> Option<DatacenterId> {
         self.inner.lock().await.state.home(authority).cloned()
+    }
+
+    /// The committed authority epoch of `authority` in this node's applied ownership state, or the
+    /// unassigned sentinel [`AuthorityEpoch(0)`](crate::AuthorityEpoch) when no committed command has
+    /// homed it.
+    ///
+    /// A local read like [`home_of`](Self::home_of): current on the leader, possibly behind on a
+    /// follower. It is the fence value a writer stamps onto work it produces, so a former holder's stale
+    /// epoch is fenced out once the authority advances.
+    pub async fn epoch_of(&self, authority: &AuthorityKey) -> AuthorityEpoch {
+        self.inner.lock().await.state.epoch(authority)
+    }
+
+    /// Whether work carrying `presented` under `authority` may proceed against this node's committed
+    /// epoch, or is fenced as stale.
+    ///
+    /// Feeds an [`AuthorityFence`] from the applied ownership state and admits `presented`, so work
+    /// produced under a superseded epoch — a former holder's, after the authority advanced — is
+    /// [`Fenced`](Admission::Fenced) without effect.
+    pub async fn admit(&self, authority: &AuthorityKey, presented: AuthorityEpoch) -> Admission {
+        let mut fence = AuthorityFence::new();
+        fence.commit(authority, self.inner.lock().await.state.epoch(authority));
+        fence.admit(authority, presented)
     }
 }
 

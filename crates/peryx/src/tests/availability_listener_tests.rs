@@ -124,6 +124,14 @@ impl peryx_driver::state::OwnershipAuthority for FixedGroup {
             voters: vec!["east".to_owned(), "west".to_owned()],
         }
     }
+
+    async fn committed_epoch(&self, _authority: &str) -> u64 {
+        0
+    }
+
+    async fn admit_epoch(&self, _authority: &str, _presented: u64) -> bool {
+        true
+    }
 }
 
 #[test]

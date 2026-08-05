@@ -480,6 +480,35 @@ async fn test_has_home_reflects_a_committed_assignment() {
 }
 
 #[tokio::test]
+async fn test_committed_epoch_reflects_the_first_assignment() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    // Unassigned reads as the zero sentinel; the first committed assignment mints epoch one.
+    assert_eq!(group.committed_epoch("proj").await, 0);
+    group.claim_home("proj").await.unwrap();
+    assert_eq!(group.committed_epoch("proj").await, 1);
+}
+
+#[tokio::test]
+async fn test_admit_epoch_fences_a_superseded_epoch() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+    group.claim_home("proj").await.unwrap();
+
+    assert!(group.admit_epoch("proj", 1).await, "the committed epoch is admitted");
+    assert!(
+        !group.admit_epoch("proj", 2).await,
+        "an epoch ahead of the committed one is fenced"
+    );
+    assert!(!group.admit_epoch("proj", 0).await, "the zero sentinel is fenced");
+    assert!(
+        !group.admit_epoch("other", 1).await,
+        "an unassigned authority fences all work"
+    );
+}
+
+#[tokio::test]
 async fn test_cluster_status_reports_the_leader_and_voter_membership() {
     let dir = tempfile::tempdir().unwrap();
     let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));

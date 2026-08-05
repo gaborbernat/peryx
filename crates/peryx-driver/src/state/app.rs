@@ -231,6 +231,20 @@ impl ServingState {
         crate::state::ownership::claim_first_publish_home(self.ownership.get(), authority).await;
     }
 
+    /// The committed authority epoch for `authority`, the fence value a writer stamps onto work it
+    /// produces so a stale-epoch write is fenced out. `0` when this process runs no consensus group,
+    /// which the placement fence reads as the closed, unassigned sentinel.
+    pub async fn committed_authority_epoch(&self, authority: &str) -> u64 {
+        crate::state::ownership::committed_authority_epoch(self.ownership.get(), authority).await
+    }
+
+    /// Whether background work carrying `presented` under `authority` may still be written, or is fenced
+    /// as a stale-epoch writer that the authority superseded. A process running no consensus group has no
+    /// authority to supersede its work, so it admits everything.
+    pub async fn admit_authority_epoch(&self, authority: &str, presented: u64) -> bool {
+        crate::state::ownership::admit_authority_epoch(self.ownership.get(), authority, presented).await
+    }
+
     /// Find the index whose route is the longest segment-aligned prefix of `path` (which has no
     /// leading slash), and the path remainder after `route/`. Returns `None` if no route matches.
     #[must_use]

@@ -292,14 +292,33 @@ async fn run_persisted(
         },
         None => None,
     };
+    // Snapshot the authority epoch as the lease's fence: a run that outlives an authority transfer keeps
+    // writing under the epoch it started with, which the newer holder fences out.
+    let fence = match job.repository() {
+        Some(repository) => shared.state.committed_authority_epoch(repository).await,
+        None => 0,
+    };
     let context = JobContext {
         state: shared.state.clone(),
         cancel: cancel.clone(),
+        fence,
     };
-    let (result, panicked) = AssertUnwindSafe(job.run(&context)).catch_unwind().await.map_or_else(
+    let (mut result, panicked) = AssertUnwindSafe(job.run(&context)).catch_unwind().await.map_or_else(
         |_| (Err(JobFailure::new("job_panic", "node-local job panicked")), true),
         |result| (result, false),
     );
+    // Fence stale-epoch work: a run that leased a real authority epoch but whose authority advanced
+    // while it ran wrote under a superseded epoch, so its success is rejected rather than counted. A
+    // node-wide job (fence 0) and a process with no group hold no epoch and are never fenced.
+    if fence != 0 && result.is_ok() {
+        let repository = job.repository().expect("a nonzero fence is taken from a repository");
+        if !shared.state.admit_authority_epoch(repository, fence).await {
+            result = Err(JobFailure::new(
+                "authority_fenced",
+                "a newer authority epoch superseded this run",
+            ));
+        }
+    }
     let cancelled = cancel.is_cancelled() && !panicked;
     let outcome = if panicked {
         Outcome::Failed

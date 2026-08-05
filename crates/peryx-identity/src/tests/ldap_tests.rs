@@ -355,19 +355,31 @@ async fn start_openldap() -> (ContainerAsync<GenericImage>, u16, Vec<u8>) {
         "dn: cn=Philip J. Fry,ou=people,dc=localhost\nchangetype: modify\nreplace: title\ntitle: {}\n-\nreplace: description\n{descriptions}",
         "x".repeat(1_025)
     );
-    let container = GenericImage::new("ghcr.io/rroemhild/docker-test-openldap", "v2.5.0")
-        .with_exposed_port(10_389.tcp())
-        .with_hostname("localhost")
-        .with_env_var("LDAP_DOMAIN", "localhost")
-        .with_env_var("LDAP_BASEDN", "dc=localhost")
-        .with_env_var("LDAP_BINDDN", "cn=admin,dc=localhost")
-        .with_copy_to("/etc/ldap/ssl/ca.crt", ca.clone())
-        .with_copy_to("/etc/ldap/ssl/ldap.crt", certificate)
-        .with_copy_to("/etc/ldap/ssl/ldap.key", key)
-        .with_copy_to("/tmp/invalid-attributes.ldif", invalid_attributes.into_bytes())
-        .start()
-        .await
-        .unwrap();
+    // Retry the container start rather than unwrapping it: coverage instrumentation roughly halves
+    // throughput, which overloads the Docker daemon enough to refuse a start transiently, and a bare
+    // unwrap turns that jitter into a flake. A generous outer bound still fails a genuinely dead daemon.
+    let container = tokio::time::timeout(Duration::from_mins(3), async {
+        loop {
+            let started = GenericImage::new("ghcr.io/rroemhild/docker-test-openldap", "v2.5.0")
+                .with_exposed_port(10_389.tcp())
+                .with_hostname("localhost")
+                .with_env_var("LDAP_DOMAIN", "localhost")
+                .with_env_var("LDAP_BASEDN", "dc=localhost")
+                .with_env_var("LDAP_BINDDN", "cn=admin,dc=localhost")
+                .with_copy_to("/etc/ldap/ssl/ca.crt", ca.clone())
+                .with_copy_to("/etc/ldap/ssl/ldap.crt", certificate.clone())
+                .with_copy_to("/etc/ldap/ssl/ldap.key", key.clone())
+                .with_copy_to("/tmp/invalid-attributes.ldif", invalid_attributes.clone().into_bytes())
+                .start()
+                .await;
+            match started {
+                Ok(container) => break container,
+                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        }
+    })
+    .await
+    .expect("openldap container never started within the retry window");
     let port = container.get_host_port_ipv4(10_389.tcp()).await.unwrap();
     wait_until_serving(port, &ca).await;
     (container, port, ca)

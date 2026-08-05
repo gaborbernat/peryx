@@ -14,8 +14,8 @@ use rstest::rstest;
 use tower::ServiceExt as _;
 
 use super::{
-    app_with_indexes, auth, body_has_code, hosted, hosted_writable, oci_digest, proxy, scoped_index, send, send_body,
-    send_with, writable_index,
+    EpochAuthority, app_with_indexes, auth, body_has_code, hosted, hosted_writable, oci_digest, proxy, scoped_index,
+    send, send_body, send_with, writable_index,
 };
 
 const TOKEN: &str = "s3cret";
@@ -2051,4 +2051,158 @@ async fn test_put_without_digest_keeps_session_resumable() {
     let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got, &blob[..]);
+}
+
+#[rstest]
+#[case::home_ingress(true)]
+#[case::non_home_ingress(false)]
+#[tokio::test]
+async fn test_monolithic_upload_at_the_current_epoch(#[case] homed: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    // A repository at a settled epoch admits the push, and a non-home node at that epoch admits it too.
+    state.set_ownership_authority(EpochAuthority::settled(5, homed));
+    let blob = b"single-post-blob-under-authority";
+    let digest = oci_digest(blob);
+
+    let (status, headers, _) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/app/blobs/uploads/?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        blob.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(headers["docker-content-digest"], digest);
+
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
+}
+
+#[tokio::test]
+async fn test_monolithic_upload_under_a_superseded_epoch_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    // The push leases epoch 5, but the repository home advanced to 6 while the bytes arrived.
+    state.set_ownership_authority(EpochAuthority::superseded(5, 6));
+    let blob = b"a-layer-that-loses-the-race";
+    let digest = oci_digest(blob);
+
+    let (status, _, body) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/app/blobs/uploads/?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        blob.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body_has_code(&body, "UNAVAILABLE"), "{body:?}");
+    assert_no_topology(&body);
+
+    // The fenced push changed no placement: the repository does not serve the blob.
+    let (status, _, _) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_session_finish_under_a_superseded_epoch_keeps_the_stage_for_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let group = EpochAuthority::superseded(5, 6);
+    state.set_ownership_authority(group.clone());
+    let blob = b"a-resumable-layer-across-a-transfer";
+    let digest = oci_digest(blob);
+    let location = stage_one_chunk(&app, blob).await;
+
+    // The finalize leases epoch 5, which the advanced authority no longer admits.
+    let (status, _, body) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body_has_code(&body, "UNAVAILABLE"), "{body:?}");
+
+    // The durable stage survived, so upload status stays usable.
+    let (status, headers, _) = send_with(&app, Method::GET, &location, &[("authorization", &auth(TOKEN))]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(headers.contains_key(header::RANGE));
+
+    // Once the node catches up to the new epoch, the same retry finalizes without re-uploading a byte.
+    group.settle();
+    let (status, headers, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(headers["docker-content-digest"], digest);
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
+}
+
+#[tokio::test]
+async fn test_mount_under_a_superseded_epoch_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let digest = upload_blob(&app, "store/source/app", b"source-layer-to-mount").await;
+    // The mount into the target leases epoch 5, but the target's home advanced to 6.
+    state.set_ownership_authority(EpochAuthority::superseded(5, 6));
+
+    let (status, _, body) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/target/app/blobs/uploads/?mount={digest}&from=store/source/app"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body_has_code(&body, "UNAVAILABLE"), "{body:?}");
+
+    // The fenced mount recorded no membership: the target does not serve the blob.
+    let (status, _, _) = send(&app, Method::GET, &format!("/v2/store/target/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_mount_at_the_current_epoch_publishes_the_blob() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let blob = b"source-layer-to-mount";
+    let digest = upload_blob(&app, "store/source/app", blob).await;
+    state.set_ownership_authority(EpochAuthority::settled(7, true));
+
+    let (status, _, _) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/target/app/blobs/uploads/?mount={digest}&from=store/source/app"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/target/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
+}
+
+/// A stale-epoch upload error is protocol-safe: it names no leader, datacenter, or membership, so it
+/// leaks no internal control topology.
+fn assert_no_topology(body: &bytes::Bytes) {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    for leaked in ["leader", "voter", "datacenter", "://", ".internal"] {
+        assert!(!text.contains(leaked), "stale-epoch response leaked {leaked:?}: {text}");
+    }
 }

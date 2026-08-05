@@ -446,6 +446,46 @@ fn download_error_response(err: DownloadError) -> Response {
     }
 }
 
+/// A blob's placement is content-addressed and independent of any repository home, but recording that a
+/// repository serves the digest is a metadata write under the repository's authority. An upload snapshots
+/// the repository's committed epoch, then re-admits it before it records membership: an upload whose
+/// authority did not move commits under the epoch it leased, while one whose home transferred while the
+/// bytes arrived leased a superseded epoch and is turned away before it changes placement.
+///
+/// Snapshot the repository's committed authority epoch to re-admit before a blob upload records membership.
+pub(super) async fn upload_epoch(state: &ServingState, repo: &str) -> u64 {
+    state.committed_authority_epoch(repo).await
+}
+
+/// Whether an upload leased at `fence` may still record membership under `repo`'s committed epoch. A
+/// process with no ownership group, or a repository no group has homed (`fence` of `0`), holds no epoch
+/// and is never fenced.
+pub(super) async fn epoch_admits(state: &ServingState, repo: &str, fence: u64) -> bool {
+    fence == 0 || state.admit_authority_epoch(repo, fence).await
+}
+
+/// The retry response for an upload whose repository authority advanced past the epoch it leased. It is a
+/// `503` a client retries, and it names no leader, datacenter, or membership, so it leaks no topology.
+pub(super) fn authority_moved() -> Response {
+    error_response(
+        ErrorCode::Unavailable,
+        "the repository authority moved while the upload was in flight; retry the upload",
+    )
+}
+
+/// Release a still-open quota reservation, a no-op when the push was unmetered or the digest was already a
+/// member. Every abandoned finalize — a rejected epoch, a commit fault, a superseded authority — returns
+/// the momentary bytes it reserved so a fenced or failed upload leaves no phantom accounting behind.
+pub(super) fn release_reservation(
+    state: &ServingState,
+    reservation: Option<peryx_storage::meta::QuotaReservationRecord>,
+) -> Result<(), ServeError> {
+    if let Some(record) = reservation {
+        state.meta.release_quota_reservation(record.id)?;
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "a monolithic upload commits the staged blob, its quota reservation, and its outbox entry together"
@@ -466,6 +506,7 @@ pub(super) async fn commit_blob(
             "only sha256 blob digests are supported",
         ));
     };
+    let fence = upload_epoch(state, repo).await;
     // A digest this repository already serves is accounted; re-pushing it must not reserve again.
     let reservation = if store::blob_is_member(&state.meta, &index.name, repo, digest)? {
         None
@@ -479,15 +520,18 @@ pub(super) async fn commit_blob(
             crate::quota::Admission::Reserved(record) => Some(record),
         }
     };
+    if !epoch_admits(state, repo, fence).await {
+        release_reservation(state, reservation)?;
+        pending.abort().await.map_err(blob_fault)?;
+        return Ok(authority_moved());
+    }
     match pending.commit(&storage).await {
         Ok(()) => {
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
             Ok(blob_created(name, digest))
         }
         Err(err) => {
-            if let Some(record) = reservation {
-                state.meta.release_quota_reservation(record.id)?;
-            }
+            release_reservation(state, reservation)?;
             Ok(download_error_response(DownloadError::Blob(err)))
         }
     }
@@ -519,6 +563,7 @@ pub(super) async fn commit_staged_upload(
             "only sha256 blob digests are supported",
         ));
     };
+    let fence = upload_epoch(state, repo).await;
     let reservation = if store::blob_is_member(&state.meta, &index.name, repo, digest)? {
         None
     } else {
@@ -532,6 +577,12 @@ pub(super) async fn commit_staged_upload(
             crate::quota::Admission::Reserved(record) => Some(record),
         }
     };
+    if !epoch_admits(state, repo, fence).await {
+        // Keep the durable stage and its session so status stays usable and a retry, once the transfer
+        // has settled, finalizes without re-uploading a byte; only the momentary reservation is released.
+        release_reservation(state, reservation)?;
+        return Ok(authority_moved());
+    }
     match state.blobs.finish_upload(session, &storage).await {
         Ok(()) => {
             state.meta.remove_upload(session)?;
@@ -539,9 +590,7 @@ pub(super) async fn commit_staged_upload(
             Ok(blob_created(name, digest))
         }
         Err(err) => {
-            if let Some(record) = reservation {
-                state.meta.release_quota_reservation(record.id)?;
-            }
+            release_reservation(state, reservation)?;
             Ok(download_error_response(DownloadError::Blob(err)))
         }
     }

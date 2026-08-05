@@ -719,3 +719,44 @@ async fn test_audit_without_limits_records_no_quota_usage() {
     let usage = state.meta.quota_usage("store").unwrap();
     assert_eq!((usage.accounted_bytes.committed, usage.projects.committed), (0, 0));
 }
+
+#[tokio::test]
+async fn test_metered_upload_under_a_superseded_epoch_releases_its_reservation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = quota_store(
+        &dir,
+        &PolicyConfig {
+            max_accounted_bytes: Some(64),
+            ..PolicyConfig::default()
+        },
+    );
+    // The push reserves its bytes, then the repository home advances past the epoch the finalize leased.
+    state.set_ownership_authority(super::EpochAuthority::superseded(5, 6));
+    let blob = b"a-metered-layer-that-loses-the-race";
+    let digest = oci_digest(blob);
+
+    let (status, _, body) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/app/blobs/uploads/?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        blob.to_vec(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body_has_code(&body, "UNAVAILABLE"), "{body:?}");
+    // The fenced push released its reservation before it could charge capacity: neither reserved nor
+    // committed bytes linger, and the repository never became a member of the blob.
+    let usage = state.meta.quota_usage("store").unwrap();
+    assert_eq!(
+        (usage.accounted_bytes.reserved, usage.accounted_bytes.committed),
+        (0, 0)
+    );
+    assert_eq!(
+        send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}

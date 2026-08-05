@@ -475,3 +475,81 @@ fn body_has_code(body: &Bytes, code: &str) -> bool {
 fn oci_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", Digest::of(bytes).as_str())
 }
+
+/// A stand-in ownership group for upload-fence tests. `committed` is the epoch a finalize leases (the
+/// local view it reads); `current` is the authoritative epoch the fence admits against. When the two
+/// differ, an upload that leased `committed` is fenced, modelling a repository home that transferred
+/// while the bytes arrived. `homed` records whether this node holds the home, so a test drives home and
+/// non-home ingress; the fence reads only the epoch, so a non-home node at the current epoch finalizes
+/// exactly like the home.
+struct EpochAuthority {
+    committed: std::sync::atomic::AtomicU64,
+    current: std::sync::atomic::AtomicU64,
+    homed: bool,
+}
+
+impl EpochAuthority {
+    /// A settled authority whose leased and committed epochs agree, so an upload finalizes.
+    fn settled(epoch: u64, homed: bool) -> Arc<Self> {
+        Arc::new(Self {
+            committed: std::sync::atomic::AtomicU64::new(epoch),
+            current: std::sync::atomic::AtomicU64::new(epoch),
+            homed,
+        })
+    }
+
+    /// An authority that advanced past the epoch a finalize leased, so the upload is fenced.
+    fn superseded(leased: u64, current: u64) -> Arc<Self> {
+        Arc::new(Self {
+            committed: std::sync::atomic::AtomicU64::new(leased),
+            current: std::sync::atomic::AtomicU64::new(current),
+            homed: true,
+        })
+    }
+
+    /// Catch the local view up to the current epoch, so a retry after the transfer settles finalizes.
+    fn settle(&self) {
+        let current = self.current.load(std::sync::atomic::Ordering::SeqCst);
+        self.committed.store(current, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl peryx_driver::state::OwnershipAuthority for EpochAuthority {
+    async fn has_home(&self, _authority: &str) -> bool {
+        self.homed
+    }
+
+    async fn committed_epoch(&self, _authority: &str) -> u64 {
+        self.committed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn admit_epoch(&self, _authority: &str, presented: u64) -> bool {
+        let current = self.current.load(std::sync::atomic::Ordering::SeqCst);
+        current != 0 && presented == current
+    }
+
+    async fn claim_home(
+        &self,
+        _authority: &str,
+    ) -> Result<peryx_driver::state::HomeClaim, peryx_driver::state::OwnershipError> {
+        Ok(peryx_driver::state::HomeClaim::AlreadyHomed)
+    }
+
+    fn cluster_status(&self) -> peryx_driver::state::ClusterStatus {
+        peryx_driver::state::ClusterStatus {
+            leader: None,
+            term: self.current.load(std::sync::atomic::Ordering::SeqCst),
+            voters: Vec::new(),
+        }
+    }
+
+    async fn transfer_home(
+        &self,
+        _authority: &str,
+        _new_home: &str,
+    ) -> Result<Option<peryx_driver::state::TransferOutcome>, peryx_driver::state::OwnershipError> {
+        // Upload-fence tests never move a home; the fence reads only the committed and current epochs.
+        Ok(None)
+    }
+}

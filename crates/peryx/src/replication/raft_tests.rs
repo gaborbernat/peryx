@@ -32,6 +32,7 @@ fn ha_config(dir: &TempDir, membership: Option<DcMembership>, identity: Option<&
     Config {
         data_dir: dir.path().to_path_buf(),
         writer_identity: identity.map(str::to_owned),
+        node_identity: identity.map(str::to_owned),
         availability: AvailabilityConfig::Ha(ReplicationConfig::Primary {
             source: "seed".to_owned(),
             token,
@@ -152,6 +153,7 @@ fn test_ha_reads_the_shared_token_from_a_replica_role() {
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         writer_identity: Some("node-a".to_owned()),
+        node_identity: Some("node-a".to_owned()),
         availability: AvailabilityConfig::Ha(ReplicationConfig::Replica {
             upstream: "http://east.internal:4460/".to_owned(),
             token: SecretSource::Literal(TOKEN.to_owned()),
@@ -167,7 +169,7 @@ fn test_ha_reads_the_shared_token_from_a_replica_role() {
 }
 
 #[test]
-fn test_ha_without_a_writer_identity_is_rejected() {
+fn test_ha_without_a_node_identity_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let config = ha_config(
         &dir,
@@ -178,7 +180,7 @@ fn test_ha_without_a_writer_identity_is_rejected() {
 
     let error = ConsensusPlan::from_config(&config).err().unwrap().to_string();
 
-    assert!(error.contains("writer-identity"), "{error}");
+    assert!(error.contains("node-identity"), "{error}");
 }
 
 #[test]

@@ -16,6 +16,14 @@ fn test_writer_identity_from_toml() {
 }
 
 #[test]
+fn test_node_identity_from_toml() {
+    assert_eq!(
+        toml_config("node_identity = \"node-b\"\n").node_identity.as_deref(),
+        Some("node-b")
+    );
+}
+
+#[test]
 fn test_mirror_prefetch_from_toml() {
     let c = toml_config(
         "\

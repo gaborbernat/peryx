@@ -116,6 +116,7 @@ fn test_apply_overlays_only_present_fields() {
             host: Some("0.0.0.0".to_owned()),
             port: Some(9000),
             writer_identity: Some("writer-a".to_owned()),
+            node_identity: Some("node-b".to_owned()),
             offline: Some(true),
             read_only: Some(true),
             cache_ttl_secs: Some(60),
@@ -128,6 +129,7 @@ fn test_apply_overlays_only_present_fields() {
     assert_eq!(merged.host, "0.0.0.0");
     assert_eq!(merged.port, 9000);
     assert_eq!(merged.writer_identity.as_deref(), Some("writer-a"));
+    assert_eq!(merged.node_identity.as_deref(), Some("node-b"));
     assert!(merged.offline);
     assert!(merged.read_only);
     assert_eq!(merged.cache_ttl_secs, 60);

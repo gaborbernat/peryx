@@ -53,6 +53,8 @@ fn test_parse_init_with_flags() {
         "/d",
         "--writer-identity",
         "writer-a",
+        "--node-identity",
+        "node-b",
         "--offline",
         "--read-only",
         "--log-level",
@@ -70,6 +72,7 @@ fn test_parse_init_with_flags() {
     assert_eq!(o.port, Some(9));
     assert_eq!(o.data_dir, Some(PathBuf::from("/d")));
     assert_eq!(o.writer_identity.as_deref(), Some("writer-a"));
+    assert_eq!(o.node_identity.as_deref(), Some("node-b"));
     assert_eq!(o.offline, Some(true));
     assert_eq!(o.read_only, Some(true));
     assert_eq!(o.log.level.as_deref(), Some("debug"));

@@ -91,10 +91,15 @@ impl ConsensusPlan {
         let Some(membership) = config.dc_membership.as_ref() else {
             return Ok(None);
         };
+        // Each node runs the ownership Raft node under its OWN voter identity, so it must name itself in
+        // the roster through `node-identity`. Deriving this from `writer-identity` — the one writer every
+        // node claims and follows on the metadata plane, identical across the group — would make every
+        // node share the writer's voter id, so no genuine multi-voter group forms and a home failure
+        // cannot transfer authority off the dead node.
         let identity = config
-            .writer_identity
+            .node_identity
             .as_deref()
-            .context("an `ha` consensus roster needs a `writer-identity` to find this node in it")?;
+            .context("an `ha` consensus roster needs a `node-identity` naming this node's own member entry")?;
         let roster = build_roster(membership)?;
         let local = membership
             .members

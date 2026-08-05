@@ -15,6 +15,7 @@ or `PERYX_*` environment variables, which override the file. Precedence is `defa
 | Bind port                 | `--port`            | `PERYX_PORT`                 | `port`                 | `4433`       |
 | Data directory            | `--data-dir`        | `PERYX_DATA_DIR`             | `data_dir`             | `peryx-data` |
 | Writer identity           | `--writer-identity` | `PERYX_WRITER_IDENTITY`      | `writer_identity`      | (none)       |
+| Node identity             | `--node-identity`   | `PERYX_NODE_IDENTITY`        | `node_identity`        | (none)       |
 | Offline mode              | `--offline`         | `PERYX_OFFLINE`              | `offline`              | `false`      |
 | Read replica mode         | `--read-only`       | `PERYX_READ_ONLY`            | `read_only`            | `false`      |
 | Config file               | `--config` / `-c`   | (n/a)                        | (n/a)                  | (none)       |
@@ -1027,6 +1028,12 @@ one member.
 | `dc`      | The datacenter the member runs in, unique within the group     | (required)               |
 | `address` | The address peers reach the member on, unique within the group | (required)               |
 | `role`    | `writer` or `replica`                                          | (required)               |
+
+In `ha` mode each node also sets `node_identity` to its own member's `node` value, so the ownership consensus runs under
+that node's own voter identity. This is distinct from `writer_identity`, which names the one writer every node claims
+and follows on the metadata plane and is therefore identical across the group: deriving the consensus identity from
+`writer_identity` would make every node share the writer's voter, so no genuine multi-voter group would form and a home
+failure could not transfer authority to a survivor.
 
 peryx validates the group at startup and refuses to serve on any violation: a blank or duplicated `group`, `node`, `dc`,
 or `address`; a `node` that reuses the `group` identity; anything other than exactly one `writer`; or a group with no

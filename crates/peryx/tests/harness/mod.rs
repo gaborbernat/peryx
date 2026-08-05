@@ -646,8 +646,11 @@ fn node_config(
     let mut config = String::new();
     if let Some(writer) = writer {
         // Every node follows the one writer's identity: the writer claims it on startup, and a replica
-        // verifies its offline-seeded store against it.
-        let _ = writeln!(config, "writer_identity = \"{}\"\n", writer.0);
+        // verifies its offline-seeded store against it. Consensus, though, needs each node's OWN identity,
+        // so it names its own member entry through `node_identity` — otherwise every node would run the
+        // ownership Raft node under the writer's voter id and the group could never fail over.
+        let _ = writeln!(config, "writer_identity = \"{}\"", writer.0);
+        let _ = writeln!(config, "node_identity = \"{}\"\n", member.node);
     }
     config.push_str("[[index]]\nname = \"hosted\"\nhosted = true\n\n");
     if let Some(writer) = writer {

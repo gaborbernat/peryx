@@ -101,6 +101,7 @@ fn ha_group_config(dir: &tempfile::TempDir) -> Config {
     Config {
         data_dir: dir.path().to_path_buf(),
         writer_identity: Some(WRITER_IDENTITY.to_owned()),
+        node_identity: Some(WRITER_IDENTITY.to_owned()),
         availability: AvailabilityConfig::Ha(primary_config()),
         dc_membership: Some(DcMembership {
             group: "ownership".to_owned(),

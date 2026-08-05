@@ -1724,3 +1724,77 @@ async fn test_a_run_under_the_current_epoch_is_not_fenced() {
     .await;
     scheduler.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_write_ledger_reap_drains_settled_rows_and_keeps_pending() {
+    let (_dir, state) = serving();
+    // The serving clock is fixed at 1000, so settle the reapable rows far enough in the past that the
+    // retention window has elapsed by then. An admitted intent and a finalized operation are reaped; a
+    // pending intent whose write may still finalize is kept.
+    let past = -3000;
+    state
+        .meta
+        .stage_intent("done", "digest-a", 10, b"x", 1000, past)
+        .unwrap();
+    state
+        .meta
+        .advance_intent("done", peryx_storage::meta::IntentPhase::Admitted, past)
+        .unwrap();
+    state
+        .meta
+        .stage_intent("live", "digest-b", 10, b"x", 1000, past)
+        .unwrap();
+    state.meta.claim_operation("op", Some(0), past).unwrap();
+    state
+        .meta
+        .finalize_operation("op", peryx_storage::meta::OperationResult::Published, b"body", past)
+        .unwrap();
+
+    let report = super::WriteLedgerReap
+        .run(&context(state.clone(), CancellationToken::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report.processed, 2,
+        "one admitted intent and one finalized operation reaped"
+    );
+    assert_eq!(state.meta.staged_intent("done").unwrap(), None);
+    assert_eq!(
+        state.meta.staged_intent("live").unwrap().unwrap().phase,
+        peryx_storage::meta::IntentPhase::Pending
+    );
+    assert_eq!(state.meta.operation_outcome("op").unwrap(), None);
+    assert_eq!(super::WriteLedgerReap.kind(), "write_ledger_reap");
+    assert_eq!(super::WriteLedgerReap.scope(), "");
+}
+
+#[tokio::test]
+async fn test_write_ledger_reap_stops_when_cancelled() {
+    let (_dir, state) = serving();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let report = super::WriteLedgerReap.run(&context(state, cancel)).await.unwrap();
+
+    assert_eq!(report, JobReport::default());
+}
+
+#[tokio::test]
+async fn test_write_ledger_reap_surfaces_a_storage_fault() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reap.redb");
+    MetaStore::open(&path).unwrap();
+    // A read-only store refuses the prune's write, so the reap surfaces the fault as a job failure
+    // rather than reporting a clean sweep it never performed.
+    let meta = MetaStore::open_existing_read_only(&path).unwrap();
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let clock: Clock = Arc::new(|| 1_000);
+    let state = AppState::with_clock(meta, blobs, 60, Vec::new(), clock).serving;
+
+    let failure = super::WriteLedgerReap
+        .run(&context(state, CancellationToken::new()))
+        .await
+        .unwrap_err();
+    assert!(failure.message().contains("read-only"), "{}", failure.message());
+}

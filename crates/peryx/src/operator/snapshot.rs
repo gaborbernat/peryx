@@ -417,6 +417,9 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         rate_limit,
         auth,
         availability,
+        // The write-ack quorum and deadline are resolved from configuration on startup, not restorable
+        // cluster state, so a restored node re-reads them from its config like the roster and listener below.
+        write_ack: _,
         // The static datacenter roster does not yet drive the runtime, so a backup omits it and
         // restores to the same effective behavior; snapshotting it lands with the migration work.
         dc_membership: _,

@@ -36,6 +36,7 @@ use crate::attestation;
 use crate::cache::{self};
 use crate::discovery;
 
+mod acknowledge;
 mod admission;
 mod changelog;
 mod get;

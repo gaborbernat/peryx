@@ -189,4 +189,42 @@ impl MetaStore {
         let table = txn.open_table(INGRESS_INTENT)?;
         Ok(table.len()?)
     }
+
+    /// Remove up to `limit` settled intents whose retention window has elapsed at `now`, returning how
+    /// many were pruned. An [`Admitted`](IntentPhase::Admitted) intent the home DC finalized, or an
+    /// [`Expired`](IntentPhase::Expired) one, is pruned once `retention_secs` have passed since its last
+    /// transition. A [`Pending`](IntentPhase::Pending) intent is never pruned, since its write may still
+    /// finalize, so a stalled home DC still sheds new load through [`RejectedOverLimit`] rather than by
+    /// dropping work in flight.
+    ///
+    /// [`RejectedOverLimit`]: IntentStageOutcome::RejectedOverLimit
+    ///
+    /// # Errors
+    /// Returns a store error when a row cannot be read or the delete cannot be committed.
+    pub fn prune_ingress_intents(&self, now: i64, retention_secs: i64, limit: usize) -> Result<usize, MetaError> {
+        let txn = self.db.begin_write()?;
+        let pruned;
+        {
+            let mut table = txn.open_table(INGRESS_INTENT)?;
+            let mut doomed = Vec::new();
+            for entry in table.iter()? {
+                if doomed.len() >= limit {
+                    break;
+                }
+                let (key, value) = entry?;
+                let record: StagedIntent = serde_json::from_slice(value.value())?;
+                if matches!(record.phase, IntentPhase::Admitted | IntentPhase::Expired)
+                    && now >= record.updated_at_unix + retention_secs
+                {
+                    doomed.push(key.value().to_owned());
+                }
+            }
+            for key in &doomed {
+                table.remove(key.as_str())?;
+            }
+            pruned = doomed.len();
+        }
+        txn.commit()?;
+        Ok(pruned)
+    }
 }

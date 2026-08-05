@@ -184,3 +184,69 @@ fn test_list_pending_intents_is_empty_without_pending_work() {
 
     assert!(store.list_pending_intents(10).unwrap().is_empty());
 }
+
+fn admit(store: &MetaStore, key: &str, digest: &str, staged_at: i64, admitted_at: i64) {
+    store.stage_intent(key, digest, 10, b"intent", 1000, staged_at).unwrap();
+    assert_eq!(
+        store.advance_intent(key, IntentPhase::Admitted, admitted_at).unwrap(),
+        IntentTransition::Advanced
+    );
+}
+
+#[test]
+fn test_prune_removes_admitted_intents_past_retention() {
+    let (_dir, store) = store();
+    admit(&store, "key-1", "digest-a", 1, 10);
+
+    // At 70 with a 60s retention the intent settled at 10 is eligible, so it is reaped.
+    assert_eq!(store.prune_ingress_intents(70, 60, 100).unwrap(), 1);
+    assert_eq!(store.staged_intent("key-1").unwrap(), None);
+    assert_eq!(store.count_staged_intents().unwrap(), 0);
+}
+
+#[test]
+fn test_prune_removes_expired_intents_past_retention() {
+    let (_dir, store) = store();
+    store.stage_intent("key-1", "digest-a", 10, b"intent", 1000, 1).unwrap();
+    store.advance_intent("key-1", IntentPhase::Expired, 10).unwrap();
+
+    assert_eq!(store.prune_ingress_intents(70, 60, 100).unwrap(), 1);
+    assert_eq!(store.staged_intent("key-1").unwrap(), None);
+}
+
+#[test]
+fn test_prune_keeps_a_settled_intent_within_retention() {
+    let (_dir, store) = store();
+    admit(&store, "key-1", "digest-a", 1, 10);
+
+    // At 69 the 60s window since the transition at 10 has not elapsed, so the intent stays.
+    assert_eq!(store.prune_ingress_intents(69, 60, 100).unwrap(), 0);
+    assert_eq!(
+        store.staged_intent("key-1").unwrap().unwrap().phase,
+        IntentPhase::Admitted
+    );
+}
+
+#[test]
+fn test_prune_never_removes_a_pending_intent() {
+    let (_dir, store) = store();
+    // A pending intent staged long ago is never reaped: its write may still finalize.
+    store.stage_intent("key-1", "digest-a", 10, b"intent", 1000, 1).unwrap();
+
+    assert_eq!(store.prune_ingress_intents(1_000_000, 60, 100).unwrap(), 0);
+    assert_eq!(
+        store.staged_intent("key-1").unwrap().unwrap().phase,
+        IntentPhase::Pending
+    );
+}
+
+#[test]
+fn test_prune_honors_the_batch_limit() {
+    let (_dir, store) = store();
+    admit(&store, "key-1", "digest-a", 1, 10);
+    admit(&store, "key-2", "digest-b", 1, 10);
+    admit(&store, "key-3", "digest-c", 1, 10);
+
+    assert_eq!(store.prune_ingress_intents(70, 60, 2).unwrap(), 2);
+    assert_eq!(store.count_staged_intents().unwrap(), 1);
+}

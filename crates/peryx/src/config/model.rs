@@ -13,6 +13,7 @@ use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig};
 use peryx_http::{DEFAULT_HOT_CACHE_BYTES, DEFAULT_MAX_STALE_SECS};
 use peryx_identity::{Action, ExternalGroupGrant, Glob, Grant, IndexAcl, NamedToken, ProviderId};
 use peryx_policy::PolicyConfig;
+use peryx_replication::DurabilityPolicy;
 use peryx_storage::blob::{DurabilityCapabilities, DurabilityRequirement};
 use peryx_upstream::ExecCredentialConfig;
 use serde::Deserialize;
@@ -60,6 +61,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub auth: AuthConfig,
     pub availability: AvailabilityConfig,
+    /// The resolved write-ack quorum and deadline hosted writes are acknowledged against.
+    pub write_ack: WriteAckConfig,
     /// The static datacenter replication group, when one is configured. Absent under single-node
     /// `none` mode and whenever no `[[availability.member]]` roster is given.
     pub dc_membership: Option<DcMembership>,
@@ -253,6 +256,26 @@ impl AvailabilityConfig {
         match self {
             Self::None => None,
             Self::Dc(replication) | Self::Ha(replication) => Some(replication),
+        }
+    }
+}
+
+/// The default client write-ack deadline, in seconds, when `[availability.write_ack]` names none.
+pub const DEFAULT_WRITE_ACK_DEADLINE_SECS: u64 = 5;
+
+/// The resolved `[availability.write_ack]` contract: the durability quorum a hosted write must reach and
+/// the deadline the client waits before the write is reported retry-safe-unknown rather than durable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteAckConfig {
+    pub policy: DurabilityPolicy,
+    pub deadline: Duration,
+}
+
+impl Default for WriteAckConfig {
+    fn default() -> Self {
+        Self {
+            policy: DurabilityPolicy::Local,
+            deadline: Duration::from_secs(DEFAULT_WRITE_ACK_DEADLINE_SECS),
         }
     }
 }
@@ -873,6 +896,7 @@ impl Default for Config {
             rate_limit: RateLimitConfig::default(),
             auth: AuthConfig::default(),
             availability: AvailabilityConfig::None,
+            write_ack: WriteAckConfig::default(),
             dc_membership: None,
             availability_listener: None,
             jobs: JobsConfig::default(),

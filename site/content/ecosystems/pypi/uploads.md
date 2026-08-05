@@ -13,6 +13,31 @@ version, and take whatever spelling names the right thing. peryx does the same a
 it once was stricter than the index it fronts. This page explains what it accepts and why, and where accepting a broader
 input still stops short of accepting the wrong one.
 
+## Durability acknowledgement
+
+A successful upload response means the write reached the durability its deployment promises, not merely that bytes
+touched a disk. Under single-node `none` mode that promise is local durability: once the backend commits the artifact
+and its metadata, peryx answers `200`. Under `dc` and `ha` the promise is a datacenter quorum, set by
+`[availability.write_ack]`: `local`, `majority` (the default), or `everywhere` over the datacenter's members. A
+filesystem backend proves that quorum from a quorum of independent per-node placement receipts; a datacenter-durable
+object store proves it from its own atomic put and digest confirmation.
+
+The response follows the evidence. A write that reaches its quorum answers `200 upload accepted`. A write still short of
+its quorum when the client's `write_ack.deadline-secs` window elapses answers `202 Accepted` carrying a stable operation
+id, not a failure: the durable completion may land after the client stops waiting, so reporting a definite failure would
+be wrong and a blind retry could publish the artifact twice. The client resends the same upload, and peryx resolves the
+original operation by its id, replaying the recorded result rather than mutating a second time. An identical resend of
+an already-published file is the same idempotent success it has always been.
+
+Only proven same-datacenter durability counts toward the quorum. A volatile buffer, a temporary staging file, or a
+provider's asynchronous cross-region replication is not a completed same-datacenter copy and is never counted as one.
+Cross-datacenter artifact replication runs downstream and a write never waits on it.
+
+Gathering placement receipts from other datacenter members travels the replication plane, which is not yet wired, so
+today the only receipt available while the request is open is the ingress node's own. A single-node deployment, or one
+member per datacenter, reaches its quorum from that receipt and answers `200`; a larger same-datacenter quorum is
+reported retry-safe until the receipt transport lands.
+
 ## Project size under concurrent uploads
 
 `max_project_size_bytes` applies to the sum of counted distribution files for one normalized project. peryx reserves an

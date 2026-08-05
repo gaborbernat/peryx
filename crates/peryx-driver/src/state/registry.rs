@@ -159,6 +159,13 @@ impl AppState {
         self.serving_mut().availability_topology = topology;
     }
 
+    /// Install the resolved hosted-write acknowledgement quorum and client deadline.
+    pub fn set_write_ack(&mut self, policy: peryx_replication::DurabilityPolicy, deadline: std::time::Duration) {
+        let serving = self.serving_mut();
+        serving.write_ack_policy = policy;
+        serving.write_ack_deadline = deadline;
+    }
+
     /// Install the authority role the binary resolved from the configured replication role, so the
     /// topology snapshot reports a configured primary as the writer even when it serves read-only.
     pub fn set_availability_role(&mut self, role: peryx_core::NodeRole) {

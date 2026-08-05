@@ -420,3 +420,61 @@ async fn test_promote_rejects_archived_and_quarantined_targets() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_promote_at_the_current_authority_epoch_applies() {
+    let h = promotion_harness().await;
+    let wheel = fixture_wheel();
+    upload_wheel_to(&h.state, "/staging/", "peryxpkg-1.0-py3-none-any.whl", "1.0", &wheel).await;
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 4,
+            current: 4,
+            homed: true,
+        },
+    );
+    let (status, body) = request_response(
+        &h.state,
+        "PUT",
+        "/prod/peryxpkg/1.0/promote?from=staging",
+        Some(&upload_auth()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "promoted 1 file(s)");
+}
+
+#[tokio::test]
+async fn test_promote_under_a_superseded_epoch_conflicts_and_promotes_nothing() {
+    let h = promotion_harness().await;
+    let wheel = fixture_wheel();
+    upload_wheel_to(&h.state, "/staging/", "peryxpkg-1.0-py3-none-any.whl", "1.0", &wheel).await;
+    // The target authority advanced past the epoch this promotion leased, so it is fenced.
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 6,
+            homed: true,
+        },
+    );
+    let (status, body) = request_response(
+        &h.state,
+        "PUT",
+        "/prod/peryxpkg/1.0/promote?from=staging",
+        Some(&upload_auth()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // Nothing was promoted onto the target.
+    let (status, ..) = get(&h.state, "/prod/simple/peryxpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let lowered = body.to_ascii_lowercase();
+    for leaked in ["leader", "voter", "datacenter", "://", ".internal"] {
+        assert!(
+            !lowered.contains(leaked),
+            "stale-epoch response leaked {leaked:?}: {body}"
+        );
+    }
+}

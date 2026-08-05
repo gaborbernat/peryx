@@ -7,6 +7,7 @@ mod identity_availability_tests;
 mod logging_tests;
 mod none_mode_tests;
 mod operator;
+mod package_lifecycle_availability_tests;
 mod prefetch;
 mod replication_liveness_tests;
 mod replication_tests;

@@ -3,6 +3,7 @@ mod app;
 mod availability_listener_tests;
 mod cli;
 mod config;
+mod identity_availability_tests;
 mod logging_tests;
 mod none_mode_tests;
 mod operator;

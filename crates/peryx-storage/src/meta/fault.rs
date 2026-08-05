@@ -127,3 +127,14 @@ pub fn reopen(inner: &Arc<InMemoryBackend>, fault: &Arc<Fault>) -> MetaStore {
         db: Arc::new(MetaDatabase::ReadWrite(database(inner, fault))),
     }
 }
+
+/// Overwrite `key` in a `<&str, &[u8]>` table with raw `bytes`, so a store's decode arm meets a
+/// malformed record without a backend fault.
+pub fn corrupt(store: &MetaStore, table: redb::TableDefinition<'_, &str, &[u8]>, key: &str, bytes: &[u8]) {
+    let MetaDatabase::ReadWrite(db) = &*store.db else {
+        panic!("corrupt needs a read-write store");
+    };
+    let write = db.begin_write().unwrap();
+    write.open_table(table).unwrap().insert(key, bytes).unwrap();
+    write.commit().unwrap();
+}

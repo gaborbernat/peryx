@@ -239,6 +239,8 @@ sync path itself.
 
 ## Related
 
+- What a client observes under each mode:
+  [client behavior across availability modes](@/core/availability-client-behavior.md)
 - Size and stand up each mode's shape: [availability deployment and sizing](@/core/availability-deployment.md)
 - Operate the single-writer model that is today's `none`: [high availability](@/core/high-availability.md)
 - Where mutations and the change serial live: [architecture](@/core/architecture.md)

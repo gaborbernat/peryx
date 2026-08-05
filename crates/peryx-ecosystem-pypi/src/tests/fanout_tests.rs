@@ -138,8 +138,12 @@ async fn test_blob_committed_while_waiting_on_the_gate_serves_from_disk() {
         let digest = digest.clone();
         async move { cache::stream_file(state, digest, "pypi".to_owned(), "parked.whl".to_owned()).await }
     });
-    // The parked request only proceeds once the holder commits the blob and releases the gate.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Wait until the spawned request has registered on the gate — it bumps the gate's user count past
+    // our hold before it awaits the lock — so the blob is committed while it is parked, deterministically
+    // rather than racing a timer.
+    while cache::flight_users(&h.state, digest.as_str()) < 2 {
+        tokio::task::yield_now().await;
+    }
     h.state.blobs.put_bytes_as(body, &digest).await.unwrap();
     drop(guard);
     let outcome = waiting.await.unwrap().unwrap();

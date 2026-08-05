@@ -480,7 +480,7 @@ pub(super) async fn commit_blob(
         }
     };
     match pending.commit(&storage).await {
-        Ok(()) => {
+        Ok(_receipt) => {
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
             Ok(blob_created(name, digest))
         }

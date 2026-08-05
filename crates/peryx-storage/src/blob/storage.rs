@@ -224,7 +224,7 @@ impl BlobStorage {
     /// # Errors
     /// Returns a contextual digest mismatch, write, or commit error.
     pub async fn put_bytes_as(&self, bytes: &[u8], expected: &Digest) -> Result<(), BlobError> {
-        self.stage_bytes(bytes).await?.commit_as(expected).await
+        self.stage_bytes(bytes).await?.commit_as(expected).await.map(drop)
     }
 
     /// Append `chunk` to `session`'s durable upload stage, returning the new staged length.
@@ -405,7 +405,7 @@ impl BlobBlocking<'_> {
     /// # Errors
     /// Returns a contextual commit error.
     pub fn commit(&self, staged: BlobStaged) -> Result<(), BlobError> {
-        staged.commit_blocking()
+        staged.commit_blocking().map(drop)
     }
 
     /// Publish a blocking stage only at the expected digest.
@@ -413,7 +413,7 @@ impl BlobBlocking<'_> {
     /// # Errors
     /// Returns a contextual mismatch or commit error.
     pub fn commit_as(&self, staged: BlobStaged, expected: &Digest) -> Result<(), BlobError> {
-        staged.commit_as_blocking(expected)
+        staged.commit_as_blocking(expected).map(drop)
     }
 
     /// Read metadata without fetching bytes.

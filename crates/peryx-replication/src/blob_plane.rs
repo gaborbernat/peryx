@@ -307,6 +307,9 @@ async fn commit_blob(
     }
     let mut write = blobs.begin().await?;
     write.write_chunk(Bytes::from(bytes)).await?;
+    // The commit now returns a durable placement receipt, proof the bytes are digest-verified, synced, and
+    // atomically published past the filesystem boundary. Quorum and cross-DC placement consume that
+    // evidence downstream; here the local durable copy only needs recording as present.
     write.commit(digest).await?;
     // A replicated blob is resupply-able from the primary, so it records under the resupply-able source
     // (`Proxy` projects `RemoteOnly` when its bytes are absent, not `Unavailable`). A whole-blob #826 page

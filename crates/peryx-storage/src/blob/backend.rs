@@ -9,7 +9,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::error::{BlobError, BlobOperation};
 use super::store::{BlobStore, PendingBlob, StagedBlob};
-use super::{BlobMetadata, Digest};
+use super::{BlobMetadata, Digest, PlacementReceipt};
 
 fn filesystem_context<T>(
     result: Result<T, BlobError>,
@@ -309,11 +309,12 @@ impl BlobWrite {
         }
     }
 
-    /// Verify the completed stream and publish it atomically.
+    /// Verify the completed stream and publish it atomically, returning the [`PlacementReceipt`] that
+    /// proves the bytes are durable at the backend's durability scope.
     ///
     /// # Errors
-    /// Returns a contextual commit error on mismatch or storage failure.
-    pub async fn commit(self, expected: &Digest) -> Result<(), BlobError> {
+    /// Returns a contextual commit error on mismatch or storage failure, and no receipt.
+    pub async fn commit(self, expected: &Digest) -> Result<PlacementReceipt, BlobError> {
         match self.backend {
             BlobWriteBackend::Filesystem(_) => self.finish().await?.commit_as(expected).await,
             BlobWriteBackend::S3(write) => write.commit(expected).await,
@@ -491,14 +492,15 @@ impl BlobStaged {
         }
     }
 
-    /// Publish the stage at its computed content address.
+    /// Publish the stage at its computed content address, returning a [`PlacementReceipt`] that proves the
+    /// bytes are durable: digest-verified, synced, and atomically published past the filesystem boundary.
     ///
     /// # Errors
-    /// Returns a contextual commit error on storage failure.
+    /// Returns a contextual commit error on storage failure, and no receipt.
     ///
     /// # Panics
     /// Panics if the internal blocking task panics.
-    pub async fn commit(mut self) -> Result<(), BlobError> {
+    pub async fn commit(mut self) -> Result<PlacementReceipt, BlobError> {
         match self.take_backend() {
             BlobStagedBackend::Filesystem { store, staged } => {
                 let permit = store.worker_permit().await;
@@ -513,16 +515,16 @@ impl BlobStaged {
         }
     }
 
-    pub(crate) fn commit_blocking(mut self) -> Result<(), BlobError> {
+    pub(crate) fn commit_blocking(mut self) -> Result<PlacementReceipt, BlobError> {
         let backend = self.take_backend();
         Self::commit_backend(backend)
     }
 
-    /// Publish only when the computed address matches `expected`.
+    /// Publish only when the computed address matches `expected`, returning its [`PlacementReceipt`].
     ///
     /// # Errors
-    /// Returns a contextual digest mismatch or commit error.
-    pub async fn commit_as(self, expected: &Digest) -> Result<(), BlobError> {
+    /// Returns a contextual digest mismatch or commit error, and no receipt.
+    pub async fn commit_as(self, expected: &Digest) -> Result<PlacementReceipt, BlobError> {
         if self.digest() != expected {
             let error = BlobError::digest_mismatch(expected, self.digest()).with_context(
                 self.backend_name(),
@@ -535,7 +537,7 @@ impl BlobStaged {
         self.commit().await
     }
 
-    pub(crate) fn commit_as_blocking(self, expected: &Digest) -> Result<(), BlobError> {
+    pub(crate) fn commit_as_blocking(self, expected: &Digest) -> Result<PlacementReceipt, BlobError> {
         if self.digest() != expected {
             let error = BlobError::digest_mismatch(expected, self.digest()).with_context(
                 self.backend_name(),
@@ -590,11 +592,11 @@ impl BlobStaged {
         self.backend.take().expect("staged blob retains its backend")
     }
 
-    fn commit_backend(backend: BlobStagedBackend) -> Result<(), BlobError> {
+    fn commit_backend(backend: BlobStagedBackend) -> Result<PlacementReceipt, BlobError> {
         match backend {
             BlobStagedBackend::Filesystem { store, staged } => {
                 let digest = staged.digest().clone();
-                filesystem_context(store.commit_staged(staged), BlobOperation::Commit, Some(&digest)).map(drop)
+                filesystem_context(store.commit_staged(staged), BlobOperation::Commit, Some(&digest))
             }
             BlobStagedBackend::S3(_) => Err(
                 BlobError::unsupported("blocking commit on the s3 backend").with_context(

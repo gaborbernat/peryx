@@ -507,6 +507,20 @@ async fn ui_router_admin() -> (tempfile::TempDir, axum::Router, String) {
     (dir, router_for(state), authorization)
 }
 
+/// [`ui_router_admin`] that also hands back the state, so a test can settle its metrics aggregator
+/// rather than poll the rendered page for an event applied on the aggregator's own thread.
+async fn ui_router_admin_stateful() -> (
+    tempfile::TempDir,
+    std::sync::Arc<peryx_driver::AppState>,
+    axum::Router,
+    String,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(&ui_config(&dir)).unwrap();
+    let authorization = seed_administrator(&state).await;
+    (dir, state.clone(), router_for(state), authorization)
+}
+
 /// Leptos server rendering drives a per-thread reactive graph through process-global arenas, so two
 /// page renders at once in one process wedge on a lost wakeup. nextest runs each test in its own
 /// process and never hits this; `cargo test` runs a binary's tests as threads and would, so hold one
@@ -1678,19 +1692,14 @@ async fn test_ui_unknown_route_falls_back(ui_router: (tempfile::TempDir, axum::R
 #[tokio::test]
 async fn test_ui_stats_drills_from_index_to_files() {
     // The stats drill names repositories, so the page renders it only for an operator.
-    let (_dir, router, authorization) = ui_router_admin().await;
+    let (_dir, state, router, authorization) = ui_router_admin_stateful().await;
     upload_fixture(&router).await;
-    // The aggregator applies the upload event on its own thread; poll the rendered page.
-    let mut body = String::new();
-    for _ in 0..500 {
-        let (status, page) = get_authorized(&router, "/stats?index=root%2Fpypi", &authorization).await;
-        assert_eq!(status, StatusCode::OK);
-        if page.contains("veloxdemo") {
-            body = page;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    // The aggregator applies the upload on its own thread; settle it so the page reflects the event
+    // deterministically instead of polling for it.
+    state.metrics.settle();
+    let (status, body) = get_authorized(&router, "/stats?index=root%2Fpypi", &authorization).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("veloxdemo"));
     assert!(body.contains("uploads"));
     // Leptos escapes attribute ampersands in server output.
     assert!(body.contains("/stats?index=root%2Fpypi&amp;project=veloxdemo"));

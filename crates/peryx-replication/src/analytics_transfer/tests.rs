@@ -128,9 +128,33 @@ fn test_http_source_rejects_a_non_http_base() {
 }
 
 #[test]
+fn test_http_source_rejects_an_unparseable_base() {
+    let error = HttpAnalyticsSource::new("not a url", TOKEN, limits(1024), Duration::from_secs(5)).unwrap_err();
+    assert!(matches!(error, HttpAnalyticsError::InvalidBase(_)));
+}
+
+#[test]
 fn test_http_source_appends_a_trailing_slash_to_the_base() {
-    // A base without a trailing slash still roots the analytics path rather than dropping a segment.
-    assert!(HttpAnalyticsSource::new("http://producer:8080", TOKEN, limits(1024), Duration::from_secs(5)).is_ok());
+    // A path base without a trailing slash still roots the analytics path rather than dropping a segment.
+    assert!(
+        HttpAnalyticsSource::new(
+            "http://producer:8080/prefix",
+            TOKEN,
+            limits(1024),
+            Duration::from_secs(5)
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn test_http_source_debug_redacts_the_token() {
+    let source =
+        HttpAnalyticsSource::new("http://producer:8080/", TOKEN, limits(1024), Duration::from_secs(5)).unwrap();
+    let rendered = format!("{source:?}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    assert!(!rendered.contains(TOKEN), "{rendered}");
+    assert!(rendered.contains("producer"), "{rendered}");
 }
 
 struct TestServer {
@@ -243,4 +267,48 @@ async fn test_http_source_maps_a_refused_connection() {
     let error = source(&url).fetch_after(0).await.unwrap_err();
 
     assert!(matches!(error, TransportError::Disconnected | TransportError::Timeout));
+}
+
+#[tokio::test]
+async fn test_http_source_maps_a_response_timeout() {
+    // A listener that accepts but never answers holds the request open until the client's timeout fires.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        // Accept the connection and hold it open, never answering, until the task is aborted.
+        let _connection = listener.accept().await;
+        std::future::pending::<()>().await;
+    });
+    let silent = HttpAnalyticsSource::new(&url, TOKEN, limits(1 << 20), Duration::from_millis(150)).unwrap();
+
+    let error = silent.fetch_after(0).await.unwrap_err();
+
+    assert!(matches!(error, TransportError::Timeout), "{error:?}");
+    task.abort();
+}
+
+#[tokio::test]
+async fn test_http_source_maps_a_truncated_body() {
+    use tokio::io::AsyncWriteExt as _;
+
+    // Announce a long body, then close after a single byte so the streamed read fails mid-body.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n[")
+                .await;
+            let _ = stream.flush().await;
+            // Drop the connection before the promised bytes arrive.
+        }
+    });
+
+    let error = source(&url).fetch_after(0).await.unwrap_err();
+
+    assert!(
+        matches!(error, TransportError::Disconnected | TransportError::Timeout),
+        "{error:?}"
+    );
+    task.abort();
 }

@@ -1,7 +1,17 @@
 use crate::meta::{
-    AccountingClass, FinalizeOutcome, IntentPhase, MetaError, MetaStore, NewQuotaReservation, OperationState,
-    QuotaError, QuotaReservationRecord, QuotaValue,
+    AccountingClass, FinalizeOutcome, FinalizedWrite, IntentPhase, MetaError, MetaStore, NewQuotaReservation,
+    OperationState, QuotaError, QuotaReservationRecord, QuotaValue,
 };
+
+fn write(response: &[u8], expiry_unix: Option<i64>, now: i64) -> FinalizedWrite<'_> {
+    FinalizedWrite {
+        operation: "op",
+        intent_key: "intent",
+        response,
+        expiry_unix,
+        now,
+    }
+}
 
 fn decode_error() -> MetaError {
     MetaError::from(serde_json::from_str::<serde_json::Value>("{").unwrap_err())
@@ -30,7 +40,7 @@ fn staged(store: &MetaStore) {
 }
 
 fn publish(store: &MetaStore, response: &[u8]) -> Result<FinalizeOutcome, MetaError> {
-    store.commit_finalized_write("op", "intent", response, Some(100), 2, |driver| {
+    store.commit_finalized_write(write(response, Some(100), 2), |driver| {
         driver.put("row", b"value")?;
         Ok::<_, MetaError>(vec![b"{\"action\":\"add\"}".to_vec()])
     })
@@ -71,7 +81,7 @@ fn test_commit_finalized_write_replays_the_first_result_without_a_second_write()
     publish(&store, b"first").unwrap();
 
     let replay = store
-        .commit_finalized_write("op", "intent", b"second", Some(200), 5, |driver| {
+        .commit_finalized_write(write(b"second", Some(200), 5), |driver| {
             driver.put("row", b"clobbered")?;
             Ok::<_, MetaError>(vec![b"{\"action\":\"add\"}".to_vec()])
         })
@@ -102,7 +112,7 @@ fn test_commit_finalized_write_rolls_back_when_the_body_errors() {
     let (_dir, store) = super::store();
     staged(&store);
 
-    let result = store.commit_finalized_write("op", "intent", b"response", None, 2, |driver| {
+    let result = store.commit_finalized_write(write(b"response", None, 2), |driver| {
         driver.put("row", b"value")?;
         Err::<Vec<Vec<u8>>, _>(decode_error())
     });
@@ -145,7 +155,7 @@ fn test_commit_finalized_write_with_quota_commits_the_reservation_on_publish() {
     let reservation = reservation(&store);
 
     let outcome = store
-        .commit_finalized_write_with_quota("op", "intent", b"response", Some(100), 2, reservation.id, |driver| {
+        .commit_finalized_write_with_quota(write(b"response", Some(100), 2), reservation.id, |driver| {
             driver.put("row", b"value")?;
             Ok::<_, QuotaError>((true, vec![b"{\"action\":\"add\"}".to_vec()]))
         })
@@ -173,7 +183,7 @@ fn test_commit_finalized_write_with_quota_releases_the_reservation_on_skip() {
     let reservation = reservation(&store);
 
     let outcome = store
-        .commit_finalized_write_with_quota("op", "intent", b"response", None, 2, reservation.id, |_driver| {
+        .commit_finalized_write_with_quota(write(b"response", None, 2), reservation.id, |_driver| {
             Ok::<_, QuotaError>((false, Vec::new()))
         })
         .unwrap();
@@ -200,14 +210,14 @@ fn test_commit_finalized_write_with_quota_replays_without_moving_the_reservation
     staged(&store);
     let reservation = reservation(&store);
     store
-        .commit_finalized_write_with_quota("op", "intent", b"first", None, 2, reservation.id, |driver| {
+        .commit_finalized_write_with_quota(write(b"first", None, 2), reservation.id, |driver| {
             driver.put("row", b"value")?;
             Ok::<_, QuotaError>((true, vec![b"{\"action\":\"add\"}".to_vec()]))
         })
         .unwrap();
 
     let replay = store
-        .commit_finalized_write_with_quota("op", "intent", b"second", None, 5, reservation.id, |driver| {
+        .commit_finalized_write_with_quota(write(b"second", None, 5), reservation.id, |driver| {
             driver.put("row", b"clobbered")?;
             Ok::<_, QuotaError>((true, vec![b"{\"action\":\"add\"}".to_vec()]))
         })

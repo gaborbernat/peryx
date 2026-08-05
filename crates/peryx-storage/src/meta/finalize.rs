@@ -19,6 +19,23 @@ use super::ingress_intent::{IntentPhase, StagedIntent};
 use super::operation_outcome::{OperationOutcomeRecord, OperationState};
 use super::{DriverTxn, INGRESS_INTENT, MetaError, MetaStore, OPERATION_OUTCOME};
 
+/// The identity and retained result of an admitted write a finalize commits, shared by the plain and
+/// quota-threaded finalize paths.
+#[derive(Debug, Clone, Copy)]
+pub struct FinalizedWrite<'a> {
+    /// The operation id whose terminal outcome a retry replays.
+    pub operation: &'a str,
+    /// The staging intent to advance to [`Admitted`](super::IntentPhase::Admitted); an absent key
+    /// advances nothing.
+    pub intent_key: &'a str,
+    /// The response bytes a retry replays.
+    pub response: &'a [u8],
+    /// When the stored outcome may be pruned, or `None` for no retention bound.
+    pub expiry_unix: Option<i64>,
+    /// The finalize timestamp, in Unix seconds.
+    pub now: i64,
+}
+
 /// The verdict of a finalize commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalizeOutcome {
@@ -69,21 +86,17 @@ impl MetaStore {
     /// read, write, or commit.
     pub fn commit_finalized_write<E: From<MetaError>>(
         &self,
-        operation: &str,
-        intent_key: &str,
-        response: &[u8],
-        expiry_unix: Option<i64>,
-        now: i64,
+        write: FinalizedWrite<'_>,
         body: impl FnOnce(&mut DriverTxn) -> Result<Vec<Vec<u8>>, E>,
     ) -> Result<FinalizeOutcome, E> {
         let committed = self.commit_driver_txn_at(
             None,
             None,
             true,
-            |txn, ()| stamp_finalized(txn, operation, intent_key, response, expiry_unix, now),
+            |txn, ()| stamp_finalized(txn, &write),
             |driver| body(driver).map(|journal| ((), journal)).map_err(FinalizeFlow::User),
         );
-        self.resolve_finalize(operation, committed)
+        self.resolve_finalize(write.operation, committed)
     }
 
     /// Map a finalize transaction's result to a [`FinalizeOutcome`]: a clean commit published, a
@@ -111,15 +124,11 @@ impl MetaStore {
 /// race-replay when the outcome is already terminal.
 pub(super) fn stamp_finalized<E: From<MetaError>>(
     txn: &redb::WriteTransaction,
-    operation: &str,
-    intent_key: &str,
-    response: &[u8],
-    expiry_unix: Option<i64>,
-    now: i64,
+    write: &FinalizedWrite<'_>,
 ) -> Result<(), FinalizeFlow<E>> {
     let mut outcomes = txn.open_table(OPERATION_OUTCOME).map_err(MetaError::from)?;
     let existing = outcomes
-        .get(operation)
+        .get(write.operation)
         .map_err(MetaError::from)?
         .map(|value| serde_json::from_slice::<OperationOutcomeRecord>(value.value()))
         .transpose()
@@ -129,15 +138,15 @@ pub(super) fn stamp_finalized<E: From<MetaError>>(
     }
     let record = OperationOutcomeRecord {
         state: OperationState::Published,
-        response: response.to_vec(),
-        expiry_unix,
-        updated_at_unix: now,
+        response: write.response.to_vec(),
+        expiry_unix: write.expiry_unix,
+        updated_at_unix: write.now,
     };
     let encoded = serde_json::to_vec(&record).map_err(MetaError::from)?;
     outcomes
-        .insert(operation, encoded.as_slice())
+        .insert(write.operation, encoded.as_slice())
         .map_err(MetaError::from)?;
-    advance_intent_to_admitted(txn, intent_key, now)
+    advance_intent_to_admitted(txn, write.intent_key, write.now)
 }
 
 /// Advance a staged intent to [`Admitted`](super::IntentPhase::Admitted) in the finalize transaction,

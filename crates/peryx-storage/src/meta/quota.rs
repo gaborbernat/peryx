@@ -343,11 +343,7 @@ impl MetaStore {
     /// it, if the transaction fails.
     pub fn commit_finalized_write_with_quota<E>(
         &self,
-        operation: &str,
-        intent_key: &str,
-        response: &[u8],
-        expiry_unix: Option<i64>,
-        now: i64,
+        write: super::FinalizedWrite<'_>,
         reservation: Uuid,
         body: impl FnOnce(&mut super::DriverTxn) -> Result<(bool, Vec<Vec<u8>>), E>,
     ) -> Result<super::FinalizeOutcome, E>
@@ -359,7 +355,7 @@ impl MetaStore {
             None,
             true,
             |txn, &wrote| {
-                super::finalize::stamp_finalized::<E>(txn, operation, intent_key, response, expiry_unix, now)?;
+                super::finalize::stamp_finalized::<E>(txn, &write)?;
                 let available = if wrote {
                     commit_reservation(txn, reservation)?
                 } else {
@@ -371,7 +367,7 @@ impl MetaStore {
             },
             |driver| body(driver).map_err(super::finalize::FinalizeFlow::User),
         );
-        self.resolve_finalize(operation, committed.map(drop))
+        self.resolve_finalize(write.operation, committed.map(drop))
     }
 
     /// Release a pending or committed allocation. A second release returns `false` and changes no counters.

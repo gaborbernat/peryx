@@ -112,7 +112,14 @@ fn seeded() -> (MetaStore, Arc<InMemoryBackend>, Arc<Fault>) {
 }
 
 fn finalize(store: &MetaStore) -> Result<FinalizeOutcome, MetaError> {
-    store.commit_finalized_write("op", "intent", b"response", Some(100), 2, |driver| {
+    let write = FinalizedWrite {
+        operation: "op",
+        intent_key: "intent",
+        response: b"response",
+        expiry_unix: Some(100),
+        now: 2,
+    };
+    store.commit_finalized_write(write, |driver| {
         driver.put("row", b"value")?;
         Ok::<_, MetaError>(vec![b"{\"action\":\"add\"}".to_vec()])
     })

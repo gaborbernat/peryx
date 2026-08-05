@@ -1,6 +1,74 @@
 # Handoff — #533 Finalize admitted uploads at the home DC
 
-Branch `feat/finalize-home-dc-533` off `upstream/main` @ `204cac59`. Verified completable + full design mapped against existing primitives. No implementation committed yet. Delete this file before opening the PR.
+Branch `feat/finalize-home-dc-533` off `upstream/main` @ `204cac59`. Delete this file before opening the PR.
+
+## CONTINUATION STATUS (2026-08-05) — storage foundation DONE, PyPI finalize remaining
+
+Coordinator confirmed: **scope = PyPI-only** (OCI has no ingress-staging intent; file an OCI-finalize
+follow-up that first needs an OCI equivalent of #530, reference it in the PR body). **Fork (b) confirmed**:
+`finalize_admitted_upload(state, intent_key, descriptor)` with descriptor-as-input (the descriptor's
+transport is #541 routing, excluded from #533; tests call the driver/state entry point directly).
+**Quota confirmed**: admission (`serving/admission.rs`) does NOT touch quota; quota is reserved pre-admit
+in `serving/post.rs::project_quota_reservation` and committed at publish — so finalize commits it via the
+quota-threaded storage path.
+
+### Done + committed (all tests pass; storage layer complete)
+
+Both finalize methods take a `FinalizedWrite<'_> { operation, intent_key, response, expiry_unix, now }`
+param object (exported from `meta`) instead of positional args:
+
+- `922e1a45` (+ FinalizedWrite refactor) — neutral primitive `MetaStore::commit_finalized_write<E: From<MetaError>>(write: FinalizedWrite<'_>, body: FnOnce(&mut DriverTxn) -> Result<Vec<Vec<u8>>, E>) -> Result<FinalizeOutcome, E>` in `crates/peryx-storage/src/meta/finalize.rs`. Atomic metadata+journal+outcome+intent-advance via `commit_driver_txn_at`'s finalize hook; in-txn terminal guard → `RaceReplay` → re-read → `FinalizeOutcome::Replayed`. `FinalizeOutcome::{Published, Replayed(OperationOutcomeRecord)}` exported from `meta`. Fault tests `meta/finalize_fault_tests.rs` (redb backend seam, fail-at-each-offset, exactly-once serial). Public tests `tests/meta/finalize_tests.rs`.
+- `177fc933` — quota-threaded `MetaStore::commit_finalized_write_with_quota<E: From<MetaError> + From<QuotaError>>(write: FinalizedWrite<'_>, reservation: Uuid, body: FnOnce(&mut DriverTxn) -> Result<(bool, Vec<Vec<u8>>), E>) -> Result<FinalizeOutcome, E>` in `crates/peryx-storage/src/meta/quota.rs`. `body`'s bool = published; commits the reservation when published, releases it on skip, discards the move on replay. Shares `stamp_finalized` + `resolve_finalize` (both `pub(super)` in finalize.rs) with the plain path.
+
+Storage `commit_finalized_write*` is the whole of acceptance criteria 2/3/4 at the store layer. Do NOT rebuild it.
+
+### Remaining: the PyPI finalize (new `crates/peryx-ecosystem-pypi/src/serving/finalize.rs`) — every API mapped
+
+Descriptor (what #541 routing supplies; tests construct it) must carry enough to build a `store::PublishedFile`
+(`store/uploads.rs:33`) plus the authz principal: `{ hosted_index_name, normalized, display, filename,
+artifact_sha256, artifact_size, record_bytes, version, submitted_at_unix, metadata_sibling{url,sha,size,source},
+provenance_sibling?{sha,size}, quota_reservation_id?, principal }`.
+
+`finalize_admitted_upload(state, intent_key, descriptor)` control flow:
+1. `state.meta.staged_intent(intent_key)?` → `None` ⇒ `NotStaged`. Decode the intent payload — expose a
+   `pub(crate) fn decode_intent(&StagedIntent) -> IngressIntent` (or make fields `pub(crate)`) from
+   `serving/admission.rs` (the `IngressIntent` struct + `operation = "{intent_key}:{digest}"`). `op = intent.operation`.
+2. Idempotent replay: `state.meta.operation_outcome(&op)?` terminal ⇒ replay (`Published`→same response, `Failed`→same error). No work.
+3. **Fence** (acceptance: stale epoch fails before publish): `let e = state.committed_authority_epoch(&intent.authority).await; if !state.admit_authority_epoch(&intent.authority, e).await { fail(op, Fenced) }`. (Presents committed epoch; #541 carries the request epoch. Triggers on unassigned authority = committed 0 with a group.)
+4. **Validate before publish** — each failure `fail(op, …)` (stamp a Failed outcome, return the error, no publish):
+   - checksum: `intent.digest == descriptor.artifact_sha256 && intent.size == descriptor.artifact_size`.
+   - placement: `state.meta.get_artifact_placement(&intent.digest)?.is_some()` (`meta/placement.rs:263`).
+   - authz (permissions may have changed): resolve the hosted `Index` from `state`, `peryx_identity::authorize(&descriptor.principal, &hosted.acl, Some(&descriptor.normalized), Action::Write)` (`peryx-identity/src/acl.rs:20`).
+   - policy: mirror `serving/post.rs::upload_policy_response` / `PolicyAction::Upload` against the current `index.policy`.
+5. **Publish atomically**: build `PublishedFile` from the descriptor; body = `store::uploads::publish_file_in_txn(txn, &file, upload_conflict_guard)` (already a free `fn` at `store/uploads.rs:150`, returns `(bool wrote, Vec<Vec<u8>>)` — perfect for `commit_finalized_write_with_quota`'s body; for the unmetered case use plain `commit_finalized_write` and drop the bool). `response_bytes` = the serialized client upload response so a retry replays it.
+6. Return `Published`/`Replayed`; the primitive advanced the intent to `Admitted`.
+
+`fail(op, reason)`: stamp a terminal `Failed` outcome so retries replay it. Simplest: `claim_operation(op)` then
+`finalize_operation(op, OperationResult::Failed, response, now)` (`meta/operation_outcome.rs`), or add a one-txn
+`fail_operation` helper. A failed finalize leaves the intent `Pending` (reclaimed by expiry).
+
+Driver-state entry point: a thin `pub` fn (in `crates/peryx-driver/src/state/` or the pypi serving layer) tests call
+directly, like `apply_replicated_page` — NOT an HTTP route (routing is #541).
+
+Docs: `site/content/core/` (availability finalization: states, validation errors, retries, visibility, remote
+placement) + `site/content/ecosystems/pypi/reference/uploads.md`. Format via the pre-commit mdformat hook.
+
+### Test harness notes (for 100% x86, deterministic)
+- Fence test: inject a mock `OwnershipAuthority` via `AppState::set_ownership_authority(Arc<dyn OwnershipAuthority>)`
+  (`state/app.rs:217`) returning committed epoch 0 with a group ⇒ `admit_authority_epoch` false ⇒ Fenced.
+- Fault tests at each durable boundary: the finalize commit is one `commit_driver_txn_at` txn — the storage-layer
+  fault suite already proves atomicity; at the PyPI layer drive validation-failure + replay + published paths and
+  assert one terminal outcome + one journal entry (acceptance criteria 3 + 4).
+- Verify coverage on x86 (`coverage-lcov`, cross-compile+qemu per the `peryx-coverage-arch-gap` memory), never macOS.
+
+### Build/PR rules
+Canonical `bash /Volumes/OWC/cargo-target/.cargo-serial.sh cargo <cmd> --manifest-path <this worktree>/Cargo.toml`
+(note: pass the literal `cargo`). Full pre-commit incl clippy + mdformat before every push. commit skill + pr skill
+(`--body-file`, no footer, run through no-slop). `crates/peryx/src/replication.rs` is a network-lane conflict
+hotspot — route rebases to the coordinator. Delete this file before the PR.
+
+---
+
 
 ## Verification (done)
 

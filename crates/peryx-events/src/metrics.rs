@@ -1111,7 +1111,8 @@ fn apply(tree: &mut StatsTree, event: Event) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::mpsc::channel;
+    use std::sync::{Arc, RwLock};
 
     use peryx_replication::{
         AggregateDelta, AggregateKey, ApplyLimits, ApplyOutcome, ApplyState, AuthorityEpoch, IntervalId, ProducerId,
@@ -1119,8 +1120,9 @@ mod tests {
     use peryx_storage::meta::{AnalyticsHandle, MetaStore};
 
     use super::{
-        Clock, DailySnapshot, DailyUsage, DownloadSnapshot, Event, Metrics, PackageUsage, SECONDS_PER_DAY, SourceUsage,
-        TimelineBucket, UnusedPackage, UsageInterval, VersionUsage,
+        Clock, DailyBuckets, DailyKey, DailySnapshot, DailyTotals, DailyUsage, DownloadSnapshot, Event, Message,
+        Metrics, PackageUsage, SECONDS_PER_DAY, SourceUsage, StatsTree, TimelineBucket, UnusedPackage, UsageInterval,
+        VersionUsage, aggregate, daily_rows,
     };
 
     fn store() -> (tempfile::TempDir, MetaStore) {
@@ -1369,6 +1371,50 @@ mod tests {
             [5],
             "the aged day-0 bucket expired during aggregation, leaving only day 5"
         );
+    }
+
+    #[test]
+    fn test_aggregate_flushes_retention_within_the_batch() {
+        // The running aggregator applies retention inside the download batch on its own thread, so the
+        // settle-based tests reach that flush only when the batch wins the race with the coverage
+        // snapshot. Drive the loop directly over a channel that closes after one batch: the retention
+        // flush then runs on every architecture and every run, not just the lucky ones.
+        let clock = clock_on_day(30);
+        let stale = DailyKey {
+            day: 10,
+            repository: "pypi".into(),
+            project: "flask".into(),
+            version: "1.0".into(),
+            source: "up".into(),
+        };
+        let mut seeded = DailyBuckets::new();
+        seeded.insert(
+            stale,
+            DailyTotals {
+                downloads: 5,
+                bytes: 50,
+            },
+        );
+        let daily = Arc::new(RwLock::new(seeded));
+        let tree = Arc::new(RwLock::new(StatsTree::new()));
+
+        let (sender, receiver) = channel();
+        sender
+            .send(Message::Event(download_of("pypi", "flask", "2.0", Some("up"), 9)))
+            .unwrap();
+        drop(sender);
+
+        aggregate(&receiver, &tree, &daily, None, Some(7), &clock);
+
+        let rows = daily_rows(&daily.read().unwrap());
+        assert_eq!(
+            rows.len(),
+            1,
+            "the day-10 bucket outside the 7-day window survived: {rows:?}"
+        );
+        assert_eq!(rows[0].day, 30);
+        assert_eq!(rows[0].downloads, 1);
+        assert_eq!(rows[0].bytes, 9);
     }
 
     #[test]

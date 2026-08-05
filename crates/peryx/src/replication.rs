@@ -673,6 +673,11 @@ impl ReplicationRuntime {
                 )
             }
         };
+        // A `dc` or `ha` node resolves each write to a datacenter durability decision, so it exposes the
+        // outcome counters; single-node `none` runs no such decision and registers nothing.
+        if availability.is_some() {
+            state.register_prometheus(state.serving.dc_durability.clone());
+        }
         Ok(Self {
             primary,
             replica,

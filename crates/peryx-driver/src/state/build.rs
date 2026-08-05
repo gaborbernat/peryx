@@ -320,6 +320,7 @@ impl AppState {
                 max_stale_secs,
                 clock,
                 requests: AtomicU64::new(0),
+                dc_durability: std::sync::Arc::new(super::DcDurabilityMetrics::default()),
                 read_only: false,
                 availability_role: peryx_core::NodeRole::Writer,
                 availability_topology: peryx_core::TopologyConfig::default(),

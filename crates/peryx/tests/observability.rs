@@ -21,6 +21,10 @@ const GENERAL_SERIES: &str = "peryx_pages_served_total";
 /// exports none of it, which is how `none` is told apart from an enabled mode on the scrape alone.
 const AVAILABILITY_SERIES: &str = "peryx_replication_";
 
+/// The datacenter durability outcome family a `dc` or `ha` node exports. A `none` node runs no such
+/// decision, so it exports none of it.
+const DC_DURABILITY_SERIES: &str = "peryx_dc_ack_durable_total";
+
 fn dc_group() -> Topology {
     Topology::dc(
         "east",
@@ -54,6 +58,26 @@ fn test_none_metrics_exposes_general_series_and_no_availability_series() {
     assert!(
         !body.contains(AVAILABILITY_SERIES),
         "a none node exports no availability series: {body}",
+    );
+    assert!(
+        !body.contains(DC_DURABILITY_SERIES),
+        "a none node runs no datacenter durability decision, so it exports no such series: {body}",
+    );
+}
+
+#[test]
+fn test_dc_metrics_exposes_the_durability_outcome_series() {
+    let cluster = dc_group().start().expect("dc cluster starts");
+    let (code, body) = cluster
+        .node("writer-a")
+        .expect("writer is present")
+        .metrics()
+        .expect("metrics reachable");
+
+    assert_eq!(code, 200);
+    assert!(
+        body.contains(DC_DURABILITY_SERIES),
+        "a dc node exposes the datacenter durability outcome series: {body}",
     );
 }
 

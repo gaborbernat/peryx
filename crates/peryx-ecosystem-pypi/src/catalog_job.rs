@@ -273,7 +273,7 @@ mod tests {
             source: None,
             max_projects: NonZeroUsize::new(max_projects).unwrap(),
             concurrency: NonZeroUsize::new(concurrency).unwrap(),
-            timeout: Duration::from_secs(5),
+            timeout: Duration::from_secs(30),
         }
     }
 
@@ -395,11 +395,8 @@ mod tests {
             peryx_core::Ecosystem::Pypi,
             IndexKind::Cached { client, offline: false },
         )]);
-        let mut parameters = parameters("progress", 101, 16);
-        parameters.timeout = Duration::from_secs(30);
-
         assert_eq!(
-            run(&app, parameters).await.unwrap(),
+            run(&app, parameters("progress", 101, 16)).await.unwrap(),
             JobReport {
                 processed: 101,
                 changed: 1

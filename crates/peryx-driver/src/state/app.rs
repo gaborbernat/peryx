@@ -121,6 +121,10 @@ pub struct ServingState {
     /// the async runtime has ignited it. Absent when the process runs no group, so the mutation path
     /// skips the claim.
     pub(super) ownership: std::sync::OnceLock<Arc<dyn crate::state::OwnershipAuthority>>,
+    /// The availability control plane the administrator command surface submits membership and transfer
+    /// commands through, registered once the runtime ignites the consensus group. Absent when the process
+    /// runs no group, so the command surface has nothing to drive.
+    pub(super) control: std::sync::OnceLock<Arc<crate::state::ControlPlane>>,
 }
 
 /// The whole process state: the serving data every handler needs, plus the driver registry only the
@@ -222,6 +226,20 @@ impl ServingState {
     #[must_use]
     pub fn ownership_authority(&self) -> Option<&Arc<dyn crate::state::OwnershipAuthority>> {
         self.ownership.get()
+    }
+
+    /// Register the availability control plane once the runtime ignites the consensus group, so the
+    /// administrator command surface can submit membership and transfer commands. Set at most once; a
+    /// later call is ignored.
+    pub fn set_control_plane(&self, control: Arc<crate::state::ControlPlane>) {
+        let _ = self.control.set(control);
+    }
+
+    /// The availability control plane, or `None` when this process runs no consensus group and exposes no
+    /// command surface.
+    #[must_use]
+    pub fn control_plane(&self) -> Option<&Arc<crate::state::ControlPlane>> {
+        self.control.get()
     }
 
     /// Assign `authority`'s home on its first publish, best effort. A publish path calls this after it

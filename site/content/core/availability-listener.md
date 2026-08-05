@@ -11,8 +11,8 @@ no socket, timer, or task for it, so the default single-writer deployment pays n
 run.
 
 This page describes the listener's bind, transport, authentication, scopes, request limits, audit trail, and network
-segmentation. The listener currently serves one read-only status endpoint; membership and transfer commands arrive in
-later work behind the same gate.
+segmentation. It serves a read-only status endpoint and a membership-and-transfer command endpoint, each behind the same
+authenticated gate but gating a different scope.
 
 ## Enabling the listener
 
@@ -57,11 +57,12 @@ states the intent, which suits only a trusted, isolated segment that terminates 
 ## Authentication and scopes
 
 The listener reuses the same identity store as the package API; it holds no second user database. A request presents
-HTTP Basic credentials for a local user, and the node admits it only when that user holds the server-wide administration
-read scope over the operator resource, the same standing the operator API requires. A request without a credential, or
-with an invalid one, receives `401 Unauthorized` with a `WWW-Authenticate` challenge. An authenticated user without the
-administration scope receives `403 Forbidden`. Rotating a user's password immediately rejects the old one, and revoking
-the administration grant immediately forbids a prior administrator.
+HTTP Basic credentials for a local user, which the node authenticates once and then authorizes against the scope the
+route needs: the status endpoint requires the server-wide administration read scope over the operator resource, and the
+command endpoint requires the administration write scope. A request without a credential, or with an invalid one,
+receives `401 Unauthorized` with a `WWW-Authenticate` challenge. An authenticated user lacking the route's scope
+receives `403 Forbidden`. Rotating a user's password immediately rejects the old one, and revoking the administration
+grant immediately forbids a prior administrator.
 
 ## The status endpoint
 
@@ -70,24 +71,106 @@ GET /availability/v1/status
 ```
 
 The response reports the advertised protocol version, the node's mode and authority role, and whether it currently
-serves read-only:
+serves read-only. On a node that runs an ownership consensus group it also reports the group's leader, term, and voter
+membership under `consensus`, and the recent command latency under `commands`:
 
 ```json
 {
-  "protocol_version": 1,
+  "protocol_version": 2,
   "mode": "dc",
   "role": "writer",
-  "read_only": false
+  "read_only": false,
+  "consensus": {
+    "leader": "east",
+    "term": 3,
+    "voters": [
+      "east",
+      "west"
+    ]
+  },
+  "commands": {
+    "completed": 12,
+    "p50_ms": 4,
+    "p99_ms": 90
+  }
 }
 ```
 
-The path carries a version segment so a client pins the protocol versions it understands and refuses an incompatible
-peer rather than guessing a wire shape. An unknown path answers `404 Not Found` without consulting the identity store,
-so an unauthenticated caller cannot probe the surface.
+The `commands.p99_ms` figure is the 99th-percentile command latency over a bounded recent window, so a latency spike
+through a leader change is visible without an external metrics pipeline. The path carries a version segment so a client
+pins the protocol versions it understands and refuses an incompatible peer rather than guessing a wire shape; protocol
+version 2 adds the command endpoint below. An unknown path answers `404 Not Found` without consulting the identity
+store, so an unauthenticated caller cannot probe the surface.
+
+## Membership and transfer commands
+
+```
+POST /availability/v1/commands
+```
+
+An administrator drives the ownership consensus group through this endpoint. Every command commits through the Raft log;
+the handler submits a typed command and never writes the membership or ownership store directly, so a rejected or
+replayed command cannot corrupt the group. The endpoint requires the administration write scope, the write counterpart
+of the read scope the status endpoint gates.
+
+The request body is a tagged command. The four membership commands rewrite the consensus roster, and the two authority
+commands move or fence an artifact home:
+
+| `type`               | Fields                            | Effect                                                            |
+| -------------------- | --------------------------------- | ----------------------------------------------------------------- |
+| `add_learner`        | `datacenter`, `address`           | Add a non-voting learner that replicates the log.                 |
+| `promote_voter`      | `datacenter`                      | Promote a caught-up learner to a voter that counts toward quorum. |
+| `remove_voter`       | `datacenter`                      | Remove a voter from the roster.                                   |
+| `replace_voter`      | `remove`, `datacenter`, `address` | Add the incoming datacenter as a learner and swap it in.          |
+| `transfer_authority` | `authority`, `new_home`           | Move an authority's home, minting the next epoch.                 |
+| `advance_epoch`      | `authority`                       | Mint the next epoch without moving the home, fencing stale work.  |
+
+```
+POST /availability/v1/commands
+Idempotency-Key: 5f0c-transfer-proj-west
+{ "type": "transfer_authority", "authority": "proj", "new_home": "west" }
+```
+
+A committed command answers `200 OK` with the committed identity — the log term and index, and whether the command
+changed the state:
+
+```json
+{
+  "term": 3,
+  "index": 42,
+  "outcome": "committed"
+}
+```
+
+An `outcome` of `no_change` means the command committed but left the roster or ownership state as it was, for example
+promoting a datacenter that is already a voter, so a repeat is safe.
+
+### Idempotency
+
+A client stamps an `Idempotency-Key` header to make a command retry-safe. A repeat carrying a key that already committed
+reads back the first receipt without submitting a second command, so a client that retries across a leader change — a
+common outcome for a membership command — mints one command rather than two. The node retains a bounded window of recent
+keys; a key that ages out of the window is submitted again, so a key is a short-lived retry token, not a durable dedup
+ledger.
+
+### Failure statuses
+
+| Status                    | Cause                                                                                        |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| `403 Forbidden`           | The actor lacks the administration write scope.                                              |
+| `409 Conflict`            | The command is invalid against the current state, for example transferring to the same home. |
+| `429 Too Many Requests`   | The bounded set of concurrent commands is saturated; retry after one drains.                 |
+| `503 Service Unavailable` | This node is not the leader, cannot reach a quorum, or runs no consensus group.              |
+
+A `503` from a non-leader node names the current leader in its body when the group knows one, so a client retries
+against it.
 
 ## Request limits and audit
 
-The listener bounds each request body so a later command endpoint cannot be handed an unbounded body on the control
-plane. Every admitted request records an audit line naming the actor and the path, so administrative access to the
-control plane is attributable. Keep the listener behind a management-network boundary that bounds connection volume; the
-node applies its request-body and authorization gates on every call.
+The listener bounds each request body so the command endpoint cannot be handed an unbounded body on the control plane,
+and bounds the set of commands in flight so an operator script cannot fan out an unbounded burst of roster rewrites.
+Every authenticated request records an audit line naming the actor and the path. Every command records a second audit
+line naming the actor, the command kind, its datacenter or authority target, the result, and the committed term and
+index — never the request body, so an address or credential never reaches the log. A replayed command is audited as
+`replayed` so a retry is distinguishable from a fresh command. Keep the listener behind a management-network boundary
+that bounds connection volume; the node applies its request-body, concurrency, and authorization gates on every call.

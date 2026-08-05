@@ -106,6 +106,10 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
         let consensus = replication.ignite_consensus().await?;
         if let Some(consensus) = &consensus {
             state.set_ownership_authority(consensus.authority.clone());
+            state.set_control_plane(std::sync::Arc::new(peryx_driver::state::ControlPlane::new(
+                consensus.control.clone(),
+                state.clock.clone(),
+            )));
         }
         if !replication.is_replica() {
             for index in &state.indexes {

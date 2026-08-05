@@ -7,7 +7,9 @@ use axum::http::{HeaderMap, Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use peryx_driver::authz::AuthorizationService;
-use peryx_driver::state::AppState;
+use peryx_driver::state::{
+    AppState, CommandOutcome, CommandReceipt, ControlCommand, ControlError, ControlPlane, MembershipControl,
+};
 use peryx_driver::users::UserService;
 use peryx_identity::{GrantScope, PasswordPolicy, Role};
 use peryx_storage::meta::MetaStore;
@@ -171,7 +173,7 @@ async fn test_status_reports_writer_posture_for_an_administrator() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["protocol_version"], 1);
+    assert_eq!(body["protocol_version"], 2);
     assert_eq!(body["mode"], "dc");
     assert_eq!(body["role"], "writer");
     assert_eq!(body["read_only"], false);
@@ -340,4 +342,180 @@ async fn test_listener_serves_then_drains_on_shutdown() {
     shutdown.cancel();
     server.await.unwrap();
     assert!(client.get(&url).send().await.is_err());
+}
+
+/// A control double returning a fixed result and counting its submissions, so a test can drive the
+/// command surface without a live Raft node and prove that a replay never resubmits.
+struct FakeControl {
+    result: Result<CommandReceipt, ControlError>,
+    calls: std::sync::Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl MembershipControl for FakeControl {
+    async fn submit(&self, _command: ControlCommand) -> Result<CommandReceipt, ControlError> {
+        *self.calls.lock().unwrap() += 1;
+        self.result.clone()
+    }
+}
+
+fn with_control(state: &Arc<AppState>, result: Result<CommandReceipt, ControlError>) -> Arc<FakeControl> {
+    let control = Arc::new(FakeControl {
+        result,
+        calls: std::sync::Mutex::new(0),
+    });
+    state.set_control_plane(Arc::new(ControlPlane::new(control.clone(), Arc::new(|| 0))));
+    control
+}
+
+fn transfer_body() -> Value {
+    serde_json::json!({ "type": "transfer_authority", "authority": "proj", "new_home": "west" })
+}
+
+fn committed(index: u64) -> CommandReceipt {
+    CommandReceipt {
+        term: 5,
+        index,
+        outcome: CommandOutcome::Committed,
+    }
+}
+
+async fn post_command(
+    state: &Arc<AppState>,
+    auth: Option<&str>,
+    key: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/availability/v1/commands")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(value) = auth {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = key {
+        builder = builder.header("idempotency-key", value);
+    }
+    let response = router(state.clone(), dc_writer())
+        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn test_a_command_commits_and_returns_its_receipt() {
+    let (_dir, state) = app().await;
+    with_control(&state, Ok(committed(9)));
+
+    let (status, body) = post_command(&state, Some(&basic(ADMIN, PASSWORD)), None, transfer_body()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["term"], 5);
+    assert_eq!(body["index"], 9);
+    assert_eq!(body["outcome"], "committed");
+}
+
+#[tokio::test]
+async fn test_a_command_forbids_a_non_writer() {
+    let (_dir, state) = app().await;
+    with_control(&state, Ok(committed(1)));
+
+    // The operator authenticates but holds neither administration scope, so the write command is refused.
+    let (status, _) = post_command(&state, Some(&basic(OPERATOR, PASSWORD)), None, transfer_body()).await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_a_command_rejects_a_missing_credential() {
+    let (_dir, state) = app().await;
+    with_control(&state, Ok(committed(1)));
+
+    let (status, _) = post_command(&state, None, None, transfer_body()).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_a_command_without_a_consensus_group_is_unavailable() {
+    let (_dir, state) = app().await;
+
+    // No control plane is registered, so the node runs no group to command.
+    let (status, _) = post_command(&state, Some(&basic(ADMIN, PASSWORD)), None, transfer_body()).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_a_repeated_idempotency_key_returns_one_committed_result() {
+    let (_dir, state) = app().await;
+    let control = with_control(&state, Ok(committed(9)));
+    let auth = basic(ADMIN, PASSWORD);
+
+    let (first, first_body) = post_command(&state, Some(&auth), Some("k1"), transfer_body()).await;
+    let (second, second_body) = post_command(&state, Some(&auth), Some("k1"), transfer_body()).await;
+
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(first_body, second_body);
+    assert_eq!(
+        *control.calls.lock().unwrap(),
+        1,
+        "the replay never reached the consensus group"
+    );
+}
+
+#[rstest]
+#[case::not_leader(ControlError::NotLeader { leader: Some("east.internal:4460".to_owned()) }, StatusCode::SERVICE_UNAVAILABLE)]
+#[case::unavailable(ControlError::Unavailable("log gone".to_owned()), StatusCode::SERVICE_UNAVAILABLE)]
+#[case::invalid(ControlError::Invalid("same home".to_owned()), StatusCode::CONFLICT)]
+#[case::overloaded(ControlError::Overloaded, StatusCode::TOO_MANY_REQUESTS)]
+#[tokio::test]
+async fn test_a_command_failure_maps_to_its_status(#[case] error: ControlError, #[case] expected: StatusCode) {
+    let (_dir, state) = app().await;
+    with_control(&state, Err(error));
+
+    let (status, _) = post_command(&state, Some(&basic(ADMIN, PASSWORD)), None, transfer_body()).await;
+
+    assert_eq!(status, expected);
+}
+
+#[tokio::test]
+async fn test_a_malformed_command_body_is_rejected() {
+    let (_dir, state) = app().await;
+    with_control(&state, Ok(committed(1)));
+
+    let (status, _) = post_command(
+        &state,
+        Some(&basic(ADMIN, PASSWORD)),
+        None,
+        serde_json::json!({ "type": "no_such_command" }),
+    )
+    .await;
+
+    assert!(
+        status.is_client_error(),
+        "an unknown command shape is a client error, got {status}"
+    );
+}
+
+#[tokio::test]
+async fn test_status_reports_command_metrics_when_a_plane_runs() {
+    let (_dir, state) = app().await;
+    with_control(&state, Ok(committed(9)));
+    post_command(&state, Some(&basic(ADMIN, PASSWORD)), None, transfer_body()).await;
+
+    let (status, _, body) = request(
+        &state,
+        dc_writer(),
+        "/availability/v1/status",
+        Some(&basic(ADMIN, PASSWORD)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["commands"]["completed"], 1);
+    assert_eq!(body["commands"]["p50_ms"], 0);
 }

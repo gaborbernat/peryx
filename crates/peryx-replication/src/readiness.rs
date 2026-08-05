@@ -14,6 +14,7 @@
 //! shrink it into a smaller, unsafe quorum.
 
 use std::cmp::Reverse;
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 use crate::visibility::Frontier as VisibilityFrontier;
@@ -109,21 +110,37 @@ impl GroupReadiness {
 /// minimum over the fastest such members, never dragged down to the slowest member overall.
 #[must_use]
 pub fn group_readiness(members: &[MemberFrontier], policy: DurabilityPolicy) -> GroupReadiness {
-    let required = policy.required_acks(members.len());
-    let reporting = members.iter().filter(|member| member.applied.is_some()).count();
-    let writer_present = members
+    // A member id is unique in the roster: one physical node listed twice is still one member. Deduplicate
+    // by id, first occurrence winning, so a doubled node cannot inflate both the roster size and the
+    // reporting count into a quorum the real group never reaches. This upholds the call-site invariant the
+    // pure fold cannot otherwise enforce.
+    let mut seen = BTreeSet::new();
+    let roster: Vec<&MemberFrontier> = members
         .iter()
-        .any(|member| member.role == MemberRole::Writer && member.applied.is_some());
-    let blocked = if !writer_present {
+        .filter(|member| seen.insert(member.member.as_str()))
+        .collect();
+
+    let required = policy.required_acks(roster.len());
+    let reporting = roster.iter().filter(|member| member.applied.is_some()).count();
+    let writer = roster
+        .iter()
+        .find(|member| member.role == MemberRole::Writer && member.applied.is_some());
+    let blocked = if writer.is_none() {
         Some(ReadinessBlocker::WriterLost)
     } else if reporting < required {
         Some(ReadinessBlocker::InsufficientMembers { reporting, required })
     } else {
         None
     };
+    // The writer bounds every member's applied serial, so the durable frontier can never legitimately
+    // exceed the writer's. Clamp to it when the writer reports, so a replica that erroneously advertises a
+    // serial above the writer cannot over-claim durability to its frontier under `Local` (or any
+    // `required == 1`) path.
+    let frontier = durable_frontier(&roster, required);
+    let bounded = writer.map_or(frontier, |writer| frontier.min(writer.applied.unwrap_or(0)));
     GroupReadiness {
         blocked,
-        durable_frontier: durable_frontier(members, required),
+        durable_frontier: bounded,
     }
 }
 
@@ -160,7 +177,7 @@ pub fn visibility_compaction_frontier(
 /// The highest serial at least `required` members have applied: the `required`-th largest applied serial,
 /// counting a non-reporting member as zero. Zero when the policy needs more acknowledgements than the
 /// group holds, since no serial then clears the bar.
-fn durable_frontier(members: &[MemberFrontier], required: usize) -> u64 {
+fn durable_frontier(members: &[&MemberFrontier], required: usize) -> u64 {
     if required == 0 || required > members.len() {
         return 0;
     }

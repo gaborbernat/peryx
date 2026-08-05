@@ -306,3 +306,40 @@ fn test_the_frontier_drains_every_epoch_below_the_current_authority() {
         "an entry left in an epoch below the current authority is drained and released"
     );
 }
+
+#[test]
+fn test_a_duplicate_member_id_never_inflates_the_quorum() {
+    // A true two-member group cannot reach a majority when only the writer reports.
+    let honest = group_readiness(&[writer(Some(5)), replica("a", None)], DurabilityPolicy::Majority);
+    assert!(!honest.is_ready());
+
+    // Listing the writer twice is one physical node, so it must not forge a second acknowledgement.
+    let doubled = group_readiness(
+        &[writer(Some(5)), writer(Some(5)), replica("a", None)],
+        DurabilityPolicy::Majority,
+    );
+    assert!(!doubled.is_ready(), "a doubled member id forged a majority");
+}
+
+#[test]
+fn test_the_durable_frontier_never_exceeds_the_writer() {
+    // The writer bounds every member's serial, so a replica advertising a serial above the writer must
+    // not push the durable frontier past what the writer actually holds.
+    let readiness = group_readiness(&[writer(Some(5)), replica("a", Some(9))], DurabilityPolicy::Local);
+    assert_eq!(
+        readiness.durable_frontier, 5,
+        "a replica above the writer over-claimed durability"
+    );
+}
+
+#[test]
+fn test_a_filtered_roster_computes_a_smaller_quorum_than_the_true_group() {
+    // The true three-member group is not ready: a majority needs two reporters and only the writer reports.
+    let full = [writer(Some(5)), replica("a", None), replica("b", None)];
+    assert!(!group_readiness(&full, DurabilityPolicy::Majority).is_ready());
+
+    // A caller that drops the non-reporting members computes a majority of one and falsely reports ready.
+    // The fold cannot detect the filtering, so callers must pass the full configured roster; this pins the
+    // hazard the invariant guards against.
+    assert!(group_readiness(&[writer(Some(5))], DurabilityPolicy::Majority).is_ready());
+}

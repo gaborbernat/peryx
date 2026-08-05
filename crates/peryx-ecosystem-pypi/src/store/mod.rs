@@ -146,18 +146,36 @@ fn project_key(index: &str, normalized: &str) -> String {
     format!("{PROJECTS_PREFIX}{index}/{normalized}")
 }
 
-/// The normalized project a replicated authoritative key names, or `None` when the key is not a project
-/// marker. A replica maps the keys it just applied to the projects whose derived views need rebuilding
-/// through this. Publishing a file, and retiring or restoring a project, write or remove that project's
-/// marker; a per-file yank, unyank, or delete instead goes through `mutate_uploads`, which touches only
-/// the file's own record under the upload prefix, so it names no project here and retires no page. That
-/// is harmless today, since a replica hot-caches no hosted page for such a change to leave stale. File,
-/// metadata, and journal keys carry no project either. A project name never contains a slash, so the
-/// final segment is the project and the rest is the index route.
-pub(crate) fn project_of_key(key: &str) -> Option<&str> {
-    key.strip_prefix(PROJECTS_PREFIX)?
-        .rsplit_once('/')
-        .map(|(_index, normalized)| normalized)
+/// The `(index, normalized project)` a replicated authoritative key names, or `None` when the key
+/// belongs to no project. A replica maps the keys it just applied to the projects whose derived views
+/// need rebuilding through this.
+///
+/// Publishing a file, and retiring or restoring a project, write or remove that project's marker under
+/// the projects prefix. A per-file yank, unyank, or delete goes through `mutate_uploads`, which rewrites
+/// the file's own record under the upload prefix; a yank of a file served from a read-only layer records
+/// an override. Both name a project too, so a replicated per-file change retires the affected project's
+/// page and search document rather than leaving them stale. File, metadata, and journal keys carry no
+/// project.
+///
+/// A project name and a filename never contain a slash, while an index name may. A project-marker key is
+/// `{index}/{normalized}`, so the index is everything before the final segment; an upload or override key
+/// is `{index}/{normalized}/{filename}`, so dropping the filename leaves the same shape.
+pub(crate) fn project_of_key(key: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = key.strip_prefix(PROJECTS_PREFIX) {
+        return split_index_project(rest);
+    }
+    for prefix in [UPLOAD_PREFIX, OVERRIDE_PREFIX] {
+        if let Some(rest) = key.strip_prefix(prefix) {
+            let (head, _filename) = rest.rsplit_once('/')?;
+            return split_index_project(head);
+        }
+    }
+    None
+}
+
+fn split_index_project(rest: &str) -> Option<(&str, &str)> {
+    let (index, normalized) = rest.rsplit_once('/')?;
+    (!index.is_empty() && !normalized.is_empty()).then_some((index, normalized))
 }
 
 fn project_status_key(index: &str, normalized: &str) -> String {
@@ -1015,5 +1033,27 @@ impl PypiStore for peryx_storage::meta::MetaStore {
         recent_limit: usize,
     ) -> Result<std::collections::HashMap<String, IndexSummary>, peryx_storage::meta::MetaError> {
         summary::summarize_indexes(self, index_names, recent_limit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_of_key;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::project_marker("pypi\u{0}p\u{0}hosted/flask", Some(("hosted", "flask")))]
+    #[case::upload("pypi\u{0}u\u{0}hosted/flask/flask-1.0-py3-none-any.whl", Some(("hosted", "flask")))]
+    #[case::override_marker("pypi\u{0}o\u{0}hosted/flask/flask-1.0.tar.gz", Some(("hosted", "flask")))]
+    #[case::slashed_index("pypi\u{0}p\u{0}team/dev/flask", Some(("team/dev", "flask")))]
+    #[case::slashed_index_upload("pypi\u{0}u\u{0}team/dev/flask/flask-1.0.whl", Some(("team/dev", "flask")))]
+    #[case::file_digest("pypi\u{0}f\u{0}deadbeef", None)]
+    #[case::metadata_digest("pypi\u{0}d\u{0}deadbeef", None)]
+    #[case::foreign_prefix("oci\u{0}m\u{0}store/app", None)]
+    fn test_project_of_key_maps_project_upload_and_override_keys(
+        #[case] key: &str,
+        #[case] expected: Option<(&str, &str)>,
+    ) {
+        assert_eq!(project_of_key(key), expected);
     }
 }

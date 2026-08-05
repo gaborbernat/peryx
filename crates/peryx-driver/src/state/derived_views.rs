@@ -26,6 +26,20 @@ pub use peryx_search::SEARCH_VIEW;
 /// set readability waits on regardless of ecosystem.
 pub const REQUIRED_VIEWS: &[&str] = &[SEARCH_VIEW];
 
+/// A required view a replica could not rebuild while applying a page, naming the view that holds the
+/// readable frontier back.
+///
+/// A driver returns it from
+/// [`apply_replicated_changes`](crate::serving::EcosystemDriver::apply_replicated_changes) so the neutral
+/// apply path leaves the frontier where it was and reports the view rather than advancing past a serial a
+/// stale view does not reflect. The lazy full-index refresh a later search runs is the recovery path: it
+/// re-derives every document and advances the frontier once the failing input is readable again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewBlock {
+    /// The name of the required view whose rebuild failed.
+    pub view: String,
+}
+
 /// The highest metadata serial a replica may expose, and the view holding it back.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadableFrontier {

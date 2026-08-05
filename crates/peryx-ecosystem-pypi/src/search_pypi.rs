@@ -69,7 +69,7 @@ fn collect_projects(ctx: &IndexerCtx<'_>, index: &Index, projects: &mut BTreeSet
     Ok(())
 }
 
-fn package_document(
+pub(crate) fn package_document(
     ctx: &IndexerCtx<'_>,
     index: &Index,
     normalized: &str,

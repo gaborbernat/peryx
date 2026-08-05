@@ -17,7 +17,7 @@ pub use control::{
     MembershipControl, plan_voter_roster,
 };
 pub use dc_durability::DcDurabilityMetrics;
-pub use derived_views::{REQUIRED_VIEWS, ReadableFrontier, SEARCH_VIEW, readable_frontier};
+pub use derived_views::{REQUIRED_VIEWS, ReadableFrontier, SEARCH_VIEW, ViewBlock, readable_frontier};
 pub use describe::{
     HostedDescription, IndexDescription, MemberDescription, SecretDescription, UpstreamDescription,
     UpstreamSourceDescription, describe_index, describe_indexes,

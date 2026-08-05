@@ -306,6 +306,38 @@ impl PackageSearch {
         Ok(())
     }
 
+    /// Replace one project's document on one index — the record keyed by [`project_key`] — with `docs`,
+    /// leaving every other project untouched.
+    ///
+    /// A replica calls this as it applies a metadata page: it retires the project's stale document by
+    /// its exact key term and re-adds the freshly derived one (or none, when the project no longer has
+    /// files), then reloads the reader. Unlike [`write`](PackageSearch::write) and
+    /// [`rebuild`](PackageSearch::rebuild) it touches neither the mutation epoch nor the view frontier,
+    /// so the caller sequences the frontier advance after every affected project is current. Delete then
+    /// add is idempotent, so re-running the same update after a crash reaches the same index.
+    ///
+    /// It shares the writer lock with an eager rebuild so the two never open a second writer over the
+    /// same directory; a search that finds the lock held serves the current reader rather than blocking.
+    ///
+    /// # Errors
+    /// Returns a search error if the writer cannot commit or the reader cannot reload.
+    ///
+    /// # Panics
+    /// Panics if the rebuild lock was poisoned by a prior panic while rebuilding.
+    pub fn update_project(&self, docs: &[PackageDocument], key: &str) -> Result<(), SearchError> {
+        let _guard = self.rebuild_lock.lock().expect("search rebuild lock");
+        let mut writer = self
+            .index
+            .writer_with_num_threads::<TantivyDocument>(1, WRITER_MEMORY_BYTES)?;
+        writer.delete_term(Term::from_field_text(self.fields.key, key));
+        for package in docs {
+            writer.add_document(self.document(package))?;
+        }
+        writer.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
     /// Replace the whole index with `documents`, then make them searchable.
     fn write(&self, documents: &[PackageDocument]) -> Result<(), SearchError> {
         let mut writer = self
@@ -427,6 +459,7 @@ impl PackageSearch {
             package.normalized_name
         );
         let mut doc = TantivyDocument::new();
+        doc.add_text(self.fields.key, project_key(&package.route, &package.normalized_name));
         doc.add_text(self.fields.route, &package.route);
         doc.add_text(self.fields.normalized, &package.normalized_name);
         doc.add_text(self.fields.display, &package.display_name);
@@ -454,6 +487,10 @@ impl PackageSearch {
 
 #[derive(Clone, Copy)]
 struct SearchFields {
+    /// The scoped-update handle: `{route}\0{normalized}`, one exact term per document so a per-project
+    /// rebuild deletes exactly that project's document on one index and re-adds the fresh one, leaving
+    /// every other project untouched.
+    key: Field,
     route: Field,
     normalized: Field,
     display: Field,
@@ -465,6 +502,15 @@ struct SearchFields {
     sort: Field,
     search: Field,
     raw: Field,
+}
+
+/// The scoped-update key for `normalized` as served on `route`.
+///
+/// It is the exact term [`update_project`](PackageSearch::update_project) deletes and the document
+/// carries, so a caller rebuilding one project on one index names it through this and the two never drift.
+#[must_use]
+pub fn project_key(route: &str, normalized: &str) -> String {
+    format!("{route}\u{0}{normalized}")
 }
 
 fn open_index(path: &Path, schema: &Schema) -> Result<TantivyIndex, SearchError> {
@@ -505,6 +551,7 @@ fn search_schema() -> (Schema, SearchFields) {
             .set_fieldnorms(false),
     );
     let fields = SearchFields {
+        key: builder.add_text_field("key", exact.clone()),
         route: builder.add_text_field("route", exact.clone()),
         normalized: builder.add_text_field("normalized", exact.clone()),
         display: builder.add_text_field("display", stored.clone()),

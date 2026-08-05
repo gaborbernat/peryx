@@ -362,12 +362,25 @@ pub trait EcosystemDriver: Send + Sync {
         0
     }
 
-    /// Invalidate this driver's derived views for the authoritative keys a replica just copied from the
-    /// primary, so a later read rebuilds them once the readable frontier permits rather than serving a
-    /// stale page. `changed_keys` are raw store keys spanning every ecosystem; a driver acts on the ones
-    /// it owns and ignores the rest, so the neutral replica loop forwards them without parsing. A driver
-    /// with no replicated derived views does nothing, so the default is a no-op.
-    fn apply_replicated_changes(&self, _state: &ServingState, _changed_keys: &[String]) {}
+    /// Rebuild this driver's derived views for the authoritative keys a replica just copied from the
+    /// primary, so the views reflect the applied serial before the neutral apply path advances the
+    /// readable frontier over it. `changed_keys` are raw store keys spanning every ecosystem; a driver
+    /// acts on the ones it owns and ignores the rest, so the neutral replica loop forwards them without
+    /// parsing.
+    ///
+    /// A driver with no replicated derived views does nothing, so the default succeeds without work.
+    ///
+    /// # Errors
+    /// Returns [`ViewBlock`](crate::state::ViewBlock) when a required view could not be rebuilt: the apply
+    /// path then holds the frontier at its prior value rather than exposing a serial the view does not
+    /// reflect, and the lazy full refresh a later search runs recovers it.
+    fn apply_replicated_changes(
+        &self,
+        _state: &ServingState,
+        _changed_keys: &[String],
+    ) -> Result<(), crate::state::ViewBlock> {
+        Ok(())
+    }
 
     /// The project names of the index at `position`, for the web index listing. The web crate renders
     /// these without knowing the wire protocol they came from. Default: none.

@@ -43,6 +43,13 @@ impl ServingState {
         self.bump_search_epoch();
     }
 
+    /// Retire one project's rendered pages without touching the search epoch. A replica applying a page
+    /// rebuilds that project's search document itself through the scoped path, so it invalidates the hot
+    /// pages here and advances the search view without the global reindex the epoch bump would schedule.
+    pub fn invalidate_hot_pages(&self, project: &str) {
+        self.cache.invalidate_hot(project);
+    }
+
     /// Preserve rendered page caches across `OCI` tag mutations.
     pub fn bump_search_epoch(&self) {
         self.search.bump_epoch();

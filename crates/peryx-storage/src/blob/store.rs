@@ -378,7 +378,16 @@ impl BlobStore {
     /// Never in practice: blob paths always sit inside the store root, so a parent exists.
     pub fn finish_upload(&self, session: &str, expected: &Digest) -> Result<(), BlobError> {
         let stage = self.upload_dir().join(session);
-        let mut file = std::fs::File::open(&stage).map_err(|err| absent_or_io(err, expected))?;
+        let mut file = match std::fs::File::open(&stage) {
+            Ok(file) => file,
+            // A finish that already published this digest and cleared its stage is idempotent: a retry
+            // whose response was lost finds the blob durably present and succeeds, the way commit_staged
+            // does, rather than reporting the missing stage as a failed upload.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && self.path_for(expected).is_file() => {
+                return Ok(());
+            }
+            Err(err) => return Err(absent_or_io(err, expected)),
+        };
         let mut hasher = Sha256::new();
         let mut buffer = vec![0; 1024 * 1024].into_boxed_slice();
         loop {

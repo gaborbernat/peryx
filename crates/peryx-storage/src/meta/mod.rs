@@ -29,6 +29,7 @@ mod placement_reconcile;
 mod policy_decision;
 mod quota;
 mod reclamation;
+mod reconcile;
 mod repository;
 mod revocation;
 mod role_grant;
@@ -84,6 +85,7 @@ pub use reclamation::{
     ObservedFrontier, ReadyOutcome, ReclamationError, ReclamationProgress, ReclamationState, ReclamationStatus,
     ReclamationTombstone, SelectOutcome, SkipReason,
 };
+pub use reconcile::{NewReconcileEntry, ReconcileEnqueue, ReconcileEntry};
 pub use repository::{
     CreateRepositoryError, DesiredRepository, NewRepository, ReconcileAction, ReconcileRepositoryError,
     ReconciledRepository, RepositoryFieldError, RepositoryId, RepositoryPage, RepositoryQuery, RepositoryQueryError,
@@ -121,6 +123,7 @@ const OPERATION_OUTCOME: TableDefinition<&str, &[u8]> = TableDefinition::new("op
 /// The ingress DC's durably staged write intents, keyed by client-scoped identity so a retried
 /// admission is idempotent and a restart recovers the intents a home DC has yet to finalize.
 const INGRESS_INTENT: TableDefinition<&str, &[u8]> = TableDefinition::new("ingress_intent");
+const RECONCILE_BACKLOG: TableDefinition<&str, &[u8]> = TableDefinition::new("reconcile_backlog");
 const POLICY_DECISION: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_decision");
 const POLICY_DECISION_CURRENT: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current");
 const POLICY_DECISION_CURRENT_ID: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current_id");
@@ -297,6 +300,7 @@ impl MetaStore {
             txn.open_table(RECLAMATION_TOMBSTONE)?;
             txn.open_table(OPERATION_OUTCOME)?;
             txn.open_table(INGRESS_INTENT)?;
+            txn.open_table(RECONCILE_BACKLOG)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;
             txn.open_table(SCOPED_TOKEN)?;

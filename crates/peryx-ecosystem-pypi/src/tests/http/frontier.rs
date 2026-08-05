@@ -177,6 +177,30 @@ async fn test_apply_replicated_changes_retires_only_the_changed_projects() {
     assert!(h.state.hot_fresh(&hot_beta_now).is_some(), "beta's hot pages survived");
 }
 
+#[tokio::test]
+async fn test_apply_replicated_changes_ignores_a_change_on_an_unknown_index() {
+    let h = harness().await;
+    let hot = h.state.hot_key("hosted", "alpha", cache::SIMPLE_HTML);
+    h.state
+        .cache
+        .store_hot(hot.clone(), Bytes::from_static(b"A"), 1_000_000);
+    assert!(h.state.hot_fresh(&hot).is_some());
+
+    // A change keyed to an index this replica never configured resolves to no serving positions, so it
+    // retires nothing rather than touching an unrelated project that shares the name.
+    let driver = h.state.driver_for(Ecosystem::Pypi).unwrap().clone();
+    driver
+        .apply_replicated_changes(h.state.serving.as_ref(), &["pypi\u{0}p\u{0}ghost/alpha".to_owned()])
+        .unwrap();
+
+    assert_eq!(
+        h.state.hot_key("hosted", "alpha", cache::SIMPLE_HTML),
+        hot,
+        "an unknown index advanced no epoch",
+    );
+    assert!(h.state.hot_fresh(&hot).is_some(), "alpha's hot pages survived");
+}
+
 #[test]
 fn test_the_readable_frontier_is_the_minimum_regardless_of_apply_order() {
     // The gate reads the readable frontier as the lowest serial every required view reflects, a minimum

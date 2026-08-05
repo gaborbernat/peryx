@@ -512,6 +512,33 @@ fn test_apply_replicated_page_holds_the_frontier_when_a_view_rebuild_fails() {
 }
 
 #[test]
+fn test_apply_replicated_page_holds_the_frontier_when_recording_it_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("meta.redb");
+    MetaStore::open(&path).unwrap();
+    // A read-only store lets every derived view rebuild yet refuses the frontier write, the one path
+    // where no driver blocked but recording the applied serial still fails.
+    let meta = MetaStore::open_existing_read_only(&path).unwrap();
+    let state = AppState::new(meta, BlobStore::new(dir.path().join("blobs")), 60, Vec::new());
+
+    crate::replication::apply_replicated_page(
+        &state,
+        SyncOutcome {
+            changes: 1,
+            serial: 1,
+            primary_serial: 1,
+        },
+        &[],
+    );
+
+    assert_eq!(
+        state.meta.view_frontier(peryx_driver::state::SEARCH_VIEW).unwrap(),
+        None,
+        "a failed frontier write leaves the readable frontier where it was rather than crashing",
+    );
+}
+
+#[test]
 fn test_apply_replicated_page_ignores_a_page_with_no_changes() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, None);

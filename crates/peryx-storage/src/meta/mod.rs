@@ -62,7 +62,8 @@ pub use job::{
 pub use job_lease::{ClaimOutcome, JobLease, JobLeaseError, LeaseState};
 pub use journal::{DriverBlobReference, DriverMutation, JournalRecord, JournalSnapshot};
 pub use operation_outcome::{
-    OperationClaim, OperationOutcomeError, OperationOutcomeRecord, OperationResult, OperationState,
+    OperationClaim, OperationOutcomeError, OperationOutcomeHealth, OperationOutcomePage, OperationOutcomeQuery,
+    OperationOutcomeQueryError, OperationOutcomeRecord, OperationOutcomeRow, OperationResult, OperationState,
 };
 pub use placement::{
     ArtifactOrigin, ArtifactPlacement, ArtifactPlacementHealth, ArtifactPlacementPage, ArtifactPlacementQuery,

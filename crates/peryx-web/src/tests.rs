@@ -218,6 +218,21 @@ fn test_placement_labels_are_all_distinct_text() {
 }
 
 #[test]
+fn test_operation_status_labels_are_all_distinct_text() {
+    let mut texts = std::collections::BTreeSet::new();
+    for status in [
+        crate::model::UiOperationStatus::Pending,
+        crate::model::UiOperationStatus::Published,
+        crate::model::UiOperationStatus::Failed,
+        crate::model::UiOperationStatus::Expired,
+    ] {
+        texts.insert(crate::model::operation_status_label(status).text);
+    }
+    // Four statuses, four distinct words: no status is told apart by colour alone.
+    assert_eq!(texts.len(), 4);
+}
+
+#[test]
 fn test_projects_and_members_from_json() {
     let list = serde_json::json!({"projects": [{"name": "a"}, {"name": "b"}]});
     assert_eq!(projects_from_list(&list), ["a", "b"]);

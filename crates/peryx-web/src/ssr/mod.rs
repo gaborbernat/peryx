@@ -3,6 +3,7 @@
 
 mod archive;
 mod login;
+mod operations;
 mod placement;
 mod router;
 mod search;
@@ -12,6 +13,7 @@ mod topology;
 
 pub use archive::{member_chunk, members};
 pub use login::login_state;
+pub use operations::operations;
 pub use placement::{blob_placements, placements};
 pub use router::{UiState, ui_router};
 pub use search::search;

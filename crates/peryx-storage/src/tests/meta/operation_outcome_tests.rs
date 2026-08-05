@@ -1,5 +1,8 @@
+use rstest::rstest;
+
 use crate::meta::{
-    MetaStore, OperationClaim, OperationOutcomeError, OperationOutcomeRecord, OperationResult, OperationState,
+    MetaStore, OperationClaim, OperationOutcomeError, OperationOutcomeHealth, OperationOutcomeQuery,
+    OperationOutcomeQueryError, OperationOutcomeRecord, OperationOutcomeRow, OperationResult, OperationState,
 };
 
 fn store() -> (tempfile::TempDir, MetaStore) {
@@ -193,4 +196,135 @@ fn test_prune_honors_the_limit() {
         .filter(|id| store.operation_outcome(id).unwrap().is_some())
         .count();
     assert_eq!(remaining, 1);
+}
+
+fn row(operation: &str, state: OperationState, expiry_unix: Option<i64>, updated_at_unix: i64) -> OperationOutcomeRow {
+    OperationOutcomeRow {
+        operation: operation.to_owned(),
+        state,
+        expiry_unix,
+        updated_at_unix,
+    }
+}
+
+#[test]
+fn test_list_on_an_empty_ledger_returns_no_rows() {
+    let (_dir, store) = store();
+
+    let page = store
+        .list_operation_outcomes(&OperationOutcomeQuery::default())
+        .unwrap();
+
+    assert!(page.rows.is_empty());
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn test_list_returns_rows_in_operation_id_order() {
+    let (_dir, store) = store();
+    store.claim_operation("op-b", Some(10), 1).unwrap();
+    store.claim_operation("op-a", None, 2).unwrap();
+    store
+        .finalize_operation("op-a", OperationResult::Published, b"", 3)
+        .unwrap();
+
+    let page = store
+        .list_operation_outcomes(&OperationOutcomeQuery::default())
+        .unwrap();
+
+    assert_eq!(
+        page.rows,
+        vec![
+            row("op-a", OperationState::Published, None, 3),
+            row("op-b", OperationState::Pending, Some(10), 1),
+        ],
+    );
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn test_list_paginates_after_an_exclusive_cursor() {
+    let (_dir, store) = store();
+    for id in ["op-a", "op-b", "op-c"] {
+        store.claim_operation(id, None, 1).unwrap();
+    }
+
+    let first = store
+        .list_operation_outcomes(&OperationOutcomeQuery { cursor: None, limit: 1 })
+        .unwrap();
+    assert_eq!(first.rows, vec![row("op-a", OperationState::Pending, None, 1)]);
+    assert_eq!(first.next_cursor, Some("op-a".to_owned()));
+
+    let second = store
+        .list_operation_outcomes(&OperationOutcomeQuery {
+            cursor: first.next_cursor,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(second.rows, vec![row("op-b", OperationState::Pending, None, 1)]);
+    assert_eq!(second.next_cursor, Some("op-b".to_owned()));
+}
+
+#[test]
+fn test_list_page_that_exactly_fills_carries_no_next_cursor() {
+    let (_dir, store) = store();
+    store.claim_operation("op-a", None, 1).unwrap();
+    store.claim_operation("op-b", None, 1).unwrap();
+
+    let page = store
+        .list_operation_outcomes(&OperationOutcomeQuery { cursor: None, limit: 2 })
+        .unwrap();
+
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(page.next_cursor, None, "a page that reaches the end resumes nowhere");
+}
+
+#[rstest]
+#[case(0)]
+#[case(101)]
+fn test_list_rejects_an_out_of_range_limit(#[case] limit: usize) {
+    let (_dir, store) = store();
+
+    let result = store.list_operation_outcomes(&OperationOutcomeQuery { cursor: None, limit });
+
+    assert!(matches!(result, Err(OperationOutcomeQueryError::InvalidLimit)));
+}
+
+#[test]
+fn test_health_buckets_by_client_facing_status_at_the_clock() {
+    let (_dir, store) = store();
+    store.claim_operation("op-live", Some(100), 1).unwrap();
+    store.claim_operation("op-stale", Some(10), 1).unwrap();
+    store.claim_operation("op-done", None, 1).unwrap();
+    store
+        .finalize_operation("op-done", OperationResult::Published, b"", 2)
+        .unwrap();
+    store.claim_operation("op-gone", None, 1).unwrap();
+    store
+        .finalize_operation("op-gone", OperationResult::Failed, b"", 2)
+        .unwrap();
+
+    // At now=50 the deadline-10 pending write reads expired while the deadline-100 one still reads pending.
+    let health = store.operation_outcome_health(50).unwrap();
+
+    assert_eq!(
+        health,
+        OperationOutcomeHealth {
+            pending: 1,
+            published: 1,
+            failed: 1,
+            expired: 1,
+        }
+    );
+    assert_eq!(health.total(), 4);
+}
+
+#[test]
+fn test_health_reads_a_pending_write_within_its_deadline_as_pending() {
+    let (_dir, store) = store();
+    store.claim_operation("op-live", Some(100), 1).unwrap();
+
+    // Before the deadline the write is pending; at and past it, expired.
+    assert_eq!(store.operation_outcome_health(99).unwrap().pending, 1);
+    assert_eq!(store.operation_outcome_health(100).unwrap().expired, 1);
 }

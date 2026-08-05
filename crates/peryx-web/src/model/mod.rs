@@ -5,6 +5,7 @@
 
 mod analytics;
 mod login;
+mod operations;
 mod placement;
 mod policy_decision;
 mod project;
@@ -20,6 +21,7 @@ pub use analytics::{
     UiUsageRows, UiVersionRow, format_instant,
 };
 pub use login::UiLoginState;
+pub use operations::{OperationRow, OperationsHealth, OperationsView, UiOperationStatus, operation_status_label};
 pub use placement::{
     BlobDatacenterPlacement, BlobPlacementStatus, BlobPlacementView, PlacementHealth, PlacementRow, PlacementView,
     blob_placement_status_label,

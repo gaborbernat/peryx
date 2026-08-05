@@ -54,6 +54,26 @@ Use the counts to watch a replica converge: a rising `remote-only` count on a no
 a store that has applied metadata ahead of the blobs it references, which the
 [derived-view frontier](@/core/availability-derived-views.md) holds back from readers until the bytes land.
 
+## Pending operations
+
+The operations surface reports the admitted writes the node retains, bucketed by the client-facing status each reads:
+`pending` while a write is in flight within its retention deadline, `published` once it finalizes, `failed` when it
+gives up, and `expired` when it outlives its deadline without finalizing. Read it as the
+[pending-operations page](@/core/web-ui.md#pending-operations) at `/admin/operations`, or as JSON from
+`GET /+availability/operations`.
+
+The whole-ledger counts need `operator:read` and are aggregated before serialization, so the summary never scales with
+the number of retained writes. A per-operation table needs `administration:read`, because an operation id identifies a
+write; it pages in operation-id order, bounded at the supported limit with a cursor to resume. Each row carries an
+operation id with its status, when its record last changed, and when it may be pruned, never the response bytes, the
+repository, or the owner, so inspecting a write's convergence exposes no tenant data. An operator who cannot read the
+rows still reads the counts.
+
+An `expired` write is not a definite failure: the retention deadline is the client's wait, not the write's, so a durable
+completion may have happened after the client stopped polling. A terminal record is pruned once its deadline passes,
+while a still-pending one is kept, so a rising `expired` count names writes whose durability a client could not confirm
+within its deadline rather than writes known to have been lost.
+
 ## Liveness and readiness
 
 The topology and placement surfaces describe the group; the

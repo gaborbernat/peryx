@@ -33,7 +33,10 @@ pub use toxiproxy::{Proxy, Toxiproxy};
 const BIN: &str = env!("CARGO_BIN_EXE_peryx");
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(25);
-const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+// A dead node refuses the connection at once, so this bounds only how long a live-but-slow response
+// may take. Under the parallel availability-e2e suite a loaded CI runner can push a first read past a
+// two-second ceiling, which then reads as a spurious unreachable; keep it well under READY_TIMEOUT.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The administrator a topology bootstraps when it opts in with [`Topology::with_admin`], and the
 /// password it authenticates with. The password clears the fifteen-character floor

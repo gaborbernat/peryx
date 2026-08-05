@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod identity_availability_tests;
 mod logging_tests;
+mod metrics_availability_tests;
 mod none_mode_tests;
 mod operator;
 mod prefetch;

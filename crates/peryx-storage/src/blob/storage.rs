@@ -65,6 +65,18 @@ impl BlobStorage {
         crate::meta::BackendId::from_static(self.name())
     }
 
+    /// The underlying filesystem store, or `None` on the S3 backend.
+    ///
+    /// Cross-data-center copy publishes verified bytes through the local filesystem store's atomic
+    /// write; the S3 backend replicates through the object store itself and exposes no such store.
+    #[must_use]
+    pub const fn filesystem_store(&self) -> Option<&BlobStore> {
+        match &self.backend {
+            Backend::Filesystem(store) => Some(store),
+            Backend::S3(_) => None,
+        }
+    }
+
     /// The effective configured backend contract.
     #[must_use]
     pub fn capabilities(&self) -> BlobCapabilities {

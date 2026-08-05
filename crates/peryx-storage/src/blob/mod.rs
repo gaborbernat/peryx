@@ -63,6 +63,14 @@ impl Digest {
     }
 }
 
+impl From<&peryx_identity::ArtifactDigest> for Digest {
+    /// An [`ArtifactDigest`](peryx_identity::ArtifactDigest) is a validated lowercase-hex sha256, which is
+    /// exactly a blob [`Digest`], so the conversion carries the hex across without re-parsing.
+    fn from(digest: &peryx_identity::ArtifactDigest) -> Self {
+        Self(digest.sha256().to_owned())
+    }
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

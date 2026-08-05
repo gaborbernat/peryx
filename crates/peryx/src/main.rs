@@ -111,6 +111,12 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
                 state.clock.clone(),
             )));
         }
+        if let Some(store) = state.blobs.filesystem_store()
+            && let Some(copier) =
+                peryx::availability::CrossDcBlobCopier::from_config(config, store.clone(), state.blobs.backend_id())?
+        {
+            state.set_cross_dc_copier(std::sync::Arc::new(copier));
+        }
         if !replication.is_replica() {
             for index in &state.indexes {
                 if let peryx_driver::IndexKind::Cached { client, offline: false } = &index.kind {

@@ -819,15 +819,15 @@ concurrency = 4
 timeout_secs = 900
 ```
 
-| Key             | Meaning                                                | Default    |
-| --------------- | ------------------------------------------------------ | ---------- |
-| `job`           | `cache_maintenance` or `catalog_sync`                  | (required) |
-| `interval_secs` | Seconds between runs, must be positive                 | (required) |
-| `repository`    | Cached online PyPI index for `catalog_sync`            | (required) |
-| `source`        | Named upstream to use instead of repository routing    | routing    |
-| `max_projects`  | Maximum projects refreshed per run; range `1..=100000` | `10000`    |
-| `concurrency`   | Project metadata requests in flight; range `1..=32`    | `4`        |
-| `timeout_secs`  | Whole-run wall-time limit; range `1..=86400`           | `900`      |
+| Key             | Meaning                                                      | Default    |
+| --------------- | ------------------------------------------------------------ | ---------- |
+| `job`           | `cache_maintenance`, `catalog_sync`, or `dc_copy`            | (required) |
+| `interval_secs` | Seconds between runs, must be positive                       | (required) |
+| `repository`    | Cached online PyPI index for `catalog_sync`                  | (required) |
+| `source`        | Named upstream to use instead of repository routing          | routing    |
+| `max_projects`  | Maximum projects refreshed per run; range `1..=100000`       | `10000`    |
+| `concurrency`   | Requests or copies in flight; range `1..=32` (`1..=64` copy) | `4` / `8`  |
+| `timeout_secs`  | Whole-run wall-time limit; range `1..=86400`                 | `900`      |
 
 `cache_maintenance` reclaims expired process resources and revalidates stale cached pages, fanning out one run per
 installed ecosystem so independent repositories sweep together while one repository never sweeps itself twice at once.
@@ -836,6 +836,13 @@ installed ecosystem so independent repositories sweep together while one reposit
 not download distributions. The same repository cannot run two catalog syncs at once, while different repositories may
 run within the node-local worker limits. Cancellation stops admitting project requests; completed root and project
 generations remain valid because each source document publishes atomically.
+
+`dc_copy` copies the filesystem blobs the local data center still owes from its peers, so each data center keeps its own
+verified copy of every artifact a peer serves. It reads the copy backlog from the placement ledger, pulls each owed
+digest from a verified peer over the replication transport, and records the local placement. It runs only on a
+filesystem backend in a `dc` or `ha` group whose roster names this node and at least one peer data center, and it
+accepts only `concurrency` (copies in flight, range `1..=64`, default `8`). The copy is fenced by the ownership group's
+cluster term, so a node with no live consensus term copies nothing.
 
 One bounded timer drives every schedule, so a large set costs no per-tick scan. When a tick arrives while the same job's
 previous run is still going, peryx skips it rather than queueing it, and counts the skip in the job metrics. Pick an

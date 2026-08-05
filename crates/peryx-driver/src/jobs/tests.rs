@@ -16,9 +16,9 @@ use tracing::instrument::WithSubscriber as _;
 use super::attempts::{JobAttemptControl, JobAttemptError};
 use super::scheduler::{JobLimits, Submit};
 use super::{
-    CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, JobContext, JobFailure, JobHistoryCleanup, JobReport,
-    JobScheduler, MaintenanceJob, NodeJob, Schedule, ScheduledJob, SearchRebuildJob, run_schedules, scheduled_job,
-    submit_maintenance,
+    CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, CrossDcCopier, DcCopyJob, DcCopyParameters, JobContext,
+    JobFailure, JobHistoryCleanup, JobReport, JobScheduler, MaintenanceJob, NodeJob, Schedule, ScheduledJob,
+    SearchRebuildJob, run_schedules, scheduled_job, submit_maintenance,
 };
 use crate::serving::{EcosystemDriver, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
@@ -1135,6 +1135,113 @@ fn cache_schedule(secs: u64) -> Vec<Schedule> {
 #[test]
 fn test_a_scheduled_job_reports_its_stable_label() {
     assert_eq!(ScheduledJob::CacheMaintenance.as_str(), CACHE_MAINTENANCE);
+    assert_eq!(ScheduledJob::DcCopy(DcCopyParameters::new()).as_str(), "dc_copy");
+}
+
+#[test]
+fn test_dc_copy_parameters_default_to_the_bounded_concurrency() {
+    assert_eq!(DcCopyParameters::default(), DcCopyParameters::new());
+    assert_eq!(
+        DcCopyParameters::new().concurrency.get(),
+        super::DEFAULT_DC_COPY_CONCURRENCY
+    );
+}
+
+struct StubCopier {
+    ran: Arc<AtomicUsize>,
+    report: JobReport,
+}
+
+#[async_trait]
+impl CrossDcCopier for StubCopier {
+    async fn copy_pass(
+        &self,
+        _state: &ServingState,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+        _params: DcCopyParameters,
+    ) -> Result<JobReport, JobFailure> {
+        assert!(!cancelled(), "the pass observes the cooperative cancellation signal");
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        Ok(self.report)
+    }
+}
+
+#[tokio::test]
+async fn test_dc_copy_job_delegates_to_the_registered_copier() {
+    let (_dir, state) = serving();
+    let ran = Arc::new(AtomicUsize::new(0));
+    state.set_cross_dc_copier(Arc::new(StubCopier {
+        ran: ran.clone(),
+        report: JobReport {
+            processed: 3,
+            changed: 2,
+        },
+    }));
+    let job = DcCopyJob {
+        parameters: DcCopyParameters::new(),
+    };
+    assert_eq!(job.kind(), "dc_copy");
+    assert_eq!(job.scope(), "");
+    let report = job.run(&context(state, CancellationToken::new())).await.unwrap();
+
+    assert_eq!(
+        report,
+        JobReport {
+            processed: 3,
+            changed: 2
+        }
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_dc_copy_job_is_a_no_op_without_a_registered_copier() {
+    let (_dir, state) = serving();
+    let job = DcCopyJob {
+        parameters: DcCopyParameters::new(),
+    };
+
+    let report = job.run(&context(state, CancellationToken::new())).await.unwrap();
+
+    assert_eq!(report, JobReport::default());
+}
+
+fn dc_copy_schedule(secs: u64) -> Vec<Schedule> {
+    vec![Schedule {
+        job: ScheduledJob::DcCopy(DcCopyParameters::new()),
+        interval: Duration::from_secs(secs),
+    }]
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_a_dc_copy_schedule_submits_the_registered_copier() {
+    let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
+    let ran = Arc::new(AtomicUsize::new(0));
+    app.serving.set_cross_dc_copier(Arc::new(StubCopier {
+        ran: ran.clone(),
+        report: JobReport::default(),
+    }));
+    let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
+    let cancel = CancellationToken::new();
+    let timer = tokio::spawn(run_schedules(
+        app.clone(),
+        scheduler.clone(),
+        dc_copy_schedule(60),
+        cancel.clone(),
+    ));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_mins(1)).await;
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"dc_copy\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    cancel.cancel();
+    timer.await.unwrap();
+    scheduler.shutdown().await;
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
 }
 
 fn catalog_schedule(secs: u64) -> Vec<Schedule> {

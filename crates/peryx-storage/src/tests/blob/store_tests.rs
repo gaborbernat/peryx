@@ -22,6 +22,14 @@ fn test_from_hex_accepts_valid_and_rejects_invalid() {
 }
 
 #[test]
+fn test_from_artifact_digest_carries_the_hex() {
+    let content = b"payload";
+    let blob = Digest::of(content);
+    let artifact = peryx_identity::ArtifactDigest::from_sha256(blob.as_str()).unwrap();
+    assert_eq!(Digest::from(&artifact), blob);
+}
+
+#[test]
 fn test_path_for_is_sharded() {
     let store = BlobStore::new("/data");
     let digest = Digest::of(b"hello");

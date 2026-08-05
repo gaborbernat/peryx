@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use peryx_driver::jobs::{
-    DEFAULT_CATALOG_CONCURRENCY, DEFAULT_CATALOG_PROJECTS, DEFAULT_CATALOG_TIMEOUT, MAINTENANCE_INTERVAL, Schedule,
-    ScheduledJob,
+    DEFAULT_CATALOG_CONCURRENCY, DEFAULT_CATALOG_PROJECTS, DEFAULT_CATALOG_TIMEOUT, DEFAULT_DC_COPY_CONCURRENCY,
+    MAINTENANCE_INTERVAL, Schedule, ScheduledJob,
 };
 use rstest::rstest;
 
@@ -157,6 +157,18 @@ fn test_catalog_schedule_resolves_default_and_explicit_limits() {
     "job = \"catalog_sync\"\nrepository = \"pypi\"\ntimeout_secs = 86401",
     "`timeout_secs` must be between 1 and 86400"
 )]
+#[case::dc_copy_fields(
+    "job = \"dc_copy\"\nrepository = \"pypi\"",
+    "cross-datacenter copy accepts only `concurrency`"
+)]
+#[case::dc_copy_zero_concurrency(
+    "job = \"dc_copy\"\nconcurrency = 0",
+    "cross-datacenter copy `concurrency` must be positive"
+)]
+#[case::dc_copy_too_much_concurrency(
+    "job = \"dc_copy\"\nconcurrency = 65",
+    "cross-datacenter copy `concurrency` exceeds the per-pass limit"
+)]
 fn test_schedule_rejects_invalid_kind_parameters(#[case] fields: &str, #[case] expected: &str) {
     let partial = config::from_toml(
         PathBuf::from("x.toml"),
@@ -167,6 +179,23 @@ fn test_schedule_rejects_invalid_kind_parameters(#[case] fields: &str, #[case] e
     let error = Config::default().apply(partial).unwrap_err();
 
     assert!(error.to_string().contains(expected), "{error}");
+}
+
+#[test]
+fn test_dc_copy_schedule_resolves_default_and_explicit_concurrency() {
+    let config = toml_config(
+        "[[jobs.schedule]]\njob = \"dc_copy\"\ninterval_secs = 300\n\n\
+         [[jobs.schedule]]\njob = \"dc_copy\"\ninterval_secs = 60\nconcurrency = 4\n",
+    );
+    let ScheduledJob::DcCopy(defaults) = &config.jobs.schedules[0].job else {
+        panic!("expected dc copy");
+    };
+    assert_eq!(defaults.concurrency.get(), DEFAULT_DC_COPY_CONCURRENCY);
+    assert_eq!(config.jobs.schedules[0].interval, Duration::from_mins(5));
+    let ScheduledJob::DcCopy(explicit) = &config.jobs.schedules[1].job else {
+        panic!("expected dc copy");
+    };
+    assert_eq!(explicit.concurrency.get(), 4);
 }
 
 #[rstest]

@@ -174,6 +174,7 @@ pub struct RawJobSchedule {
 pub enum RawScheduledJob {
     CacheMaintenance,
     CatalogSync,
+    DcCopy,
 }
 
 /// One process replication role before secret and numeric validation.

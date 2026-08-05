@@ -128,6 +128,10 @@ pub struct ServingState {
     /// commands through, registered once the runtime ignites the consensus group. Absent when the process
     /// runs no group, so the command surface has nothing to drive.
     pub(super) control: std::sync::OnceLock<Arc<crate::state::ControlPlane>>,
+    /// The cross-data-center blob copier the scheduled `DcCopy` job drives, registered once the binary
+    /// has resolved its roster and replication token. Absent when the process copies nothing — single
+    /// node, no roster, or an object-store backend — so the job runs as a no-op.
+    pub(super) cross_dc_copier: std::sync::OnceLock<Arc<dyn crate::jobs::CrossDcCopier>>,
 }
 
 /// The whole process state: the serving data every handler needs, plus the driver registry only the
@@ -243,6 +247,18 @@ impl ServingState {
     #[must_use]
     pub fn control_plane(&self) -> Option<&Arc<crate::state::ControlPlane>> {
         self.control.get()
+    }
+
+    /// Register the cross-data-center blob copier the scheduled `DcCopy` job drives. Set at most once; a
+    /// later call is ignored.
+    pub fn set_cross_dc_copier(&self, copier: Arc<dyn crate::jobs::CrossDcCopier>) {
+        let _ = self.cross_dc_copier.set(copier);
+    }
+
+    /// The registered cross-data-center blob copier, or `None` when this process copies nothing.
+    #[must_use]
+    pub fn cross_dc_copier(&self) -> Option<&Arc<dyn crate::jobs::CrossDcCopier>> {
+        self.cross_dc_copier.get()
     }
 
     /// Assign `authority`'s home on its first publish, best effort. A publish path calls this after it

@@ -71,7 +71,7 @@ pub use byte_ack::{ByteAckDecision, decide_byte_ack};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use completeness::{Completeness, ProducerCoverage, assess};
 pub use dc_ack::{ByteEvidence, DcAck, Deadline, decide_dc_ack};
-pub use dc_copy::{CopyError, CopyPlan, TargetCopy, copy_blob_to_target, plan_dc_copy, run_dc_copy};
+pub use dc_copy::{CopyError, copy_blob_to_target};
 pub use drain::{DrainIntent, DrainPlan, plan_drain};
 pub use driver::{StepOutcome, advance_once};
 pub use envelope::{

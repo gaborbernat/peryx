@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use peryx_core::Ecosystem;
 use peryx_driver::jobs::{
-    CatalogSyncParameters, MAX_CATALOG_CONCURRENCY, MAX_CATALOG_PROJECTS_PER_RUN, MAX_CATALOG_TIMEOUT, Schedule,
-    ScheduledJob,
+    CatalogSyncParameters, DcCopyParameters, MAX_CATALOG_CONCURRENCY, MAX_CATALOG_PROJECTS_PER_RUN,
+    MAX_CATALOG_TIMEOUT, MAX_DC_COPY_CONCURRENCY, Schedule, ScheduledJob,
 };
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
 use peryx_identity::{ExternalGroup, ExternalGroupGrant, GrantScope, ProviderId};
@@ -142,11 +142,35 @@ fn classify_schedule(index: usize, raw: RawJobSchedule) -> Result<Schedule, Conf
             ScheduledJob::CacheMaintenance
         }
         RawScheduledJob::CatalogSync => ScheduledJob::CatalogSync(classify_catalog_sync(index, raw)?),
+        RawScheduledJob::DcCopy => ScheduledJob::DcCopy(classify_dc_copy(index, &raw)?),
     };
     Ok(Schedule {
         job,
         interval: Duration::from_secs(interval.get()),
     })
+}
+
+fn classify_dc_copy(index: usize, raw: &RawJobSchedule) -> Result<DcCopyParameters, ConfigError> {
+    if raw.repository.is_some() || raw.source.is_some() || raw.max_projects.is_some() || raw.timeout_secs.is_some() {
+        return Err(ConfigError::Jobs {
+            index,
+            reason: "cross-datacenter copy accepts only `concurrency`",
+        });
+    }
+    let mut parameters = DcCopyParameters::new();
+    if let Some(concurrency) = raw.concurrency {
+        parameters.concurrency = std::num::NonZeroUsize::new(concurrency).ok_or(ConfigError::Jobs {
+            index,
+            reason: "cross-datacenter copy `concurrency` must be positive",
+        })?;
+    }
+    if parameters.concurrency.get() > MAX_DC_COPY_CONCURRENCY {
+        return Err(ConfigError::Jobs {
+            index,
+            reason: "cross-datacenter copy `concurrency` exceeds the per-pass limit",
+        });
+    }
+    Ok(parameters)
 }
 
 fn classify_catalog_sync(index: usize, raw: RawJobSchedule) -> Result<CatalogSyncParameters, ConfigError> {

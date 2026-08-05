@@ -140,6 +140,24 @@ continue instead of only reporting failure. The referrers check refuses to answe
 A strict client, and a conformance suite, reads each of these as the spec mandates; a lenient client sees a registry
 that fails in a way it can understand and act on.
 
+## Uploads route through the repository authority
+
+A blob's bytes are content-addressed and may enter through any datacenter, but recording that a repository serves a
+digest is a metadata write, and repository metadata lives under one home authority. So a blob upload snapshots the
+repository's committed authority epoch when it starts to finalize, then re-admits that epoch before it records the
+membership. An upload whose home did not move commits under the epoch it leased; a monolithic `PUT`, a resumable session
+`PUT`, and a cross-repository mount each route the same way.
+
+An upload that leased an epoch the repository's home then moved past is turned away before it changes placement, with a
+`503` a client retries. The response names no leader, datacenter, or membership, so it leaks no topology. A resumable
+session keeps its staged bytes and its id through the rejection: upload status still answers, and the same finalize
+retried once the node has caught up to the new home commits the blob without re-uploading a byte. A monolithic upload
+retries as a whole, and a mount retries as a mount. Blob placement stays independent of the repository home either way,
+so the bytes a fenced upload staged remain valid for the retry.
+
+A node that runs no ownership group, and a repository no group has homed, hold the unassigned epoch and finalize every
+upload unfenced, so a single-node registry pushes exactly as before.
+
 ## Manifests and tags route through the repository authority
 
 A manifest push, a tag replacement, and a delete are metadata writes that belong to the repository's home datacenter.

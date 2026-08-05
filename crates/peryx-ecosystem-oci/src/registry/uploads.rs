@@ -1,6 +1,9 @@
 //! The `POST`/`PATCH`/`PUT` blob-upload session lifecycle.
 
-use super::blobs::{blob_created, blob_fault, commit_blob, commit_staged_upload};
+use super::blobs::{
+    authority_moved, blob_created, blob_fault, commit_blob, commit_staged_upload, epoch_admits, release_reservation,
+    upload_epoch,
+};
 use super::*;
 use crate::error::{ErrorCode, error_response};
 use crate::store::{self};
@@ -44,6 +47,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 if let Some(response) = policy_size_denial(index, &repo, metadata.bytes) {
                     return Ok(response);
                 }
+                let fence = upload_epoch(state, &repo).await;
                 // A mount publishes an existing blob into this repository without a transfer, so it
                 // reserves the mounted digest's bytes exactly as an upload of them would; a digest
                 // already served here is not reserved again.
@@ -56,6 +60,10 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                         crate::quota::Admission::Reserved(record) => Some(record),
                     }
                 };
+                if !epoch_admits(state, &repo, fence).await {
+                    release_reservation(state, reservation)?;
+                    return Ok(authority_moved());
+                }
                 crate::quota::commit_blob_membership(&state.meta, &index.name, &repo, mount, reservation, journal)?;
                 return Ok(blob_created(name, mount));
             }

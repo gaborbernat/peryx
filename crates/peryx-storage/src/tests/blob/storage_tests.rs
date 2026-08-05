@@ -28,6 +28,13 @@ fn dummy_s3(dir: &std::path::Path) -> BlobStorage {
     BlobStorage::s3(S3Config::new(settings).unwrap(), dir.join("staging"))
 }
 
+#[test]
+fn test_filesystem_backend_exposes_its_store_and_s3_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(BlobStorage::filesystem(dir.path()).filesystem_store().is_some());
+    assert!(dummy_s3(dir.path()).filesystem_store().is_none());
+}
+
 #[tokio::test]
 async fn test_filesystem_storage_stages_resumes_and_finishes_an_upload() {
     let dir = tempfile::tempdir().unwrap();

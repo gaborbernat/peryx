@@ -55,15 +55,18 @@ impl OperationTelemetry {
     /// unsampled operation adds no event volume. The fields are the log-safe identity and trace linkage;
     /// the change payload is never among them.
     pub fn emit(&self) {
-        if !self.sampled {
+        // A sampled operation always carries a traceparent, since `of` sets the two together. Gating the
+        // extraction on `sampled` keeps an unsampled or untraced operation silent and drops the field
+        // without a defaulted placeholder that could never be reached.
+        let Some(traceparent) = self.traceparent.as_deref().filter(|_| self.sampled) else {
             return;
-        }
+        };
         tracing::info!(
             operation.source = %self.source,
             operation.epoch = self.epoch,
             operation.serial = self.serial,
             operation.kind = self.kind,
-            operation.traceparent = self.traceparent.as_deref().unwrap_or_default(),
+            operation.traceparent = traceparent,
             "availability operation",
         );
     }
@@ -92,6 +95,8 @@ fn trace_flags(traceparent: &str) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::{OperationTelemetry, sampled};
     use crate::{
         AuthorityEpoch, BlobReference, Change, MetadataMutation, OperationEnvelope, OperationKind, TraceContext,
@@ -193,10 +198,74 @@ mod tests {
         );
     }
 
+    /// A `tracing` writer that appends every formatted event to a shared buffer, so a test can read back
+    /// exactly what `emit` recorded.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Capture {
+        fn recorded(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `body` under a subscriber that formats its events into a buffer, then return the buffer's
+    /// contents. The writer is drained before the read so nothing the subscriber buffered is missed.
+    fn captured(body: impl FnOnce()) -> String {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(capture.clone()).finish();
+        tracing::subscriber::with_default(subscriber, body);
+        std::io::Write::flush(&mut capture.clone()).unwrap();
+        capture.recorded()
+    }
+
     #[test]
-    fn test_emit_records_a_sampled_operation_and_skips_an_unsampled_one() {
-        // Both paths run so the sampled gate and the record are exercised; the fields carry no payload.
-        OperationTelemetry::of(&traced(Some(SAMPLED_TRACEPARENT))).emit();
-        OperationTelemetry::of(&traced(Some(UNSAMPLED_TRACEPARENT))).emit();
+    fn test_emit_records_a_sampled_operation_without_its_payload() {
+        let recorded = captured(|| OperationTelemetry::of(&traced(Some(SAMPLED_TRACEPARENT))).emit());
+
+        assert!(
+            recorded.contains("availability operation"),
+            "the event is recorded: {recorded}"
+        );
+        assert!(recorded.contains("primary-a"), "the identity is present: {recorded}");
+        assert!(
+            recorded.contains(SAMPLED_TRACEPARENT),
+            "the traceparent is present: {recorded}"
+        );
+        for secret in ["hunter2", "secret-digest-map", "/var/lib/peryx/private/path"] {
+            assert!(
+                !recorded.contains(secret),
+                "emit leaked a payload value {secret}: {recorded}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_emit_skips_an_unsampled_operation() {
+        let recorded = captured(|| OperationTelemetry::of(&traced(Some(UNSAMPLED_TRACEPARENT))).emit());
+
+        assert!(
+            recorded.is_empty(),
+            "an unsampled operation records nothing: {recorded}"
+        );
     }
 }

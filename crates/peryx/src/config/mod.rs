@@ -8,6 +8,7 @@ mod load;
 mod merge;
 mod model;
 mod raw;
+mod repository_migration;
 
 use std::path::PathBuf;
 
@@ -30,6 +31,7 @@ pub use raw::{
     RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawPolicy, RawPrefetchConfig, RawReplication,
     RawTls, RawToken, RawTrustedPublisher, RawUpstream, RawWebhook,
 };
+pub use repository_migration::reconcile_configured_repositories;
 
 /// An error while assembling configuration.
 #[derive(Debug, thiserror::Error)]

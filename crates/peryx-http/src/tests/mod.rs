@@ -11,6 +11,7 @@ mod placements_tests;
 mod policy_decision_tests;
 mod pql_tests;
 mod quota_tests;
+mod repositories_tests;
 mod response_security_tests;
 mod retention_tests;
 mod revocation_tests;

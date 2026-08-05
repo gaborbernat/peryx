@@ -61,6 +61,232 @@ fn quota_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 /// Register the `/+grants` role-grant family, kept apart so the service path list stays short.
+fn repository_paths(paths: PathsBuilder) -> PathsBuilder {
+    paths
+        .path(
+            "/+repositories",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, list_repositories())
+                .operation(HttpMethod::Post, create_repository())
+                .build(),
+        )
+        .path(
+            "/+repositories/{id}",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, inspect_repository())
+                .operation(HttpMethod::Put, update_repository())
+                .build(),
+        )
+        .path(
+            "/+repositories/{id}/disable",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Post, repository_state_operation("Disable a repository", "Disables a repository, conditional on an `If-Match` version. Idempotent: disabling an already-disabled repository returns it unchanged."))
+                .build(),
+        )
+        .path(
+            "/+repositories/{id}/enable",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Post, repository_state_operation("Enable a repository", "Re-enables a disabled repository, conditional on an `If-Match` version."))
+                .build(),
+        )
+}
+
+fn repository_example() -> serde_json::Value {
+    json!({
+        "id": "repo_2f7e6a1b9c4d4e2f8a1b2c3d4e5f6a7b", "route": "root/pypi", "display_name": "PyPI mirror",
+        "ecosystem": "pypi", "definition": {}, "state": "enabled", "version": 1,
+        "created_by": "usr_550e8400e29b41d4a716446655440000", "created_at_unix": 1_700_000_000,
+        "updated_by": "usr_550e8400e29b41d4a716446655440000", "updated_at_unix": 1_700_000_000
+    })
+}
+
+fn repository_id_parameter() -> utoipa::openapi::path::Parameter {
+    ParameterBuilder::new()
+        .name("id")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some(
+            "Opaque, stable repository identifier from a create or list response",
+        ))
+        .example(Some(json!("repo_2f7e6a1b9c4d4e2f8a1b2c3d4e5f6a7b")))
+        .build()
+}
+
+fn list_repositories() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("List repositories"))
+            .description(Some(
+                "Lists repositories in id order with an opaque cursor and a bounded page size. Filter by state.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .parameter(
+                ParameterBuilder::new()
+                    .name("state")
+                    .parameter_in(ParameterIn::Query)
+                    .required(Required::False)
+                    .description(Some("Filter by `enabled` or `disabled`"))
+                    .build(),
+            )
+            .parameter(
+                ParameterBuilder::new()
+                    .name("cursor")
+                    .parameter_in(ParameterIn::Query)
+                    .required(Required::False)
+                    .description(Some("Opaque cursor from a prior page's `next_cursor`"))
+                    .build(),
+            )
+            .parameter(
+                ParameterBuilder::new()
+                    .name("limit")
+                    .parameter_in(ParameterIn::Query)
+                    .required(Required::False)
+                    .description(Some("Page size, 1..=100 (default 25)"))
+                    .build(),
+            )
+            .response(
+                "200",
+                api_json_response(
+                    "A page of repositories",
+                    json!({"repositories": [repository_example()], "next_cursor": serde_json::Value::Null}),
+                ),
+            )
+            .response(
+                "400",
+                api_json_response(
+                    "The limit is out of range",
+                    json!({"error": "limit must be between 1 and 100"}),
+                ),
+            ),
+    )
+}
+
+fn create_repository() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Create a repository"))
+            .description(Some(
+                "Creates a repository under a unique route, minting a stable id. The route and ecosystem are fixed \
+                 for the record's life. The response carries the record, an `ETag` for a later `If-Match`, and a \
+                 `Location`.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .request_body(Some(RequestBodyBuilder::new().required(Some(Required::True)).content("application/json", ContentBuilder::new().example(Some(json!({"route": "root/pypi", "display_name": "PyPI mirror", "ecosystem": "pypi", "definition": {}}))).build()).build()))
+            .response("201", api_json_response("The created repository", repository_example()))
+            .response("409", api_json_response("Another repository already serves the route", json!({"error": "a repository already serves route \"root/pypi\""})))
+            .response("415", ResponseBuilder::new().description("The request is not JSON"))
+            .response("422", api_json_response("The body is malformed or a field is invalid", json!({"error": "route must not be empty"}))),
+    )
+}
+
+fn inspect_repository() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Inspect a repository"))
+            .description(Some(
+                "Returns one repository by id, with an `ETag` carrying its version.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .parameter(repository_id_parameter())
+            .response("200", api_json_response("The repository", repository_example())),
+    )
+}
+
+fn update_repository() -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some("Update a repository"))
+            .description(Some(
+                "Replaces a repository's display name and definition, conditional on an `If-Match` version. The \
+                 route and ecosystem cannot change. A stale precondition conflicts and the winning version rides \
+                 back on the `ETag`.",
+            ))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .parameter(repository_id_parameter())
+            .request_body(Some(
+                RequestBodyBuilder::new()
+                    .required(Some(Required::True))
+                    .content(
+                        "application/json",
+                        ContentBuilder::new()
+                            .example(Some(json!({"display_name": "PyPI mirror", "definition": {}})))
+                            .build(),
+                    )
+                    .build(),
+            ))
+            .response("200", api_json_response("The updated repository", repository_example()))
+            .response(
+                "400",
+                api_json_response(
+                    "The `If-Match` precondition is malformed",
+                    json!({"error": "If-Match must be a repository version"}),
+                ),
+            )
+            .response(
+                "409",
+                api_json_response(
+                    "The repository is at a different version than the precondition named",
+                    json!({"error": "repository version precondition failed"}),
+                ),
+            )
+            .response("415", ResponseBuilder::new().description("The request is not JSON"))
+            .response(
+                "422",
+                api_json_response(
+                    "The body is malformed or a field is invalid",
+                    json!({"error": "display name must not be empty"}),
+                ),
+            )
+            .response(
+                "428",
+                api_json_response(
+                    "The request carried no `If-Match`",
+                    json!({"error": "an If-Match version is required"}),
+                ),
+            ),
+    )
+}
+
+fn repository_state_operation(summary: &'static str, description: &'static str) -> OperationBuilder {
+    administrator_errors(
+        OperationBuilder::new()
+            .tag("operations")
+            .summary(Some(summary))
+            .description(Some(description))
+            .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+            .parameter(repository_id_parameter())
+            .response(
+                "200",
+                api_json_response("The repository in its new state", repository_example()),
+            )
+            .response(
+                "400",
+                api_json_response(
+                    "The `If-Match` precondition is malformed",
+                    json!({"error": "If-Match must be a repository version"}),
+                ),
+            )
+            .response(
+                "409",
+                api_json_response(
+                    "The repository is at a different version than the precondition named",
+                    json!({"error": "repository version precondition failed"}),
+                ),
+            )
+            .response(
+                "428",
+                api_json_response(
+                    "The request carried no `If-Match`",
+                    json!({"error": "an If-Match version is required"}),
+                ),
+            ),
+    )
+}
+
 fn grant_paths(paths: PathsBuilder) -> PathsBuilder {
     paths
         .path(
@@ -156,6 +382,7 @@ pub(super) fn service_paths(paths: PathsBuilder) -> PathsBuilder {
                 .operation(HttpMethod::Post, lift_revocation())
                 .build(),
         );
+    let paths = repository_paths(paths);
     token_paths(paths)
         .path(
             "/metrics",

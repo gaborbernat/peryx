@@ -48,6 +48,34 @@ async fn test_browser_upload_derives_legacy_fields_and_publishes() {
 }
 
 #[tokio::test]
+async fn test_upload_durably_stages_one_ingress_intent_and_deduplicates_a_resend() {
+    let h = harness().await;
+    let wheel = fixture_wheel();
+    let filename = "peryxpkg-1.0-py3-none-any.whl";
+    let fields = [
+        (":action", "file_upload"),
+        ("name", "peryxpkg"),
+        ("version", "1.0"),
+        ("filetype", "bdist_wheel"),
+    ];
+    let (content_type, body) = multipart_body(&fields, Some((filename, &wheel)));
+
+    let (status, body) = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "upload accepted"));
+    // The ingress DC durably recorded exactly one admission intent for the upload it accepted.
+    assert_eq!(h.state.meta.count_staged_intents().unwrap(), 1);
+
+    // A byte-identical resend is admitted again but resolves the same intent: no second staged row and
+    // no duplicated bytes.
+    let (content_type, body) = multipart_body(&fields, Some((filename, &wheel)));
+    let (status, _) = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(h.state.meta.count_staged_intents().unwrap(), 1);
+}
+
+#[tokio::test]
 async fn test_browser_upload_publishes_modern_sdist() {
     let h = harness().await;
     let sdist = fixture_sdist();
@@ -578,6 +606,26 @@ async fn test_upload_same_filename_with_different_bytes_is_bad_request() {
     let (ct, body) = multipart_body(&upload_fields(), Some(("peryxpkg-1.0-py3-none-any.whl", &wheel)));
 
     let (status, body) = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &ct, body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body,
+        "File already exists: \"peryxpkg-1.0-py3-none-any.whl\" has different content; use a different filename"
+    );
+}
+#[tokio::test]
+async fn test_upload_conflicting_content_through_a_second_route_is_refused_by_publication() {
+    let h = harness().await;
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    // The virtual route stages a distinct ingress intent (its tenant differs), so admission admits the
+    // resend and publication into the shared hosted index returns the file-conflict error.
+    let other = fixture_wheel_with_body("1.0", b"VALUE = 2\n");
+    let (ct, body) = multipart_body(&upload_fields(), Some(("peryxpkg-1.0-py3-none-any.whl", &other)));
+
+    let (status, body) = post_upload_response(&h.state, "/root/pypi/", Some(&upload_auth()), &ct, body).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(

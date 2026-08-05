@@ -73,6 +73,12 @@ pub trait OwnershipAuthority: Send + Sync {
     /// so a former holder's stale-epoch write is fenced out once the authority advances. A local read,
     /// current on the leader and possibly behind on a follower.
     async fn committed_epoch(&self, authority: &str) -> u64;
+
+    /// Whether work carrying `presented` under `authority` may still proceed against the committed epoch.
+    ///
+    /// Admits only the current committed epoch, so a stale epoch below it — a former holder's, after the
+    /// authority advanced — is fenced. An unassigned authority (epoch `0`) admits nothing.
+    async fn admit_epoch(&self, authority: &str, presented: u64) -> bool;
 }
 
 /// Claim `authority`'s home on its first publish, best effort, when this process runs a group.
@@ -91,11 +97,43 @@ pub(super) async fn claim_first_publish_home(group: Option<&std::sync::Arc<dyn O
     }
 }
 
+/// The committed authority epoch for `authority`, or `0` when this process runs no group.
+///
+/// The fence a writer stamps onto its work. A process with no group holds no epoch, reported as the
+/// unassigned `0` sentinel the placement fence reads as closed.
+pub(super) async fn committed_authority_epoch(
+    group: Option<&std::sync::Arc<dyn OwnershipAuthority>>,
+    authority: &str,
+) -> u64 {
+    match group {
+        Some(group) => group.committed_epoch(authority).await,
+        None => 0,
+    }
+}
+
+/// Whether work carrying `presented` under `authority` may still be written against the committed epoch.
+///
+/// A process with no group has no authority to supersede its work, so it admits everything; a running
+/// group fences any epoch below its committed one.
+pub(super) async fn admit_authority_epoch(
+    group: Option<&std::sync::Arc<dyn OwnershipAuthority>>,
+    authority: &str,
+    presented: u64,
+) -> bool {
+    match group {
+        Some(group) => group.admit_epoch(authority, presented).await,
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, claim_first_publish_home};
+    use super::{
+        ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, admit_authority_epoch, claim_first_publish_home,
+        committed_authority_epoch,
+    };
 
     struct Fake {
         homed: bool,
@@ -127,6 +165,10 @@ mod tests {
 
         async fn committed_epoch(&self, _authority: &str) -> u64 {
             self.epoch
+        }
+
+        async fn admit_epoch(&self, _authority: &str, presented: u64) -> bool {
+            self.epoch != 0 && presented == self.epoch
         }
     }
 
@@ -166,6 +208,30 @@ mod tests {
     #[tokio::test]
     async fn test_first_publish_is_a_no_op_without_a_group() {
         claim_first_publish_home(None, "proj").await;
+    }
+
+    #[tokio::test]
+    async fn test_committed_epoch_reads_the_running_group() {
+        let group = group(true, Ok(HomeClaim::AlreadyHomed));
+        assert_eq!(committed_authority_epoch(Some(&group), "proj").await, 7);
+    }
+
+    #[tokio::test]
+    async fn test_committed_epoch_is_the_unassigned_sentinel_without_a_group() {
+        assert_eq!(committed_authority_epoch(None, "proj").await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_admit_epoch_admits_the_committed_epoch_and_fences_a_stale_one() {
+        // The Fake commits epoch 7, so the current epoch is admitted and the superseded one below it is not.
+        let group = group(true, Ok(HomeClaim::AlreadyHomed));
+        assert!(admit_authority_epoch(Some(&group), "proj", 7).await);
+        assert!(!admit_authority_epoch(Some(&group), "proj", 6).await);
+    }
+
+    #[tokio::test]
+    async fn test_admit_epoch_admits_everything_without_a_group() {
+        assert!(admit_authority_epoch(None, "proj", 6).await);
     }
 
     #[tokio::test]

@@ -869,7 +869,11 @@ async fn test_metrics_expose_a_kinds_full_lifecycle_series() {
 }
 
 fn context(state: Arc<ServingState>, cancel: CancellationToken) -> JobContext {
-    JobContext { state, cancel, fence: 0 }
+    JobContext {
+        state,
+        cancel,
+        fence: 0,
+    }
 }
 
 #[tokio::test]
@@ -1461,4 +1465,131 @@ async fn test_search_rebuild_surfaces_an_indexer_failure() {
         .unwrap_err();
 
     assert_eq!(failure.code(), "search_rebuild");
+}
+
+/// An ownership group double whose committed epoch a test advances, to drive the fence deterministically.
+struct MutableEpoch(Arc<std::sync::atomic::AtomicU64>);
+
+#[async_trait]
+impl crate::state::OwnershipAuthority for MutableEpoch {
+    async fn has_home(&self, _authority: &str) -> bool {
+        true
+    }
+
+    async fn claim_home(&self, _authority: &str) -> Result<crate::state::HomeClaim, crate::state::OwnershipError> {
+        Ok(crate::state::HomeClaim::AlreadyHomed)
+    }
+
+    fn cluster_status(&self) -> crate::state::ClusterStatus {
+        crate::state::ClusterStatus {
+            leader: None,
+            term: 0,
+            voters: Vec::new(),
+        }
+    }
+
+    async fn committed_epoch(&self, _authority: &str) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    async fn admit_epoch(&self, _authority: &str, presented: u64) -> bool {
+        let current = self.0.load(Ordering::SeqCst);
+        current != 0 && presented == current
+    }
+}
+
+/// A repository job that records the epoch it leased and then advances its authority's epoch while it
+/// runs, superseding the epoch it leased.
+struct AdvancingJob {
+    epoch: Arc<std::sync::atomic::AtomicU64>,
+    leased: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[async_trait]
+impl NodeJob for AdvancingJob {
+    fn kind(&self) -> &'static str {
+        "advancing"
+    }
+
+    fn scope(&self) -> &'static str {
+        "proj"
+    }
+
+    fn repository(&self) -> Option<&str> {
+        Some("proj")
+    }
+
+    fn persist_as(&self) -> Option<JobKind> {
+        Some(JobKind::CatalogSync)
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        self.leased.store(ctx.authority_fence(), Ordering::SeqCst);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        Ok(JobReport::default())
+    }
+}
+
+#[tokio::test]
+async fn test_a_run_whose_authority_advances_mid_run_is_fenced() {
+    let (_dir, state) = serving();
+    let epoch = Arc::new(std::sync::atomic::AtomicU64::new(5));
+    let leased = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    state.set_ownership_authority(Arc::new(MutableEpoch(epoch.clone())));
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+
+    // The job leases epoch 5, then advances the authority to 6 while it runs, so its success is fenced.
+    scheduler.submit(Arc::new(AdvancingJob {
+        epoch,
+        leased: leased.clone(),
+    }));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"advancing\",outcome=\"failed\"} 1",
+    )
+    .await;
+
+    assert_eq!(
+        leased.load(Ordering::SeqCst),
+        5,
+        "the run leased the committed epoch as its fence"
+    );
+    let runs = job_runs(&state.meta);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].error.as_deref(),
+        Some("authority_fenced: a newer authority epoch superseded this run"),
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_admit_authority_epoch_admits_all_work_without_a_group() {
+    let (_dir, state) = serving();
+
+    // A process running no consensus group has no authority to supersede its work, so it admits any
+    // epoch, including the closed sentinel.
+    assert!(state.admit_authority_epoch("proj", 7).await);
+    assert!(state.admit_authority_epoch("proj", 0).await);
+}
+
+#[tokio::test]
+async fn test_a_run_under_the_current_epoch_is_not_fenced() {
+    let (_dir, state) = serving();
+    state.set_ownership_authority(Arc::new(MutableEpoch(Arc::new(std::sync::atomic::AtomicU64::new(5)))));
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+
+    // A run that leaves its authority's epoch unchanged keeps the epoch it leased, so it is admitted.
+    scheduler.submit(TestJob::persisting_repository(
+        "steady",
+        "proj",
+        "proj",
+        Action::Return(Ok(JobReport::default())),
+    ));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"steady\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+    scheduler.shutdown().await;
 }

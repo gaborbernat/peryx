@@ -24,8 +24,8 @@ use openraft::{
 use tokio::sync::Mutex;
 
 use crate::ownership::{DatacenterId, OwnershipState};
-use crate::{AuthorityEpoch, AuthorityKey};
 use crate::raft::{OwnershipResponse, PeryxNode, TypeConfig};
+use crate::{Admission, AuthorityEpoch, AuthorityFence, AuthorityKey};
 
 /// The `u64` voter handle `OpenRaft` keys nodes by. See [`crate::raft`] for why it is not the datacenter
 /// identity.
@@ -78,6 +78,18 @@ impl OwnershipStateMachine {
     /// epoch is fenced out once the authority advances.
     pub async fn epoch_of(&self, authority: &AuthorityKey) -> AuthorityEpoch {
         self.inner.lock().await.state.epoch(authority)
+    }
+
+    /// Whether work carrying `presented` under `authority` may proceed against this node's committed
+    /// epoch, or is fenced as stale.
+    ///
+    /// Feeds an [`AuthorityFence`] from the applied ownership state and admits `presented`, so work
+    /// produced under a superseded epoch — a former holder's, after the authority advanced — is
+    /// [`Fenced`](Admission::Fenced) without effect.
+    pub async fn admit(&self, authority: &AuthorityKey, presented: AuthorityEpoch) -> Admission {
+        let mut fence = AuthorityFence::new();
+        fence.commit(authority, self.inner.lock().await.state.epoch(authority));
+        fence.admit(authority, presented)
     }
 }
 

@@ -81,6 +81,10 @@ impl OwnershipAuthority for RecordingAuthority {
     async fn committed_epoch(&self, _authority: &str) -> u64 {
         0
     }
+
+    async fn admit_epoch(&self, _authority: &str, _presented: u64) -> bool {
+        true
+    }
 }
 
 /// Publish the sdist fixture (project `peryxpkg`) to the hosted index and return the response.

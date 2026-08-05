@@ -19,7 +19,7 @@ use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, Ownershi
 use peryx_replication::raft::log_store::RaftLogStoreAdapter;
 use peryx_replication::raft::network::PeerRaftNetworkFactory;
 use peryx_replication::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
-use peryx_replication::{AuthorityKey, DatacenterId, OwnershipCommand, OwnershipEffect};
+use peryx_replication::{Admission, AuthorityEpoch, AuthorityKey, DatacenterId, OwnershipCommand, OwnershipEffect};
 use peryx_storage::raft::RaftLogStore;
 use url::Url;
 
@@ -175,6 +175,15 @@ impl OwnershipAuthority for OwnershipGroup {
             .epoch_of(&AuthorityKey(authority.to_owned()))
             .await
             .0
+    }
+
+    async fn admit_epoch(&self, authority: &str, presented: u64) -> bool {
+        let admission = self
+            .node
+            .state_machine()
+            .admit(&AuthorityKey(authority.to_owned()), AuthorityEpoch(presented))
+            .await;
+        matches!(admission, Admission::Admit)
     }
 
     async fn claim_home(&self, authority: &str) -> Result<HomeClaim, OwnershipError> {

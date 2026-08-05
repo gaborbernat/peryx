@@ -4,9 +4,9 @@ use openraft::storage::RaftStateMachine;
 use openraft::testing::log_id;
 use openraft::{Entry, EntryPayload, Membership, RaftSnapshotBuilder, Snapshot};
 
-use crate::AuthorityEpoch;
 use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect};
 use crate::raft::{OwnershipResponse, OwnershipStateMachine, TypeConfig};
+use crate::{Admission, AuthorityEpoch};
 
 fn key(name: &str) -> crate::AuthorityKey {
     crate::AuthorityKey(name.to_owned())
@@ -222,4 +222,27 @@ async fn test_epoch_of_reads_the_committed_epoch() {
 
     machine.apply(vec![normal(2, advance("proj"))]).await.unwrap();
     assert_eq!(machine.epoch_of(&key("proj")).await, AuthorityEpoch(2));
+}
+
+#[tokio::test]
+async fn test_admit_fences_a_superseded_epoch() {
+    let mut machine = OwnershipStateMachine::default();
+    // An unassigned authority admits nothing, so its zero epoch fences even a real presented epoch.
+    assert_eq!(
+        machine.admit(&key("proj"), AuthorityEpoch(1)).await,
+        Admission::Fenced {
+            committed: AuthorityEpoch(0),
+            presented: AuthorityEpoch(1),
+        }
+    );
+
+    machine.apply(vec![normal(1, assign("proj", "east"))]).await.unwrap();
+    assert_eq!(machine.admit(&key("proj"), AuthorityEpoch(1)).await, Admission::Admit);
+    assert_eq!(
+        machine.admit(&key("proj"), AuthorityEpoch(2)).await,
+        Admission::Fenced {
+            committed: AuthorityEpoch(1),
+            presented: AuthorityEpoch(2),
+        }
+    );
 }

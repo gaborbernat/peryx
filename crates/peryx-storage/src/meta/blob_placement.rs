@@ -94,6 +94,15 @@ impl BackendId {
     }
 }
 
+impl BackendLocation {
+    /// The location a content-addressed blob occupies: its digest, which the backend derives the storage
+    /// path from. A digest is always a valid component, so this needs no fallible parse.
+    #[must_use]
+    pub fn for_digest(digest: &ArtifactDigest) -> Self {
+        Self(digest.sha256().to_owned())
+    }
+}
+
 /// The identity of one blob placement: a digest on a specific backend, data center, and location.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobPlacementKey {

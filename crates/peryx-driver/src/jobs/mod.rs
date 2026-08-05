@@ -350,6 +350,97 @@ impl NodeJob for SearchRebuildJob {
     }
 }
 
+const DC_COPY: &str = "dc_copy";
+
+/// Default copies a cross-data-center pass runs at once, bounding peer fetches and target writes in flight.
+pub const DEFAULT_DC_COPY_CONCURRENCY: usize = 8;
+/// Startup rejects a larger fan-out so one pass cannot open an unbounded number of peer transfers.
+pub const MAX_DC_COPY_CONCURRENCY: usize = 64;
+
+/// The bounds one scheduled cross-data-center copy pass runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DcCopyParameters {
+    /// Copies to run at once across the backlog a single pass drains.
+    pub concurrency: NonZeroUsize,
+}
+
+impl DcCopyParameters {
+    /// The default bound: a handful of concurrent copies.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            concurrency: NonZeroUsize::MIN.saturating_add(DEFAULT_DC_COPY_CONCURRENCY - 1),
+        }
+    }
+}
+
+impl Default for DcCopyParameters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The cross-data-center blob copier a node registers to back its scheduled [`DcCopy`](ScheduledJob::DcCopy)
+/// pass.
+///
+/// The copy pulls verified bytes from a peer over the replication blob transport, a network dependency
+/// this neutral crate does not carry, so the binary implements the copier and registers it on the
+/// [`ServingState`], exactly as it registers the [`OwnershipAuthority`](crate::state::OwnershipAuthority).
+/// A process that registers none — single node, no roster, or an object-store backend — runs the job as a
+/// no-op.
+#[async_trait]
+pub trait CrossDcCopier: Send + Sync {
+    /// Run one bounded copy pass over `state`: fence the work to the ownership group's cluster term, drain
+    /// the copy backlog the local data center owes, and record each verified placement, at most
+    /// `params.concurrency` copies in flight. `cancelled` reports cooperative shutdown between units of
+    /// work.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when the pass cannot complete.
+    async fn copy_pass(
+        &self,
+        state: &ServingState,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+        params: DcCopyParameters,
+    ) -> Result<JobReport, JobFailure>;
+}
+
+/// The node-wide job that runs one cross-data-center blob copy pass through the registered
+/// [`CrossDcCopier`].
+///
+/// A process that registered none does nothing, so an unconfigured node pays only the scheduler tick.
+pub struct DcCopyJob {
+    parameters: DcCopyParameters,
+}
+
+#[async_trait]
+impl NodeJob for DcCopyJob {
+    fn kind(&self) -> &'static str {
+        DC_COPY
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        match ctx.state().cross_dc_copier() {
+            Some(copier) => {
+                copier
+                    .copy_pass(ctx.state(), &|| ctx.is_cancelled(), self.parameters)
+                    .await
+            }
+            None => Ok(JobReport::default()),
+        }
+    }
+}
+
+/// Submit one node-wide cross-data-center blob copy pass. The scheduler drops it when a prior pass is
+/// still draining the backlog, so a slow transfer never stacks passes.
+pub fn submit_dc_copy(scheduler: &JobScheduler, parameters: DcCopyParameters) {
+    scheduler.submit(Arc::new(DcCopyJob { parameters }));
+}
+
 /// Submit one maintenance job per installed ecosystem driver. The scheduler runs them concurrently
 /// across ecosystems under its bounds and drops any whose predecessor is still sweeping.
 pub fn submit_maintenance(app: &AppState, scheduler: &JobScheduler) {

@@ -570,7 +570,7 @@ fn test_backup_snapshots_disabled_jobs_but_omits_the_default() {
 
 #[test]
 fn test_backup_roundtrips_custom_job_schedules() {
-    use peryx_driver::jobs::{CatalogSyncParameters, Schedule, ScheduledJob};
+    use peryx_driver::jobs::{CatalogSyncParameters, DcCopyParameters, Schedule, ScheduledJob};
 
     let root = tempfile::tempdir().unwrap();
     let data_dir = root.path().join("data");
@@ -592,6 +592,12 @@ fn test_backup_roundtrips_custom_job_schedules() {
                 timeout: std::time::Duration::from_secs(30),
             }),
             interval: std::time::Duration::from_hours(1),
+        },
+        Schedule {
+            job: ScheduledJob::DcCopy(DcCopyParameters {
+                concurrency: std::num::NonZeroUsize::new(4).unwrap(),
+            }),
+            interval: std::time::Duration::from_mins(2),
         },
     ];
     let config = Config {

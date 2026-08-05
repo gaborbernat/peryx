@@ -345,6 +345,7 @@ impl AppState {
                 session_sealer: None,
                 ownership: std::sync::OnceLock::new(),
                 control: std::sync::OnceLock::new(),
+                cross_dc_copier: std::sync::OnceLock::new(),
             }),
             drivers: std::array::from_fn(|_| None),
             absolute_prefixes: Vec::new(),

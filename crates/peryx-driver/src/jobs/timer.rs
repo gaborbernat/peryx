@@ -14,8 +14,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CACHE_MAINTENANCE, CatalogSyncParameters, JobHistoryCleanup, JobScheduler, MAINTENANCE_INTERVAL, scheduled_job,
-    submit_maintenance,
+    CACHE_MAINTENANCE, CatalogSyncParameters, DcCopyParameters, JobHistoryCleanup, JobScheduler, MAINTENANCE_INTERVAL,
+    scheduled_job, submit_dc_copy, submit_maintenance,
 };
 use crate::state::AppState;
 
@@ -29,6 +29,8 @@ pub enum ScheduledJob {
     CacheMaintenance,
     /// Refresh one remote project catalog and a bounded set of its project metadata.
     CatalogSync(CatalogSyncParameters),
+    /// Copy the filesystem blobs the local data center owes from its peers, in the background.
+    DcCopy(DcCopyParameters),
 }
 
 impl ScheduledJob {
@@ -38,12 +40,14 @@ impl ScheduledJob {
         match self {
             Self::CacheMaintenance => CACHE_MAINTENANCE,
             Self::CatalogSync(_) => "catalog_sync",
+            Self::DcCopy(_) => "dc_copy",
         }
     }
 
     fn submit(&self, app: &AppState, scheduler: &JobScheduler) {
         match self {
             Self::CacheMaintenance => submit_maintenance(app, scheduler),
+            Self::DcCopy(parameters) => submit_dc_copy(scheduler, *parameters),
             Self::CatalogSync(_) => match scheduled_job(app, self) {
                 Ok(job) => {
                     scheduler.submit(job);

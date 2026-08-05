@@ -42,6 +42,12 @@ fn test_key_components_accept_a_valid_value_and_expose_it() {
     );
 }
 
+#[test]
+fn test_backend_location_for_digest_carries_the_sha256_hex() {
+    let digest = digest(0x2a);
+    assert_eq!(BackendLocation::for_digest(&digest).as_str(), digest.sha256());
+}
+
 #[rstest]
 #[case(String::new(), PlacementKeyError::Empty { field: "backend" })]
 #[case("a".repeat(513), PlacementKeyError::TooLong { field: "backend" })]

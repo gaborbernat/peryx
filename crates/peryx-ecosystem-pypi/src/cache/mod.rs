@@ -182,6 +182,13 @@ fn release_flight(state: &ServingState, key: &str, guard: peryx_index::serving::
     peryx_index::serving::release_flight(&state.cache.inflight, key, guard);
 }
 
+/// How many callers are registered on `key`'s flight gate, so a test can wait for a racing request to
+/// reach the gate deterministically instead of sleeping.
+#[cfg(test)]
+pub(crate) fn flight_users(state: &ServingState, key: &str) -> usize {
+    state.cache.inflight.active(key)
+}
+
 /// The stored cached record for `key`, or `None` when there is none or when its bytes no longer decode.
 ///
 /// Corrupt bytes (a torn write, a format from a version that never shipped) leave a cache entry the

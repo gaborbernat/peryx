@@ -130,6 +130,11 @@ impl RateLimitConfig {
     }
 }
 
+/// A monotonic time source, measured as elapsed time since the limiter was built. Production reads a
+/// process `Instant`; a test injects a hand-advanced source so window resets are exercised without a
+/// real sleep.
+type Clock = Arc<dyn Fn() -> Duration + Send + Sync>;
+
 pub struct RateLimiter {
     config: RateLimitConfig,
     // A fixed seed makes the bucket probe sequence independent of the per-process `RandomState` seed, so
@@ -139,11 +144,19 @@ pub struct RateLimiter {
     principal_hasher: RandomState,
     allowed: RouteCounters,
     denied: RouteCounters,
+    clock: Clock,
 }
 
 impl RateLimiter {
     #[must_use]
     pub fn new(config: RateLimitConfig) -> Self {
+        let base = Instant::now();
+        Self::with_clock(config, Arc::new(move || base.elapsed()))
+    }
+
+    /// Build a limiter over an injected [`Clock`], so a test drives window resets by advancing time
+    /// instead of sleeping the wall clock.
+    fn with_clock(config: RateLimitConfig, clock: Clock) -> Self {
         let capacity = config.max_clients.saturating_mul(RouteClass::COUNT).max(1);
         Self {
             config,
@@ -153,6 +166,7 @@ impl RateLimiter {
             principal_hasher: RandomState::new(),
             allowed: RouteCounters::default(),
             denied: RouteCounters::default(),
+            clock,
         }
     }
 
@@ -189,7 +203,7 @@ impl RateLimiter {
             return Ok(());
         }
 
-        let now = Instant::now();
+        let now = (self.clock)();
         let window = Duration::from_secs(limit.window_secs);
         let bucket = self.buckets.get_with(BucketKey { class, actor }, || {
             Arc::new(Mutex::new(Window {
@@ -211,7 +225,7 @@ impl RateLimiter {
         Err(Limited {
             class,
             actor,
-            retry_after: bucket.reset_at.saturating_duration_since(now).as_secs().max(1),
+            retry_after: bucket.reset_at.saturating_sub(now).as_secs().max(1),
         })
     }
 
@@ -273,7 +287,7 @@ struct BucketKey {
 }
 
 struct Window {
-    reset_at: Instant,
+    reset_at: Duration,
     used: u64,
 }
 
@@ -597,6 +611,9 @@ fn limited_response(retry_after: u64) -> Response {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use axum::http::Method;
 
@@ -614,6 +631,36 @@ mod tests {
         assert!(!limiter.check_client(RouteClass::Listing, client));
         // A separate client keeps its own budget rather than inheriting the exhausted one.
         assert!(limiter.check_client(RouteClass::Listing, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))));
+    }
+
+    #[test]
+    fn test_the_window_resets_and_readmits_once_time_advances_past_it() {
+        let millis = Arc::new(AtomicU64::new(0));
+        let handle = Arc::clone(&millis);
+        let limiter = RateLimiter::with_clock(
+            RateLimitConfig {
+                listing: RouteLimit::new(1, 1),
+                ..RateLimitConfig::enabled_defaults()
+            },
+            Arc::new(move || Duration::from_millis(handle.load(Ordering::SeqCst))),
+        );
+        let client = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        assert!(
+            limiter.check_client(RouteClass::Listing, client),
+            "the first request in the window is admitted"
+        );
+        assert!(
+            !limiter.check_client(RouteClass::Listing, client),
+            "the second exhausts the one-per-window budget"
+        );
+
+        // Advance past the one-second window with the injected clock, no wall-clock sleep: the bucket
+        // resets and admits a fresh request.
+        millis.store(1_001, Ordering::SeqCst);
+        assert!(
+            limiter.check_client(RouteClass::Listing, client),
+            "a window whose reset time has passed readmits the client"
+        );
     }
 
     #[test]

@@ -155,6 +155,31 @@ impl MetaStore {
             .transpose()?)
     }
 
+    /// List up to `limit` intents still [`Pending`](IntentPhase::Pending), in key order.
+    ///
+    /// The drain reads its work through this: key order is the stable resume order, so a re-run after an
+    /// interruption picks up at the first intent still pending, the finalized ones having advanced out of
+    /// the pending set.
+    ///
+    /// # Errors
+    /// Returns a store error when the table cannot be read or a record decoded.
+    pub fn list_pending_intents(&self, limit: usize) -> Result<Vec<(String, StagedIntent)>, MetaError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(INGRESS_INTENT)?;
+        let mut pending = Vec::new();
+        for entry in table.iter()? {
+            let (key, value) = entry?;
+            let record: StagedIntent = serde_json::from_slice(value.value())?;
+            if record.phase == IntentPhase::Pending {
+                pending.push((key.value().to_owned(), record));
+                if pending.len() == limit {
+                    break;
+                }
+            }
+        }
+        Ok(pending)
+    }
+
     /// How many intents the ledger currently retains, the durable count the retention limit bounds.
     ///
     /// # Errors

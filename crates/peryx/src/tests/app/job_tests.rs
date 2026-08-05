@@ -42,6 +42,13 @@ fn reindex_command(chunk_size: usize) -> JobCommand {
     }
 }
 
+fn drain_command(authority: &str) -> JobCommand {
+    JobCommand::Drain {
+        runtime: RuntimeArgs::default(),
+        authority: authority.to_owned(),
+    }
+}
+
 fn catalog_server() -> (String, std::thread::JoinHandle<()>) {
     use std::io::{Read as _, Write as _};
 
@@ -276,6 +283,41 @@ fn test_job_reindex_rebuilds_the_search_index_and_records_a_node_wide_run() {
     assert_eq!(runs[0].kind, JobKind::SearchRebuild);
     assert_eq!(runs[0].scope, "");
     assert_eq!(runs[0].state, JobState::Succeeded);
+}
+
+#[test]
+fn test_job_drain_finalizes_retained_intents_and_records_an_authority_drain_run() {
+    let (_dir, meta, config) = store_and_config();
+    meta.stage_intent("corp\u{0}flask\u{0}k1", "digest-a", 3, b"body", 100, 1)
+        .unwrap();
+    meta.stage_intent("corp\u{0}flask\u{0}k2", "digest-b", 4, b"body2", 100, 1)
+        .unwrap();
+    drop(meta);
+    let mut out = Vec::new();
+
+    app::job(&config, &drain_command("corp/flask"), &mut out).unwrap();
+
+    assert_eq!(String::from_utf8(out).unwrap(), "processed\t2\nchanged\t2\n");
+    let meta = MetaStore::open(config.data_dir.join("peryx.redb")).unwrap();
+    assert_eq!(
+        meta.staged_intent("corp\u{0}flask\u{0}k1").unwrap().unwrap().phase,
+        peryx_storage::meta::IntentPhase::Admitted
+    );
+    assert!(meta.list_pending_intents(10).unwrap().is_empty());
+    let runs = meta.list_job_runs().unwrap();
+    assert_eq!(runs[0].kind, JobKind::AuthorityDrain);
+    assert_eq!(runs[0].repository.as_deref(), Some("corp/flask"));
+    assert_eq!(runs[0].state, JobState::Succeeded);
+}
+
+#[test]
+fn test_job_drain_rejects_an_empty_authority_before_opening_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_at(&dir);
+
+    let error = app::job(&config, &drain_command("  "), &mut Vec::new()).unwrap_err();
+
+    assert_eq!(error.to_string(), "authority must not be empty");
 }
 
 #[rstest]

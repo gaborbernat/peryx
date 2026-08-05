@@ -14,6 +14,17 @@ pub enum HomeClaim {
     AlreadyHomed,
 }
 
+/// The committed result of moving an authority's home to a new datacenter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferOutcome {
+    /// The datacenter that held the home before the transfer.
+    pub from: String,
+    /// The datacenter the home moved to.
+    pub to: String,
+    /// The epoch the transfer minted, which fences the old home's stale-epoch writes.
+    pub epoch: u64,
+}
+
 /// A snapshot of the ownership consensus group this node observes, for the availability status resource.
 ///
 /// It names voters by their consensus id and datacenter, never their peer address, so the status surface
@@ -79,6 +90,15 @@ pub trait OwnershipAuthority: Send + Sync {
     /// Admits only the current committed epoch, so a stale epoch below it — a former holder's, after the
     /// authority advanced — is fenced. An unassigned authority (epoch `0`) admits nothing.
     async fn admit_epoch(&self, authority: &str, presented: u64) -> bool;
+
+    /// Move `authority`'s home to `new_home` on the control quorum, minting the next epoch that fences the
+    /// old home's stale-epoch writes. Reports the committed [`TransferOutcome`], or `None` when the
+    /// authority was unassigned or already homed there, so nothing moved.
+    ///
+    /// # Errors
+    /// [`OwnershipError::NotLeader`] when this node cannot commit — a control minority cannot transfer
+    /// authority — or [`OwnershipError::Unavailable`] when the commit otherwise fails.
+    async fn transfer_home(&self, authority: &str, new_home: &str) -> Result<Option<TransferOutcome>, OwnershipError>;
 }
 
 /// Claim `authority`'s home on its first publish, best effort, when this process runs a group.
@@ -126,19 +146,46 @@ pub(super) async fn admit_authority_epoch(
     }
 }
 
+/// Move `authority`'s home to `new_home` on the control quorum, or report the group is absent.
+///
+/// A process with no group cannot commit a transfer, so it returns `Ok(None)` (nothing moved); a running
+/// group commits the fenced move and returns the [`TransferOutcome`], or the [`OwnershipError`] the
+/// commit failed with — a control minority surfaces as [`OwnershipError::NotLeader`].
+///
+/// # Errors
+/// The [`OwnershipError`] a running group's commit failed with.
+pub(super) async fn transfer_authority_home(
+    group: Option<&std::sync::Arc<dyn OwnershipAuthority>>,
+    authority: &str,
+    new_home: &str,
+) -> Result<Option<TransferOutcome>, OwnershipError> {
+    match group {
+        Some(group) => group.transfer_home(authority, new_home).await,
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::{
-        ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, admit_authority_epoch, claim_first_publish_home,
-        committed_authority_epoch,
+        ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, TransferOutcome, admit_authority_epoch,
+        claim_first_publish_home, committed_authority_epoch, transfer_authority_home,
     };
 
     struct Fake {
         homed: bool,
         claim: Result<HomeClaim, OwnershipError>,
         epoch: u64,
+        transfer: Result<Option<TransferOutcome>, OwnershipError>,
+    }
+
+    fn clone_ownership_error(error: &OwnershipError) -> OwnershipError {
+        match error {
+            OwnershipError::NotLeader { leader } => OwnershipError::NotLeader { leader: leader.clone() },
+            OwnershipError::Unavailable(reason) => OwnershipError::Unavailable(reason.clone()),
+        }
     }
 
     #[async_trait::async_trait]
@@ -170,10 +217,35 @@ mod tests {
         async fn admit_epoch(&self, _authority: &str, presented: u64) -> bool {
             self.epoch != 0 && presented == self.epoch
         }
+
+        async fn transfer_home(
+            &self,
+            _authority: &str,
+            _new_home: &str,
+        ) -> Result<Option<TransferOutcome>, OwnershipError> {
+            match &self.transfer {
+                Ok(outcome) => Ok(outcome.clone()),
+                Err(error) => Err(clone_ownership_error(error)),
+            }
+        }
     }
 
     fn group(homed: bool, claim: Result<HomeClaim, OwnershipError>) -> Arc<dyn OwnershipAuthority> {
-        Arc::new(Fake { homed, claim, epoch: 7 })
+        Arc::new(Fake {
+            homed,
+            claim,
+            epoch: 7,
+            transfer: Ok(None),
+        })
+    }
+
+    fn transferring_group(transfer: Result<Option<TransferOutcome>, OwnershipError>) -> Arc<dyn OwnershipAuthority> {
+        Arc::new(Fake {
+            homed: true,
+            claim: Ok(HomeClaim::AlreadyHomed),
+            epoch: 7,
+            transfer,
+        })
     }
 
     #[tokio::test]
@@ -241,12 +313,55 @@ mod tests {
         assert_eq!(group.committed_epoch("proj").await, 7);
     }
 
+    #[tokio::test]
+    async fn test_transfer_commits_the_move_through_the_group() {
+        let outcome = TransferOutcome {
+            from: "east".to_owned(),
+            to: "west".to_owned(),
+            epoch: 2,
+        };
+        let group = transferring_group(Ok(Some(outcome.clone())));
+
+        let moved = transfer_authority_home(Some(&group), "proj", "west")
+            .await
+            .expect("commits");
+        assert_eq!(moved, Some(outcome));
+    }
+
+    #[tokio::test]
+    async fn test_transfer_by_a_control_minority_is_not_the_leader() {
+        // A minority cannot commit the transfer, so the group forwards to the leader it knows.
+        let group = transferring_group(Err(OwnershipError::NotLeader {
+            leader: Some("east.internal:4460".to_owned()),
+        }));
+
+        let error = transfer_authority_home(Some(&group), "proj", "west").await.unwrap_err();
+        assert!(matches!(error, OwnershipError::NotLeader { leader: Some(_) }));
+    }
+
+    #[tokio::test]
+    async fn test_transfer_that_cannot_commit_surfaces_unavailable() {
+        let group = transferring_group(Err(OwnershipError::Unavailable("log store gone".to_owned())));
+
+        let error = transfer_authority_home(Some(&group), "proj", "west").await.unwrap_err();
+        assert!(matches!(error, OwnershipError::Unavailable(reason) if reason == "log store gone"));
+    }
+
+    #[tokio::test]
+    async fn test_transfer_without_a_group_moves_nothing() {
+        let moved = transfer_authority_home(None, "proj", "west")
+            .await
+            .expect("no group moves nothing");
+        assert_eq!(moved, None);
+    }
+
     #[test]
     fn test_cluster_status_snapshots_the_group() {
         let status = Fake {
             homed: false,
             claim: Ok(HomeClaim::AlreadyHomed),
             epoch: 0,
+            transfer: Ok(None),
         }
         .cluster_status();
 

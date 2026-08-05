@@ -41,6 +41,7 @@ pub fn job(config: &Config, command: &JobCommand, out: &mut dyn Write) -> anyhow
             out,
         ),
         JobCommand::Reindex { chunk_size, .. } => run_search_rebuild(config, *chunk_size, out),
+        JobCommand::Drain { authority, .. } => run_authority_drain(config, authority, out),
     }
 }
 
@@ -111,6 +112,24 @@ fn run_search_rebuild(config: &Config, chunk_size: usize, out: &mut dyn Write) -
         let scheduler = JobScheduler::new(state.serving.clone(), JobLimits::node_local());
         let result = scheduler
             .run(Arc::new(SearchRebuildJob::new(chunk)))
+            .await
+            .map_err(anyhow::Error::msg);
+        scheduler.shutdown().await;
+        result
+    })?;
+    writeln!(out, "processed\t{}", report.processed)?;
+    writeln!(out, "changed\t{}", report.changed)?;
+    Ok(())
+}
+
+fn run_authority_drain(config: &Config, authority: &str, out: &mut dyn Write) -> anyhow::Result<()> {
+    ensure!(!authority.trim().is_empty(), "authority must not be empty");
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let report = runtime.block_on(async {
+        let state = crate::server::build_state(config)?;
+        let scheduler = JobScheduler::new(state.serving.clone(), JobLimits::node_local());
+        let result = scheduler
+            .run(Arc::new(crate::replication::AuthorityDrainJob::new(authority)))
             .await
             .map_err(anyhow::Error::msg);
         scheduler.shutdown().await;

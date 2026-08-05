@@ -20,6 +20,8 @@ const RESTART_ERROR: &str = "node restarted before the job finished";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
+    /// Finalizing a failed home's retained ingress intents at the new home after authority transfer.
+    AuthorityDrain,
     /// The background sweep that revalidates stale cached pages.
     CacheRefresh,
     /// A bounded remote project-catalog and file-metadata refresh.

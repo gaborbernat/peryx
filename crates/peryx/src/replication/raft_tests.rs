@@ -5,7 +5,7 @@ use std::time::Duration;
 use openraft::error::{ClientWriteError, ForwardToLeader, RaftError};
 use peryx_driver::state::{
     CommandOutcome, ControlCommand, ControlError, HomeClaim, MembershipControl as _, OwnershipAuthority as _,
-    OwnershipError,
+    OwnershipError, TransferOutcome,
 };
 use peryx_replication::DatacenterId;
 use peryx_replication::raft::log_store::RaftLogStoreAdapter;
@@ -514,6 +514,73 @@ async fn test_admit_epoch_fences_a_superseded_epoch() {
         !group.admit_epoch("other", 1).await,
         "an unassigned authority fences all work"
     );
+}
+
+#[tokio::test]
+async fn test_transfer_home_moves_a_homed_authority_and_advances_the_epoch() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+    group.claim_home("proj").await.unwrap();
+
+    let moved = group.transfer_home("proj", "west").await.unwrap();
+    assert_eq!(
+        moved,
+        Some(TransferOutcome {
+            from: "east".to_owned(),
+            to: "west".to_owned(),
+            epoch: 2,
+        })
+    );
+    // The transfer mints the next epoch, which fences the old home's stale-epoch writes.
+    assert_eq!(group.committed_epoch("proj").await, 2);
+    assert!(group.admit_epoch("proj", 2).await, "the new epoch is admitted");
+    assert!(!group.admit_epoch("proj", 1).await, "the old home's epoch is fenced");
+}
+
+#[tokio::test]
+async fn test_transfer_home_of_an_unassigned_authority_moves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    // An authority with no home has nothing to move; the command commits but reports no transfer.
+    assert_eq!(group.transfer_home("ghost", "west").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_transfer_home_to_the_current_home_moves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+    group.claim_home("proj").await.unwrap();
+
+    // Moving to the home it already holds is a no-op, not a spurious epoch bump.
+    assert_eq!(group.transfer_home("proj", "east").await.unwrap(), None);
+    assert_eq!(group.committed_epoch("proj").await, 1);
+}
+
+#[tokio::test]
+async fn test_transfer_by_a_control_minority_reports_not_leader() {
+    let dir = tempfile::tempdir().unwrap();
+    // An unbootstrapped node holds no leadership, so it cannot commit a transfer: a control minority
+    // never moves authority.
+    let group = OwnershipGroup::new(started_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group.transfer_home("proj", "west").await,
+        Err(OwnershipError::NotLeader { leader: None })
+    ));
+}
+
+#[tokio::test]
+async fn test_transfer_home_on_a_stopped_group_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = leader_node(&dir).await;
+    node.raft().shutdown().await.unwrap();
+    let group = OwnershipGroup::new(node, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group.transfer_home("proj", "west").await,
+        Err(OwnershipError::Unavailable(_))
+    ));
 }
 
 #[tokio::test]

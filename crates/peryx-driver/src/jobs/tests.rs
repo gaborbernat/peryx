@@ -1499,6 +1499,14 @@ impl crate::state::OwnershipAuthority for MutableEpoch {
         let current = self.0.load(Ordering::SeqCst);
         current != 0 && presented == current
     }
+
+    async fn transfer_home(
+        &self,
+        _authority: &str,
+        _new_home: &str,
+    ) -> Result<Option<crate::state::TransferOutcome>, crate::state::OwnershipError> {
+        Ok(None)
+    }
 }
 
 /// A repository job that records the epoch it leased and then advances its authority's epoch while it
@@ -1574,6 +1582,18 @@ async fn test_admit_authority_epoch_admits_all_work_without_a_group() {
     // epoch, including the closed sentinel.
     assert!(state.admit_authority_epoch("proj", 7).await);
     assert!(state.admit_authority_epoch("proj", 0).await);
+}
+
+#[tokio::test]
+async fn test_transfer_authority_home_delegates_to_the_group() {
+    let (_dir, state) = serving();
+
+    // A process running no consensus group cannot commit a transfer, so the delegate reports nothing moved.
+    assert_eq!(state.transfer_authority_home("proj", "west").await.unwrap(), None);
+
+    // With a group registered, the delegate forwards to it; this one commits nothing itself.
+    state.set_ownership_authority(Arc::new(MutableEpoch(Arc::new(std::sync::atomic::AtomicU64::new(5)))));
+    assert_eq!(state.transfer_authority_home("proj", "west").await.unwrap(), None);
 }
 
 #[tokio::test]

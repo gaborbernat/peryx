@@ -95,3 +95,14 @@ fn test_parse_job_reindex_defaults_and_explicit_chunk_size() {
     assert_eq!(explicit.runtime_args().data_dir, Some(PathBuf::from("/d")));
     assert!(matches!(explicit, JobCommand::Reindex { chunk_size: 50, .. }));
 }
+
+#[test]
+fn test_parse_job_drain_names_its_authority() {
+    let Command::Job(drain) =
+        parse(&["peryx", "job", "drain", "--authority", "corp/flask", "--data-dir", "/d"]).command
+    else {
+        panic!("expected job command");
+    };
+    assert_eq!(drain.runtime_args().data_dir, Some(PathBuf::from("/d")));
+    assert!(matches!(drain, JobCommand::Drain { authority, .. } if authority == "corp/flask"));
+}

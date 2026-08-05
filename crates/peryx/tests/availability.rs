@@ -188,15 +188,18 @@ fn test_validates_a_generated_dc_topology_config() {
 }
 
 #[test]
-fn test_ownership_controls_are_unavailable_until_the_write_api_lands() {
+fn test_a_none_node_exposes_leader_reads_but_no_ownership_write_api() {
     let cluster = Topology::single().start().expect("cluster starts");
-    assert!(matches!(cluster.leader(), Err(HarnessError::Unsupported(_))));
+    // A single `none` node runs no consensus group and mounts no availability status, so the leader read
+    // is available but names no leader, and a transfer wait finds none before its deadline.
+    assert!(matches!(cluster.leader(), Ok(None)));
+    assert!(matches!(
+        cluster.await_authority_transfer("node-a", Duration::from_millis(200)),
+        Err(HarnessError::NoTransfer { .. })
+    ));
+    // The ownership write endpoint is still blocked on #540, the one control that stays unsupported.
     assert!(matches!(
         cluster.submit_ownership_write("x"),
-        Err(HarnessError::Unsupported(_))
-    ));
-    assert!(matches!(
-        cluster.await_authority_transfer("node-a", Duration::from_secs(1)),
         Err(HarnessError::Unsupported(_))
     ));
 }

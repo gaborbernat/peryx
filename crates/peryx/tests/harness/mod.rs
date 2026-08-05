@@ -63,6 +63,12 @@ pub enum HarnessError {
     Config(String),
     #[error("this control is not available yet: {0}")]
     Unsupported(&'static str),
+    #[error("authority did not leave {from:?} within {within:?}; it still reports {observed:?}")]
+    NoTransfer {
+        from: String,
+        within: Duration,
+        observed: Option<String>,
+    },
 }
 
 /// The availability mode a node runs in.
@@ -306,7 +312,62 @@ impl Cluster {
     }
 }
 
-impl OwnershipControl for Cluster {}
+impl Cluster {
+    /// The control-plane leader datacenter a quorum of nodes agrees on, or `None` until they concur.
+    ///
+    /// Polls every node's status surface and tallies the `consensus.leader` each reports, since a single
+    /// node's view lags the group by a heartbeat and flaps mid-election. Agreement across a majority is
+    /// the settled leader.
+    fn observed_leader(&self) -> Option<String> {
+        let mut tally: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for node in &self.nodes {
+            let Some((200, body)) = node.control_get_as(ADMIN_USER, ADMIN_PASSWORD, "/availability/v1/status") else {
+                continue;
+            };
+            let Ok(status) = serde_json::from_str::<serde_json::Value>(&body) else {
+                continue;
+            };
+            if let Some(leader) = status
+                .get("consensus")
+                .and_then(|consensus| consensus.get("leader"))
+                .and_then(serde_json::Value::as_str)
+            {
+                *tally.entry(leader.to_owned()).or_default() += 1;
+            }
+        }
+        let quorum = self.nodes.len() / 2 + 1;
+        tally
+            .into_iter()
+            .find(|(_, count)| *count >= quorum)
+            .map(|(leader, _)| leader)
+    }
+}
+
+impl OwnershipControl for Cluster {
+    fn leader(&self) -> Result<Option<String>, HarnessError> {
+        Ok(self.observed_leader())
+    }
+
+    fn await_authority_transfer(&self, from: &str, within: Duration) -> Result<String, HarnessError> {
+        let deadline = Instant::now() + within;
+        loop {
+            let observed = self.observed_leader();
+            if let Some(leader) = &observed
+                && leader != from
+            {
+                return Ok(leader.clone());
+            }
+            if Instant::now() >= deadline {
+                return Err(HarnessError::NoTransfer {
+                    from: from.to_owned(),
+                    within,
+                    observed,
+                });
+            }
+            std::thread::sleep(READY_POLL);
+        }
+    }
+}
 
 /// One running `peryx serve` process and the surface a test drives it through.
 #[derive(Debug)]
@@ -600,9 +661,13 @@ pub struct NodeArtifact {
     pub log_tail: String,
 }
 
-/// The ownership-plane controls the failover test tier will use once the write and authority endpoints
-/// exist. Every method fails with [`HarnessError::Unsupported`] today: the embedded Raft node runs but
-/// exposes nothing to drive or observe over HTTP, so the harness will not fake a result.
+/// The ownership-plane controls the failover test tier drives a cluster through.
+///
+/// The control plane exposes its leader over the availability status resource, so [`leader`](Self::leader)
+/// and [`await_authority_transfer`](Self::await_authority_transfer) observe a real control-plane failover:
+/// kill the datacenter holding authority and watch it move. Submitting an ownership command still needs a
+/// write endpoint that does not exist yet, so [`submit_ownership_write`](Self::submit_ownership_write)
+/// stays blocked on #540 rather than faking a result.
 pub trait OwnershipControl {
     /// Submit an ownership command to the current leader.
     ///
@@ -612,25 +677,17 @@ pub trait OwnershipControl {
         Err(HarnessError::Unsupported("ownership write endpoint is blocked on #540"))
     }
 
-    /// The identity of the node currently holding ownership authority.
+    /// The datacenter currently holding control-plane authority, or `None` until a quorum agrees on one.
     ///
     /// # Errors
-    /// [`HarnessError::Unsupported`] until authority is exposed over HTTP (#540).
-    fn leader(&self) -> Result<Option<String>, HarnessError> {
-        Err(HarnessError::Unsupported(
-            "leader/authority is not exposed over HTTP yet (#540)",
-        ))
-    }
+    /// [`HarnessError`] when the status surface cannot be read.
+    fn leader(&self) -> Result<Option<String>, HarnessError>;
 
-    /// Wait until authority leaves `from` within `within`, returning the new holder.
+    /// Wait until authority leaves `from` within `within`, returning the datacenter that took it.
     ///
     /// # Errors
-    /// [`HarnessError::Unsupported`] until authority transfer is observable (#540).
-    fn await_authority_transfer(&self, _from: &str, _within: Duration) -> Result<String, HarnessError> {
-        Err(HarnessError::Unsupported(
-            "authority-transfer observation is blocked on #540",
-        ))
-    }
+    /// [`HarnessError::NoTransfer`] when `from` still holds authority at the deadline.
+    fn await_authority_transfer(&self, from: &str, within: Duration) -> Result<String, HarnessError>;
 }
 
 /// Generate one node's full config: a minimal hosted index every node serves, plus the availability and

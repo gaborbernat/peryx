@@ -82,6 +82,37 @@ Every retained operation reaches exactly one outcome — finalized at the new ho
 already superseded it — so a home loss at the transfer boundary yields one home and one settled outcome per operation,
 never a double-write and never a dropped one.
 
+## Reconciling old-epoch operations
+
+A transfer mints a higher epoch, and the [authority fence](@/core/availability-contracts.md) stops the old home from
+applying more work under the epoch it lost. The operations it durably recorded before the transfer still sit in its log,
+though, and each needs one terminal disposition so the two homes never disagree about what the authority did.
+
+Reconciliation classifies every such operation deterministically from its committed record, its epoch, and the current
+metadata, into exactly one of four outcomes. An operation whose effect the committed state already carries is **already
+applied** and reconciles to a no-op. A durable operation a newer operation has since overwritten is **superseded** and
+dropped. An operation that never reached a durable commit **failed** with nothing to apply. A durable operation that
+still stands is **replayable**: the new home re-issues it under the current epoch. The precedence is fixed, so the
+outcome is single-valued and independent of evaluation order: a never-committed operation fails ahead of everything, and
+an already-applied one is a no-op even when a later operation also superseded it, because idempotency has already
+settled its effect.
+
+A replay re-issues the operation under the new epoch while keeping its original source and serial, so it stays
+idempotent, and continues the W3C trace the original authored rather than starting a disconnected one, so its audit
+identity carries across the transfer. A replay that reaches an authority already past that serial is a no-op under the
+same idempotency, so a retried or duplicated reconciliation never double-applies.
+
+A reconciled record is retained until both the required-replica frontier and the operator audit-retention frontier have
+passed its serial, then released. Holding it until every required replica has applied the outcome keeps a lagging
+replica from re-litigating the operation after a restore, and holding it through the audit window keeps the operation
+answerable to an operator query; releasing it once both frontiers cover it bounds the retained backlog.
+
+The backlog is durable, so the drain is restart-safe: a home that stops mid-reconciliation resumes from the operations
+still pending and settles each exactly once, and a re-scan of an already-settled operation never resets it. The drain
+and the prune run in bounded batches, so the reconciliation scan and the retained backlog stay within their limits; the
+pending backlog depth and the drain throughput are the signals to alert on, since a backlog that stops draining means
+the new home is not settling what the old home left behind.
+
 ## Operator recovery
 
 For a confirmed permanent home loss in an `ha` deployment:

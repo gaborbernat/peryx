@@ -115,7 +115,10 @@ pub use readiness::{
     visibility_compaction_frontier,
 };
 pub use receipt_quorum::{ByteDurability, ReceiptAck, assess_byte_durability};
-pub use reconcile::{Disposition, OldEpochOp, classify};
+pub use reconcile::{
+    Cleanup, Disposition, OldEpochIdentity, OldEpochOp, ReconcileAction, ReconcileDrain, ReplayCommand, classify,
+    cleanup, drain_reconcile, reconcile,
+};
 pub use remote_durability::{MetadataOperation, RemoteAck, RemoteDurability, assess_remote_metadata_durability};
 pub use replica::{AppliedPage, Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};

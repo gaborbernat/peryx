@@ -23,6 +23,19 @@ pub fn normalize_name(name: &str) -> String {
     out
 }
 
+/// The canonical authority key of a `PyPI` project: its PEP 503 normalized name.
+///
+/// Every spelling of a project — differing in case or in any run of `-`, `_`, or `.` — folds to one
+/// key, so a project's home is assigned and fenced under a single authority no matter which variant a
+/// publish arrives as. `PyPI` projects hold the unprefixed authority keyspace; an ecosystem whose
+/// identifiers could otherwise collide with a normalized project name (a single-segment OCI repository,
+/// for one) prefixes its own keys with a scheme, and a normalized name never contains the `:` such a
+/// scheme uses.
+#[must_use]
+pub fn authority_key(name: &str) -> String {
+    normalize_name(name)
+}
+
 /// [`normalize_name`] without the allocation when the name is already normalized, which upstream
 /// indexes usually deliver. The check is a byte scan; only a name that needs rewriting is copied.
 #[must_use]

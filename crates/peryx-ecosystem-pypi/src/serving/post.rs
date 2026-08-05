@@ -264,9 +264,13 @@ async fn admit_and_store(
     }
     let stored = cache::store_upload(state, hosted_name, prepared, quota).await;
     // The first stored file publishes the project, so it assigns the project's home datacenter through
-    // the ownership group; a later file finds a home already set and only reads it.
+    // the ownership group; a later file finds a home already set and only reads it. The project routes
+    // through its canonical authority key — its PEP 503 normalized name — so every name variant homes
+    // under one authority.
     if matches!(&stored, Ok(true)) {
-        state.claim_first_publish_home(project).await;
+        state
+            .claim_first_publish_home(&crate::name::authority_key(project))
+            .await;
     }
     upload_store_response(state, audit, stored)
 }

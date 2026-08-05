@@ -4,7 +4,7 @@ use openraft::storage::RaftStateMachine;
 use openraft::testing::log_id;
 use openraft::{Entry, EntryPayload, Membership, RaftSnapshotBuilder, Snapshot};
 
-use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect};
+use crate::ownership::{Assignment, AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipState};
 use crate::raft::{OwnershipResponse, OwnershipStateMachine, TypeConfig};
 use crate::{Admission, AuthorityEpoch};
 
@@ -16,6 +16,7 @@ fn assign(authority: &str, home: &str) -> OwnershipCommand {
     OwnershipCommand::AssignHome {
         authority: key(authority),
         home: DatacenterId(home.to_owned()),
+        cause: AssignmentCause::FirstPublish,
     }
 }
 
@@ -26,8 +27,12 @@ fn advance(authority: &str) -> OwnershipCommand {
 }
 
 fn normal(index: u64, command: OwnershipCommand) -> Entry<TypeConfig> {
+    normal_at(1, index, command)
+}
+
+fn normal_at(term: u64, index: u64, command: OwnershipCommand) -> Entry<TypeConfig> {
     Entry {
-        log_id: log_id(1, 0, index),
+        log_id: log_id(term, 0, index),
         payload: EntryPayload::Normal(command),
     }
 }
@@ -65,6 +70,30 @@ async fn test_apply_folds_normal_commands_through_one_state_in_order() {
                 epoch: AuthorityEpoch(2)
             }),
         ]
+    );
+}
+
+#[tokio::test]
+async fn test_apply_stamps_the_committed_term_and_index_onto_the_assignment_audit() {
+    let mut machine = OwnershipStateMachine::default();
+
+    machine
+        .apply(vec![normal_at(4, 9, assign("proj", "east"))])
+        .await
+        .unwrap();
+
+    // The apply loop reads the entry's log position, so the assignment audit — read back through the
+    // snapshot the machine builds — carries the term and index the command committed at.
+    let snapshot = machine.get_snapshot_builder().await.build_snapshot().await.unwrap();
+    let restored = OwnershipState::restore(&snapshot.snapshot.into_inner()).unwrap();
+    assert_eq!(
+        restored.assignment(&key("proj")),
+        Some(&Assignment {
+            cause: AssignmentCause::FirstPublish,
+            term: 4,
+            index: 9,
+            epoch: AuthorityEpoch(1),
+        })
     );
 }
 

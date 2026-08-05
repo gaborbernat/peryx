@@ -36,6 +36,21 @@ pub enum Reference {
     Digest(String),
 }
 
+/// The scheme every OCI authority key carries. A `PyPI` project's authority key is an unprefixed PEP 503
+/// normalized name, which never contains `:`, so this prefix keeps an OCI repository's key clear of the
+/// `PyPI` keyspace and of any other scheme's.
+const AUTHORITY_SCHEME: &str = "oci:";
+
+/// The canonical authority key of an OCI repository: its repository path under [`AUTHORITY_SCHEME`].
+///
+/// The path is preserved verbatim, only prefixed, so distinct repository paths keep distinct keys and
+/// two repositories never share a home. The `repository` passed here is the index-route-stripped
+/// repository name — the same string the manifest write path homes on its first publish.
+#[must_use]
+pub fn authority_key(repository: &str) -> String {
+    format!("{AUTHORITY_SCHEME}{repository}")
+}
+
 /// Classify a full request path (`/v2/...`) into a pull route, or `None` when it is neither a
 /// recognized verb nor a well-formed name/reference. The bare `/v2/` version check is handled before
 /// this and never reaches here.
@@ -498,5 +513,21 @@ mod tests {
         for (digest, expected) in cases {
             assert_eq!(referrers_tag(&digest), expected, "digest {digest}");
         }
+    }
+
+    #[test]
+    fn test_authority_key_prefixes_the_repository_and_keeps_paths_distinct() {
+        assert_eq!(authority_key("library/nginx"), "oci:library/nginx");
+        // The path is preserved verbatim, so two repositories keep two keys and never share a home.
+        assert_ne!(authority_key("library/nginx"), authority_key("library/redis"));
+    }
+
+    #[test]
+    fn test_authority_key_cannot_collide_with_a_pypi_project_key() {
+        // A single-segment repository would collide with a PyPI project of the same name in a shared
+        // keyspace; the scheme prefix, which a PEP 503 normalized name can never contain, keeps them apart.
+        let repo_key = authority_key("nginx");
+        assert!(repo_key.starts_with("oci:"));
+        assert_ne!(repo_key, "nginx");
     }
 }

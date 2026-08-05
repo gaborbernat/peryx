@@ -99,7 +99,8 @@ pub use liveness::{
 };
 pub use multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RoundReport, SetLimits};
 pub use ownership::{
-    DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipError, OwnershipState, Rejection, TransferRecord,
+    AppliedMeta, Assignment, AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipError,
+    OwnershipState, Rejection, TransferRecord,
 };
 pub use peer::{
     BatchFrame, BatchRequest, DEFAULT_TRANSFER_LIMITS, FrontierSync, LoopbackPeer, LoopbackTransport, PeerFault,

@@ -9,7 +9,9 @@ use peryx_driver::ServingState;
 use peryx_events::webhook::WebhookEventKind;
 
 use crate::error::{ErrorCode, error_response, error_response_with_status};
-use crate::registry::authority::{authority_moved, epoch_admits, release_reservation, repository_epoch};
+use crate::registry::authority::{
+    authority_moved, claim_repository_home, epoch_admits, release_reservation, repository_epoch,
+};
 use crate::store::{self, Manifest};
 
 use super::*;
@@ -105,7 +107,7 @@ pub(in crate::registry) async fn put_manifest(
     }
     // A pushed manifest publishes the repository, so its first push assigns the repository's home
     // datacenter through the ownership group; a repeat push finds a home already set and does nothing.
-    state.claim_first_publish_home(&repo).await;
+    claim_repository_home(state, &repo).await;
     // A pushed manifest is hosted content whose verified bytes are now local, so a later read resolves
     // its placement from the index without probing the content store.
     store::record_content_placement(&state.meta, &canonical, store::OciArtifactOrigin::Pushed, true)?;

@@ -26,7 +26,8 @@ use peryx_replication::raft::log_store::RaftLogStoreAdapter;
 use peryx_replication::raft::network::PeerRaftNetworkFactory;
 use peryx_replication::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
 use peryx_replication::{
-    Admission, AuthorityEpoch, AuthorityKey, DatacenterId, OwnershipCommand, OwnershipEffect, Rejection,
+    Admission, AssignmentCause, AuthorityEpoch, AuthorityKey, DatacenterId, OwnershipCommand, OwnershipEffect,
+    Rejection,
 };
 use peryx_storage::raft::RaftLogStore;
 use url::Url;
@@ -203,6 +204,7 @@ impl OwnershipAuthority for OwnershipGroup {
         let command = OwnershipCommand::AssignHome {
             authority: AuthorityKey(authority.to_owned()),
             home: self.home.clone(),
+            cause: AssignmentCause::FirstPublish,
         };
         match self.node.submit(command).await {
             // AssignHome commits as either this datacenter winning the home or a rejection because one is

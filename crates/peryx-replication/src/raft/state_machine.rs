@@ -23,7 +23,7 @@ use openraft::{
 };
 use tokio::sync::Mutex;
 
-use crate::ownership::{DatacenterId, OwnershipState};
+use crate::ownership::{AppliedMeta, DatacenterId, OwnershipState};
 use crate::raft::{OwnershipResponse, PeryxNode, TypeConfig};
 use crate::{Admission, AuthorityEpoch, AuthorityFence, AuthorityKey};
 
@@ -136,9 +136,13 @@ impl RaftStateMachine<TypeConfig> for OwnershipStateMachine {
         let mut responses = Vec::new();
         for entry in entries {
             inner.last_applied = Some(entry.log_id);
+            let meta = AppliedMeta {
+                term: entry.log_id.leader_id.term,
+                index: entry.log_id.index,
+            };
             let response = match entry.payload {
                 EntryPayload::Blank => OwnershipResponse::NonMutating,
-                EntryPayload::Normal(command) => OwnershipResponse::Applied(inner.state.apply(&command)),
+                EntryPayload::Normal(command) => OwnershipResponse::Applied(inner.state.apply(&command, meta)),
                 EntryPayload::Membership(membership) => {
                     inner.last_membership = StoredMembership::new(Some(entry.log_id), membership);
                     OwnershipResponse::NonMutating

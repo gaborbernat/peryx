@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{PackageName, is_valid_name, normalize_name, normalize_name_cow, project_of_filename};
+use crate::{PackageName, authority_key, is_valid_name, normalize_name, normalize_name_cow, project_of_filename};
 
 #[test]
 fn test_normalize_name_cow_borrows_already_normal_and_owns_the_rest() {
@@ -60,6 +60,30 @@ fn test_project_of_filename_keys_the_whole_hyphenated_sdist_name() {
     for (filename, expected) in cases {
         assert_eq!(project_of_filename(filename), expected, "{filename}");
     }
+}
+
+#[test]
+fn test_authority_key_folds_every_name_variant_to_one_key() {
+    let key = authority_key("Flask");
+    // Case, and every run of `-`, `_`, or `.`, fold to the one PEP 503 key, so the project homes under a
+    // single authority however a publish spells it.
+    for variant in ["flask", "Flask", "FLASK", "flask"] {
+        assert_eq!(authority_key(variant), key, "{variant:?}");
+    }
+    for (spelling, expected) in [
+        ("zope.interface", "zope-interface"),
+        ("A__B", "a-b"),
+        ("foo--bar", "foo-bar"),
+    ] {
+        assert_eq!(authority_key(spelling), expected, "{spelling:?}");
+    }
+}
+
+#[test]
+fn test_authority_key_never_carries_a_scheme_colon() {
+    // PyPI holds the unprefixed keyspace: no normalized name contains `:`, so a scheme-prefixed key from
+    // another ecosystem can never collide with a project's key.
+    assert!(!authority_key("zope.interface").contains(':'));
 }
 
 #[test]

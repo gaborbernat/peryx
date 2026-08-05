@@ -937,12 +937,9 @@ fn apply_daily_batch(
         let now = clock();
         expire_daily(&mut daily, now, days);
     }
-    let snapshot = match store {
-        Some(_) => Some(snapshot_daily(&daily)),
-        None => None,
-    };
-    drop(daily);
-    if let (Some(store), Some(snapshot)) = (store, snapshot) {
+    if let Some(store) = store {
+        let snapshot = snapshot_daily(&daily);
+        drop(daily);
         let encoded = serde_json::to_vec(&snapshot).expect("serialize daily usage snapshot");
         let _ = store.save_daily(&encoded);
     }

@@ -55,6 +55,7 @@ pub struct PartialConfig {
     pub port: Option<u16>,
     pub data_dir: Option<PathBuf>,
     pub writer_identity: Option<String>,
+    pub node_identity: Option<String>,
     pub offline: Option<bool>,
     pub read_only: Option<bool>,
     pub cache_ttl_secs: Option<i64>,

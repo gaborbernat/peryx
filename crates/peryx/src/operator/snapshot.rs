@@ -402,6 +402,9 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         data_dir,
         netrc,
         writer_identity,
+        // A node's own consensus identity is a per-node fact like the listener binding below, not
+        // restorable cluster state, so a backup omits it; a restored node re-reads it from configuration.
+        node_identity: _,
         offline,
         read_only,
         cache_ttl_secs,

@@ -44,6 +44,75 @@ fn test_a_three_node_ha_cluster_forms_and_reports_its_leader() {
     );
 }
 
+#[test]
+fn test_killing_the_home_leader_fails_authority_over_to_a_survivor() {
+    let mut cluster = Topology::ha(
+        "ownership",
+        vec![
+            MemberSpec::new("node-a", "east", Role::Writer),
+            MemberSpec::new("node-b", "west", Role::Replica),
+            MemberSpec::new("node-c", "south", Role::Replica),
+        ],
+    )
+    .with_admin()
+    .start()
+    .expect("the three-node ha cluster starts");
+
+    // Settle on a leader before the failure, so the transfer is observed against a known starting home.
+    let home = await_quorum_leader(&cluster)["leader"]
+        .as_str()
+        .expect("a quorum-agreed leader datacenter")
+        .to_owned();
+
+    // Kill the datacenter that holds authority. Two of three genuine voters survive, still a quorum, so
+    // the group elects a new leader among them and authority moves off the dead home. If every node ran
+    // under the writer's voter id, no survivor could take over and this would time out.
+    let identity = identity_for(&home);
+    let node = cluster
+        .nodes_mut()
+        .iter_mut()
+        .find(|node| node.identity() == identity)
+        .expect("the leader datacenter runs one of the nodes");
+    node.kill();
+
+    let new_home = await_leader_change(&cluster, &home);
+    assert!(
+        ["east", "west", "south"].contains(&new_home.as_str()) && new_home != home,
+        "authority moved to a surviving datacenter: {new_home}",
+    );
+}
+
+/// The node identity each datacenter runs under, so a test can kill the datacenter that holds authority.
+fn identity_for(datacenter: &str) -> &'static str {
+    match datacenter {
+        "east" => "node-a",
+        "west" => "node-b",
+        "south" => "node-c",
+        other => panic!("unexpected leader datacenter {other}"),
+    }
+}
+
+/// Wait until a quorum of the surviving nodes agrees on a leader that is not `old`, the signal that
+/// authority failed over off the killed home. The budget matches a real re-election under a saturated CI
+/// runner, not a slow algorithm.
+fn await_leader_change(cluster: &Cluster, old: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Some(block) = quorum_leader(cluster)
+            && let Some(leader) = block["leader"].as_str()
+            && leader != old
+        {
+            return leader.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "authority did not leave {old} within the deadline:\n{}",
+            cluster.failure_report().render(),
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Wait until a majority of the group agrees on the same leader with all three voters committed, then
 /// return that consensus block.
 ///

@@ -27,6 +27,7 @@ fn test_env_overlays_scalar_and_log_fields() {
         ("PERYX_PORT", "8080"),
         ("PERYX_DATA_DIR", "/srv/peryx"),
         ("PERYX_WRITER_IDENTITY", "writer-a"),
+        ("PERYX_NODE_IDENTITY", "node-b"),
         ("PERYX_OFFLINE", "true"),
         ("PERYX_READ_ONLY", "true"),
         ("PERYX_CACHE_TTL_SECS", "42"),
@@ -42,6 +43,7 @@ fn test_env_overlays_scalar_and_log_fields() {
     assert_eq!(partial.port, Some(8080));
     assert_eq!(partial.data_dir, Some(PathBuf::from("/srv/peryx")));
     assert_eq!(partial.writer_identity.as_deref(), Some("writer-a"));
+    assert_eq!(partial.node_identity.as_deref(), Some("node-b"));
     assert_eq!(partial.offline, Some(true));
     assert_eq!(partial.read_only, Some(true));
     assert_eq!(partial.cache_ttl_secs, Some(42));

@@ -28,6 +28,11 @@ pub struct Config {
     pub port: u16,
     pub data_dir: PathBuf,
     pub writer_identity: Option<String>,
+    /// This node's own identity in an `ha` consensus roster, naming its `[[availability.member]]` entry
+    /// so the ownership Raft node runs under its own voter identity. It is distinct from
+    /// [`writer_identity`](Self::writer_identity), which names the one writer every node claims and
+    /// follows on the metadata plane and is the same on every node.
+    pub node_identity: Option<String>,
     /// Disable upstream network access and serve only cached data.
     pub offline: bool,
     /// Reject client mutations and disable upstream cache fills on a read replica.
@@ -854,6 +859,7 @@ impl Default for Config {
             port: 4433,
             data_dir: PathBuf::from("peryx-data"),
             writer_identity: None,
+            node_identity: None,
             offline: false,
             read_only: false,
             cache_ttl_secs: 300,

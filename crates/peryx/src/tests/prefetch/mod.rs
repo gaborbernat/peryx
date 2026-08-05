@@ -97,6 +97,7 @@ pub(super) fn command_options(data_dir: &Path, packages: Vec<String>) -> Prefetc
             port: None,
             data_dir: Some(data_dir.to_path_buf()),
             writer_identity: None,
+            node_identity: None,
             offline: false,
             read_only: false,
             log_level: None,

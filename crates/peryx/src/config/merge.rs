@@ -53,6 +53,9 @@ impl Config {
         if let Some(writer_identity) = partial.writer_identity {
             self.writer_identity = Some(writer_identity);
         }
+        if let Some(node_identity) = partial.node_identity {
+            self.node_identity = Some(node_identity);
+        }
         if let Some(offline) = partial.offline {
             self.offline = offline;
         }

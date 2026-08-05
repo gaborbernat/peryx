@@ -161,6 +161,10 @@ pub struct RuntimeArgs {
     #[arg(long)]
     pub writer_identity: Option<String>,
 
+    /// This node's own identity in an `ha` consensus roster, naming its member entry.
+    #[arg(long)]
+    pub node_identity: Option<String>,
+
     /// Serve configured cached indexes from cache only.
     #[arg(long)]
     pub offline: bool,
@@ -204,6 +208,7 @@ impl RuntimeArgs {
             port: self.port,
             data_dir: self.data_dir.clone(),
             writer_identity: self.writer_identity.clone(),
+            node_identity: self.node_identity.clone(),
             offline: self.offline.then_some(true),
             read_only: self.read_only.then_some(true),
             cache_ttl_secs: None,

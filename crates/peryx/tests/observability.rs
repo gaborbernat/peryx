@@ -26,7 +26,7 @@ fn dc_group() -> Topology {
         "east",
         vec![
             MemberSpec::new("writer-a", "east-1", Role::Writer),
-            MemberSpec::new("replica-b", "east-1", Role::Replica),
+            MemberSpec::new("replica-b", "east-2", Role::Replica),
         ],
     )
 }

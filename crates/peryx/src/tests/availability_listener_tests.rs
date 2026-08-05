@@ -100,9 +100,54 @@ async fn request(
     (status, headers, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
+/// An ownership group double reporting a fixed consensus snapshot, so the status resource's consensus
+/// block is exercised without a live Raft node.
+struct FixedGroup;
+
+#[async_trait::async_trait]
+impl peryx_driver::state::OwnershipAuthority for FixedGroup {
+    async fn has_home(&self, _authority: &str) -> bool {
+        false
+    }
+
+    async fn claim_home(
+        &self,
+        _authority: &str,
+    ) -> Result<peryx_driver::state::HomeClaim, peryx_driver::state::OwnershipError> {
+        Ok(peryx_driver::state::HomeClaim::AlreadyHomed)
+    }
+
+    fn cluster_status(&self) -> peryx_driver::state::ClusterStatus {
+        peryx_driver::state::ClusterStatus {
+            leader: Some("east".to_owned()),
+            term: 2,
+            voters: vec!["east".to_owned(), "west".to_owned()],
+        }
+    }
+}
+
 #[test]
 fn test_posture_absent_for_single_node_none() {
     assert!(AvailabilityPosture::from_config(&AvailabilityConfig::None).is_none());
+}
+
+#[tokio::test]
+async fn test_status_reports_the_consensus_group_when_one_runs() {
+    let (_dir, state) = app().await;
+    state.set_ownership_authority(Arc::new(FixedGroup));
+
+    let (status, _, body) = request(
+        &state,
+        ha_replica(),
+        "/availability/v1/status",
+        Some(&basic(ADMIN, PASSWORD)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["consensus"]["leader"], "east");
+    assert_eq!(body["consensus"]["term"], 2);
+    assert_eq!(body["consensus"]["voters"], serde_json::json!(["east", "west"]));
 }
 
 #[tokio::test]

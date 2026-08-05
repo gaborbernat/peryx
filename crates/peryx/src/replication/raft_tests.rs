@@ -283,6 +283,26 @@ fn test_voter_id_is_stable_and_distinct() {
 }
 
 #[tokio::test]
+async fn test_ignite_does_not_bootstrap_a_replica_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    // A replica seed starts but never initializes; it joins through the writer's replication, so it
+    // holds no leader until the seed contacts it.
+    let plan = ConsensusPlan {
+        local: voter_id("west"),
+        home: DatacenterId("west".to_owned()),
+        seed: false,
+        roster: one_voter("east", "east.internal:4460"),
+        log_path: dir.path().join("raft/ownership-log.redb"),
+        group: "ownership".to_owned(),
+        token: TOKEN.to_owned(),
+    };
+
+    let node = plan.ignite().await.unwrap();
+
+    assert_eq!(node.leader(), None);
+}
+
+#[tokio::test]
 async fn test_ignite_starts_and_bootstraps_a_single_node_group() {
     let dir = tempfile::tempdir().unwrap();
     let config = ha_config(

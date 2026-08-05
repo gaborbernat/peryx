@@ -71,15 +71,16 @@ async fn send_body(
         .status()
 }
 
-/// Poll the delivery queue until one lands, since enqueue-then-send runs off the request.
-fn wait_for_delivery(state: &AppState) -> WebhookDeliveryRecord {
-    for _ in 0..500 {
-        if let Some(record) = state.meta.list_webhook_deliveries().unwrap().into_iter().next() {
-            return record;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    panic!("no webhook delivery enqueued");
+/// The delivery the push enqueued. `emit` writes it synchronously inside the request, and a delivered
+/// attempt is marked rather than removed, so the record is already present once the request returns.
+fn enqueued_delivery(state: &AppState) -> WebhookDeliveryRecord {
+    state
+        .meta
+        .list_webhook_deliveries()
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the push enqueued a webhook delivery")
 }
 
 async fn push_manifest(app: &axum::Router, blob: &[u8], manifest: &[u8], reference: &str) {
@@ -114,7 +115,7 @@ async fn test_manifest_push_fires_an_upload_webhook() {
     let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
     push_manifest(&app, b"layer-bytes", manifest, "1.0").await;
 
-    let delivery = wait_for_delivery(&state);
+    let delivery = enqueued_delivery(&state);
     assert_eq!(delivery.event, "upload");
     let payload: serde_json::Value = serde_json::from_str(&delivery.payload).unwrap();
     assert_eq!(payload["event"], "upload");
@@ -143,7 +144,7 @@ async fn test_manifest_delete_fires_a_delete_webhook() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let delivery = wait_for_delivery(&state);
+    let delivery = enqueued_delivery(&state);
     assert_eq!(delivery.event, "delete");
     let payload: serde_json::Value = serde_json::from_str(&delivery.payload).unwrap();
     assert_eq!(payload["project"], "app");
@@ -174,7 +175,7 @@ async fn test_manifest_restore_fires_a_restore_webhook() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let delivery = wait_for_delivery(&state);
+    let delivery = enqueued_delivery(&state);
     assert_eq!(delivery.event, "restore");
     let payload: serde_json::Value = serde_json::from_str(&delivery.payload).unwrap();
     assert_eq!(payload["project"], "app");
@@ -207,7 +208,7 @@ async fn test_blob_delete_fires_a_delete_webhook() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
 
-    let delivery = wait_for_delivery(&state);
+    let delivery = enqueued_delivery(&state);
     assert_eq!(delivery.event, "delete");
     let payload: serde_json::Value = serde_json::from_str(&delivery.payload).unwrap();
     assert_eq!(payload["file"]["sha256"], digest);

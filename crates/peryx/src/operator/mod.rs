@@ -24,7 +24,7 @@ pub use backup::backup_create;
 pub use import::import_dir;
 pub use restore::restore;
 pub use verify::backup_verify;
-pub use writer::promote_writer;
+pub use writer::{claim_writer, promote_writer};
 
 const BACKUP_FORMAT: u32 = 2;
 const BUFFER_BYTES: usize = 1024 * 1024;

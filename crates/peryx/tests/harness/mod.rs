@@ -181,9 +181,10 @@ impl Topology {
     pub fn start(&self) -> Result<Cluster, HarnessError> {
         let addresses: Vec<(u16, u16)> = self.members.iter().map(|_| (free_port(), free_port())).collect();
         let roster = self.roster_toml(&addresses);
+        let writer = (self.mode != Mode::None).then(|| self.writer(&addresses));
         let mut nodes = Vec::with_capacity(self.members.len());
         for (member, &(public, control)) in self.members.iter().zip(&addresses) {
-            let node = Node::spawn(self, member, public, control, &roster)?;
+            let node = Node::spawn(self, member, public, control, writer.as_ref(), &roster)?;
             nodes.push(node);
         }
         Ok(Cluster { nodes })
@@ -208,10 +209,15 @@ impl Topology {
             })
             .collect();
         let roster = self.roster_toml(&addresses);
+        let writer = (self.mode != Mode::None).then(|| self.writer(&addresses));
         let member = self.members.first().expect("a topology has at least one member");
         let dir = TempDir::new().expect("temp dir");
         let config = dir.path().join("peryx.toml");
-        std::fs::write(&config, node_config(self, member, addresses[0].1, &roster)).expect("write config");
+        std::fs::write(
+            &config,
+            node_config(self, member, addresses[0].1, writer.as_ref(), &roster),
+        )
+        .expect("write config");
         let output = Command::new(BIN)
             .args(["config", "check"])
             .arg("--config")
@@ -229,19 +235,17 @@ impl Topology {
         }
     }
 
-    /// The `[[availability.member]]` roster block shared by every node, mapping each member to its peer
-    /// control port. Empty for a `none`-mode topology.
+    /// The `[availability]` mode selector and the `[[availability.member]]` roster shared by every
+    /// node. The per-process replication role lives in [`node_config`], not here, so a replica follows
+    /// the writer rather than every node running as its own primary. Empty for a `none`-mode topology.
     fn roster_toml(&self, addresses: &[(u16, u16)]) -> String {
         if self.mode == Mode::None {
             return String::new();
         }
         let mut toml = format!(
-            "[availability]\nmode = \"{}\"\ngroup = \"{}\"\n\n\
-             [availability.replication]\nrole = \"primary\"\nsource = \"{}\"\ntoken = \"{}\"\n\n",
+            "[availability]\nmode = \"{}\"\ngroup = \"{}\"\n\n",
             self.mode.as_str(),
             self.group,
-            self.group,
-            self.token,
         );
         for (member, &(_, control)) in self.members.iter().zip(addresses) {
             let _ = write!(
@@ -253,6 +257,17 @@ impl Topology {
             );
         }
         toml
+    }
+
+    /// The writer's identity and public address, which every replica follows and claims before it
+    /// starts. A `dc` or `ha` topology always has exactly one writer.
+    fn writer(&self, addresses: &[(u16, u16)]) -> (String, u16) {
+        self.members
+            .iter()
+            .zip(addresses)
+            .find(|(member, _)| matches!(member.role, Role::Writer))
+            .map(|(member, &(public, _))| (member.node.clone(), public))
+            .expect("a dc or ha topology has a writer")
     }
 }
 
@@ -308,13 +323,19 @@ impl Node {
         member: &MemberSpec,
         port: u16,
         control_port: u16,
+        writer: Option<&(String, u16)>,
         roster: &str,
     ) -> Result<Self, HarnessError> {
         let data = TempDir::new().expect("temp data dir");
         let config = data.path().join("peryx.toml");
-        std::fs::write(&config, node_config(topology, member, control_port, roster)).expect("write config");
+        std::fs::write(&config, node_config(topology, member, control_port, writer, roster)).expect("write config");
         if topology.bootstrap_admin {
             bootstrap_admin(&config, data.path());
+        }
+        // A replica starts read-only and only verifies the writer identity, so its store must already
+        // hold it: seed it offline through the same binary before serving.
+        if writer.is_some() && !matches!(member.role, Role::Writer) {
+            claim_writer_identity(&config, data.path())?;
         }
         let http = reqwest::blocking::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -611,15 +632,36 @@ pub trait OwnershipControl {
 
 /// Generate one node's full config: a minimal hosted index every node serves, plus the availability and
 /// roster blocks for a `dc` or `ha` member.
-fn node_config(topology: &Topology, member: &MemberSpec, control_port: u16, roster: &str) -> String {
+fn node_config(
+    topology: &Topology,
+    member: &MemberSpec,
+    control_port: u16,
+    writer: Option<&(String, u16)>,
+    roster: &str,
+) -> String {
     // Top-level keys must precede any table, or TOML folds them into the last `[[index]]`.
     let mut config = String::new();
-    if topology.mode != Mode::None {
-        let _ = writeln!(config, "writer_identity = \"{}\"\n", member.node);
+    if let Some(writer) = writer {
+        // Every node follows the one writer's identity: the writer claims it on startup, and a replica
+        // verifies its offline-seeded store against it.
+        let _ = writeln!(config, "writer_identity = \"{}\"\n", writer.0);
     }
     config.push_str("[[index]]\nname = \"hosted\"\nhosted = true\n\n");
-    if topology.mode != Mode::None {
+    if let Some(writer) = writer {
         config.push_str(roster);
+        if matches!(member.role, Role::Writer) {
+            let _ = write!(
+                config,
+                "[availability.replication]\nrole = \"primary\"\nsource = \"{}\"\ntoken = \"{}\"\n\n",
+                writer.0, topology.token,
+            );
+        } else {
+            let _ = write!(
+                config,
+                "[availability.replication]\nrole = \"replica\"\nupstream = \"http://127.0.0.1:{}\"\ntoken = \"{}\"\n\n",
+                writer.1, topology.token,
+            );
+        }
         let _ = writeln!(config, "[availability.listener]\nbind = \"127.0.0.1:{control_port}\"");
     }
     config
@@ -647,6 +689,26 @@ fn bootstrap_admin(config: &std::path::Path, data: &std::path::Path) {
         "bootstrap-administrator failed: {}",
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+/// Seed a replica's store with the writer identity it follows, through the same offline command an
+/// operator runs, so the replica passes its read-only startup identity check before it serves.
+fn claim_writer_identity(config: &std::path::Path, data: &std::path::Path) -> Result<(), HarnessError> {
+    let output = Command::new(BIN)
+        .args(["writer", "claim"])
+        .arg("--config")
+        .arg(config)
+        .arg("--data-dir")
+        .arg(data)
+        .output()
+        .expect("run peryx writer claim");
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(HarnessError::Config(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
 }
 
 fn launch(config: &std::path::Path, data: &std::path::Path, port: u16) -> Child {

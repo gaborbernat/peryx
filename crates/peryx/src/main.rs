@@ -376,6 +376,7 @@ fn main() -> anyhow::Result<()> {
                 peryx::cli::WriterCommand::Promote(args) => {
                     operator::promote_writer(&config, &args.replacement, &mut std::io::stdout())
                 }
+                peryx::cli::WriterCommand::Claim(_) => operator::claim_writer(&config, &mut std::io::stdout()),
             }
         }
         peryx::cli::Command::Prefetch(command) => {

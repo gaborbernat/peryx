@@ -195,3 +195,50 @@ fn test_ownership_controls_are_unavailable_until_the_write_api_lands() {
         Err(HarnessError::Unsupported(_))
     ));
 }
+
+#[test]
+fn test_dc_replica_metrics_exposes_the_replication_series() {
+    // A real replica in a dc group follows the writer, so its scrape carries the replication series a
+    // `none` node never exports. The harness bootstraps the replica's writer identity offline, which is
+    // what lets a replica start read-only at all.
+    let cluster = Topology::dc(
+        "east",
+        vec![
+            MemberSpec::new("writer-a", "east-1", Role::Writer),
+            MemberSpec::new("replica-b", "east-2", Role::Replica),
+        ],
+    )
+    .start()
+    .expect("dc cluster starts");
+    let replica = cluster.node("replica-b").expect("the replica is present");
+
+    let (code, body) = replica.metrics().expect("metrics reachable");
+
+    assert_eq!(code, 200);
+    assert!(
+        body.contains("peryx_replication_"),
+        "a dc replica exports the replication series: {body}"
+    );
+}
+
+#[test]
+fn test_ha_replica_metrics_exposes_the_replication_series() {
+    let cluster = Topology::ha(
+        "global",
+        vec![
+            MemberSpec::new("writer-east", "east", Role::Writer),
+            MemberSpec::new("replica-west", "west", Role::Replica),
+        ],
+    )
+    .start()
+    .expect("ha cluster starts");
+    let replica = cluster.node("replica-west").expect("the replica is present");
+
+    let (code, body) = replica.metrics().expect("metrics reachable");
+
+    assert_eq!(code, 200);
+    assert!(
+        body.contains("peryx_replication_"),
+        "an ha replica exports the replication series: {body}"
+    );
+}

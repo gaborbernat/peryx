@@ -97,6 +97,36 @@ async fn test_ignite_consensus_forms_no_group_outside_an_ha_roster() {
     assert!(replication.ignite_consensus().await.unwrap().is_none());
 }
 
+#[test]
+fn test_a_dc_node_registers_the_durability_metric() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, Some(primary_config()));
+    let state = build_state(&config).unwrap();
+    let _replication = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let mut body = String::new();
+    state.write_process_metrics(&mut body);
+    assert!(
+        body.contains("peryx_dc_ack_durable_total"),
+        "a dc node exposes the datacenter durability outcome metric: {body}"
+    );
+}
+
+#[test]
+fn test_a_none_node_registers_no_durability_metric() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(&dir, None);
+    let state = build_state(&config).unwrap();
+    let _replication = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let mut body = String::new();
+    state.write_process_metrics(&mut body);
+    assert!(
+        !body.contains("peryx_dc_ack"),
+        "a single-node none process runs no datacenter durability decision: {body}"
+    );
+}
+
 fn ha_group_config(dir: &tempfile::TempDir) -> Config {
     Config {
         data_dir: dir.path().to_path_buf(),

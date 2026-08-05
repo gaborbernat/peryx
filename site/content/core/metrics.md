@@ -199,6 +199,31 @@ Watch `peryx_availability_worker_slots_active` against `peryx_availability_worke
 any increase in `peryx_availability_worker_panics_total`: a panic marks the worker domain unhealthy and drops the node
 out of a read pool through the `worker_unhealthy` readiness reason.
 
+## Datacenter durability
+
+Present on a `dc` or `ha` node, absent under single-node `none`, which runs no such decision. A client write resolves to
+one datacenter durability outcome from the shared decision: `durable` once both its metadata and its artifact bytes are
+datacenter-durable for the backend that stored it, `pending` while the client deadline is still live and the evidence is
+incomplete, or `unknown` once the deadline expires unproven. An `unknown` outcome is not a failure: durable completion
+may have happened after the client stopped waiting, so it must not be retried as a fresh write. Only the closed `scope`
+label appears, and the quorum figures are gauge values rather than labels, so the group holds to a fixed seven series
+whatever the write volume, digest, or repository.
+
+| Series                             | Type    | Labels  | Meaning                                                          |
+| ---------------------------------- | ------- | ------- | ---------------------------------------------------------------- |
+| `peryx_dc_ack_durable_total`       | counter | `scope` | Writes proven datacenter-durable, split by backend scope.        |
+| `peryx_dc_ack_pending_total`       | counter |         | Writes still pending durability within the client deadline.      |
+| `peryx_dc_ack_unknown_total`       | counter |         | Writes whose deadline expired before durability proved.          |
+| `peryx_dc_ack_quorum_acknowledged` | gauge   |         | Independent members that acknowledged the last filesystem write. |
+| `peryx_dc_ack_quorum_required`     | gauge   |         | Independent members the policy required for that write.          |
+| `peryx_dc_ack_quorum_remaining`    | gauge   |         | Independent members still needed for that write.                 |
+
+`scope` is `filesystem` or `object-store`: a filesystem backend proves datacenter durability from a quorum of
+independent per-node placement receipts, while an object store proves it from its own atomic put, so the two carry
+different crash and replication guarantees. Alert on a sustained `rate(peryx_dc_ack_unknown_total[5m])`, which marks
+writes whose durability a client could not confirm within its deadline, and watch `peryx_dc_ack_quorum_remaining` fall
+to zero as a filesystem write converges on its quorum.
+
 ## Alerts worth building
 
 The queries below assume the `job="peryx"` scrape above. They are starting points; set thresholds to your traffic.

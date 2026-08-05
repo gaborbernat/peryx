@@ -13,6 +13,7 @@ peryx-events.workspace = true
 peryx-identity.workspace = true
 peryx-index.workspace = true
 peryx-policy.workspace = true
+peryx-replication.workspace = true
 peryx-search.workspace = true
 peryx-storage.workspace = true
 peryx-upstream.workspace = true

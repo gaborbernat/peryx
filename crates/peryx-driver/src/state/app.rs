@@ -59,6 +59,9 @@ pub struct ServingState {
     pub max_stale_secs: i64,
     pub clock: Clock,
     pub requests: AtomicU64,
+    /// Datacenter durability acknowledgement observability. Every process holds one; only a `dc` or `ha`
+    /// node registers it as a Prometheus source, so its series appear only where the decision is real.
+    pub dc_durability: Arc<crate::state::DcDurabilityMetrics>,
     /// Whether this process serves as a replica and rejects client mutations.
     pub read_only: bool,
     /// The authority role this node holds, derived from its configured replication role rather than its

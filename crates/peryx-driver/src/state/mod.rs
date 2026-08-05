@@ -4,6 +4,7 @@ mod app;
 mod build;
 mod caches;
 mod control;
+mod dc_durability;
 mod derived_views;
 mod describe;
 mod ownership;
@@ -15,6 +16,7 @@ pub use control::{
     AuditRecord, CommandMetrics, CommandOutcome, CommandReceipt, ControlCommand, ControlError, ControlPlane,
     MembershipControl, plan_voter_roster,
 };
+pub use dc_durability::DcDurabilityMetrics;
 pub use derived_views::{REQUIRED_VIEWS, ReadableFrontier, SEARCH_VIEW, readable_frontier};
 pub use describe::{
     HostedDescription, IndexDescription, MemberDescription, SecretDescription, UpstreamDescription,

@@ -8,7 +8,7 @@
 
 mod harness;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use harness::{HarnessError, MemberSpec, OwnershipControl, Role, Topology, Toxiproxy};
 
@@ -86,8 +86,13 @@ fn test_leaves_no_leaked_process() {
         let mut cluster = Topology::single().start().expect("cluster starts");
         cluster.nodes_mut()[0].pid()
     };
-    // The cluster dropped at the block's end; its Drop killed the process group.
-    std::thread::sleep(Duration::from_millis(200));
+    // The cluster dropped at the block's end; its Drop killed the process group. Poll for the exit
+    // instead of sleeping a fixed span, so a slow reap under load waits for the process rather than
+    // asserting against a race.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while harness::process_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert!(
         !harness::process_alive(pid),
         "dropping the cluster must leave no peryx process (pid {pid})"

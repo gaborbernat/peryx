@@ -113,6 +113,47 @@ async fn test_a_re_drain_after_a_committed_apply_replays_no_committed_change() {
 }
 
 #[tokio::test]
+async fn test_a_drained_peer_is_held_out_until_it_commits() {
+    let peer = peer_with("a", "tok", 5);
+    let mut set = PeerSet::new(limits(4, 3, 8, Duration::ZERO), ReconnectPolicy::default());
+    set.join("a", LoopbackTransport::connect(&peer, "tok"), 0);
+    set.advance(Duration::ZERO).await;
+    let drained = set.drain("a");
+
+    // A fetch between the drain and the commit would resume from the regressed frontier and re-request
+    // the drained changes; the peer is held out instead, so this round selects nothing.
+    let held = set.advance(Duration::ZERO).await;
+    assert_eq!(held.advanced(), 0, "a drained-but-uncommitted peer is not fetched");
+
+    set.commit("a", 3);
+    let resumed = set.advance(Duration::ZERO).await;
+    let served = set.drain("a");
+
+    assert_eq!(
+        drained.iter().map(|change| change.serial).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(resumed.advanced(), 1, "the peer is due again once committed");
+    assert_eq!(
+        served.iter().map(|change| change.serial).collect::<Vec<_>>(),
+        vec![4, 5]
+    );
+}
+
+#[tokio::test]
+async fn test_draining_an_empty_peer_leaves_it_in_the_rotation() {
+    let peer = peer_with("a", "tok", 2);
+    let mut set = PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default());
+    set.join("a", LoopbackTransport::connect(&peer, "tok"), 0);
+
+    // Draining before any fetch pops nothing, so the peer is never held out of the rotation.
+    assert!(set.drain("a").is_empty());
+    let report = set.advance(Duration::ZERO).await;
+
+    assert_eq!(report.advanced(), 1, "an empty drain does not gate the peer");
+}
+
+#[tokio::test]
 async fn test_a_duplicate_commit_cannot_move_the_frontier_backward() {
     let peer = peer_with("a", "tok", 3);
     let mut set = PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default());

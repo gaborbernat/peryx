@@ -110,6 +110,12 @@ struct Member<T: PeerTransport> {
     attempt: u32,
     channel: BoundedChannel,
     health: Health,
+    /// Set once the peer's buffered changes are drained and cleared once they commit. While it holds,
+    /// the peer is not fetched again: a drain empties the channel without advancing the frontier, so
+    /// `next_serial` regresses to the frontier and a fetch in that window would re-request the
+    /// drained-but-uncommitted changes. Gating the peer here keeps that re-fetch from ever happening,
+    /// so the caller's applier need not lean on idempotency to stay correct.
+    draining: bool,
 }
 
 impl<T: PeerTransport> Member<T> {
@@ -119,6 +125,7 @@ impl<T: PeerTransport> Member<T> {
 
     fn is_due(&self, now: Duration) -> bool {
         !self.channel.is_full()
+            && !self.draining
             && match self.health {
                 Health::Ready => true,
                 Health::BackingOff { until } => until <= now,
@@ -156,6 +163,7 @@ impl<T: PeerTransport> PeerSet<T> {
             attempt: 0,
             channel: BoundedChannel::new(self.limits.per_peer_budget),
             health: Health::Ready,
+            draining: false,
         });
     }
 
@@ -180,7 +188,11 @@ impl<T: PeerTransport> PeerSet<T> {
     }
 
     /// Take every buffered change from a peer, in serial order, for the caller to apply and commit.
-    /// The changes stay charged against the peer until [`commit`](Self::commit) advances its frontier.
+    ///
+    /// Draining empties the channel without advancing the frontier, so the peer is held out of the fetch
+    /// rotation until [`commit`](Self::commit) advances it. Without that hold, a fetch between the drain
+    /// and the commit would resume from the regressed frontier and re-request the drained-but-uncommitted
+    /// changes; the hold makes that impossible rather than relying on the applier to discard the replay.
     pub fn drain(&mut self, source: &str) -> Vec<Change> {
         let Some(member) = self.member_mut(source) else {
             return Vec::new();
@@ -189,6 +201,9 @@ impl<T: PeerTransport> PeerSet<T> {
         while let Some(change) = member.channel.pop() {
             changes.push(change);
         }
+        // Hold the peer out of the fetch rotation until its drained changes commit, so a fetch in the
+        // window before commit cannot re-request them from the regressed frontier.
+        member.draining = !changes.is_empty();
         changes
     }
 
@@ -202,6 +217,7 @@ impl<T: PeerTransport> PeerSet<T> {
             }
             member.attempt = 0;
             member.health = Health::Ready;
+            member.draining = false;
         }
     }
 

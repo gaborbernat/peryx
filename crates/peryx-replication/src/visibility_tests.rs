@@ -305,3 +305,100 @@ fn test_frontier_keeps_the_highest_acknowledged_serial() {
         "an out-of-order lower acknowledgement does not retract coverage"
     );
 }
+
+#[test]
+fn test_compact_keeps_a_lift_in_a_later_epoch_until_the_revoke_epoch_drains() {
+    let mut state = VisibilityState::new();
+    let art = artifact("a");
+    state.apply(&op(&art, Revoke, 1, 5));
+    state.apply(&op(&art, Lift, 2, 1));
+
+    // The lift's epoch is covered, but epoch 1 is not, so the entry that fences a late epoch-1 revoke
+    // must survive: forgetting it would let the stale revoke resurrect the artifact.
+    state.compact(&frontier(2, 1));
+
+    assert_eq!(
+        state.retained_artifacts(),
+        1,
+        "the fence for the undrained earlier epoch is kept"
+    );
+    assert_eq!(
+        state.apply(&op(&art, Revoke, 1, 9)),
+        ApplyEffect::Ignored,
+        "a stale epoch-1 revoke stays fenced rather than resurrecting the lifted artifact",
+    );
+    assert!(state.get(&art).is_visible());
+}
+
+#[test]
+fn test_compact_keeps_a_restore_in_a_later_epoch_until_the_trash_epoch_drains() {
+    let mut state = VisibilityState::new();
+    let art = artifact("a");
+    state.apply(&op(&art, Trash, 1, 5));
+    state.apply(&op(&art, Restore, 2, 1));
+
+    // The symmetric trash dimension: a covered restore in a later epoch must not release the entry while
+    // an earlier trash epoch can still deliver a stale trash.
+    state.compact(&frontier(2, 1));
+
+    assert_eq!(
+        state.retained_artifacts(),
+        1,
+        "the fence for the undrained earlier epoch is kept"
+    );
+    assert_eq!(
+        state.apply(&op(&art, Trash, 1, 9)),
+        ApplyEffect::Ignored,
+        "a stale epoch-1 trash stays fenced rather than resurrecting the restored artifact",
+    );
+    assert!(state.get(&art).is_visible());
+}
+
+#[test]
+fn test_compact_releases_a_cross_epoch_entry_once_every_earlier_epoch_is_acknowledged() {
+    let mut state = VisibilityState::new();
+    let art = artifact("a");
+    state.apply(&op(&art, Revoke, 1, 5));
+    state.apply(&op(&art, Lift, 2, 1));
+
+    // Epoch 1 is drained everywhere and epoch 2 covers the lift, so no earlier operation can still
+    // arrive and the settled, visible entry is released.
+    let mut frontier = Frontier::default();
+    frontier.acknowledge(1, 5);
+    frontier.acknowledge(2, 1);
+    state.compact(&frontier);
+
+    assert_eq!(
+        state.retained_artifacts(),
+        0,
+        "a fully settled cross-epoch entry is released"
+    );
+    assert!(state.get(&art).is_visible());
+}
+
+#[test]
+fn test_compact_keeps_a_cross_epoch_entry_with_an_unacknowledged_middle_epoch() {
+    let mut state = VisibilityState::new();
+    let art = artifact("a");
+    state.apply(&op(&art, Revoke, 1, 5));
+    state.apply(&op(&art, Lift, 3, 1));
+
+    // Epoch 3 covers the lift and epoch 1 is acknowledged, but epoch 2 is not, so an epoch-2 operation
+    // could still arrive: the gap below the high-water epoch keeps the entry.
+    let mut frontier = Frontier::default();
+    frontier.acknowledge(1, 5);
+    frontier.acknowledge(3, 1);
+    state.compact(&frontier);
+
+    assert_eq!(
+        state.retained_artifacts(),
+        1,
+        "a gap below the high-water epoch keeps the entry"
+    );
+    assert_eq!(
+        state.apply(&op(&art, Revoke, 2, 4)),
+        ApplyEffect::Ignored,
+        "a stale epoch-2 revoke stays fenced",
+    );
+    assert!(state.get(&art).is_visible());
+}

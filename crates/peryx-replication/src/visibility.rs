@@ -116,6 +116,20 @@ impl Frontier {
             .get(&order.epoch)
             .is_some_and(|&serial| order.serial <= serial)
     }
+
+    /// Whether `order` and every epoch beneath it are settled, so forgetting an entry whose high-water is
+    /// `order` cannot let a late lower-epoch operation resurrect it.
+    ///
+    /// [`covers`](Self::covers) settles the order's own epoch through its serial, but a dimension's
+    /// high-water in a later epoch overwrote and forgot the orders it held in earlier ones, and those
+    /// earlier epochs can still deliver an operation below the high-water that the fence would reject.
+    /// Authority epochs are contiguous from one, and the frontier records a superseded epoch only once it
+    /// is drained everywhere, so every epoch below `order.epoch` being acknowledged is what proves no such
+    /// operation remains in flight. A single unacknowledged epoch below the high-water leaves the entry
+    /// retained, so its fence stands until the earlier epoch drains.
+    fn settles(&self, order: OpOrder) -> bool {
+        self.covers(order) && self.covered.range(1..order.epoch).count() as u64 == order.epoch.saturating_sub(1)
+    }
 }
 
 /// A snapshot that cannot be trusted to preserve every tombstone, so restore refuses it rather than
@@ -213,16 +227,18 @@ impl VisibilityState {
     /// covers, bounding retention once an entry can no longer be re-litigated by a late delivery.
     ///
     /// A still-trashed or still-revoked artifact is kept regardless of the frontier, because its
-    /// tombstone is what holds the artifact out of sight. An artifact with an operation above the
-    /// frontier is kept so a lagging replica or backup still converges to the same state. Compaction
-    /// never turns a visible artifact invisible or the reverse: it only forgets an entry whose absence
-    /// reads as the visible default it already holds.
+    /// tombstone is what holds the artifact out of sight. An artifact with an operation the frontier has
+    /// not settled is kept so a lagging replica or backup still converges to the same state, and an entry
+    /// whose high-water sits in a later epoch is kept until every earlier epoch is drained too, so a stale
+    /// lower-epoch operation cannot resurrect it once the entry is forgotten. Compaction never turns a
+    /// visible artifact invisible or the reverse: it only forgets an entry whose absence reads as the
+    /// visible default it already holds.
     pub fn compact(&mut self, frontier: &Frontier) {
         self.artifacts.retain(|_, entry| {
             entry.trashed
                 || entry.revoked
-                || entry.trashed_at.is_some_and(|order| !frontier.covers(order))
-                || entry.revoked_at.is_some_and(|order| !frontier.covers(order))
+                || entry.trashed_at.is_some_and(|order| !frontier.settles(order))
+                || entry.revoked_at.is_some_and(|order| !frontier.settles(order))
         });
     }
 

@@ -1,8 +1,11 @@
 //! Process-level replication configuration and follower scheduling.
 
 mod availability_metrics;
+mod drain;
 mod raft;
 mod worker;
+
+pub use drain::AuthorityDrainJob;
 
 use std::collections::HashMap;
 use std::sync::Arc;

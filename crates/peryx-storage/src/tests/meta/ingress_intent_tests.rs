@@ -157,3 +157,30 @@ fn test_staged_intent_is_none_for_an_unknown_key() {
     assert_eq!(store.staged_intent("unknown").unwrap(), None);
     assert_eq!(store.count_staged_intents().unwrap(), 0);
 }
+
+#[test]
+fn test_list_pending_intents_returns_only_pending_in_key_order_bounded() {
+    let (_dir, store) = store();
+    for key in ["key-c", "key-a", "key-b", "key-d"] {
+        store.stage_intent(key, "digest", 1, b"x", 8, 1).unwrap();
+    }
+    // Advancing one out of Pending drops it from the drain's work set.
+    store.advance_intent("key-b", IntentPhase::Admitted, 2).unwrap();
+
+    let pending = store.list_pending_intents(2).unwrap();
+
+    assert_eq!(
+        pending.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+        ["key-a", "key-c"]
+    );
+    assert!(pending.iter().all(|(_, record)| record.phase == IntentPhase::Pending));
+}
+
+#[test]
+fn test_list_pending_intents_is_empty_without_pending_work() {
+    let (_dir, store) = store();
+    store.stage_intent("key-1", "digest", 1, b"x", 8, 1).unwrap();
+    store.advance_intent("key-1", IntentPhase::Admitted, 2).unwrap();
+
+    assert!(store.list_pending_intents(10).unwrap().is_empty());
+}

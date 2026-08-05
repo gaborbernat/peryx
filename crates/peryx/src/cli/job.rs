@@ -39,6 +39,14 @@ pub enum JobCommand {
         #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_SEARCH_REBUILD_CHUNK)]
         chunk_size: usize,
     },
+    /// Finalize an authority's retained ingress intents at its new home after a failover transfer.
+    Drain {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        /// The authority whose retained intents to drain into local metadata.
+        #[arg(long)]
+        authority: String,
+    },
 }
 
 impl JobCommand {
@@ -47,7 +55,7 @@ impl JobCommand {
         match self {
             Self::List(args) => &args.runtime,
             Self::Show(args) => &args.runtime,
-            Self::Run { runtime, .. } | Self::Reindex { runtime, .. } => runtime,
+            Self::Run { runtime, .. } | Self::Reindex { runtime, .. } | Self::Drain { runtime, .. } => runtime,
         }
     }
 }

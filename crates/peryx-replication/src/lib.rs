@@ -23,6 +23,7 @@ mod channel;
 mod completeness;
 mod dc_ack;
 mod dc_copy;
+mod drain;
 mod driver;
 mod envelope;
 mod error;
@@ -71,6 +72,7 @@ pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use completeness::{Completeness, ProducerCoverage, assess};
 pub use dc_ack::{ByteEvidence, DcAck, Deadline, decide_dc_ack};
 pub use dc_copy::{CopyError, CopyPlan, TargetCopy, copy_blob_to_target, plan_dc_copy, run_dc_copy};
+pub use drain::{DrainIntent, DrainPlan, plan_drain};
 pub use driver::{StepOutcome, advance_once};
 pub use envelope::{
     AuthorityEpoch, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, OperationEnvelope, OperationId, OperationKind,
@@ -156,6 +158,8 @@ mod completeness_tests;
 mod dc_ack_tests;
 #[cfg(test)]
 mod dc_copy_tests;
+#[cfg(test)]
+mod drain_tests;
 #[cfg(test)]
 mod driver_tests;
 #[cfg(test)]

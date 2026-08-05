@@ -88,13 +88,15 @@ peryx index show <index> [--config <path>] [--data-dir <path>]
 
 Inspect the durable history of background jobs and run the ones an operator triggers on demand. `list` prints the most
 recent runs newest-first as JSON; `show` prints one run by its `jr_…` id. `run` starts a one-shot catalog sync for a
-cached repository. Every run records a durable history entry you can read back with `list` and `show`.
+cached repository; `reindex` rebuilds the search index; `drain` finalizes an authority's retained writes at its new home
+after a failover. Every run records a durable history entry you can read back with `list` and `show`.
 
 ```
 peryx job list [--data-dir <path>] [--config <path>]
 peryx job show <id> [--data-dir <path>] [--config <path>]
 peryx job run --repository <name> [--source <name>] [--max-projects <n>] [--concurrency <n>] [--timeout-secs <n>]
 peryx job reindex [--chunk-size <n>] [--data-dir <path>] [--config <path>]
+peryx job drain --authority <name> [--data-dir <path>] [--config <path>]
 ```
 
 ### `job reindex`
@@ -113,6 +115,21 @@ Publication is atomic. Searches keep serving the prior complete index for the wh
 only once every batch has committed, so a query never sees a half-built index. If the process stops mid-rebuild, the
 partial index is discarded on the next start and the incremental refresh rebuilds it — a restart never serves partial
 results. A rebuild cancelled at shutdown leaves the served index untouched.
+
+### `job drain`
+
+Finalize the ingress write intents an authority's former home left retained, at the datacenter that just took its home.
+When a home fails and the control quorum transfers an authority to a survivor, the ingress datacenters still hold the
+writes the old home never finalized. `drain` reads those intents in stable key order and finalizes each into the new
+home's local metadata, recording an `authority_drain` job you can read back with `list` and `show`. It is the operator
+side of [authority transfer](@/core/availability-authority-transfer.md): the transfer moves the home, and the drain
+settles the writes that were in flight when it moved.
+
+The pass is bounded, ordered, and resumable. It finalizes in batches so a large backlog drains in bounded transactions,
+and each finalize only advances an intent, never re-applies it, so re-running after an interruption resumes at the first
+intent still pending rather than double-finalizing settled ones. Because the run names its authority, the scheduler
+fences it: if the same authority transfers again while the drain runs, the run leased a now-superseded epoch and fails
+with `authority_fenced` rather than finalizing under stale authority — re-run it at the current home.
 
 ## `config-snippet`
 

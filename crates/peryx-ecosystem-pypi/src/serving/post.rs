@@ -24,6 +24,7 @@ use crate::quota::{self, Admission, PendingQuota};
 use crate::upload::{self, UploadError};
 use crate::{PackageName, ProjectStatus, normalize_name};
 
+use super::admission;
 use super::response::{CacheContext, cache_error_response, policy_denial_response};
 use super::upload_form::{collect_form, upload_error_message, upload_error_response};
 use super::{authorize, identify, request_id, upload_target};
@@ -224,13 +225,66 @@ async fn accept_upload(context: UploadContext<'_>, multipart: Multipart) -> Resp
         emit_upload_status_event(&audit, &block);
         return block.response;
     }
-    let stored = cache::store_upload(state, &hosted.name, prepared, quota).await;
+    admit_and_store(state, &hosted.name, &index.route, &project, prepared, quota, &audit).await
+}
+
+/// Durably admit the upload into the ingress datacenter, then store it. Admission stages a durable write
+/// intent and proves same-DC durability before storage, so an accepted upload survives a restart near the
+/// client; a refused admission returns its response unchanged and nothing is stored.
+async fn admit_and_store(
+    state: &Arc<ServingState>,
+    hosted_name: &str,
+    route: &str,
+    project: &str,
+    prepared: upload::PreparedUpload,
+    quota: Option<PendingQuota>,
+    audit: &UploadAudit<'_>,
+) -> Response {
+    let request = admission::AdmissionRequest {
+        tenant: route,
+        authority: project,
+        filename: &prepared.filename,
+        digest: prepared.digest.as_str(),
+        size: prepared
+            .record
+            .file
+            .size
+            .expect("a prepared upload carries its byte size"),
+        ingress_dc: &admission::ingress_dc(state.availability_topology()),
+    };
+    if let admission::Admission::Reject(response) = admission::admit(
+        &state.meta,
+        state.blobs.durability(),
+        admission::MAX_STAGED_INTENTS,
+        &request,
+        (state.clock)(),
+    ) {
+        emit_admission_rejection(audit);
+        return response;
+    }
+    let stored = cache::store_upload(state, hosted_name, prepared, quota).await;
     // The first stored file publishes the project, so it assigns the project's home datacenter through
     // the ownership group; a later file finds a home already set and only reads it.
     if matches!(&stored, Ok(true)) {
-        state.claim_first_publish_home(&project).await;
+        state.claim_first_publish_home(project).await;
     }
-    upload_store_response(state, &audit, stored)
+    upload_store_response(state, audit, stored)
+}
+
+fn emit_admission_rejection(audit: &UploadAudit<'_>) {
+    security_upload_event(
+        audit.headers,
+        audit.actor.as_deref(),
+        audit.route,
+        Some(audit.hosted),
+        "denied",
+    )
+    .project(Some(audit.project))
+    .version(Some(audit.version))
+    .filename(Some(audit.filename))
+    .digest(Some(audit.digest))
+    .reason(Some("ingress admission rejected"))
+    .emit();
 }
 
 fn project_quota_reservation(

@@ -11,6 +11,43 @@ is rejected, and the error string a rejection returns. For why peryx works this 
 [what peryx accepts on upload](@/ecosystems/pypi/uploads.md); for the routes these apply to, see
 [HTTP endpoints](@/ecosystems/pypi/reference/endpoints.md).
 
+## Durable ingress admission
+
+A PyPI client uploads to whichever datacenter it reaches. Before peryx stores an upload, the datacenter it arrived at
+durably admits it: it streams the bytes to a staged blob and records a durable write intent bound to the tenant (the
+upload route), the ecosystem authority key (the normalized project), the artifact digest, the byte size, the ingress
+datacenter, and an operation id. Admission succeeds only once both the bytes and the intent are durable in that
+datacenter, so an accepted upload survives a restart near the client. Publication, home-datacenter assignment, and
+cross-datacenter replication run after admission and are not part of it.
+
+| Situation                                           | Status | Result                                                                          |
+| --------------------------------------------------- | ------ | ------------------------------------------------------------------------------- |
+| A new upload is streamed and staged                 | `200`  | One intent is recorded, bound to the identity above                             |
+| The same filename and content is resent             | `200`  | The resend resolves the same intent; no bytes are staged twice                  |
+| The same filename is resent with different content  | `400`  | `File already exists: "<name>" has different content; use a different filename` |
+| The declared digest does not match the bytes        | `400`  | `<field> mismatch`, before an intent is recorded                                |
+| The backend cannot prove same-datacenter durability | `503`  | `same-datacenter durability unavailable: <guarantee>`                           |
+| The un-finalized admission backlog is full          | `503`  | `ingress admission backlog is full`                                             |
+
+**Idempotency.** The intent is keyed by the upload's file identity within its tenant and authority, so a retried upload
+resolves one intent rather than staging its bytes a second time. A client that loses the response and resends the same
+distribution is admitted again and publishes the same file idempotently; a resend of the same filename carrying
+different bytes is refused with the same error publication returns, so the client-visible upload contract is unchanged.
+
+**Checksums.** The `sha256_digest`, `blake2_256_digest`, and `md5_digest` a client declares are verified against the
+streamed bytes before admission records anything, so a checksum mismatch is rejected with its existing error and leaves
+no staged intent. See [the digest fields peryx verifies](#upload-digest-fields) below.
+
+**Same-datacenter durability.** Admission requires the configured blob backend to prove race-safe, integrity-checked
+writes — create-if-absent so a concurrent writer cannot silently clobber a staged artifact, and checksum validation so a
+corrupted write is rejected rather than acknowledged. A local filesystem proves both. An object store proves them only
+when its endpoint honors conditional writes and checksum validation; one that cannot is refused at admission rather than
+acknowledging an upload it cannot make durable.
+
+**Limits.** Each ingress node bounds the number of un-finalized intents it holds, so a stalled downstream cannot let
+staged uploads grow without limit. When the backlog is full, further uploads shed load with `503` until finalized
+intents drain.
+
 ## Project size quota
 
 An index policy can set `max_project_size_bytes` for hosted PyPI uploads. The limit counts each distribution file's

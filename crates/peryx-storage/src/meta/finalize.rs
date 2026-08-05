@@ -31,7 +31,7 @@ pub enum FinalizeOutcome {
 
 /// How a finalize transaction ended, threading the caller's error `E` alongside the internal
 /// race-replay signal so both leave the transaction dropped through one error channel.
-enum FinalizeFlow<E> {
+pub(super) enum FinalizeFlow<E> {
     /// The caller's body, or a store fault mapped into it, rejected the finalize.
     User(E),
     /// The outcome was already terminal when the finalize hook read it, so the staged rows and journal
@@ -41,6 +41,12 @@ enum FinalizeFlow<E> {
 
 impl<E: From<MetaError>> From<MetaError> for FinalizeFlow<E> {
     fn from(err: MetaError) -> Self {
+        Self::User(E::from(err))
+    }
+}
+
+impl<E: From<super::QuotaError>> From<super::QuotaError> for FinalizeFlow<E> {
+    fn from(err: super::QuotaError) -> Self {
         Self::User(E::from(err))
     }
 }
@@ -77,6 +83,17 @@ impl MetaStore {
             |txn, ()| stamp_finalized(txn, operation, intent_key, response, expiry_unix, now),
             |driver| body(driver).map(|journal| ((), journal)).map_err(FinalizeFlow::User),
         );
+        self.resolve_finalize(operation, committed)
+    }
+
+    /// Map a finalize transaction's result to a [`FinalizeOutcome`]: a clean commit published, a
+    /// race-replay re-reads the terminal outcome another attempt already stored, and the caller's error
+    /// propagates. Shared by the plain and quota-threaded finalize paths.
+    pub(super) fn resolve_finalize<E: From<MetaError>>(
+        &self,
+        operation: &str,
+        committed: Result<(), FinalizeFlow<E>>,
+    ) -> Result<FinalizeOutcome, E> {
         match committed {
             Ok(()) => Ok(FinalizeOutcome::Published),
             Err(FinalizeFlow::User(err)) => Err(err),
@@ -92,7 +109,7 @@ impl MetaStore {
 
 /// Stamp the terminal outcome and advance the intent inside the open finalize transaction, or signal a
 /// race-replay when the outcome is already terminal.
-fn stamp_finalized<E: From<MetaError>>(
+pub(super) fn stamp_finalized<E: From<MetaError>>(
     txn: &redb::WriteTransaction,
     operation: &str,
     intent_key: &str,

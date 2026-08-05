@@ -1,7 +1,28 @@
-use crate::meta::{FinalizeOutcome, IntentPhase, MetaError, MetaStore, OperationState};
+use crate::meta::{
+    AccountingClass, FinalizeOutcome, IntentPhase, MetaError, MetaStore, NewQuotaReservation, OperationState,
+    QuotaError, QuotaReservationRecord, QuotaValue,
+};
 
 fn decode_error() -> MetaError {
     MetaError::from(serde_json::from_str::<serde_json::Value>("{").unwrap_err())
+}
+
+fn reservation(store: &MetaStore) -> QuotaReservationRecord {
+    store
+        .reserve_project_quota(
+            NewQuotaReservation {
+                repository: "hosted",
+                project: Some("flask"),
+                version: Some("1.0"),
+                digest: "digest",
+                bytes: 8,
+                class: AccountingClass::Hosted,
+                created_at_unix: 1,
+            },
+            8,
+            false,
+        )
+        .unwrap()
 }
 
 fn staged(store: &MetaStore) {
@@ -115,6 +136,94 @@ fn test_commit_finalized_write_advances_nothing_for_an_absent_intent() {
         store.operation_outcome("op").unwrap().unwrap().state,
         OperationState::Published
     );
+}
+
+#[test]
+fn test_commit_finalized_write_with_quota_commits_the_reservation_on_publish() {
+    let (_dir, store) = super::store();
+    staged(&store);
+    let reservation = reservation(&store);
+
+    let outcome = store
+        .commit_finalized_write_with_quota("op", "intent", b"response", Some(100), 2, reservation.id, |driver| {
+            driver.put("row", b"value")?;
+            Ok::<_, QuotaError>((true, vec![b"{\"action\":\"add\"}".to_vec()]))
+        })
+        .unwrap();
+
+    assert_eq!(outcome, FinalizeOutcome::Published);
+    assert_eq!(
+        store
+            .quota_project_usage("hosted", "flask")
+            .unwrap()
+            .file_bytes
+            .committed,
+        8
+    );
+    assert_eq!(
+        store.staged_intent("intent").unwrap().unwrap().phase,
+        IntentPhase::Admitted
+    );
+}
+
+#[test]
+fn test_commit_finalized_write_with_quota_releases_the_reservation_on_skip() {
+    let (_dir, store) = super::store();
+    staged(&store);
+    let reservation = reservation(&store);
+
+    let outcome = store
+        .commit_finalized_write_with_quota("op", "intent", b"response", None, 2, reservation.id, |_driver| {
+            Ok::<_, QuotaError>((false, Vec::new()))
+        })
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        FinalizeOutcome::Published,
+        "a skipped finalize still records a terminal result"
+    );
+    assert_eq!(
+        store.quota_reservation(reservation.id).unwrap(),
+        None,
+        "the reservation is released"
+    );
+    assert_eq!(
+        store.quota_project_usage("hosted", "flask").unwrap().file_bytes,
+        QuotaValue::default()
+    );
+}
+
+#[test]
+fn test_commit_finalized_write_with_quota_replays_without_moving_the_reservation() {
+    let (_dir, store) = super::store();
+    staged(&store);
+    let reservation = reservation(&store);
+    store
+        .commit_finalized_write_with_quota("op", "intent", b"first", None, 2, reservation.id, |driver| {
+            driver.put("row", b"value")?;
+            Ok::<_, QuotaError>((true, vec![b"{\"action\":\"add\"}".to_vec()]))
+        })
+        .unwrap();
+
+    let replay = store
+        .commit_finalized_write_with_quota("op", "intent", b"second", None, 5, reservation.id, |driver| {
+            driver.put("row", b"clobbered")?;
+            Ok::<_, QuotaError>((true, vec![b"{\"action\":\"add\"}".to_vec()]))
+        })
+        .unwrap();
+
+    assert!(matches!(&replay, FinalizeOutcome::Replayed(record) if record.response == b"first"));
+    assert_eq!(
+        store
+            .quota_project_usage("hosted", "flask")
+            .unwrap()
+            .file_bytes
+            .committed,
+        8,
+        "the replay does not move the already-committed reservation a second time"
+    );
+    assert_eq!(store.current_serial().unwrap(), 1);
 }
 
 #[test]

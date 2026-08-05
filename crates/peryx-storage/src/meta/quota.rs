@@ -329,6 +329,51 @@ impl MetaStore {
         )
     }
 
+    /// Finalize an admitted write that carries a metered quota reservation, committing the reservation
+    /// with the published rows or releasing it for an idempotent no-op, in the same transaction as the
+    /// outcome and intent advance [`commit_finalized_write`](MetaStore::commit_finalized_write) records.
+    ///
+    /// `body` returns whether it published rows paired with its journal entries: a published finalize
+    /// commits `reservation` and a skipped one releases it, so a metered artifact counts once and a
+    /// duplicate reclaims its hold. A replay of an already-terminal outcome discards the staged rows,
+    /// the journal, and the reservation move, replaying the stored result instead.
+    ///
+    /// # Errors
+    /// Returns the body's error, [`QuotaError::ReservationUnavailable`], or a store error mapped into
+    /// it, if the transaction fails.
+    pub fn commit_finalized_write_with_quota<E>(
+        &self,
+        operation: &str,
+        intent_key: &str,
+        response: &[u8],
+        expiry_unix: Option<i64>,
+        now: i64,
+        reservation: Uuid,
+        body: impl FnOnce(&mut super::DriverTxn) -> Result<(bool, Vec<Vec<u8>>), E>,
+    ) -> Result<super::FinalizeOutcome, E>
+    where
+        E: From<MetaError> + From<QuotaError>,
+    {
+        let committed = self.commit_driver_txn_at(
+            None,
+            None,
+            true,
+            |txn, &wrote| {
+                super::finalize::stamp_finalized::<E>(txn, operation, intent_key, response, expiry_unix, now)?;
+                let available = if wrote {
+                    commit_reservation(txn, reservation)?
+                } else {
+                    release(txn, reservation, ReleaseScope::Pending)?
+                };
+                available.then_some(()).ok_or_else(|| {
+                    super::finalize::FinalizeFlow::User(QuotaError::ReservationUnavailable { id: reservation }.into())
+                })
+            },
+            |driver| body(driver).map_err(super::finalize::FinalizeFlow::User),
+        );
+        self.resolve_finalize(operation, committed.map(drop))
+    }
+
     /// Release a pending or committed allocation. A second release returns `false` and changes no counters.
     ///
     /// # Errors

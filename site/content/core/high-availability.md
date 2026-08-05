@@ -133,6 +133,32 @@ reaches zero points at a stalled poll, which readiness reports as `sync_error` o
 `incompatible_schema` reason means the primary and replica were built against different replication protocol versions;
 upgrade the primary before routing reads to that replica.
 
+## Peer artifact byte endpoint
+
+A `dc` or `ha` primary serves artifact bytes to authenticated peers at `GET /+replication/v1/blobs/sha256/{digest}`. The
+endpoint carries the same bearer token as the change feed; a request without it, or with a wrong one, earns
+`401 Unauthorized` and a `WWW-Authenticate: Bearer` challenge. This is a private plane between nodes, not a public
+download path.
+
+The endpoint serves a committed blob by its digest; a digest the store does not hold reads as `404 Not Found`. A served
+response carries `ETag: "sha256:<digest>"` as checksum evidence and `Cache-Control: private, no-store`. A peer selects
+which verified placements to request from its own routing metadata; the endpoint hands over bytes rather than deciding
+placement.
+
+A peer fetches the whole object or a byte range. The endpoint advertises `Accept-Ranges: bytes` and honors a single
+`Range: bytes=first-last` per [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#name-range-requests): a satisfiable
+range returns `206 Partial Content` with `Content-Range` and `Content-Length`, a well-formed but unmeetable range
+returns `416 Range Not Satisfiable` naming the size, and a malformed range falls back to the whole object.
+
+The primary bounds how many byte streams it serves at once. A request that arrives while every slot is held earns
+`503 Service Unavailable` with `Retry-After`, so a burst of slow or abandoned readers cannot exhaust the file handles,
+sockets, and buffers a stream pins. A stream releases its slot the moment it finishes, its reader cancels, or the
+connection drops, so a stalled peer frees capacity for the next without waiting on a timeout.
+
+Responses and logs stay clear of peer credentials and internal addresses. The endpoint returns bytes, a status, and the
+size and digest headers a range needs, and nothing about the token, the requesting peer, or the store's filesystem
+paths.
+
 ## Availability topology snapshot
 
 An operator surface needs one picture of the whole group, not a probe against each node. `GET /+availability/topology`

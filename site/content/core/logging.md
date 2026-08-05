@@ -73,6 +73,36 @@ jq 'select(.fields.security_event == true and .fields.action == "upload")' /var/
 jq 'select(.fields.security_event == true and .fields.actor == "__token__")' /var/log/peryx/events.log
 ```
 
+## Availability operation trace context
+
+A replicated write carries a [W3C trace context](https://www.w3.org/TR/trace-context/) on its operation
+envelope, so the span that authored it, the follower that applies it, and the background copy that moves
+its bytes all belong to one trace. The apply side joins the author's trace rather than starting a
+disconnected one, taking the envelope's `traceparent` as its parent and a fresh span id of its own, so a
+restart or a home failover that replays the envelope keeps the same trace and the same operation identity.
+
+An operation the trace sampled records one structured `availability operation` event with these fields:
+
+| Field                   | Meaning                                                            |
+| ----------------------- | ----------------------------------------------------------------- |
+| `operation.source`      | The producer datacenter identity that authored the operation.     |
+| `operation.epoch`       | The authority epoch the operation was admitted under.             |
+| `operation.serial`      | The producer's per-operation serial, unique and idempotent.       |
+| `operation.kind`        | `upload`, `yank`, `delete`, `cache-fill`, `oci-push`, `oci-delete`, or `visibility`. |
+| `operation.traceparent` | The W3C traceparent that correlates the operation across nodes.   |
+
+The fields are the operation's identity and its trace linkage alone. The change payload — the event bytes,
+the metadata mutations, and the blob references — never appears, so no credential, artifact byte, or
+private path reaches a log through this surface. Recording is gated on the traceparent's own sampled flag:
+an operation a producer chose not to trace, or one that clears the sampled bit, emits nothing, so a burst
+of writes a trace opted out of adds no event volume.
+
+Correlate one operation across nodes by its traceparent trace-id, or by its `source`/`serial` identity:
+
+```shell
+jq 'select(.fields.message == "availability operation" and .fields."operation.serial" == 7)' /var/log/peryx/events.log
+```
+
 ## Related
 
 - Every logging flag and TOML key: [configuration](@/core/configuration.md)

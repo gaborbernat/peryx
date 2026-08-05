@@ -45,6 +45,7 @@ mod remote_durability;
 mod replica;
 pub mod sim;
 mod status;
+mod telemetry;
 mod versions;
 mod visibility;
 
@@ -111,6 +112,7 @@ pub use reconcile::{Disposition, OldEpochOp, classify};
 pub use remote_durability::{MetadataOperation, RemoteAck, RemoteDurability, assess_remote_metadata_durability};
 pub use replica::{AppliedPage, Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};
+pub use telemetry::{OperationTelemetry, sampled};
 pub use versions::{
     AvailabilityVersions, Incompatibility, Negotiation, Version, VersionRange, WireKind, accepts_operation_kind,
     feature_activated, negotiate, snapshot_compatible,

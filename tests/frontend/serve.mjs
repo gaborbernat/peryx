@@ -18,6 +18,7 @@ if (!binary) {
 }
 const port = Number(process.env.PERYX_FRONTEND_PORT ?? 4455);
 const upstreamPort = Number(process.env.PERYX_UPSTREAM_PORT ?? 4454);
+const readyPort = Number(process.env.PERYX_READY_PORT ?? port + 1000);
 const base = `http://127.0.0.1:${port}`;
 const upstreamBase = `http://127.0.0.1:${upstreamPort}`;
 
@@ -175,15 +176,18 @@ const peryx = spawn(binary, ["serve", "--port", port.toString(), "--data-dir", d
   cwd: repo, // the /pkg asset route serves ui/pkg relative to the working directory
   stdio: "inherit",
 });
+let ready;
 process.on("exit", () => {
   peryx.kill();
   upstream.close();
+  ready?.close();
 });
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   // A plain signal skips the exit handler, which leaks peryx on the port; forward and quit.
   process.on(signal, () => {
     peryx.kill();
     upstream.close();
+    ready?.close();
     process.exit(0);
   });
 }
@@ -303,5 +307,17 @@ if (!manifestResponse.ok) {
   console.error(`manifest push rejected: ${manifestResponse.status} ${await manifestResponse.text()}`);
   process.exit(1);
 }
+
+// Bind the readiness port only now, once every fixture is in place. Playwright polls this before it
+// runs any test; peryx's /+status answers far earlier, so gating on it would race the uploads above.
+// A still-closed port reads as connection-refused, which Playwright treats as not-yet-ready.
+ready = createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "text/plain" });
+  response.end("ready");
+});
+await new Promise((resolve, reject) => {
+  ready.once("error", reject);
+  ready.listen(readyPort, "127.0.0.1", resolve);
+});
 
 console.log("peryx ready with the fixture uploaded");

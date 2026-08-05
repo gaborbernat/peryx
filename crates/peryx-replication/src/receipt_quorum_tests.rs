@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use peryx_storage::blob::Digest;
 
 use crate::readiness::DurabilityPolicy;
@@ -14,6 +16,10 @@ fn nodes(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
+fn members(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
 #[test]
 fn test_majority_acknowledges_after_two_of_three_independent_nodes() {
     let digest = Digest::of(b"artifact");
@@ -21,7 +27,7 @@ fn test_majority_acknowledges_after_two_of_three_independent_nodes() {
     let outcome = assess_byte_durability(
         &digest,
         &[ack("a", &digest), ack("b", &digest)],
-        3,
+        &members(&["a", "b", "c"]),
         DurabilityPolicy::Majority,
     );
 
@@ -38,7 +44,12 @@ fn test_majority_acknowledges_after_two_of_three_independent_nodes() {
 fn test_majority_is_pending_with_one_of_three() {
     let digest = Digest::of(b"artifact");
 
-    let outcome = assess_byte_durability(&digest, &[ack("a", &digest)], 3, DurabilityPolicy::Majority);
+    let outcome = assess_byte_durability(
+        &digest,
+        &[ack("a", &digest)],
+        &members(&["a", "b", "c"]),
+        DurabilityPolicy::Majority,
+    );
 
     assert_eq!(
         outcome,
@@ -59,7 +70,7 @@ fn test_two_paths_on_one_node_count_once() {
     let outcome = assess_byte_durability(
         &digest,
         &[ack("a", &digest), ack("a", &digest)],
-        3,
+        &members(&["a", "b", "c"]),
         DurabilityPolicy::Majority,
     );
 
@@ -80,7 +91,28 @@ fn test_a_receipt_for_another_digest_never_counts() {
     let outcome = assess_byte_durability(
         &digest,
         &[ack("a", &digest), ack("b", &other)],
-        3,
+        &members(&["a", "b", "c"]),
+        DurabilityPolicy::Majority,
+    );
+
+    assert_eq!(
+        outcome,
+        ByteDurability::Pending {
+            nodes: nodes(&["a"]),
+            required: 2,
+        }
+    );
+}
+
+#[test]
+fn test_a_receipt_from_a_nonmember_never_counts() {
+    let digest = Digest::of(b"artifact");
+
+    // A node outside the configured group cannot contribute to the quorum, however genuine its receipt.
+    let outcome = assess_byte_durability(
+        &digest,
+        &[ack("z", &digest), ack("a", &digest)],
+        &members(&["a", "b", "c"]),
         DurabilityPolicy::Majority,
     );
 
@@ -102,7 +134,7 @@ fn test_node_loss_still_acknowledges_when_the_rest_meet_quorum() {
     let outcome = assess_byte_durability(
         &digest,
         &[ack("b", &digest), ack("a", &digest)],
-        3,
+        &members(&["a", "b", "c"]),
         DurabilityPolicy::Majority,
     );
 
@@ -114,7 +146,12 @@ fn test_node_loss_still_acknowledges_when_the_rest_meet_quorum() {
 fn test_local_policy_acknowledges_from_a_single_node() {
     let digest = Digest::of(b"artifact");
 
-    let outcome = assess_byte_durability(&digest, &[ack("a", &digest)], 3, DurabilityPolicy::Local);
+    let outcome = assess_byte_durability(
+        &digest,
+        &[ack("a", &digest)],
+        &members(&["a", "b", "c"]),
+        DurabilityPolicy::Local,
+    );
 
     assert!(outcome.is_durable());
 }
@@ -126,7 +163,7 @@ fn test_everywhere_policy_needs_every_configured_node() {
     let outcome = assess_byte_durability(
         &digest,
         &[ack("a", &digest), ack("b", &digest)],
-        3,
+        &members(&["a", "b", "c"]),
         DurabilityPolicy::Everywhere,
     );
 
@@ -140,10 +177,28 @@ fn test_everywhere_policy_needs_every_configured_node() {
 }
 
 #[test]
+fn test_an_empty_roster_is_pending_not_vacuously_durable() {
+    let digest = Digest::of(b"artifact");
+
+    // Everywhere over zero members would compute a required quorum of zero; the floor keeps the write
+    // pending on at least one node rather than acknowledging it durable with no receipt at all.
+    let outcome = assess_byte_durability(&digest, &[], &members(&[]), DurabilityPolicy::Everywhere);
+
+    assert_eq!(
+        outcome,
+        ByteDurability::Pending {
+            nodes: Vec::new(),
+            required: 1,
+        }
+    );
+    assert!(!outcome.is_durable());
+}
+
+#[test]
 fn test_no_receipts_are_pending() {
     let digest = Digest::of(b"artifact");
 
-    let outcome = assess_byte_durability(&digest, &[], 3, DurabilityPolicy::Majority);
+    let outcome = assess_byte_durability(&digest, &[], &members(&["a", "b", "c"]), DurabilityPolicy::Majority);
 
     assert_eq!(
         outcome,

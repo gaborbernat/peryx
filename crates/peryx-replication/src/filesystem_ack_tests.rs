@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use peryx_storage::blob::{BlobDurability, Digest};
 
 use crate::ack::AckDecision;
@@ -18,9 +20,13 @@ fn receipt(node: &str, digest: Digest) -> ReceiptAck {
     }
 }
 
+fn members(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
 /// A three-member group whose majority quorum is two.
 fn awaiting() -> FilesystemAck {
-    FilesystemAck::new(digest(1), 3, DurabilityPolicy::Majority)
+    FilesystemAck::new(digest(1), members(&["a", "b", "c"]), DurabilityPolicy::Majority)
 }
 
 #[test]
@@ -79,6 +85,25 @@ fn test_a_receipt_for_another_digest_is_ignored() {
     assert_eq!(ack.record(receipt("a", digest(2))), ReceiptOutcome::Ignored);
 
     assert_eq!(ack.independent_receipts(), 0);
+}
+
+#[test]
+fn test_a_receipt_from_a_nonmember_is_ignored() {
+    let mut ack = awaiting();
+    // "z" is not one of the configured members, so its receipt cannot join the quorum.
+    assert_eq!(ack.record(receipt("z", digest(1))), ReceiptOutcome::Ignored);
+
+    assert_eq!(ack.independent_receipts(), 0);
+}
+
+#[test]
+fn test_an_empty_roster_never_acknowledges_durable() {
+    // Everywhere over zero members must not report a write durable with no receipt: the floored quorum
+    // keeps it pending even when the metadata dimension is acknowledged.
+    let ack = FilesystemAck::new(digest(1), members(&[]), DurabilityPolicy::Everywhere);
+
+    assert_eq!(ack.decide(AckDecision::Acknowledged, Live), DcAck::Pending);
+    assert_eq!(ack.decide(AckDecision::Acknowledged, Expired), DcAck::Unknown);
 }
 
 #[test]

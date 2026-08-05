@@ -560,3 +560,138 @@ async fn test_delete_project_named_promote() {
     let (status, ..) = get(&h.state, "/hosted/simple/promote/", Some("application/json")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[rstest]
+#[case::home_ingress(true)]
+#[case::non_home_ingress(false)]
+#[tokio::test]
+async fn test_yank_applies_at_the_current_authority_epoch(#[case] homed: bool) {
+    let h = harness().await;
+    upload_peryxpkg(&h.state, "/root/pypi/", &fixture_wheel()).await;
+    // A homed authority at a settled epoch admits the control; a non-home node at the same epoch routes
+    // it too, so a control works from home and non-home ingress alike.
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 5,
+            homed,
+        },
+    );
+    assert_eq!(
+        request(&h.state, "PUT", "/root/pypi/peryxpkg/1.0/yank", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    let (_, _, page) = get(&h.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
+    assert!(page.contains("\"yanked\":true"));
+}
+
+#[tokio::test]
+async fn test_yank_under_a_superseded_epoch_conflicts_and_writes_nothing() {
+    let h = harness().await;
+    upload_peryxpkg(&h.state, "/root/pypi/", &fixture_wheel()).await;
+    // A former home leased epoch 5, but the authority advanced to 6: a transfer superseded this writer.
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 6,
+            homed: true,
+        },
+    );
+    let (status, body) = request_response(&h.state, "PUT", "/root/pypi/peryxpkg/1.0/yank", Some(&upload_auth())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // The stale epoch changed nothing: the file stays un-yanked.
+    let (_, _, page) = get(&h.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
+    assert!(!page.contains("\"yanked\":true"));
+    assert_no_topology(&body);
+}
+
+#[tokio::test]
+async fn test_delete_at_the_current_authority_epoch_applies() {
+    let h = harness().await;
+    upload_peryxpkg(&h.state, "/root/pypi/", &fixture_wheel()).await;
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 9,
+            current: 9,
+            homed: true,
+        },
+    );
+    assert_eq!(
+        request(&h.state, "DELETE", "/root/pypi/peryxpkg/", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    let (status, ..) = get(&h.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_under_a_superseded_epoch_conflicts_and_keeps_the_file() {
+    let h = harness().await;
+    upload_peryxpkg(&h.state, "/root/pypi/", &fixture_wheel()).await;
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 6,
+            homed: true,
+        },
+    );
+    let (status, body) = request_response(&h.state, "DELETE", "/root/pypi/peryxpkg/", Some(&upload_auth())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // The stale delete never landed: the project still serves.
+    let (status, ..) = get(&h.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_no_topology(&body);
+}
+
+#[tokio::test]
+async fn test_restore_under_a_superseded_epoch_conflicts() {
+    let h = harness().await;
+    upload_peryxpkg(&h.state, "/root/pypi/", &fixture_wheel()).await;
+    // Soft-delete the project first, without a group, so the restore has something to undo.
+    assert_eq!(
+        request(&h.state, "DELETE", "/root/pypi/peryxpkg/", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 6,
+            homed: true,
+        },
+    );
+    let (status, body) = request_response(&h.state, "PUT", "/root/pypi/peryxpkg/restore", Some(&upload_auth())).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // The fenced restore left the project deleted.
+    let (status, ..) = get(&h.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_no_topology(&body);
+}
+
+/// A stale-epoch control error is protocol-safe: it names no node address, leader, or datacenter, so it
+/// leaks no internal control topology.
+fn assert_no_topology(body: &str) {
+    let lowered = body.to_ascii_lowercase();
+    for leaked in [
+        "leader",
+        "voter",
+        "datacenter",
+        "://",
+        "127.0.0.1",
+        ".internal",
+        "node ",
+    ] {
+        assert!(
+            !lowered.contains(leaked),
+            "stale-epoch response leaked {leaked:?}: {body}"
+        );
+    }
+    assert!(
+        lowered.contains("retry"),
+        "stale-epoch response should guide a retry: {body}"
+    );
+}

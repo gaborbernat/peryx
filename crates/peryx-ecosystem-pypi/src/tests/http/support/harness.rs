@@ -370,3 +370,48 @@ pub async fn stale_page_harness(max_stale_secs: i64, fetched_at: i64) -> Harness
         .await;
     h
 }
+
+/// A stand-in ownership authority for control-routing tests. `committed` is the epoch a control reads
+/// as its lease (the possibly-lagging local view); `current` is the authoritative epoch the fence
+/// admits against. When the two differ, a control that leased `committed` is fenced, modelling a home
+/// transfer that advanced the authority after the control started.
+pub struct AuthorityDouble {
+    pub committed: u64,
+    pub current: u64,
+    pub homed: bool,
+}
+
+#[async_trait::async_trait]
+impl peryx_driver::state::OwnershipAuthority for AuthorityDouble {
+    async fn has_home(&self, _authority: &str) -> bool {
+        self.homed
+    }
+
+    async fn committed_epoch(&self, _authority: &str) -> u64 {
+        self.committed
+    }
+
+    async fn admit_epoch(&self, _authority: &str, presented: u64) -> bool {
+        self.current != 0 && presented == self.current
+    }
+
+    async fn claim_home(
+        &self,
+        _authority: &str,
+    ) -> Result<peryx_driver::state::HomeClaim, peryx_driver::state::OwnershipError> {
+        Ok(peryx_driver::state::HomeClaim::AlreadyHomed)
+    }
+
+    fn cluster_status(&self) -> peryx_driver::state::ClusterStatus {
+        peryx_driver::state::ClusterStatus {
+            leader: None,
+            term: self.current,
+            voters: Vec::new(),
+        }
+    }
+}
+
+/// Install `authority` as the process ownership group, so control mutations route through its epoch fence.
+pub fn install_authority(state: &Arc<AppState>, authority: AuthorityDouble) {
+    state.set_ownership_authority(Arc::new(authority));
+}

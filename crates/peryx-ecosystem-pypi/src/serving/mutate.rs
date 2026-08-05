@@ -85,7 +85,7 @@ pub async fn pypi_dispatch_put(state: Arc<ServingState>, uri: axum::http::Uri, h
         return yank_request(&state, index, hosted, spec, uri.query(), &headers, actor.as_deref()).await;
     }
     if let Some(spec) = strip_action_segment(spec, "restore") {
-        return restore_request(&state, index, hosted, spec, &headers, actor.as_deref());
+        return restore_request(&state, index, hosted, spec, &headers, actor.as_deref()).await;
     }
     not_found()
 }
@@ -143,7 +143,8 @@ async fn promote_request(
         &index.route,
         &project,
         &version,
-    );
+    )
+    .await;
     security_promotion_event(audit, &result);
     promotion_response(result)
 }
@@ -186,7 +187,7 @@ async fn yank_request(
     count_response(result)
 }
 
-fn restore_request(
+async fn restore_request(
     state: &Arc<ServingState>,
     index: &Index,
     hosted: &Index,
@@ -198,7 +199,7 @@ fn restore_request(
         Ok(parsed) => parsed,
         Err(response) => return response,
     };
-    let result = cache::restore_files(state, &hosted.name, &project, version.as_deref());
+    let result = cache::restore_files(state, &hosted.name, &project, version.as_deref()).await;
     let audit = MutationAudit {
         headers,
         action: "restore",

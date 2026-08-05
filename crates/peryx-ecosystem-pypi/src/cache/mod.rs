@@ -70,6 +70,8 @@ pub enum CacheError {
     OfflineMissing(&'static str),
     #[error("index is not volatile; delete is disabled")]
     NotVolatile,
+    #[error("a newer authority epoch superseded this control")]
+    AuthoritySuperseded,
     #[error("no known source for this file")]
     FileNotFound,
     #[error("artifact is revoked")]
@@ -140,6 +142,9 @@ impl CacheError {
             Self::InvalidProvenance => "upstream provenance is not a PEP 740 attestation document".to_owned(),
             Self::OfflineMissing(target) => format!("offline mode has no cached {target}"),
             Self::NotVolatile => "index is not volatile; delete is disabled".to_owned(),
+            Self::AuthoritySuperseded => {
+                "the project's authority advanced to a newer epoch; retry this control".to_owned()
+            }
             Self::FileNotFound | Self::ArtifactRevoked => {
                 "no matching cached file or upstream source was found".to_owned()
             }

@@ -14,6 +14,27 @@ use peryx_index::{Index, IndexKind};
 use super::CacheError;
 use super::resolve::resolve_detail_optional;
 
+/// A metadata control routes through the project's ownership authority: the normalized project name is
+/// the authority key, so every PEP 503 name variant fences on one epoch. The control snapshots that
+/// epoch before it reads, then re-admits it before it writes, so a home transfer that lands while the
+/// control resolves is caught before it can change serial or visibility under a superseded epoch.
+///
+/// Snapshot the committed epoch a control will finalize under. `0` when this process runs no ownership
+/// group, or the authority has no committed home, which admits the control unfenced.
+async fn control_epoch(state: &ServingState, authority: &str) -> u64 {
+    state.committed_authority_epoch(authority).await
+}
+
+/// Fence a control whose leased epoch a transfer superseded, before it writes. A former home that read
+/// the project at `fence` but whose authority advanced is rejected, so its stale write never lands. A
+/// process with no group, or an unhomed authority (`fence` of `0`), holds no epoch and is never fenced.
+async fn admit_control(state: &ServingState, authority: &str, fence: u64) -> Result<(), CacheError> {
+    if fence != 0 && !state.admit_authority_epoch(authority, fence).await {
+        return Err(CacheError::AuthoritySuperseded);
+    }
+    Ok(())
+}
+
 /// Persist a prepared upload into the hosted store `name`: commit the staged blob, record the file
 /// and its project, and bump the serial. Returns `false` for a same-bytes duplicate.
 ///
@@ -51,7 +72,7 @@ pub fn upload_exists(state: &ServingState, hosted: &str, normalized: &str, filen
 /// Returns [`CacheError::NoPromotableFiles`] when the source hosted layer has no matching upload,
 /// [`CacheError::FileExists`] when a target filename exists with different bytes, or another
 /// [`CacheError`] on metadata-store or decode failures.
-pub fn promote_release(
+pub async fn promote_release(
     state: &ServingState,
     source: &str,
     target: &str,
@@ -59,6 +80,7 @@ pub fn promote_release(
     normalized: &str,
     version: &str,
 ) -> Result<usize, CacheError> {
+    let fence = control_epoch(state, normalized).await;
     let mut matched = false;
     let mut records = Vec::new();
     let mut blob_sizes = BTreeMap::new();
@@ -91,6 +113,7 @@ pub fn promote_release(
         .meta
         .get_project(source, normalized)?
         .unwrap_or_else(|| normalized.to_owned());
+    admit_control(state, normalized, fence).await?;
     let release = PromotedRelease {
         index: target,
         normalized,
@@ -141,10 +164,13 @@ pub async fn set_yanked(
     version: Option<&str>,
     yanked: Yanked,
 ) -> Result<usize, CacheError> {
+    let fence = control_epoch(state, normalized).await;
     let uploaded = upload_filenames(state, hosted, normalized)?;
+    let served = served_filenames(state, index, normalized, version).await?;
+    admit_control(state, normalized, fence).await?;
     let submitted_at_unix = (state.clock)();
     let mut changed = yank_uploads(state, hosted, normalized, version, &yanked, submitted_at_unix)?;
-    for filename in served_filenames(state, index, normalized, version).await? {
+    for filename in served {
         if uploaded.contains(&filename) {
             continue;
         }
@@ -204,8 +230,10 @@ pub async fn remove_files(
     version: Option<&str>,
     trash: TrashContext<'_>,
 ) -> Result<usize, CacheError> {
+    let fence = control_epoch(state, normalized).await;
     let filenames = served_filenames(state, index, normalized, version).await?;
     let uploaded = upload_filenames(state, hosted, normalized)?;
+    admit_control(state, normalized, fence).await?;
     let mut affected = trash_uploads(state, hosted, volatile, normalized, version, trash)?;
     for filename in filenames {
         if uploaded.contains(&filename) {
@@ -227,12 +255,14 @@ pub async fn remove_files(
 ///
 /// # Errors
 /// Returns [`CacheError`] on a store failure.
-pub fn restore_files(
+pub async fn restore_files(
     state: &ServingState,
     hosted: &str,
     normalized: &str,
     version: Option<&str>,
 ) -> Result<usize, CacheError> {
+    let fence = control_epoch(state, normalized).await;
+    admit_control(state, normalized, fence).await?;
     let submitted_at_unix = (state.clock)();
     let mut restored = untrash_uploads(state, hosted, normalized, version, submitted_at_unix)?;
     for (filename, kind) in state.meta.list_overrides(hosted, normalized)? {

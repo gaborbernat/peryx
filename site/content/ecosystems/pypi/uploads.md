@@ -283,6 +283,33 @@ bound attestation declares, so it raises no new trust in the bundle: a wrong-sub
 rejected before the requirement is judged, and a matching upload still gets no signature or identity guarantee it did
 not earn.
 
+## Controls route through the project's authority
+
+A yank, unyank, delete, restore, or promote changes what a project serves, so peryx routes each one through the
+project's home authority the way a first publish routes there. The normalized project name is the authority key, so
+every PEP 503 spelling of a name fences on one epoch, and a control accepted at one ingress is the same control at any
+other.
+
+A control leases the authority's committed epoch when it starts, resolves the files it will touch, then re-admits that
+epoch before it writes. A control whose authority did not move commits under the epoch it leased. One whose home
+transferred while it ran leased a superseded epoch, so peryx rejects it with `409 Conflict` and writes nothing: a former
+home cannot change a serial or a file's visibility after the project has moved on. The rejection carries a retry hint
+and nothing else — no leader address, no datacenter, no membership — so a protocol client learns to retry without
+learning the cluster's shape.
+
+### Retrying a fenced control
+
+Reissue the same request. The retry leases the current epoch and, once the transfer has settled, commits against the new
+home. The operations are idempotent — a second yank of an already-yanked file, a second delete of an already-trashed one
+— so a retry after an ambiguous failure converges on one serial ordering and one visible result instead of doubling the
+change.
+
+### Single-node and ungrouped deployments
+
+A process that runs no ownership group holds no epoch, and a project a group has not homed yet reads the unassigned
+sentinel. Both admit every control unfenced, so a single-node index and a freshly started cluster mutate exactly as
+before; the fence engages only once an authority has a committed home to supersede.
+
 ## In practice
 
 - The exact accept and reject rules, tables, and error strings: [upload rules](@/ecosystems/pypi/reference/uploads.md)

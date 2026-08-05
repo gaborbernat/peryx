@@ -221,11 +221,13 @@ impl OwnershipAuthority for OwnershipGroup {
         match self.node.submit(command).await {
             // Only a committed Transferred effect moved the home; a rejection (the authority is unassigned
             // or already homed there) commits too but moves nothing, so it reports no transfer.
-            Ok(OwnershipResponse::Applied(OwnershipEffect::Transferred { from, to, epoch })) => Ok(Some(TransferOutcome {
-                from: from.0,
-                to: to.0,
-                epoch: epoch.0,
-            })),
+            Ok(OwnershipResponse::Applied(OwnershipEffect::Transferred { from, to, epoch })) => {
+                Ok(Some(TransferOutcome {
+                    from: from.0,
+                    to: to.0,
+                    epoch: epoch.0,
+                }))
+            }
             Ok(_) => Ok(None),
             Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => Err(OwnershipError::NotLeader {
                 leader: forward.leader_node.map(|node| node.addr),

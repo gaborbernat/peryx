@@ -322,7 +322,9 @@ mod tests {
         };
         let group = transferring_group(Ok(Some(outcome.clone())));
 
-        let moved = transfer_authority_home(Some(&group), "proj", "west").await.expect("commits");
+        let moved = transfer_authority_home(Some(&group), "proj", "west")
+            .await
+            .expect("commits");
         assert_eq!(moved, Some(outcome));
     }
 
@@ -339,7 +341,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_transfer_without_a_group_moves_nothing() {
-        let moved = transfer_authority_home(None, "proj", "west").await.expect("no group moves nothing");
+        let moved = transfer_authority_home(None, "proj", "west")
+            .await
+            .expect("no group moves nothing");
         assert_eq!(moved, None);
     }
 

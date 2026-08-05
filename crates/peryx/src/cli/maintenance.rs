@@ -150,6 +150,8 @@ impl RevocationStatusArg {
 pub enum WriterCommand {
     /// Replace the configured writer identity after stopping the active writer.
     Promote(WriterPromoteArgs),
+    /// Claim the configured writer identity offline, seeding a replica's store before it starts.
+    Claim(WriterClaimArgs),
 }
 
 impl WriterCommand {
@@ -157,6 +159,7 @@ impl WriterCommand {
     pub const fn runtime_args(&self) -> &RuntimeArgs {
         match self {
             Self::Promote(args) => &args.runtime,
+            Self::Claim(args) => &args.runtime,
         }
     }
 }
@@ -169,6 +172,13 @@ pub struct WriterPromoteArgs {
 
     /// Identity that will become the writer.
     pub replacement: String,
+}
+
+/// Options for seeding a replica with the writer identity it follows.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct WriterClaimArgs {
+    #[command(flatten)]
+    pub runtime: RuntimeArgs,
 }
 
 /// Index policy commands.

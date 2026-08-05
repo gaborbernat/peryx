@@ -77,12 +77,27 @@ fn test_parse_writer_promote() {
 }
 
 #[test]
+fn test_parse_writer_claim() {
+    let cli = parse(&["peryx", "writer", "claim", "--data-dir", "/replica"]);
+    let Command::Writer(WriterCommand::Claim(args)) = cli.command else {
+        panic!("expected writer claim");
+    };
+    assert_eq!(args.runtime.data_dir, Some(PathBuf::from("/replica")));
+}
+
+#[test]
 fn test_writer_commands_expose_runtime_args() {
-    let cli = parse(&["peryx", "writer", "promote", "writer-b", "--data-dir", "/writer"]);
-    let Command::Writer(command) = cli.command else {
+    let promote = parse(&["peryx", "writer", "promote", "writer-b", "--data-dir", "/writer"]);
+    let Command::Writer(promote) = promote.command else {
         panic!("expected writer promote");
     };
-    assert_eq!(command.runtime_args().data_dir, Some(PathBuf::from("/writer")));
+    assert_eq!(promote.runtime_args().data_dir, Some(PathBuf::from("/writer")));
+
+    let claim = parse(&["peryx", "writer", "claim", "--data-dir", "/replica"]);
+    let Command::Writer(claim) = claim.command else {
+        panic!("expected writer claim");
+    };
+    assert_eq!(claim.runtime_args().data_dir, Some(PathBuf::from("/replica")));
 }
 
 #[test]

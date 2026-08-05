@@ -33,6 +33,41 @@ pub(super) fn valid_backup() -> (
     (source, root, config, backup, content_digest, metadata_digest)
 }
 
+/// A data directory whose metadata store is claimed by `identity` and advanced by `mutations` distinct
+/// project puts, so a test controls both the node identity and the control-plane serial.
+pub(super) fn claimed_data_dir(identity: &str, mutations: usize) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    meta.claim_writer_identity(identity).unwrap();
+    for _ in 0..mutations {
+        meta.next_serial().unwrap();
+    }
+    drop(meta);
+    dir
+}
+
+/// A valid backup of a data directory claimed by `identity` and advanced by `mutations` puts. Returns
+/// the temp root holding the source and the backup, and the backup path.
+pub(super) fn identified_backup(identity: &str, mutations: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+    let holder = tempfile::tempdir().unwrap();
+    let data_dir = holder.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    let meta = MetaStore::open(data_dir.join("peryx.redb")).unwrap();
+    meta.claim_writer_identity(identity).unwrap();
+    for _ in 0..mutations {
+        meta.next_serial().unwrap();
+    }
+    drop(meta);
+    let config = Config {
+        data_dir,
+        writer_identity: Some(identity.to_owned()),
+        ..Config::default()
+    };
+    let backup = holder.path().join("backup");
+    operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
+    (holder, backup)
+}
+
 pub(super) fn backup_fixture() -> (tempfile::TempDir, Config, Digest, Digest) {
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().join("data");

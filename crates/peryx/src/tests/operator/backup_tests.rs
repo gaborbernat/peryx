@@ -783,4 +783,14 @@ fn test_backup_records_none_availability_without_membership() {
     assert_eq!(availability["mode"], "none");
     assert_eq!(availability["placements"], 0);
     assert!(availability.get("membership").is_none());
+    assert!(availability.get("writer_identity").is_none());
+}
+
+#[test]
+fn test_backup_records_the_writer_identity() {
+    let (_holder, backup) = super::identified_backup("node-a", 1);
+
+    let manifest = read_manifest_json(&backup);
+
+    assert_eq!(manifest["availability"]["writer_identity"], "node-a");
 }

@@ -43,20 +43,21 @@ same care as the node.
 A backup is one coherent recovery point, and the manifest names which one. `metadata_frontier` records the metadata
 store's control-plane serial at the instant the copy was taken: the store advances it on every committed write, so the
 number is the recovery point's identity. `placements` records how many artifacts the store projects a local or remote
-availability for, sizing the availability state the metadata carries. `mode` records whether the node ran in `none`,
-`dc`, or `ha`, and when a static datacenter roster is configured, `membership` records its group and every member's
-node, datacenter, address, and role. The configuration snapshot omits that roster, so the manifest is the backup's only
-durable record of the topology the recovery point belongs to.
+availability for, sizing the availability state the metadata carries. `writer_identity` records the node the recovery
+point belongs to, when the store has claimed one, so a restore can tell one node's state from another's. `mode` records
+whether the node ran in `none`, `dc`, or `ha`, and when a static datacenter roster is configured, `membership` records
+its group and every member's node, datacenter, address, and role. The configuration snapshot omits that roster, so the
+manifest is the backup's only durable record of the topology the recovery point belongs to.
 
 `backup create` reads the frontier and placement count from the copied metadata store, not the live one, so both
 describe exactly the bytes the backup holds rather than a moving target. That is what makes the recovery point coherent:
 the metadata copy, the frontier that names it, and the placement count that sizes it all come from the same snapshot.
 
-`backup verify` re-derives the frontier and placement count from the copied store and rejects a manifest that disagrees,
-which catches a metadata file swapped for one taken at a different point or edited after the fact. It also rejects a
-roster the runtime could never consume: an empty group or member set, a duplicated node, datacenter, or address, or a
-member count of writers other than one. A `dc` or `ha` backup and a `none` backup verify the same way; the availability
-block is present in every format-2 manifest, empty of a roster when none was configured.
+`backup verify` re-derives the frontier, placement count, and writer identity from the copied store and rejects a
+manifest that disagrees, which catches a metadata file swapped for one taken at a different point or edited after the
+fact. It also rejects a roster the runtime could never consume: an empty group or member set, a duplicated node,
+datacenter, or address, or a member count of writers other than one. A `dc` or `ha` backup and a `none` backup verify
+the same way; the availability block is present in every format-2 manifest, empty of a roster when none was configured.
 
 The recovery point objective is the frontier: a restore rebuilds the node as of that serial and loses any write that
 landed after the copy, so size the backup interval to how much recent state you can afford to replay from upstream or
@@ -118,6 +119,8 @@ on it. Cheap and read-only, `backup verify` belongs on a schedule against every 
 $ peryx restore /backups/peryx-2026-08-01 --data-dir /var/lib/peryx
 restored	/var/lib/peryx
 blobs	1284	5311746048
+bytes	5312060231
+elapsed_ms	48213
 ```
 
 Restore verifies the backup in full before it writes a single byte, so a corrupt backup halts recovery instead of
@@ -129,6 +132,43 @@ Restore into an empty path, then start the server against it:
 $ peryx restore /backups/peryx-2026-08-01 --data-dir /var/lib/peryx --force
 $ peryx serve --data-dir /var/lib/peryx
 ```
+
+The `bytes` and `elapsed_ms` lines report how much the restore read and how long it took, so an operator can size the
+recovery time objective from a real run rather than an estimate.
+
+## Cluster identity and rollback
+
+`--force` replaces a directory's files, but it never lets one node adopt another node's identity. Before it writes,
+restore reads the identity the target's own metadata store has claimed. When that identity differs from the backup's,
+restore refuses outright, `--force` or not, because two nodes sharing one identity is a split brain no overwrite should
+create:
+
+```console
+$ peryx restore /backups/node-b --data-dir /var/lib/peryx --force
+Error: refusing to restore node node-b onto a directory claimed by node node-a; clear the target or restore node-a's own backup
+```
+
+Restoring a node's own backup is always allowed. When the backup's recovery point sits behind the control-plane serial
+the target has already reached, restore proceeds under `--force` but warns, since rolling a node back to an earlier
+point discards the writes made since:
+
+```console
+warning	restore	rollback	target at serial 4192, backup at 4188
+```
+
+A target with no metadata store, or one whose store cannot be opened, carries no identity to compare, so a fresh
+recovery passes without either check.
+
+## Recovery paths
+
+For a single-node deployment, restore rebuilds the whole node: restore the backup into an empty data directory and start
+`serve` against it. The restored node resumes at the backup's frontier.
+
+For a datacenter group, restore the **writer's** backup, since the writer's metadata store is the authority the replicas
+follow. Start the restored writer, then bring up each replica pointed at it; a replica needs no backup of its own,
+because it re-synchronizes its metadata and draws the referenced blobs from the writer once it connects. Restoring a
+replica's backup in place of the writer's would seat an out-of-date authority, so keep the writer's backup as the
+group's recovery point and let the replicas rebuild from it.
 
 The restored `config.toml` records the `data_dir` the backup came from. When that differs from the `--data-dir` you
 restore into, the command still restores but prints a warning, because the snapshot's path no longer matches where the

@@ -40,7 +40,7 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
     let source_blobs = BlobStorage::filesystem(config.data_dir.join("blobs"));
     let mut blob_count = 0_u64;
     let mut blob_bytes = 0_u64;
-    let (metadata_frontier, placements) = {
+    let (metadata_frontier, placements, writer_identity) = {
         let meta = MetaStore::open_existing(path.join("metadata/peryx.redb")).context("open copied metadata store")?;
         let mut index = BufWriter::new(File::create(path.join("blobs.tsv")).context("create blobs.tsv")?);
         writeln!(index, "{BLOB_INDEX_HEADER}")?;
@@ -70,13 +70,15 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
         index.into_inner()?.sync_all()?;
         let metadata_frontier = meta.current_serial().context("read metadata frontier")?;
         let placements = meta.count_artifact_placements().context("count artifact placements")?;
-        (metadata_frontier, placements)
+        let writer_identity = meta.writer_identity().context("read metadata writer identity")?;
+        (metadata_frontier, placements, writer_identity)
     };
     let (mode, membership) = config_availability(config);
     let availability = ManifestAvailability {
         mode,
         metadata_frontier,
         placements,
+        writer_identity,
         membership,
     };
     let metadata_info = {

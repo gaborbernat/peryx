@@ -46,12 +46,16 @@ struct BackupManifest {
 /// serial and `placements` sizes its artifact-availability projection, so a verifier re-derives both
 /// from the copied store and rejects a metadata file swapped for one taken at a different point. `mode`
 /// and `membership` carry the datacenter roster the configuration snapshot omits, making the manifest
-/// the backup's sole record of the topology the recovery point belongs to.
+/// the backup's sole record of the topology the recovery point belongs to. `writer_identity` is the
+/// node the recovery point belongs to, so a restore refuses to adopt one node's state under another
+/// node's identity. An older backup that never recorded it restores without the identity guard.
 #[derive(Debug, Serialize, Deserialize)]
 struct ManifestAvailability {
     mode: String,
     metadata_frontier: u64,
     placements: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    writer_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     membership: Option<ManifestMembership>,
 }

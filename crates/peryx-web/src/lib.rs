@@ -36,8 +36,8 @@ pub mod style;
 pub mod url;
 
 use pages::{
-    AdminStatus, ArtifactPlacements, AvailabilityTopology, Browse, Dashboard, Login, PolicyDecisions, Search,
-    ShadowInspection, Stats, Trash, Upload, UsageAnalytics,
+    AdminStatus, ArtifactPlacements, AvailabilityTopology, Browse, Dashboard, Login, PendingOperations,
+    PolicyDecisions, Search, ShadowInspection, Stats, Trash, Upload, UsageAnalytics,
 };
 
 /// The HTML document shell used by server rendering: head, hydration scripts, and the app.
@@ -85,6 +85,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/admin/status") view=AdminStatus ssr=SsrMode::Async />
                     <Route path=path!("/admin/topology") view=AvailabilityTopology ssr=SsrMode::Async />
                     <Route path=path!("/admin/placements") view=ArtifactPlacements ssr=SsrMode::Async />
+                    <Route path=path!("/admin/operations") view=PendingOperations ssr=SsrMode::Async />
                     <Route path=path!("/admin/policy-decisions") view=PolicyDecisions />
                     <Route path=path!("/admin/shadow") view=ShadowInspection />
                     <Route path=path!("/admin/trash") view=Trash />
@@ -119,6 +120,7 @@ fn Header() -> impl IntoView {
                     <a href="/admin/status">"Status"</a>
                     <a href="/admin/topology">"Topology"</a>
                     <a href="/admin/placements">"Placement"</a>
+                    <a href="/admin/operations">"Operations"</a>
                     <a href="/admin/policy-decisions">"Policy"</a>
                     <a href="/admin/shadow">"Shadowing"</a>
                     <a href="/admin/trash">"Trash"</a>

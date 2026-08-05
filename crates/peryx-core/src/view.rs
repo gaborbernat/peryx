@@ -159,6 +159,56 @@ impl UiByteAvailability {
     }
 }
 
+/// The client-facing status of one admitted write, the label an operations-health view shows.
+///
+/// A finalized write reads [`Published`](Self::Published) and one that gave up [`Failed`](Self::Failed),
+/// each terminal. A write still in flight reads [`Pending`](Self::Pending) until its retention deadline
+/// passes, after which it reads [`Expired`](Self::Expired) without ever finalizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiOperationStatus {
+    /// Admitted and in flight; no terminal result and still within its retention deadline.
+    Pending,
+    /// Finalized at the home. Terminal.
+    Published,
+    /// Gave up before finalizing. Terminal.
+    Failed,
+    /// Never finalized and outlived its retention deadline.
+    Expired,
+}
+
+impl UiOperationStatus {
+    /// The stable `snake_case` wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Published => "published",
+            Self::Failed => "failed",
+            Self::Expired => "expired",
+        }
+    }
+
+    /// Derive the client-facing status from a record's durable fields at `now`.
+    ///
+    /// Matches the write-status resource's rule: a finalized write is [`Published`](Self::Published) and
+    /// one that gave up [`Failed`](Self::Failed), each terminal and independent of `now`; a write that
+    /// reached neither reads [`Expired`](Self::Expired) once `now` passes its retention deadline, otherwise
+    /// [`Pending`](Self::Pending).
+    #[must_use]
+    pub const fn derive(published: bool, failed: bool, expiry: Option<i64>, now: i64) -> Self {
+        if published {
+            Self::Published
+        } else if failed {
+            Self::Failed
+        } else if let Some(expiry) = expiry {
+            if now >= expiry { Self::Expired } else { Self::Pending }
+        } else {
+            Self::Pending
+        }
+    }
+}
+
 /// How peryx came by a file's PEP 740 provenance, which bounds what it can say about it.
 ///
 /// `Hosted` provenance was uploaded here, so peryx bound every attestation to this exact
@@ -353,7 +403,8 @@ pub struct UiMemberChunk {
 #[cfg(test)]
 mod tests {
     use super::{
-        UiArtifactSource, UiAttestation, UiByteAvailability, UiFile, UiProvenance, UiProvenanceSource, UiSubjectMatch,
+        UiArtifactSource, UiAttestation, UiByteAvailability, UiFile, UiOperationStatus, UiProvenance,
+        UiProvenanceSource, UiSubjectMatch,
     };
 
     #[test]
@@ -437,6 +488,46 @@ mod tests {
             assert_eq!(serde_json::from_str::<UiByteAvailability>(wire).unwrap(), availability);
             assert_eq!(format!("\"{}\"", availability.as_str()), wire);
         }
+    }
+
+    #[test]
+    fn test_operation_status_round_trips_snake_case() {
+        for (status, wire) in [
+            (UiOperationStatus::Pending, "\"pending\""),
+            (UiOperationStatus::Published, "\"published\""),
+            (UiOperationStatus::Failed, "\"failed\""),
+            (UiOperationStatus::Expired, "\"expired\""),
+        ] {
+            assert_eq!(serde_json::to_string(&status).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<UiOperationStatus>(wire).unwrap(), status);
+            assert_eq!(format!("\"{}\"", status.as_str()), wire);
+        }
+    }
+
+    #[test]
+    fn test_operation_status_derives_from_the_durable_fields() {
+        // Terminal states are independent of the clock; a pending write reads expired only once the clock
+        // reaches its retention deadline.
+        assert_eq!(
+            UiOperationStatus::derive(true, false, Some(10), 5),
+            UiOperationStatus::Published
+        );
+        assert_eq!(
+            UiOperationStatus::derive(false, true, None, 5),
+            UiOperationStatus::Failed
+        );
+        assert_eq!(
+            UiOperationStatus::derive(false, false, Some(10), 10),
+            UiOperationStatus::Expired
+        );
+        assert_eq!(
+            UiOperationStatus::derive(false, false, Some(10), 9),
+            UiOperationStatus::Pending
+        );
+        assert_eq!(
+            UiOperationStatus::derive(false, false, None, 9),
+            UiOperationStatus::Pending
+        );
     }
 
     #[test]

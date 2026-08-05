@@ -8,10 +8,15 @@
 //! committed — so the mutation runs once. This module owns the persistence; deriving the client-facing
 //! status and scoping the id to an authority live above it.
 
+use std::ops::Bound::{Excluded, Unbounded};
+
 use redb::ReadableTable as _;
 use serde::{Deserialize, Serialize};
 
 use super::{MetaError, MetaStore, OPERATION_OUTCOME};
+
+/// The largest page an operation listing returns, so one query never scans the whole ledger.
+const MAX_QUERY_LIMIT: usize = 100;
 
 /// The lifecycle of one admitted write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +83,74 @@ pub enum OperationOutcomeError {
     NotAdmitted { operation: String },
     #[error("operation {operation} is already finalized")]
     AlreadyFinal { operation: String },
+}
+
+/// One row of an operation listing: the operation id and the durable fields a health view reads.
+///
+/// A view derives the client-facing status, age, and retention from these fields. The row carries no
+/// response bytes and no tenant coordinate, so it exposes a write's convergence without leaking what it
+/// wrote or who owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OperationOutcomeRow {
+    pub operation: String,
+    pub state: OperationState,
+    /// When the record may be pruned, from which an expired status is derived against a clock.
+    pub expiry_unix: Option<i64>,
+    pub updated_at_unix: i64,
+}
+
+/// A bounded, cursor-paginated query over operation outcomes in operation-id order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationOutcomeQuery {
+    /// Resume after this operation id, exclusive; `None` starts at the first.
+    pub cursor: Option<String>,
+    pub limit: usize,
+}
+
+impl Default for OperationOutcomeQuery {
+    fn default() -> Self {
+        Self {
+            cursor: None,
+            limit: 25,
+        }
+    }
+}
+
+/// One bounded page of operation rows in operation-id order, with a cursor to resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OperationOutcomePage {
+    pub rows: Vec<OperationOutcomeRow>,
+    /// The operation id to resume after, present only when more rows remain past this page.
+    pub next_cursor: Option<String>,
+}
+
+/// The counts an operations-health view shows, bucketed by the client-facing status a write reads.
+///
+/// The status is derived at the query's clock. Four numbers regardless of ledger size, so the summary
+/// never scales with the writes it covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct OperationOutcomeHealth {
+    pub pending: u64,
+    pub published: u64,
+    pub failed: u64,
+    pub expired: u64,
+}
+
+impl OperationOutcomeHealth {
+    /// The total operations across the four states.
+    #[must_use]
+    pub const fn total(self) -> u64 {
+        self.pending + self.published + self.failed + self.expired
+    }
+}
+
+/// A rejected operation list.
+#[derive(Debug, thiserror::Error)]
+pub enum OperationOutcomeQueryError {
+    #[error(transparent)]
+    Store(#[from] MetaError),
+    #[error("limit must be between 1 and {MAX_QUERY_LIMIT}")]
+    InvalidLimit,
 }
 
 impl MetaStore {
@@ -175,6 +248,81 @@ impl MetaStore {
             .get(operation)?
             .map(|value| serde_json::from_slice(value.value()))
             .transpose()?)
+    }
+
+    /// List operation outcomes in operation-id order with an exclusive cursor, giving an operations-health
+    /// view a bounded data source of per-operation rows.
+    ///
+    /// Reads one row past `limit` to decide whether more remain: a full page carries a `next_cursor`
+    /// pointing at its last operation id, and a page that reaches the end carries none. The read span is
+    /// bounded by the validated limit, so a large ledger never turns into one unbounded scan. Rows carry
+    /// the durable fields only; the client-facing status is derived above the store against a clock.
+    ///
+    /// # Errors
+    /// Returns [`OperationOutcomeQueryError::InvalidLimit`] for a limit outside `1..=MAX_QUERY_LIMIT`, or a
+    /// store error when a row cannot be read or decoded.
+    pub fn list_operation_outcomes(
+        &self,
+        query: &OperationOutcomeQuery,
+    ) -> Result<OperationOutcomePage, OperationOutcomeQueryError> {
+        if !(1..=MAX_QUERY_LIMIT).contains(&query.limit) {
+            return Err(OperationOutcomeQueryError::InvalidLimit);
+        }
+        let txn = self.db.begin_read().map_err(MetaError::from)?;
+        let table = txn.open_table(OPERATION_OUTCOME).map_err(MetaError::from)?;
+        let entries = query
+            .cursor
+            .as_ref()
+            .map_or_else(
+                || table.iter(),
+                |cursor| table.range::<&str>((Excluded(cursor.as_str()), Unbounded)),
+            )
+            .map_err(MetaError::from)?;
+        let mut rows = Vec::with_capacity(query.limit + 1);
+        for entry in entries {
+            let (key, value) = entry.map_err(MetaError::from)?;
+            let record: OperationOutcomeRecord = serde_json::from_slice(value.value()).map_err(MetaError::from)?;
+            rows.push(OperationOutcomeRow {
+                operation: key.value().to_owned(),
+                state: record.state,
+                expiry_unix: record.expiry_unix,
+                updated_at_unix: record.updated_at_unix,
+            });
+            if rows.len() > query.limit {
+                break;
+            }
+        }
+        let next_cursor = (rows.len() > query.limit).then(|| rows[query.limit - 1].operation.clone());
+        rows.truncate(query.limit);
+        Ok(OperationOutcomePage { rows, next_cursor })
+    }
+
+    /// Bucket every operation by the client-facing status it reads at `now` in one pass, giving an
+    /// operations-health view its aggregate without paging the whole ledger itself.
+    ///
+    /// A published or failed record is terminal; a pending record whose retention deadline has passed at
+    /// `now` reads as expired, and one still within its deadline as pending. The output is four counts
+    /// regardless of ledger size, so the summary aggregates before serialization.
+    ///
+    /// # Errors
+    /// Returns a store error if a row cannot be read or decoded.
+    pub fn operation_outcome_health(&self, now: i64) -> Result<OperationOutcomeHealth, MetaError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(OPERATION_OUTCOME)?;
+        let mut health = OperationOutcomeHealth::default();
+        for entry in table.iter()? {
+            let (_key, value) = entry?;
+            let record: OperationOutcomeRecord = serde_json::from_slice(value.value())?;
+            match record.state {
+                OperationState::Published => health.published += 1,
+                OperationState::Failed => health.failed += 1,
+                OperationState::Pending if record.expiry_unix.is_some_and(|expiry| now >= expiry) => {
+                    health.expired += 1;
+                }
+                OperationState::Pending => health.pending += 1,
+            }
+        }
+        Ok(health)
     }
 
     /// Remove up to `limit` terminal records whose retention deadline has passed at `now`, returning how

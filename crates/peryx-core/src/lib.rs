@@ -12,6 +12,7 @@
 pub mod ecosystem;
 pub mod lexicon;
 pub mod lifecycle;
+pub mod operations;
 pub mod path;
 pub mod placement;
 pub mod role;
@@ -23,6 +24,7 @@ pub mod view;
 pub use ecosystem::{Ecosystem, UnknownEcosystem};
 pub use lexicon::{Lexicon, LexiconRegistry};
 pub use lifecycle::{TRASH_GRACE_SECS, TrashInfo, TrashRecord, TrashState, UnknownTrashState};
+pub use operations::{OperationRow, OperationsHealth, OperationsView};
 pub use placement::{
     BlobDatacenterPlacement, BlobPlacementStatus, BlobPlacementView, PlacementHealth, PlacementRow, PlacementView,
 };
@@ -34,6 +36,6 @@ pub use topology::{
 };
 pub use view::{
     RenderedDescription, UiArtifactRef, UiArtifactSource, UiAttestation, UiBlock, UiByteAvailability, UiFile,
-    UiManifest, UiMember, UiMemberChunk, UiMeta, UiProject, UiProjectStatus, UiProjectView, UiProvenance,
-    UiProvenanceSource, UiRelease, UiSubjectMatch,
+    UiManifest, UiMember, UiMemberChunk, UiMeta, UiOperationStatus, UiProject, UiProjectStatus, UiProjectView,
+    UiProvenance, UiProvenanceSource, UiRelease, UiSubjectMatch,
 };

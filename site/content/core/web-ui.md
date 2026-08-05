@@ -98,7 +98,25 @@ layout is topology an operator does not read, and it names the datacenter alone:
 on-disk location, so reading convergence exposes no internal path. A single node records no cross-datacenter placement,
 so the detail is empty until a group replicates a blob.
 
-Pending-operation visibility, the other half of this surface, waits on the operations ledger and is not shown yet.
+## Pending operations
+
+`/admin/operations` reads `GET /+availability/operations` and shows the admitted writes the node retains, bucketed by
+the client-facing status each reads: `pending` while a write is in flight within its retention deadline, `published`
+once it finalizes, `failed` when it gives up, and `expired` when it outlives its deadline without finalizing. The four
+counts and their total cover the whole ledger, aggregated before serialization so the summary never scales with the
+number of retained writes. The view carries the UTC time it was taken, so an old render shows as age rather than health.
+
+The aggregate needs operator access. A per-operation table needs administrator access, because an operation id
+identifies a write; it lists each operation with its status, when its record last changed, and when it may be pruned.
+Each row carries an operation id and those fields alone, never the response bytes, the repository, or the owner, so
+inspecting a write's convergence exposes no tenant data. An operator who cannot read the rows sees the counts and a note
+rather than an empty table, so a filtered view never reads as a settled ledger.
+
+The table pages in operation-id order. Each page is capped at the supported limit and carries a cursor to the next; the
+browser walks forward a page at a time or jumps back to the first without reloading. Every status carries a text label,
+so the states stay distinguishable without colour, and a caller below operator reads nothing at all. An `expired` write
+is not a definite failure: the deadline is the client's wait, not the write's, so a durable completion may have happened
+after the client stopped polling.
 
 ## Policy decisions
 

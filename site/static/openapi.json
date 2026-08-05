@@ -700,6 +700,64 @@
         ]
       }
     },
+    "/+availability/operations": {
+      "get": {
+        "description": "The admitted writes the node retains, filtered to the caller's class, so an administrator watches convergence without paging the ledger by hand. The `health` aggregate counts writes by client-facing status (pending, published, failed, expired) across the whole ledger and needs operator authority. The per-operation `rows` carry an operation id, so they need administrator authority and page in operation-id order: a full page carries a `next_cursor` pointing at its last id, and `limit` bounds the page at 1 to 100 rows. A caller below operator reads nothing, `captured_at` dates the view, and the response is `no-store`. A row names an operation without revealing what it wrote or who owns it.",
+        "parameters": [
+          {
+            "description": "Resume the row page after this operation id, exclusive",
+            "example": "op-0f1e",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows per page, 1 to 100 (default 25)",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "captured_at": 1800000000,
+                  "health": {
+                    "expired": 1,
+                    "failed": 1,
+                    "pending": 2,
+                    "published": 5,
+                    "total": 9
+                  },
+                  "next_cursor": "op-0f1e",
+                  "rows": [
+                    {
+                      "expires_at": 1800000600,
+                      "operation": "op-0f1e",
+                      "status": "pending",
+                      "updated_at": 1800000000
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The pending-operations-health view"
+          }
+        },
+        "security": [
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Pending operations health",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+availability/placements": {
       "get": {
         "description": "How the store's bytes are placed, filtered to the caller's class, so an administrator watches convergence without paging every artifact by hand. The `health` aggregate counts artifacts by byte availability across the whole store and needs operator authority. The per-digest `rows` carry a content digest, so they need administrator authority and page in digest order: a full page carries a `next_cursor` pointing at its last digest, and `limit` bounds the page at 1 to 100 rows. A caller below operator reads nothing, `captured_at` dates the view, and the response is `no-store`. A digest names an artifact without revealing where it lives or who owns it.",

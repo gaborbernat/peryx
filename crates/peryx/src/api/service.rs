@@ -424,6 +424,12 @@ fn availability_paths(paths: PathsBuilder) -> PathsBuilder {
                 .build(),
         )
         .path(
+            "/+availability/operations",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, availability_operations())
+                .build(),
+        )
+        .path(
             "/+availability/placements",
             PathItemBuilder::new()
                 .operation(HttpMethod::Get, availability_placements())
@@ -765,6 +771,55 @@ fn availability_blob_placements() -> OperationBuilder {
                                 {"data_center": "east-1", "status": "verified", "size": 4096, "updated_at": 1_800_000_000},
                                 {"data_center": "west-2", "status": "pending", "updated_at": 1_800_000_050}
                             ]
+                        })))
+                        .build(),
+                ),
+        )
+}
+
+fn availability_operations() -> OperationBuilder {
+    OperationBuilder::new()
+        .tag("operations")
+        .summary(Some("Pending operations health"))
+        .description(Some(
+            "The admitted writes the node retains, filtered to the caller's class, so an administrator \
+             watches convergence without paging the ledger by hand. The `health` aggregate counts writes \
+             by client-facing status (pending, published, failed, expired) across the whole ledger and \
+             needs operator authority. The per-operation `rows` carry an operation id, so they need \
+             administrator authority and page in operation-id order: a full page carries a `next_cursor` \
+             pointing at its last id, and `limit` bounds the page at 1 to 100 rows. A caller below operator \
+             reads nothing, `captured_at` dates the view, and the response is `no-store`. A row names an \
+             operation without revealing what it wrote or who owns it.",
+        ))
+        .parameter(
+            ParameterBuilder::new()
+                .name("cursor")
+                .parameter_in(ParameterIn::Query)
+                .description(Some("Resume the row page after this operation id, exclusive"))
+                .example(Some(json!("op-0f1e"))),
+        )
+        .parameter(
+            ParameterBuilder::new()
+                .name("limit")
+                .parameter_in(ParameterIn::Query)
+                .description(Some("Rows per page, 1 to 100 (default 25)"))
+                .example(Some(json!(25))),
+        )
+        .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
+        .response(
+            "200",
+            ResponseBuilder::new()
+                .description("The pending-operations-health view")
+                .content(
+                    "application/json",
+                    ContentBuilder::new()
+                        .example(Some(json!({
+                            "captured_at": 1_800_000_000,
+                            "health": {"pending": 2, "published": 5, "failed": 1, "expired": 1, "total": 9},
+                            "rows": [
+                                {"operation": "op-0f1e", "status": "pending", "updated_at": 1_800_000_000, "expires_at": 1_800_000_600}
+                            ],
+                            "next_cursor": "op-0f1e"
                         })))
                         .build(),
                 ),

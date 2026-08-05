@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use axum::http::{Method, StatusCode};
-use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError};
+use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, TransferOutcome};
 
 use super::{auth, hosted_writable, send_body};
 
@@ -83,6 +83,14 @@ impl OwnershipAuthority for RecordingAuthority {
 
     async fn admit_epoch(&self, _authority: &str, _presented: u64) -> bool {
         true
+    }
+
+    async fn transfer_home(
+        &self,
+        _authority: &str,
+        _new_home: &str,
+    ) -> Result<Option<TransferOutcome>, OwnershipError> {
+        Ok(None)
     }
 }
 

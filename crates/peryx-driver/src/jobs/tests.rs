@@ -1499,6 +1499,14 @@ impl crate::state::OwnershipAuthority for MutableEpoch {
         let current = self.0.load(Ordering::SeqCst);
         current != 0 && presented == current
     }
+
+    async fn transfer_home(
+        &self,
+        _authority: &str,
+        _new_home: &str,
+    ) -> Result<Option<crate::state::TransferOutcome>, crate::state::OwnershipError> {
+        Ok(None)
+    }
 }
 
 /// A repository job that records the epoch it leased and then advances its authority's epoch while it

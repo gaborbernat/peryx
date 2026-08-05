@@ -134,6 +134,14 @@ impl peryx_driver::state::OwnershipAuthority for FixedGroup {
     async fn admit_epoch(&self, _authority: &str, _presented: u64) -> bool {
         true
     }
+
+    async fn transfer_home(
+        &self,
+        _authority: &str,
+        _new_home: &str,
+    ) -> Result<Option<peryx_driver::state::TransferOutcome>, peryx_driver::state::OwnershipError> {
+        Ok(None)
+    }
 }
 
 #[test]

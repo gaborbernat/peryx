@@ -26,6 +26,7 @@ mod dc_copy;
 mod driver;
 mod envelope;
 mod error;
+mod failover;
 mod filesystem_ack;
 mod http;
 mod ingress_intent;
@@ -76,6 +77,7 @@ pub use envelope::{
     SCHEMA_VERSION, SchemaVersion, TraceContext, TraceError, derive_child,
 };
 pub use error::SyncError;
+pub use failover::{Candidate, Failover, FailoverPolicy};
 pub use filesystem_ack::{FilesystemAck, ReceiptOutcome};
 pub use http::{DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PrimaryHttpConfigError, primary_router};
 pub use ingress_intent::{
@@ -158,6 +160,8 @@ mod dc_copy_tests;
 mod driver_tests;
 #[cfg(test)]
 mod envelope_tests;
+#[cfg(test)]
+mod failover_tests;
 #[cfg(test)]
 mod filesystem_ack_tests;
 #[cfg(test)]

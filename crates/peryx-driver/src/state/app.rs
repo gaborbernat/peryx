@@ -263,6 +263,21 @@ impl ServingState {
         crate::state::ownership::admit_authority_epoch(self.ownership.get(), authority, presented).await
     }
 
+    /// Move `authority`'s home to `new_home` on the control quorum, minting the epoch that fences the old
+    /// home. Reports the committed [`TransferOutcome`](crate::state::TransferOutcome), or `None` when this
+    /// process runs no group or the move was a no-op. A control minority surfaces as
+    /// [`OwnershipError::NotLeader`](crate::state::OwnershipError::NotLeader).
+    ///
+    /// # Errors
+    /// The [`OwnershipError`](crate::state::OwnershipError) the commit failed with.
+    pub async fn transfer_authority_home(
+        &self,
+        authority: &str,
+        new_home: &str,
+    ) -> Result<Option<crate::state::TransferOutcome>, crate::state::OwnershipError> {
+        crate::state::ownership::transfer_authority_home(self.ownership.get(), authority, new_home).await
+    }
+
     /// Find the index whose route is the longest segment-aligned prefix of `path` (which has no
     /// leading slash), and the path remainder after `route/`. Returns `None` if no route matches.
     #[must_use]

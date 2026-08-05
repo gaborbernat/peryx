@@ -20,7 +20,7 @@ use openraft::LogId;
 use openraft::error::{ClientWriteError, RaftError};
 use peryx_driver::state::{
     ClusterStatus, CommandOutcome, CommandReceipt, ControlCommand, ControlError, HomeClaim, MembershipControl,
-    OwnershipAuthority, OwnershipError, plan_voter_roster,
+    OwnershipAuthority, OwnershipError, TransferOutcome, plan_voter_roster,
 };
 use peryx_replication::raft::log_store::RaftLogStoreAdapter;
 use peryx_replication::raft::network::PeerRaftNetworkFactory;
@@ -206,6 +206,27 @@ impl OwnershipAuthority for OwnershipGroup {
                 OwnershipResponse::Applied(OwnershipEffect::Assigned { .. }) => HomeClaim::AssignedHere,
                 _ => HomeClaim::AlreadyHomed,
             }),
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => Err(OwnershipError::NotLeader {
+                leader: forward.leader_node.map(|node| node.addr),
+            }),
+            Err(error) => Err(OwnershipError::Unavailable(error.to_string())),
+        }
+    }
+
+    async fn transfer_home(&self, authority: &str, new_home: &str) -> Result<Option<TransferOutcome>, OwnershipError> {
+        let command = OwnershipCommand::RecordTransfer {
+            authority: AuthorityKey(authority.to_owned()),
+            new_home: DatacenterId(new_home.to_owned()),
+        };
+        match self.node.submit(command).await {
+            // Only a committed Transferred effect moved the home; a rejection (the authority is unassigned
+            // or already homed there) commits too but moves nothing, so it reports no transfer.
+            Ok(OwnershipResponse::Applied(OwnershipEffect::Transferred { from, to, epoch })) => Ok(Some(TransferOutcome {
+                from: from.0,
+                to: to.0,
+                epoch: epoch.0,
+            })),
+            Ok(_) => Ok(None),
             Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => Err(OwnershipError::NotLeader {
                 leader: forward.leader_node.map(|node| node.addr),
             }),

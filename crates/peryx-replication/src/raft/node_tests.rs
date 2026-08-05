@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use peryx_storage::raft::RaftLogStore;
 
 use crate::AuthorityKey;
-use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect, Rejection};
+use crate::ownership::{AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, Rejection};
 use crate::raft::log_store::RaftLogStoreAdapter;
 use crate::raft::network::{PeerRaftNetworkFactory, RaftRpc, RaftRpcRejection, raft_rpc_router};
 use crate::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode, StartError, TypeConfig};
@@ -88,6 +88,7 @@ async fn test_a_committed_command_returns_its_applied_effect() {
         .submit(OwnershipCommand::AssignHome {
             authority: AuthorityKey("proj".to_owned()),
             home: DatacenterId("east".to_owned()),
+            cause: AssignmentCause::FirstPublish,
         })
         .await
         .unwrap();
@@ -229,6 +230,7 @@ async fn test_a_reassignment_is_rejected_through_the_shared_state() {
     let assign = OwnershipCommand::AssignHome {
         authority: AuthorityKey("proj".to_owned()),
         home: DatacenterId("east".to_owned()),
+        cause: AssignmentCause::FirstPublish,
     };
     node.submit(assign.clone()).await.unwrap();
 
@@ -299,6 +301,7 @@ async fn test_a_three_node_group_forms_quorum_over_the_mounted_rpc_endpoints() {
         .submit(OwnershipCommand::AssignHome {
             authority: AuthorityKey("proj".to_owned()),
             home: DatacenterId("dc1".to_owned()),
+            cause: AssignmentCause::FirstPublish,
         })
         .await
         .unwrap();

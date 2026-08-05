@@ -39,6 +39,38 @@ const UNASSIGNED: AuthorityEpoch = AuthorityEpoch(0);
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DatacenterId(pub String);
 
+/// The committed-entry provenance the state machine reads off each applied log entry: the leader term
+/// and log index of the [`OwnershipCommand`] that produced a transition.
+///
+/// The Raft log position `(term, index)` is the operation's identity — unique and totally ordered — so
+/// recording it on an assignment ties the home to the exact committed command for audit and replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedMeta {
+    pub term: u64,
+    pub index: u64,
+}
+
+/// Why an authority was homed. First publish is the only cause today; preassignment and operator
+/// transfer are out of scope, so the enum names the one path that assigns a home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AssignmentCause {
+    /// The first successful publish to a project or repository homed it where it was published.
+    FirstPublish,
+}
+
+/// The audit trail of a home assignment: why it happened, the committed command that carried it, and the
+/// epoch it minted. Persisted in the snapshot so a replay reconstructs the same provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assignment {
+    pub cause: AssignmentCause,
+    pub term: u64,
+    pub index: u64,
+    /// The epoch the assignment minted, always [`AuthorityEpoch(1)`](crate::AuthorityEpoch) — the first
+    /// epoch of a freshly homed authority, before any advance or transfer.
+    pub epoch: AuthorityEpoch,
+}
+
 /// One authority transfer: the datacenters it moved between and the epoch it minted. The trail of these
 /// is the audit record reconciliation and drain read to classify operations left by the prior home.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +87,7 @@ pub enum OwnershipCommand {
     AssignHome {
         authority: AuthorityKey,
         home: DatacenterId,
+        cause: AssignmentCause,
     },
     /// Mint the next epoch for an assigned authority without moving its home, fencing every operation
     /// under the prior epoch. Fencing a stale home that rejoined uses this.
@@ -113,6 +146,7 @@ pub enum OwnershipError {
 struct AuthorityRecord {
     home: DatacenterId,
     epoch: AuthorityEpoch,
+    assignment: Assignment,
     transfers: Vec<TransferRecord>,
 }
 
@@ -132,19 +166,27 @@ impl OwnershipState {
         Self::default()
     }
 
-    /// Apply `command`, returning the transition it produced or why it was rejected.
+    /// Apply `command` committed at `meta`, returning the transition it produced or why it was rejected.
     ///
     /// The state advances only on a valid transition; a rejected command leaves it untouched, so a
-    /// replayed or invalid command is a deterministic no-op rather than a corruption.
-    pub fn apply(&mut self, command: &OwnershipCommand) -> OwnershipEffect {
+    /// replayed or invalid command is a deterministic no-op rather than a corruption. `meta` carries the
+    /// committed log position, which an assignment records for audit; the other transitions do not read
+    /// it, so their outcome depends on the command and current state alone.
+    pub fn apply(&mut self, command: &OwnershipCommand, meta: AppliedMeta) -> OwnershipEffect {
         match command {
-            OwnershipCommand::AssignHome { authority, home } => self.assign_home(authority, home),
+            OwnershipCommand::AssignHome { authority, home, cause } => self.assign_home(authority, home, *cause, meta),
             OwnershipCommand::AdvanceAuthorityEpoch { authority } => self.advance_epoch(authority),
             OwnershipCommand::RecordTransfer { authority, new_home } => self.transfer(authority, new_home),
         }
     }
 
-    fn assign_home(&mut self, authority: &AuthorityKey, home: &DatacenterId) -> OwnershipEffect {
+    fn assign_home(
+        &mut self,
+        authority: &AuthorityKey,
+        home: &DatacenterId,
+        cause: AssignmentCause,
+        meta: AppliedMeta,
+    ) -> OwnershipEffect {
         if self.authorities.contains_key(&authority.0) {
             return OwnershipEffect::Rejected(Rejection::AlreadyAssigned);
         }
@@ -154,6 +196,12 @@ impl OwnershipState {
             AuthorityRecord {
                 home: home.clone(),
                 epoch,
+                assignment: Assignment {
+                    cause,
+                    term: meta.term,
+                    index: meta.index,
+                    epoch,
+                },
                 transfers: Vec::new(),
             },
         );
@@ -204,6 +252,14 @@ impl OwnershipState {
     #[must_use]
     pub fn home(&self, authority: &AuthorityKey) -> Option<&DatacenterId> {
         self.authorities.get(&authority.0).map(|record| &record.home)
+    }
+
+    /// The assignment audit of `authority` — its cause, committed log position, and minted epoch — or
+    /// `None` when no command has homed it. The trail a replay or an operator reads to see where and how
+    /// a home was first assigned.
+    #[must_use]
+    pub fn assignment(&self, authority: &AuthorityKey) -> Option<&Assignment> {
+        self.authorities.get(&authority.0).map(|record| &record.assignment)
     }
 
     /// The transfers `authority` has been through, oldest first, or an empty slice when it was never

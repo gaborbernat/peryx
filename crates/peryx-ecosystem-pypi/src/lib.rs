@@ -86,7 +86,8 @@ pub use html::{parse_detail_html, parse_index_html};
 pub use legacy_json::render_legacy_json;
 pub use metadata::{CoreMetadataDoc, MetadataError, parse_metadata, ui_meta, ui_project_from_detail};
 pub use name::{
-    PackageName, file_matches_version, is_valid_name, normalize_name, normalize_name_cow, project_of_filename,
+    PackageName, authority_key, file_matches_version, is_valid_name, normalize_name, normalize_name_cow,
+    project_of_filename,
 };
 pub use serial::{
     ChangelogPage, ChangelogPageError, SerialStamp, UpstreamSerialError, compose_serial_watermarks,

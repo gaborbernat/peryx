@@ -130,8 +130,14 @@ async fn test_first_manifest_push_claims_the_repositorys_home() {
 
     assert_eq!(push(&app, "v1").await, StatusCode::CREATED);
 
-    assert_eq!(group.checked(), ["app"], "the path reads the home before claiming");
-    assert_eq!(group.claimed(), ["app"], "the first push claims the repository's home");
+    // The repository routes through its canonical, scheme-prefixed authority key, so a repository named
+    // like a PyPI project cannot collide with it.
+    assert_eq!(group.checked(), ["oci:app"], "the path reads the home before claiming");
+    assert_eq!(
+        group.claimed(),
+        ["oci:app"],
+        "the first push claims the repository's home"
+    );
 }
 
 #[tokio::test]
@@ -144,10 +150,10 @@ async fn test_repeat_manifest_push_makes_no_second_claim() {
     assert_eq!(push(&app, "v1").await, StatusCode::CREATED);
     assert_eq!(push(&app, "v2").await, StatusCode::CREATED);
 
-    assert_eq!(group.checked(), ["app", "app"], "each push reads the home");
+    assert_eq!(group.checked(), ["oci:app", "oci:app"], "each push reads the home");
     assert_eq!(
         group.claimed(),
-        ["app"],
+        ["oci:app"],
         "only the first push claims; a homed repository costs no second consensus round",
     );
 }
@@ -164,7 +170,7 @@ async fn test_a_home_claim_that_cannot_commit_does_not_block_the_push() {
         StatusCode::CREATED,
         "a claim that cannot commit is logged, never surfaced, and never blocks the push",
     );
-    assert_eq!(group.claimed(), ["app"], "the claim was attempted");
+    assert_eq!(group.claimed(), ["oci:app"], "the claim was attempted");
 }
 
 /// A stand-in ownership group for manifest-fence tests. `committed` is the epoch a mutation leases (the

@@ -17,16 +17,27 @@ use peryx_storage::meta::QuotaReservationRecord;
 use super::ServeError;
 use crate::error::{ErrorCode, error_response};
 
+/// Assign the repository's home datacenter on its first publish. Routes through the repository's
+/// canonical authority key, so a first push homes the same authority the fence below reads, and a
+/// repository can never collide with a `PyPI` project's home.
+pub(in crate::registry) async fn claim_repository_home(state: &ServingState, repo: &str) {
+    state.claim_first_publish_home(&crate::name::authority_key(repo)).await;
+}
+
 /// Snapshot the repository's committed authority epoch to re-admit before a metadata mutation commits.
+/// Keyed by the repository's canonical authority key, the same key its home was assigned under.
 pub(in crate::registry) async fn repository_epoch(state: &ServingState, repo: &str) -> u64 {
-    state.committed_authority_epoch(repo).await
+    state.committed_authority_epoch(&crate::name::authority_key(repo)).await
 }
 
 /// Whether a mutation leased at `fence` may still commit under `repo`'s committed epoch. A process with
 /// no ownership group, or a repository no group has homed (`fence` of `0`), holds no epoch and is never
 /// fenced.
 pub(in crate::registry) async fn epoch_admits(state: &ServingState, repo: &str, fence: u64) -> bool {
-    fence == 0 || state.admit_authority_epoch(repo, fence).await
+    fence == 0
+        || state
+            .admit_authority_epoch(&crate::name::authority_key(repo), fence)
+            .await
 }
 
 /// The retry response for a mutation whose repository authority advanced past the epoch it leased. It is

@@ -100,6 +100,16 @@ fn check_availability_state(
             "problem\tavailability\tplacements\texpected {expected}, found {placements}"
         )?;
     }
+    let identity = meta.writer_identity().context("read backup writer identity")?;
+    if availability.writer_identity != identity {
+        *problems += 1;
+        let expected = availability.writer_identity.as_deref().unwrap_or("none");
+        let found = identity.as_deref().unwrap_or("none");
+        writeln!(
+            out,
+            "problem\tavailability\twriter-identity\texpected {expected}, found {found}"
+        )?;
+    }
     Ok(())
 }
 

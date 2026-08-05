@@ -1,10 +1,11 @@
 use std::path::Path;
 
+use peryx_storage::meta::MetaStore;
 use rstest::rstest;
 
 use crate::operator;
 
-use super::{blob_relpath, valid_backup};
+use super::{FailOnLine, blob_relpath, claimed_data_dir, identified_backup, valid_backup};
 
 #[rstest]
 #[case::non_empty_directory(create_non_empty_directory, "not empty")]
@@ -68,4 +69,91 @@ fn create_non_empty_directory(path: &Path) {
 
 fn create_file(path: &Path) {
     std::fs::write(path, b"x").unwrap();
+}
+
+#[test]
+fn test_restore_refuses_a_directory_claimed_by_a_different_node() {
+    let (_holder, backup) = identified_backup("node-a", 1);
+    let target = claimed_data_dir("node-b", 1);
+
+    let err = operator::restore(&backup, target.path(), true, &mut Vec::new()).unwrap_err();
+
+    assert!(err.to_string().contains("refusing to restore node node-a"), "{err}");
+    assert!(err.to_string().contains("claimed by node node-b"), "{err}");
+    // The target keeps its own store: a split-brain restore never touched it.
+    let meta = MetaStore::open_existing_read_only(target.path().join("peryx.redb")).unwrap();
+    assert_eq!(meta.writer_identity().unwrap().as_deref(), Some("node-b"));
+}
+
+#[test]
+fn test_restore_warns_on_a_rollback_of_the_same_node() {
+    let (_holder, backup) = identified_backup("node-a", 1);
+    let target = claimed_data_dir("node-a", 3);
+    let mut out = Vec::new();
+
+    operator::restore(&backup, target.path(), true, &mut out).unwrap();
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("warning\trestore\trollback"), "{text}");
+    assert!(text.contains("restored"), "{text}");
+}
+
+#[test]
+fn test_restore_propagates_a_rollback_warning_write_error() {
+    let (_holder, backup) = identified_backup("node-a", 1);
+    let target = claimed_data_dir("node-a", 3);
+    let mut out = FailOnLine {
+        needle: "rollback",
+        ..FailOnLine::default()
+    };
+
+    operator::restore(&backup, target.path(), true, &mut out).unwrap_err();
+
+    assert!(out.seen.contains("warning\trestore\trollback"), "{}", out.seen);
+    // The write failed inside the preflight, before the target was touched.
+    let meta = MetaStore::open_existing_read_only(target.path().join("peryx.redb")).unwrap();
+    assert_eq!(meta.writer_identity().unwrap().as_deref(), Some("node-a"));
+}
+
+#[test]
+fn test_restore_replaces_a_same_node_target_without_a_rollback_warning() {
+    let (_holder, backup) = identified_backup("node-a", 2);
+    let target = claimed_data_dir("node-a", 0);
+    let mut out = Vec::new();
+
+    operator::restore(&backup, target.path(), true, &mut out).unwrap();
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(!text.contains("rollback"), "{text}");
+    let meta = MetaStore::open_existing_read_only(target.path().join("peryx.redb")).unwrap();
+    assert_eq!(meta.writer_identity().unwrap().as_deref(), Some("node-a"));
+}
+
+#[test]
+fn test_restore_ignores_an_unreadable_target_store() {
+    let (_holder, backup) = identified_backup("node-a", 1);
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(target.path().join("peryx.redb"), b"not a redb database").unwrap();
+
+    operator::restore(&backup, target.path(), true, &mut Vec::new()).unwrap();
+
+    let meta = MetaStore::open_existing_read_only(target.path().join("peryx.redb")).unwrap();
+    assert_eq!(meta.writer_identity().unwrap().as_deref(), Some("node-a"));
+}
+
+#[test]
+fn test_restore_preserves_the_recovery_point_and_reports_cost() {
+    let (_holder, backup) = identified_backup("node-a", 2);
+    let dest = tempfile::tempdir().unwrap();
+    let restored = dest.path().join("restored");
+    let mut out = Vec::new();
+
+    operator::restore(&backup, &restored, false, &mut out).unwrap();
+
+    let meta = MetaStore::open_existing_read_only(restored.join("peryx.redb")).unwrap();
+    assert_eq!(meta.writer_identity().unwrap().as_deref(), Some("node-a"));
+    assert!(meta.current_serial().unwrap() >= 2);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("bytes\t"), "{text}");
+    assert!(text.contains("elapsed_ms\t"), "{text}");
 }

@@ -7,7 +7,7 @@ use rstest::rstest;
 
 use crate::operator;
 
-use super::{FailOnLine, blob_relpath, valid_backup};
+use super::{FailOnLine, blob_relpath, identified_backup, valid_backup};
 
 #[test]
 fn test_backup_verify_reports_ok_for_valid_backup() {
@@ -348,6 +348,45 @@ fn test_backup_verify_rejects_stale_metadata_frontier() {
         String::from_utf8(out)
             .unwrap()
             .contains("problem\tavailability\tfrontier\texpected 999, found ")
+    );
+}
+
+#[test]
+fn test_backup_verify_rejects_a_tampered_writer_identity() {
+    let (_holder, backup) = identified_backup("node-a", 1);
+    mutate_manifest(&backup, |manifest| {
+        manifest["availability"]["writer_identity"] = serde_json::json!("node-x");
+    });
+
+    let mut out = Vec::new();
+    let err = operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(err.to_string().contains("backup verification failed"));
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("problem\tavailability\twriter-identity\texpected node-x, found node-a")
+    );
+}
+
+#[test]
+fn test_backup_verify_propagates_writer_identity_report_error() {
+    let (_holder, backup) = identified_backup("node-a", 1);
+    mutate_manifest(&backup, |manifest| {
+        manifest["availability"]["writer_identity"] = serde_json::json!("node-x");
+    });
+
+    let mut out = FailOnLine {
+        needle: "\n",
+        ..FailOnLine::default()
+    };
+    operator::backup_verify(&backup, &mut out).unwrap_err();
+
+    assert!(
+        out.seen
+            .contains("problem\tavailability\twriter-identity\texpected node-x, found node-a"),
+        "{}",
+        out.seen
     );
 }
 

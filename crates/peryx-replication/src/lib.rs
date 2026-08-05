@@ -26,6 +26,7 @@ mod dc_copy;
 mod driver;
 mod envelope;
 mod error;
+mod filesystem_ack;
 mod http;
 mod ingress_intent;
 mod liveness;
@@ -75,6 +76,7 @@ pub use envelope::{
     SCHEMA_VERSION, SchemaVersion, TraceContext, TraceError, derive_child,
 };
 pub use error::SyncError;
+pub use filesystem_ack::{FilesystemAck, ReceiptOutcome};
 pub use http::{DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PrimaryHttpConfigError, primary_router};
 pub use ingress_intent::{
     Ecosystem, IngressIntent, IntentKey, IntentLedger, IntentState, StageOutcome, TransitionOutcome,
@@ -156,6 +158,8 @@ mod dc_copy_tests;
 mod driver_tests;
 #[cfg(test)]
 mod envelope_tests;
+#[cfg(test)]
+mod filesystem_ack_tests;
 #[cfg(test)]
 mod http_tests;
 #[cfg(test)]

@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use peryx_driver::state::{HomeClaim, OwnershipAuthority as _, OwnershipError};
+use openraft::error::{ClientWriteError, ForwardToLeader, RaftError};
+use peryx_driver::state::{
+    CommandOutcome, ControlCommand, ControlError, HomeClaim, MembershipControl as _, OwnershipAuthority as _,
+    OwnershipError,
+};
 use peryx_replication::DatacenterId;
 use peryx_replication::raft::log_store::RaftLogStoreAdapter;
 use peryx_replication::raft::network::PeerRaftNetworkFactory;
@@ -10,7 +14,7 @@ use peryx_replication::raft::{OwnershipStateMachine, PeryxNode, RaftConfig, Raft
 use peryx_storage::raft::RaftLogStore;
 use tempfile::TempDir;
 
-use super::{ConsensusPlan, OwnershipGroup, authority, build_roster, voter_id};
+use super::{ConsensusPlan, OwnershipGroup, authority, build_roster, map_write_error, voter_id};
 use crate::config::{AvailabilityConfig, Config, DcMember, DcMembership, DcRole, ReplicationConfig, SecretSource};
 
 const TOKEN: &str = "group-secret";
@@ -400,8 +404,10 @@ async fn test_ignite_fails_to_bootstrap_a_roster_without_the_local_node() {
 
 async fn started_node(dir: &TempDir) -> RaftNode {
     let store = RaftLogStore::open(dir.path().join("raft.redb")).unwrap();
+    // Key the node by the same id the production roster derives from the datacenter, so a membership
+    // command that maps a datacenter back to its voter id reaches the actual voter.
     RaftNode::start(
-        1,
+        voter_id("east"),
         RaftConfig::default(),
         "ownership",
         PeerRaftNetworkFactory::new(TOKEN, Duration::from_secs(1)),
@@ -415,7 +421,7 @@ async fn started_node(dir: &TempDir) -> RaftNode {
 async fn leader_node(dir: &TempDir) -> RaftNode {
     let node = started_node(dir).await;
     node.bootstrap(BTreeMap::from([(
-        1,
+        voter_id("east"),
         PeryxNode {
             datacenter: DatacenterId("east".to_owned()),
             addr: "east.internal:4460".to_owned(),
@@ -518,4 +524,239 @@ async fn test_cluster_status_reports_the_leader_and_voter_membership() {
     assert_eq!(status.leader, Some("east".to_owned()));
     assert!(status.term >= 1, "an elected leader holds a nonzero term");
     assert_eq!(status.voters, vec!["east".to_owned()]);
+}
+
+fn add_learner(datacenter: &str) -> ControlCommand {
+    ControlCommand::AddLearner {
+        datacenter: datacenter.to_owned(),
+        address: format!("{datacenter}.internal:4470"),
+    }
+}
+
+#[tokio::test]
+async fn test_add_learner_commits_on_the_leader() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    let receipt = group.submit(add_learner("west")).await.unwrap();
+
+    assert_eq!(receipt.outcome, CommandOutcome::Committed);
+    assert!(
+        receipt.term >= 1 && receipt.index >= 1,
+        "a committed entry carries a real log id"
+    );
+}
+
+#[tokio::test]
+async fn test_a_membership_command_without_a_leader_reports_the_forward_target() {
+    let dir = tempfile::tempdir().unwrap();
+    // An unbootstrapped node has no leader, so the add cannot commit and names no forward target.
+    let group = OwnershipGroup::new(started_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group.submit(add_learner("west")).await,
+        Err(ControlError::NotLeader { leader: None })
+    ));
+}
+
+#[tokio::test]
+async fn test_a_command_on_a_stopped_group_is_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = leader_node(&dir).await;
+    node.raft().shutdown().await.unwrap();
+    let group = OwnershipGroup::new(node, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group.submit(add_learner("west")).await,
+        Err(ControlError::Unavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_promoting_a_current_voter_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    // East is already the sole voter, so promoting it leaves the roster unchanged and commits no distinct
+    // entry.
+    let receipt = group
+        .submit(ControlCommand::PromoteVoter {
+            datacenter: "east".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.outcome, CommandOutcome::NoChange);
+}
+
+#[tokio::test]
+async fn test_a_roster_rewrite_of_an_unknown_learner_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    // Promoting a datacenter that was never added as a learner is a real roster change the leader refuses,
+    // returning at once rather than blocking on a quorum it will never reach.
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group
+            .submit(ControlCommand::PromoteVoter {
+                datacenter: "west".to_owned(),
+            })
+            .await,
+        Err(ControlError::Unavailable(_))
+    ));
+}
+
+#[tokio::test]
+async fn test_removing_an_absent_voter_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    // The removed datacenter is not a voter, so the roster is unchanged and the command commits no entry.
+    let receipt = group
+        .submit(ControlCommand::RemoveVoter {
+            datacenter: "west".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.outcome, CommandOutcome::NoChange);
+}
+
+#[tokio::test]
+async fn test_replacing_a_voter_adds_the_learner_then_rewrites_the_roster() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    // The incoming datacenter is added as a learner, then the roster rewrite runs; adding and removing the
+    // same datacenter leaves the voter set unchanged, so the two-step command commits without waiting on a
+    // learner to catch up.
+    let receipt = group
+        .submit(ControlCommand::ReplaceVoter {
+            remove: "west".to_owned(),
+            datacenter: "west".to_owned(),
+            address: "west.internal:4470".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.outcome, CommandOutcome::NoChange);
+}
+
+#[tokio::test]
+async fn test_replacing_a_voter_without_a_leader_forwards_from_the_learner_add() {
+    let dir = tempfile::tempdir().unwrap();
+    // The replace adds the incoming learner first; on an unbootstrapped node that add already forwards to
+    // a leader, so the command returns before the roster rewrite.
+    let group = OwnershipGroup::new(started_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group
+            .submit(ControlCommand::ReplaceVoter {
+                remove: "east".to_owned(),
+                datacenter: "west".to_owned(),
+                address: "west.internal:4470".to_owned(),
+            })
+            .await,
+        Err(ControlError::NotLeader { .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_transferring_an_assigned_authority_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+    group.claim_home("proj").await.unwrap();
+
+    let receipt = group
+        .submit(ControlCommand::TransferAuthority {
+            authority: "proj".to_owned(),
+            new_home: "west".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.outcome, CommandOutcome::Committed);
+}
+
+#[tokio::test]
+async fn test_transferring_to_the_same_home_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+    group.claim_home("proj").await.unwrap();
+
+    let result = group
+        .submit(ControlCommand::TransferAuthority {
+            authority: "proj".to_owned(),
+            new_home: "east".to_owned(),
+        })
+        .await;
+
+    assert!(matches!(result, Err(ControlError::Invalid(_))));
+}
+
+#[tokio::test]
+async fn test_advancing_an_unassigned_authority_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    let result = group
+        .submit(ControlCommand::AdvanceEpoch {
+            authority: "ghost".to_owned(),
+        })
+        .await;
+
+    assert!(matches!(result, Err(ControlError::Invalid(_))));
+}
+
+#[test]
+fn test_a_forward_to_a_known_leader_names_its_address() {
+    // A follower's rejection stamps the leader it knows; the control error carries that address so a
+    // client retries against it rather than guessing.
+    let error = RaftError::APIError(ClientWriteError::ForwardToLeader(ForwardToLeader {
+        leader_id: Some(voter_id("west")),
+        leader_node: Some(PeryxNode {
+            datacenter: DatacenterId("west".to_owned()),
+            addr: "west.internal:4460".to_owned(),
+        }),
+    }));
+
+    assert_eq!(
+        map_write_error(&error),
+        ControlError::NotLeader {
+            leader: Some("west.internal:4460".to_owned()),
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_an_authority_command_without_a_leader_reports_the_forward_target() {
+    let dir = tempfile::tempdir().unwrap();
+    // An unbootstrapped node cannot commit an ownership command, so the client write forwards to a leader
+    // it does not know rather than committing here.
+    let group = OwnershipGroup::new(started_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group
+            .submit(ControlCommand::AdvanceEpoch {
+                authority: "proj".to_owned(),
+            })
+            .await,
+        Err(ControlError::NotLeader { .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_advancing_an_assigned_authority_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+    group.claim_home("proj").await.unwrap();
+
+    let receipt = group
+        .submit(ControlCommand::AdvanceEpoch {
+            authority: "proj".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(receipt.outcome, CommandOutcome::Committed);
 }

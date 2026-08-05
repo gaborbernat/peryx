@@ -13,13 +13,21 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context as _, bail};
+use openraft::LogId;
 use openraft::error::{ClientWriteError, RaftError};
-use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError};
+use peryx_driver::state::{
+    ClusterStatus, CommandOutcome, CommandReceipt, ControlCommand, ControlError, HomeClaim, MembershipControl,
+    OwnershipAuthority, OwnershipError, plan_voter_roster,
+};
 use peryx_replication::raft::log_store::RaftLogStoreAdapter;
 use peryx_replication::raft::network::PeerRaftNetworkFactory;
 use peryx_replication::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
-use peryx_replication::{Admission, AuthorityEpoch, AuthorityKey, DatacenterId, OwnershipCommand, OwnershipEffect};
+use peryx_replication::{
+    Admission, AuthorityEpoch, AuthorityKey, DatacenterId, OwnershipCommand, OwnershipEffect, Rejection,
+};
 use peryx_storage::raft::RaftLogStore;
 use url::Url;
 
@@ -219,6 +227,115 @@ impl OwnershipAuthority for OwnershipGroup {
             term: metrics.current_term,
             voters: membership.nodes().map(|(_, node)| node.datacenter.0.clone()).collect(),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl MembershipControl for OwnershipGroup {
+    async fn submit(&self, command: ControlCommand) -> Result<CommandReceipt, ControlError> {
+        match command {
+            ControlCommand::AddLearner { datacenter, address } => self.add_learner(&datacenter, address).await,
+            ControlCommand::PromoteVoter { datacenter } => self.change_voters(Some(&datacenter), None).await,
+            ControlCommand::RemoveVoter { datacenter } => self.change_voters(None, Some(&datacenter)).await,
+            ControlCommand::ReplaceVoter {
+                remove,
+                datacenter,
+                address,
+            } => {
+                self.add_learner(&datacenter, address).await?;
+                self.change_voters(Some(&datacenter), Some(&remove)).await
+            }
+            ControlCommand::TransferAuthority { authority, new_home } => {
+                self.submit_ownership(OwnershipCommand::RecordTransfer {
+                    authority: AuthorityKey(authority),
+                    new_home: DatacenterId(new_home),
+                })
+                .await
+            }
+            ControlCommand::AdvanceEpoch { authority } => {
+                self.submit_ownership(OwnershipCommand::AdvanceAuthorityEpoch {
+                    authority: AuthorityKey(authority),
+                })
+                .await
+            }
+        }
+    }
+}
+
+impl OwnershipGroup {
+    /// Add `datacenter` as a non-voting learner reachable at `address`, returning the committed identity
+    /// of the membership entry.
+    async fn add_learner(&self, datacenter: &str, address: String) -> Result<CommandReceipt, ControlError> {
+        let node = PeryxNode {
+            datacenter: DatacenterId(datacenter.to_owned()),
+            addr: address,
+        };
+        match self.node.raft().add_learner(voter_id(datacenter), node, false).await {
+            Ok(response) => Ok(committed_receipt(&response.log_id, CommandOutcome::Committed)),
+            Err(error) => Err(map_write_error(&error)),
+        }
+    }
+
+    /// Rewrite the voter roster, adding and removing the named datacenters. A rewrite that leaves the
+    /// roster unchanged commits as [`CommandOutcome::NoChange`] rather than a distinct entry the operator
+    /// did not intend.
+    async fn change_voters(&self, add: Option<&str>, remove: Option<&str>) -> Result<CommandReceipt, ControlError> {
+        let metrics = self.node.metrics().borrow().clone();
+        let current: BTreeSet<u64> = metrics.membership_config.voter_ids().collect();
+        let planned = plan_voter_roster(&current, add.map(voter_id), remove.map(voter_id));
+        let outcome = if planned == current {
+            CommandOutcome::NoChange
+        } else {
+            CommandOutcome::Committed
+        };
+        match self.node.raft().change_membership(planned, false).await {
+            Ok(response) => Ok(committed_receipt(&response.log_id, outcome)),
+            Err(error) => Err(map_write_error(&error)),
+        }
+    }
+
+    /// Commit `command` to the ownership log, mapping a rejected transition to an invalid-command error
+    /// rather than a committed receipt.
+    async fn submit_ownership(&self, command: OwnershipCommand) -> Result<CommandReceipt, ControlError> {
+        match self.node.raft().client_write(command).await {
+            Ok(response) => match response.data {
+                OwnershipResponse::Applied(OwnershipEffect::Rejected(rejection)) => {
+                    Err(ControlError::Invalid(rejection_reason(rejection).to_owned()))
+                }
+                _ => Ok(committed_receipt(&response.log_id, CommandOutcome::Committed)),
+            },
+            Err(error) => Err(map_write_error(&error)),
+        }
+    }
+}
+
+/// The committed identity of a log entry: the term and index the receipt reports.
+const fn committed_receipt(log_id: &LogId<u64>, outcome: CommandOutcome) -> CommandReceipt {
+    CommandReceipt {
+        term: log_id.leader_id.term,
+        index: log_id.index,
+        outcome,
+    }
+}
+
+/// Map a client-write failure to a control error, reading the forward target from a not-leader rejection
+/// so a caller retries against the leader, and folding every other cause into an unavailable error.
+fn map_write_error(error: &RaftError<u64, ClientWriteError<u64, PeryxNode>>) -> ControlError {
+    match error {
+        RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) => ControlError::NotLeader {
+            leader: forward.leader_node.as_ref().map(|node| node.addr.clone()),
+        },
+        other => ControlError::Unavailable(other.to_string()),
+    }
+}
+
+/// Why the ownership state machine rejected a transfer or epoch command.
+const fn rejection_reason(rejection: Rejection) -> &'static str {
+    match rejection {
+        Rejection::SameHome => "the authority already homes at that datacenter",
+        // A transfer or epoch command reaches only NotAssigned here; AlreadyAssigned arises from a first
+        // assignment, never from moving or fencing, so the fallback covers the not-assigned case alone.
+        _ => "the authority is not assigned a home to move or fence",
     }
 }
 

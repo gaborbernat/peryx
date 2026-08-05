@@ -567,6 +567,9 @@ pub struct ReplicationRuntime {
 pub struct Consensus {
     /// The group handle to register on the [`AppState`] for the mutation path.
     pub authority: Arc<dyn peryx_driver::state::OwnershipAuthority>,
+    /// The same group as the membership and transfer command seam the administrator control plane submits
+    /// through, wrapped once the runtime holds a clock.
+    pub control: Arc<dyn peryx_driver::state::MembershipControl>,
     /// The receive-side raft RPC routes to mount on the peer-facing (availability) listener.
     pub peer_router: Router,
 }
@@ -689,9 +692,12 @@ impl ReplicationRuntime {
                 let node = plan.ignite().await?;
                 let peer_router = peryx_replication::raft::network::raft_rpc_router(plan.token(), node.rpc_handler())
                     .context("build the raft peer rpc router")?;
-                let authority: Arc<dyn peryx_driver::state::OwnershipAuthority> =
-                    Arc::new(raft::OwnershipGroup::new(node, plan.home()));
-                Ok(Some(Consensus { authority, peer_router }))
+                let group = Arc::new(raft::OwnershipGroup::new(node, plan.home()));
+                Ok(Some(Consensus {
+                    authority: group.clone(),
+                    control: group,
+                    peer_router,
+                }))
             }
             None => Ok(None),
         }

@@ -101,7 +101,7 @@ pub use readiness::{
 pub use receipt_quorum::{ByteDurability, ReceiptAck, assess_byte_durability};
 pub use reconcile::{Disposition, OldEpochOp, classify};
 pub use remote_durability::{MetadataOperation, RemoteAck, RemoteDurability, assess_remote_metadata_durability};
-pub use replica::{Replica, ReplicaState, SyncOutcome};
+pub use replica::{AppliedPage, Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};
 pub use versions::{
     AvailabilityVersions, Incompatibility, Negotiation, Version, VersionRange, WireKind, accepts_operation_kind,

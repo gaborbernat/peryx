@@ -45,7 +45,9 @@ pub enum SyncError {
 }
 
 impl SyncError {
-    pub(crate) fn primary(error: impl Error + Send + Sync + 'static) -> Self {
+    /// Wrap a metadata-transport failure as a primary-request error, so a caller that fetches pages
+    /// through the peer transport reports transfer loss on the same channel as the legacy primary path.
+    pub fn primary(error: impl Error + Send + Sync + 'static) -> Self {
         Self::Primary(Box::new(error))
     }
 }

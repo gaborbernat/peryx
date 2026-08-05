@@ -65,7 +65,7 @@ pub use blob_routing::RoutingBlobTransport;
 pub use byte_ack::{ByteAckDecision, decide_byte_ack};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use completeness::{Completeness, ProducerCoverage, assess};
-pub use dc_copy::{CopyPlan, plan_dc_copy};
+pub use dc_copy::{CopyError, CopyPlan, TargetCopy, copy_blob_to_target, plan_dc_copy, run_dc_copy};
 pub use driver::{StepOutcome, advance_once};
 pub use envelope::{
     AuthorityEpoch, DEFAULT_DECODE_LIMITS, DecodeLimits, EnvelopeError, OperationEnvelope, OperationId, OperationKind,

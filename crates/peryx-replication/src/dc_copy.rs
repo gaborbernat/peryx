@@ -17,8 +17,14 @@
 //! them with a placement receipt, bounding concurrency and bandwidth, and retrying under the worker
 //! runtime are the copier's deferred wiring.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::num::NonZeroUsize;
 
+use futures_util::StreamExt as _;
+use peryx_storage::blob::{BlobError, BlobStore, Digest};
+
+use crate::blob::{BlobRequest, BlobTransport};
+use crate::peer::TransportError;
 use crate::protocol::{PlacementAvailability, PlacementDescriptor};
 
 /// The datacenter copies a background transfer should make, or why it makes none.
@@ -63,4 +69,84 @@ pub fn plan_dc_copy(placements: &[PlacementDescriptor], targets: &[String], comm
     } else {
         CopyPlan::Targets(owed.into_iter().collect())
     }
+}
+
+/// A failure copying one blob to one target datacenter.
+#[derive(Debug, thiserror::Error)]
+pub enum CopyError {
+    /// The source could not serve the blob's bytes.
+    #[error("copy source could not serve the blob: {0}")]
+    Fetch(#[source] TransportError),
+    /// The target could not durably publish the fetched bytes.
+    #[error("copy target could not publish the blob: {0}")]
+    Publish(#[source] BlobError),
+    /// The plan owed a copy to a datacenter with no configured target store.
+    #[error("no target store is configured for datacenter {data_center}")]
+    Unconfigured { data_center: String },
+}
+
+/// Copy `digest` from `source` to `target`, verifying and durably publishing the bytes.
+///
+/// Fetches the whole blob under the transport's byte cap, which a whole-blob fetch digest-verifies, then
+/// writes it through [`write_verified`](BlobStore::write_verified), which re-checks the digest and
+/// publishes with an atomic filesystem operation, so a target never exposes bytes that do not match the
+/// digest and a partial write never reaches a served path.
+///
+/// # Errors
+/// Returns [`CopyError::Fetch`] when the source cannot serve the blob and [`CopyError::Publish`] when the
+/// target cannot durably write it.
+pub async fn copy_blob_to_target(
+    source: &(dyn BlobTransport + Sync),
+    target: &BlobStore,
+    digest: &Digest,
+) -> Result<(), CopyError> {
+    let bytes = source
+        .fetch_blob(BlobRequest {
+            digest: digest.clone(),
+            range: None,
+        })
+        .await
+        .map_err(CopyError::Fetch)?;
+    target.write_verified(&bytes, digest).map_err(CopyError::Publish)
+}
+
+/// One target datacenter's copy result.
+#[derive(Debug)]
+pub struct TargetCopy {
+    pub data_center: String,
+    pub outcome: Result<(), CopyError>,
+}
+
+/// Copy `digest` to every datacenter the `plan` owes, resolving each target's store through `stores`, at
+/// most `max_concurrent` copies in flight.
+///
+/// A [`CopyPlan::NoSource`] or [`CopyPlan::Complete`] plan owes no copy and yields no results. Each owed
+/// target is copied independently, so one target's failure never abandons the rest, and a target with no
+/// configured store fails as [`CopyError::Unconfigured`] rather than silently vanishing. The results come
+/// back ordered by datacenter so two runs over the same plan report the same order.
+pub async fn run_dc_copy<S: std::hash::BuildHasher + Sync>(
+    plan: &CopyPlan,
+    source: &(dyn BlobTransport + Sync),
+    stores: &HashMap<String, BlobStore, S>,
+    digest: &Digest,
+    max_concurrent: NonZeroUsize,
+) -> Vec<TargetCopy> {
+    let CopyPlan::Targets(owed) = plan else {
+        return Vec::new();
+    };
+    let mut results: Vec<TargetCopy> = futures_util::stream::iter(owed.iter().cloned())
+        .map(|data_center| async move {
+            let outcome = match stores.get(&data_center) {
+                Some(target) => copy_blob_to_target(source, target, digest).await,
+                None => Err(CopyError::Unconfigured {
+                    data_center: data_center.clone(),
+                }),
+            };
+            TargetCopy { data_center, outcome }
+        })
+        .buffer_unordered(max_concurrent.get())
+        .collect()
+        .await;
+    results.sort_by(|a, b| a.data_center.cmp(&b.data_center));
+    results
 }

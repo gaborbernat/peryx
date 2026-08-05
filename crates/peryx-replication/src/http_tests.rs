@@ -1,3 +1,6 @@
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -6,14 +9,19 @@ use futures_util::StreamExt as _;
 use http_body_util::BodyExt as _;
 use peryx_storage::blob::{BlobMetadata, BlobRead, BlobReadBody, BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
+use tokio::sync::Semaphore;
 use tower::ServiceExt as _;
 
 use crate::{
     ChangePage, DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PROTOCOL_VERSION, Primary,
-    PrimaryHttpConfigError, primary_router,
+    PrimaryHttpConfigError, primary_router, primary_router_with_stream_limit,
 };
 
 const TOKEN: &str = "replica-secret";
+
+fn a_permit() -> tokio::sync::OwnedSemaphorePermit {
+    Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap()
+}
 
 #[tokio::test]
 async fn test_blob_body_preserves_a_backend_stream() {
@@ -29,7 +37,11 @@ async fn test_blob_body_preserves_a_backend_stream() {
         BlobReadBody::Stream(futures_util::stream::once(async { Ok(Bytes::from_static(b"artifact")) }).boxed()),
     );
 
-    let body = crate::http::blob_body(read).collect().await.unwrap().to_bytes();
+    let body = crate::http::blob_body(read, a_permit())
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
 
     assert_eq!(body, b"artifact".as_slice());
 }
@@ -52,6 +64,17 @@ impl TestStores {
 
     fn router(&self) -> Router {
         primary_router("primary-a", TOKEN, self.meta.clone(), self.blobs.clone()).unwrap()
+    }
+
+    fn router_with_limit(&self, streams: usize) -> Router {
+        primary_router_with_stream_limit(
+            "primary-a",
+            TOKEN,
+            self.meta.clone(),
+            self.blobs.clone(),
+            NonZeroUsize::new(streams).unwrap(),
+        )
+        .unwrap()
     }
 }
 
@@ -229,10 +252,12 @@ async fn test_primary_router_streams_a_digest_addressed_blob() {
         .unwrap();
     let status = response.status();
     let content_type = response.headers()[header::CONTENT_TYPE].clone();
+    let etag = response.headers()[header::ETAG].clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(content_type, "application/octet-stream");
+    assert_eq!(etag, format!("\"sha256:{}\"", digest.as_str()));
     assert_eq!(body, "artifact bytes");
 }
 
@@ -381,6 +406,35 @@ async fn test_primary_router_reports_a_range_head_failure() {
 
     std::fs::set_permissions(&blobs_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn test_primary_router_refuses_a_stream_when_at_capacity() {
+    let stores = TestStores::new();
+    let digest = stores.blobs.put_bytes(b"artifact bytes").await.unwrap();
+    let router = stores.router_with_limit(1);
+    let path = format!("/+replication/v1/blobs/sha256/{}", digest.as_str());
+
+    // The first response holds the sole stream slot in its still-open body.
+    let holding = router
+        .clone()
+        .oneshot(authenticated_request(&path, TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(holding.status(), StatusCode::OK);
+
+    let refused = router
+        .clone()
+        .oneshot(authenticated_request(&path, TOKEN))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(refused.headers()[header::RETRY_AFTER], "1");
+
+    // Dropping the first response releases its slot, so the next stream opens.
+    drop(holding);
+    let reopened = router.oneshot(authenticated_request(&path, TOKEN)).await.unwrap();
+    assert_eq!(reopened.status(), StatusCode::OK);
 }
 
 #[tokio::test]

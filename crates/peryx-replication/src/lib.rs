@@ -81,7 +81,10 @@ pub use envelope::{
 pub use error::SyncError;
 pub use failover::{Candidate, Failover, FailoverPolicy};
 pub use filesystem_ack::{FilesystemAck, ReceiptOutcome};
-pub use http::{DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PrimaryHttpConfigError, primary_router};
+pub use http::{
+    DEFAULT_MAX_CHANGE_PAGE_SIZE, DEFAULT_MAX_CONCURRENT_BLOB_STREAMS, HttpPrimary, HttpPrimaryError,
+    PrimaryHttpConfigError, primary_router, primary_router_with_stream_limit,
+};
 pub use ingress_intent::{
     Ecosystem, IngressIntent, IntentKey, IntentLedger, IntentState, StageOutcome, TransitionOutcome,
 };

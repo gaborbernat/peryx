@@ -1,5 +1,7 @@
 use std::fmt;
 use std::io::{Seek as _, SeekFrom};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -8,11 +10,13 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::Stream;
 use peryx_storage::blob::{BlobErrorKind, BlobRead, BlobReadBody, BlobStorage, Digest, RangeRequest, parse_range};
 use peryx_storage::meta::MetaStore;
 use reqwest::Url;
 use serde::Deserialize;
 use tokio::io::AsyncReadExt as _;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::io::ReaderStream;
 
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION, Primary};
@@ -22,6 +26,13 @@ const USER_AGENT: &str = concat!("peryx-replication/", env!("CARGO_PKG_VERSION")
 
 /// The largest change page the primary HTTP endpoint accepts.
 pub const DEFAULT_MAX_CHANGE_PAGE_SIZE: usize = 1_000;
+
+/// The most artifact byte streams the primary serves at once.
+///
+/// A request that arrives while every slot is held earns a `503`, so a burst of slow, stalled, or
+/// abandoned readers cannot exhaust the file handles, sockets, and buffers a stream pins. A finished,
+/// cancelled, or disconnected reader frees its slot.
+pub const DEFAULT_MAX_CONCURRENT_BLOB_STREAMS: NonZeroUsize = NonZeroUsize::new(32).expect("32 is non-zero");
 
 /// Invalid primary HTTP server configuration.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -137,6 +148,7 @@ struct PrimaryHttpState {
     token: String,
     meta: MetaStore,
     blobs: BlobStorage,
+    stream_permits: Arc<Semaphore>,
 }
 
 #[derive(Deserialize)]
@@ -145,7 +157,8 @@ struct ChangesQuery {
     limit: usize,
 }
 
-/// Build the authenticated primary replication routes.
+/// Build the authenticated primary replication routes, bounding concurrent artifact streams at
+/// [`DEFAULT_MAX_CONCURRENT_BLOB_STREAMS`].
 ///
 /// # Errors
 /// Returns an error when the source identity or bearer token is empty.
@@ -154,6 +167,21 @@ pub fn primary_router(
     token: impl Into<String>,
     meta: MetaStore,
     blobs: impl Into<BlobStorage>,
+) -> Result<Router, PrimaryHttpConfigError> {
+    primary_router_with_stream_limit(source, token, meta, blobs, DEFAULT_MAX_CONCURRENT_BLOB_STREAMS)
+}
+
+/// Build the authenticated primary replication routes, bounding concurrent artifact streams at
+/// `max_concurrent_streams`.
+///
+/// # Errors
+/// Returns an error when the source identity or bearer token is empty.
+pub fn primary_router_with_stream_limit(
+    source: impl Into<String>,
+    token: impl Into<String>,
+    meta: MetaStore,
+    blobs: impl Into<BlobStorage>,
+    max_concurrent_streams: NonZeroUsize,
 ) -> Result<Router, PrimaryHttpConfigError> {
     let source = source.into();
     if source.is_empty() {
@@ -171,6 +199,7 @@ pub fn primary_router(
             token,
             meta,
             blobs: blobs.into(),
+            stream_permits: Arc::new(Semaphore::new(max_concurrent_streams.get())),
         }))
 }
 
@@ -217,6 +246,9 @@ async fn serve_blob(
     let Some(digest) = Digest::from_hex(&encoded) else {
         return (StatusCode::BAD_REQUEST, "invalid sha256 digest").into_response();
     };
+    let Ok(permit) = Arc::clone(&state.stream_permits).try_acquire_owned() else {
+        return at_capacity();
+    };
     let requested = match headers.get(header::RANGE).and_then(|value| value.to_str().ok()) {
         None => None,
         Some(range) => {
@@ -238,14 +270,15 @@ async fn serve_blob(
         Err(error) if error.kind() == BlobErrorKind::NotFound => return StatusCode::NOT_FOUND.into_response(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
-    blob_content_response(read, partial)
+    blob_content_response(read, partial, &digest, permit)
 }
 
-fn blob_content_response(read: BlobRead, partial: bool) -> Response {
+fn blob_content_response(read: BlobRead, partial: bool, digest: &Digest, permit: OwnedSemaphorePermit) -> Response {
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CACHE_CONTROL, "private, no-store")
-        .header(header::ACCEPT_RANGES, "bytes");
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, format!("\"sha256:{}\"", digest.as_str()));
     if partial {
         builder = builder
             .status(StatusCode::PARTIAL_CONTENT)
@@ -261,8 +294,18 @@ fn blob_content_response(read: BlobRead, partial: bool) -> Response {
             );
     }
     builder
-        .body(blob_body(read))
+        .body(blob_body(read, permit))
         .expect("replication blob response headers are valid")
+}
+
+/// The `503` a request earns when every stream slot is held, naming a retry delay and no internal detail.
+fn at_capacity() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        "peer artifact stream capacity reached",
+    )
+        .into_response()
 }
 
 fn unsatisfiable_range(size: u64) -> Response {
@@ -274,7 +317,7 @@ fn unsatisfiable_range(size: u64) -> Response {
         .expect("replication range response headers are valid")
 }
 
-pub fn blob_body(read: BlobRead) -> Body {
+pub fn blob_body(read: BlobRead, permit: OwnedSemaphorePermit) -> Body {
     match read.body {
         BlobReadBody::File(mut file) => {
             // `open` hands back a whole-file handle plus the selected range; position it so the body
@@ -283,10 +326,26 @@ pub fn blob_body(read: BlobRead) -> Body {
             file.seek(SeekFrom::Start(read.range.start))
                 .expect("a stored blob file seeks to its validated range start");
             let length = read.range.end - read.range.start;
-            Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file).take(length)))
+            let file = ReaderStream::new(tokio::fs::File::from_std(file).take(length));
+            Body::from_stream(hold_permit(file, permit))
         }
-        BlobReadBody::Stream(stream) => Body::from_stream(stream),
+        BlobReadBody::Stream(stream) => Body::from_stream(hold_permit(stream, permit)),
     }
+}
+
+/// Carry `permit` alongside `inner` so the stream slot stays reserved for exactly the body's lifetime.
+/// The permit drops when the body finishes, the reader cancels, or the connection closes, whichever comes
+/// first, releasing the slot for the next stream.
+fn hold_permit<S>(inner: S, permit: OwnedSemaphorePermit) -> impl Stream<Item = S::Item> + Send
+where
+    S: Stream + Send + 'static,
+    S::Item: Send,
+{
+    let mut inner = Box::pin(inner);
+    futures_util::stream::poll_fn(move |context| {
+        let _slot = &permit;
+        inner.as_mut().poll_next(context)
+    })
 }
 
 pub fn authorized(headers: &HeaderMap, expected: &str) -> bool {

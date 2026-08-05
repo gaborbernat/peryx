@@ -15,5 +15,5 @@ pub use describe::{
     HostedDescription, IndexDescription, MemberDescription, SecretDescription, UpstreamDescription,
     UpstreamSourceDescription, describe_index, describe_indexes,
 };
-pub use ownership::{HomeClaim, OwnershipAuthority, OwnershipError};
+pub use ownership::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError};
 pub use peryx_index::{Index, IndexKind};

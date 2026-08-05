@@ -35,6 +35,13 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(25);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// The administrator a topology bootstraps when it opts in with [`Topology::with_admin`], and the
+/// password it authenticates with. The password clears the fifteen-character floor
+/// `bootstrap-administrator` enforces, so a test reads operator- and administrator-class fields with
+/// [`Node::http_get_as`].
+pub const ADMIN_USER: &str = "harness-admin";
+pub const ADMIN_PASSWORD: &str = "harness-admin-secret";
+
 /// A harness failure, distinct from a node's own error, so a self-test can assert why the harness gave
 /// up rather than only that it did.
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +125,7 @@ pub struct Topology {
     group: String,
     token: String,
     members: Vec<MemberSpec>,
+    bootstrap_admin: bool,
 }
 
 impl Topology {
@@ -129,6 +137,7 @@ impl Topology {
             group: "solo".to_owned(),
             token: "harness-token".to_owned(),
             members: vec![MemberSpec::new("node-a", "local", Role::Writer)],
+            bootstrap_admin: false,
         }
     }
 
@@ -140,6 +149,7 @@ impl Topology {
             group: group.to_owned(),
             token: "harness-token".to_owned(),
             members,
+            bootstrap_admin: false,
         }
     }
 
@@ -151,7 +161,17 @@ impl Topology {
             group: group.to_owned(),
             token: "harness-token".to_owned(),
             members,
+            bootstrap_admin: false,
         }
+    }
+
+    /// Bootstrap [`ADMIN_USER`] into every node before it serves, so a test can read the operator- and
+    /// administrator-class fields of the observability surfaces through [`Node::http_get_as`]. Each
+    /// node holds its own store, so each is bootstrapped independently with the same credential.
+    #[must_use]
+    pub const fn with_admin(mut self) -> Self {
+        self.bootstrap_admin = true;
+        self
     }
 
     /// Spawn every member and wait until each answers `/+status`.
@@ -293,6 +313,9 @@ impl Node {
         let data = TempDir::new().expect("temp data dir");
         let config = data.path().join("peryx.toml");
         std::fs::write(&config, node_config(topology, member, control_port, roster)).expect("write config");
+        if topology.bootstrap_admin {
+            bootstrap_admin(&config, data.path());
+        }
         let http = reqwest::blocking::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
@@ -441,6 +464,38 @@ impl Node {
         Some((code, response.text().unwrap_or_default()))
     }
 
+    /// `GET {path}` with HTTP Basic credentials, returning the status code and body, or `None` when the
+    /// node is unreachable. Pair it with a [`Topology::with_admin`] group to read the operator- and
+    /// administrator-class fields the anonymous [`Self::http_get`] never sees.
+    #[must_use]
+    pub fn http_get_as(&self, user: &str, password: &str, path: &str) -> Option<(u16, String)> {
+        let response = self
+            .http
+            .get(format!("http://127.0.0.1:{}{path}", self.port))
+            .basic_auth(user, Some(password))
+            .send()
+            .ok()?;
+        let code = response.status().as_u16();
+        Some((code, response.text().unwrap_or_default()))
+    }
+
+    /// `GET {path}` against this node's private availability control listener with admin Basic
+    /// credentials, returning the status code and body, or `None` when unreachable.
+    ///
+    /// The ownership group's consensus status the node reports under `/availability/v1/status` lives on
+    /// this listener, behind the administrator gate, so a test reads it here rather than the public port.
+    #[must_use]
+    pub fn control_get_as(&self, user: &str, password: &str, path: &str) -> Option<(u16, String)> {
+        let response = self
+            .http
+            .get(format!("http://127.0.0.1:{}{path}", self.control_port))
+            .basic_auth(user, Some(password))
+            .send()
+            .ok()?;
+        let code = response.status().as_u16();
+        Some((code, response.text().unwrap_or_default()))
+    }
+
     /// Kill the node's process group, so a test can drive a crash or a partition-by-death.
     pub fn kill(&mut self) {
         kill_group(&mut self.child);
@@ -568,6 +623,30 @@ fn node_config(topology: &Topology, member: &MemberSpec, control_port: u16, rost
         let _ = writeln!(config, "[availability.listener]\nbind = \"127.0.0.1:{control_port}\"");
     }
     config
+}
+
+/// Create the first administrator in `data` before the node serves, through `peryx
+/// bootstrap-administrator`, which writes the user offline while nothing holds the store. The node
+/// then authenticates the same credential over HTTP Basic.
+fn bootstrap_admin(config: &std::path::Path, data: &std::path::Path) {
+    let password_file = data.join("admin-password");
+    std::fs::write(&password_file, ADMIN_PASSWORD).expect("write admin password");
+    let output = Command::new(BIN)
+        .arg("bootstrap-administrator")
+        .arg(ADMIN_USER)
+        .arg("--config")
+        .arg(config)
+        .arg("--data-dir")
+        .arg(data)
+        .arg("--password-file")
+        .arg(&password_file)
+        .output()
+        .expect("run peryx bootstrap-administrator");
+    assert!(
+        output.status.success(),
+        "bootstrap-administrator failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 fn launch(config: &std::path::Path, data: &std::path::Path, port: u16) -> Child {

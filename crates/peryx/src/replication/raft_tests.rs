@@ -63,6 +63,7 @@ fn plan_at(log_path: PathBuf, local: u64, roster: BTreeMap<u64, PeryxNode>) -> C
     ConsensusPlan {
         local,
         home: DatacenterId("east".to_owned()),
+        seed: true,
         roster,
         log_path,
         group: "ownership".to_owned(),
@@ -282,6 +283,26 @@ fn test_voter_id_is_stable_and_distinct() {
 }
 
 #[tokio::test]
+async fn test_ignite_does_not_bootstrap_a_replica_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    // A replica seed starts but never initializes; it joins through the writer's replication, so it
+    // holds no leader until the seed contacts it.
+    let plan = ConsensusPlan {
+        local: voter_id("west"),
+        home: DatacenterId("west".to_owned()),
+        seed: false,
+        roster: one_voter("east", "east.internal:4460"),
+        log_path: dir.path().join("raft/ownership-log.redb"),
+        group: "ownership".to_owned(),
+        token: TOKEN.to_owned(),
+    };
+
+    let node = plan.ignite().await.unwrap();
+
+    assert_eq!(node.leader(), None);
+}
+
+#[tokio::test]
 async fn test_ignite_starts_and_bootstraps_a_single_node_group() {
     let dir = tempfile::tempdir().unwrap();
     let config = ha_config(
@@ -456,4 +477,16 @@ async fn test_has_home_reflects_a_committed_assignment() {
     group.claim_home("proj").await.unwrap();
     // client_write returns after the entry applies, so the home reads back locally at once.
     assert!(group.has_home("proj").await);
+}
+
+#[tokio::test]
+async fn test_cluster_status_reports_the_leader_and_voter_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    let status = group.cluster_status();
+
+    assert_eq!(status.leader, Some("east".to_owned()));
+    assert!(status.term >= 1, "an elected leader holds a nonzero term");
+    assert_eq!(status.voters, vec!["east".to_owned()]);
 }

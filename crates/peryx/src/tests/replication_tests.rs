@@ -122,12 +122,12 @@ async fn test_ignite_consensus_registers_the_group_for_the_mutation_path() {
     let state = build_state(&config).unwrap();
     let replication = ReplicationRuntime::new(&config, &state).unwrap();
 
-    let group = replication
+    let consensus = replication
         .ignite_consensus()
         .await
         .unwrap()
         .expect("an ha roster ignites a consensus group");
-    state.set_ownership_authority(group);
+    state.set_ownership_authority(consensus.authority);
 
     // The mutation path reaches the same group through the state. The lone voter elects itself, so a
     // first claim eventually assigns the home here rather than forwarding.

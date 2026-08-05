@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use peryx_driver::state::{HomeClaim, OwnershipAuthority, OwnershipError};
+use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError};
 
 use super::support::*;
 
@@ -66,6 +66,15 @@ impl OwnershipAuthority for RecordingAuthority {
             Err(OwnershipError::Unavailable("ownership group unreachable".to_owned()))
         } else {
             Ok(HomeClaim::AssignedHere)
+        }
+    }
+
+    fn cluster_status(&self) -> ClusterStatus {
+        // A recording double runs no consensus group, so it reports none.
+        ClusterStatus {
+            leader: None,
+            term: 0,
+            voters: Vec::new(),
         }
     }
 }

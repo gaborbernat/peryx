@@ -14,6 +14,20 @@ pub enum HomeClaim {
     AlreadyHomed,
 }
 
+/// A snapshot of the ownership consensus group this node observes, for the availability status resource.
+///
+/// It names voters by their consensus id and datacenter, never their peer address, so the status surface
+/// exposes membership without leaking the internal transport topology.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ClusterStatus {
+    /// The datacenter of the current leader, or `None` when this node knows of none.
+    pub leader: Option<String>,
+    /// The current leadership term, the group's monotonic authority epoch.
+    pub term: u64,
+    /// The datacenters this node's committed membership holds as voters.
+    pub voters: Vec<String>,
+}
+
 /// Why a home claim could not commit.
 #[derive(Debug, thiserror::Error)]
 pub enum OwnershipError {
@@ -47,6 +61,11 @@ pub trait OwnershipAuthority: Send + Sync {
     /// Returns [`OwnershipError`] when the claim cannot commit, for example when this node is not the
     /// leader and cannot reach it.
     async fn claim_home(&self, authority: &str) -> Result<HomeClaim, OwnershipError>;
+
+    /// A snapshot of the group this node observes — leader, term, and voter membership — for the
+    /// availability status resource. Read from local metrics, so it is current on the leader and may lag
+    /// on a follower.
+    fn cluster_status(&self) -> ClusterStatus;
 }
 
 /// Claim `authority`'s home on its first publish, best effort, when this process runs a group.
@@ -69,7 +88,7 @@ pub(super) async fn claim_first_publish_home(group: Option<&std::sync::Arc<dyn O
 mod tests {
     use std::sync::Arc;
 
-    use super::{HomeClaim, OwnershipAuthority, OwnershipError, claim_first_publish_home};
+    use super::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, claim_first_publish_home};
 
     struct Fake {
         homed: bool,
@@ -87,6 +106,14 @@ mod tests {
                 Ok(outcome) => Ok(*outcome),
                 Err(OwnershipError::NotLeader { leader }) => Err(OwnershipError::NotLeader { leader: leader.clone() }),
                 Err(OwnershipError::Unavailable(reason)) => Err(OwnershipError::Unavailable(reason.clone())),
+            }
+        }
+
+        fn cluster_status(&self) -> ClusterStatus {
+            ClusterStatus {
+                leader: Some("east".to_owned()),
+                term: 3,
+                voters: vec!["east".to_owned()],
             }
         }
     }
@@ -127,6 +154,19 @@ mod tests {
     #[tokio::test]
     async fn test_first_publish_is_a_no_op_without_a_group() {
         claim_first_publish_home(None, "proj").await;
+    }
+
+    #[test]
+    fn test_cluster_status_snapshots_the_group() {
+        let status = Fake {
+            homed: false,
+            claim: Ok(HomeClaim::AlreadyHomed),
+        }
+        .cluster_status();
+
+        assert_eq!(status.leader, Some("east".to_owned()));
+        assert_eq!(status.term, 3);
+        assert_eq!(status.voters, vec!["east".to_owned()]);
     }
 
     #[test]

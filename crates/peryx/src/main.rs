@@ -104,8 +104,8 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
         // Held for the process lifetime: dropping the handle shuts the ownership Raft runtime down. The
         // mutation path reaches the same group through the state registration.
         let consensus = replication.ignite_consensus().await?;
-        if let Some(group) = &consensus {
-            state.set_ownership_authority(group.clone());
+        if let Some(consensus) = &consensus {
+            state.set_ownership_authority(consensus.authority.clone());
         }
         if !replication.is_replica() {
             for index in &state.indexes {
@@ -135,7 +135,13 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
             config.availability_listener.clone(),
             peryx::availability::AvailabilityPosture::from_config(&config.availability),
         ) {
-            let listener_router = peryx::availability::router(state.clone(), posture);
+            let mut listener_router = peryx::availability::router(state.clone(), posture);
+            // Peers dial this node's advertised address for raft RPCs, so the receive-side router rides
+            // the peer-facing availability listener, not the public package routes. Without it a voter
+            // sends RPCs but answers none and the group never reaches quorum.
+            if let Some(consensus) = &consensus {
+                listener_router = listener_router.merge(consensus.peer_router.clone());
+            }
             tokio::spawn(serve_availability_listener(listener_config, listener_router));
         }
         let router = replication.mount(peryx::server::router_for(state));

@@ -469,6 +469,30 @@ fn test_finish_upload_deduplicates_an_already_stored_blob() {
 }
 
 #[test]
+fn test_finish_upload_is_idempotent_after_a_successful_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(dir.path().join("blobs"));
+    store.stage_upload_chunk("sess-1", 0, b"streamed content").unwrap();
+    let digest = Digest::of(b"streamed content");
+    store.finish_upload("sess-1", &digest).unwrap();
+
+    // A retry whose earlier response was lost finds the blob durably present and its stage cleared, so
+    // the finish succeeds rather than reporting the missing stage as a failed upload.
+    store.finish_upload("sess-1", &digest).unwrap();
+    assert_eq!(store.read(&digest).unwrap(), b"streamed content");
+}
+
+#[test]
+fn test_finish_upload_surfaces_an_unreadable_stage_as_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(dir.path().join("blobs"));
+    // An interior NUL is rejected as invalid input before any syscall, so it is neither an absent stage
+    // nor an already-published digest: the finish must surface it as an error rather than a false success.
+    let error = store.finish_upload("bad\0session", &Digest::of(b"x")).unwrap_err();
+    assert_eq!(error.kind(), crate::blob::BlobErrorKind::Io);
+}
+
+#[test]
 fn test_discard_upload_removes_the_stage_and_tolerates_absence() {
     let dir = tempfile::tempdir().unwrap();
     let store = BlobStore::new(dir.path().join("blobs"));

@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use peryx_core::Ecosystem;
@@ -818,7 +818,7 @@ async fn test_recovering_scheduler_fails_an_interrupted_attempt_before_accepting
     scheduler.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_shutdown_returns_after_the_grace_period_when_a_job_ignores_cancellation() {
     let (_dir, state) = serving();
     let mut limits = limits(2, 4, 2, 2);
@@ -827,10 +827,13 @@ async fn test_shutdown_returns_after_the_grace_period_when_a_job_ignores_cancell
     let stubborn = TestJob::new("probe", "a", Action::SleepIgnoringCancel(Duration::from_secs(30)));
     scheduler.submit(stubborn.clone());
     stubborn.started.notified().await;
-    let start = Instant::now();
+    // Paused time makes this exact: shutdown must return after the 50ms grace, not the 30s job. The
+    // virtual clock advances only to whichever timer fires first, so a bound between the two proves the
+    // grace won without racing a wall clock.
+    let start = tokio::time::Instant::now();
     scheduler.shutdown().await;
     assert!(
-        start.elapsed() < Duration::from_secs(5),
+        start.elapsed() < Duration::from_secs(1),
         "shutdown waited on the stubborn job past its grace"
     );
 }

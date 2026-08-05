@@ -106,6 +106,18 @@ pub fn flight_gate(inflight: &Inflight, key: &str) -> FlightGate {
     }
 }
 
+impl Inflight {
+    /// The number of callers currently registered on `key`'s gate, or `0` when no gate exists for it.
+    ///
+    /// A test observes this to know a racing request has reached the gate — a deterministic replacement
+    /// for sleeping and hoping the request has parked, since [`flight_gate`] bumps the count before the
+    /// caller awaits the lock.
+    #[must_use]
+    pub fn active(&self, key: &str) -> usize {
+        self.gates.get(key).map_or(0, |gate| gate.users.load(Ordering::Acquire))
+    }
+}
+
 /// Release a single-flight hold.
 pub fn release_flight(inflight: &Inflight, key: &str, guard: FlightGuard) {
     debug_assert!(Arc::ptr_eq(&inflight.gates, &guard.flight.inflight.gates));
@@ -291,6 +303,24 @@ mod tests {
 
         drop(producer);
         drop(flight_gate(&inflight, "digest").try_lock_owned().unwrap());
+    }
+
+    #[test]
+    fn test_active_counts_registered_callers() {
+        let inflight = Inflight::default();
+        assert_eq!(inflight.active("digest"), 0, "no gate exists for an unseen key");
+        let first = flight_gate(&inflight, "digest");
+        assert_eq!(inflight.active("digest"), 1);
+        let second = flight_gate(&inflight, "digest");
+        assert_eq!(inflight.active("digest"), 2, "a second caller shares the one gate");
+        drop(second);
+        assert_eq!(inflight.active("digest"), 1);
+        drop(first);
+        assert_eq!(
+            inflight.active("digest"),
+            0,
+            "the gate retires when its last caller leaves"
+        );
     }
 
     #[test]

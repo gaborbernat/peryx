@@ -1,6 +1,6 @@
 //! Matching a request's validators against an entity tag and a modification date.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use axum::http::HeaderMap;
 use rstest::rstest;
@@ -88,7 +88,9 @@ fn test_last_modified_clamps_a_write_dated_after_the_response() {
 #[test]
 fn test_a_truncated_date_the_client_echoes_back_still_matches() {
     let stored = UNIX_EPOCH + WROTE_AT + Duration::from_millis(900);
-    let modified = last_modified(stored, SystemTime::now());
+    // A fixed observation time after the write, so the test exercises the sub-second truncation path on
+    // every run instead of drifting into the clamp branch once the wall clock passes the stored date.
+    let modified = last_modified(stored, UNIX_EPOCH + AFTER + Duration::from_hours(24));
 
     assert!(if_modified_since(&http_date(modified), modified));
 }

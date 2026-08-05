@@ -15,6 +15,8 @@ mod bootstrap;
 mod cross_dc_copy;
 mod error;
 mod external_identity;
+#[cfg(test)]
+mod fault;
 mod frontier;
 mod index;
 mod ingress_intent;

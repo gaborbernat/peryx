@@ -612,7 +612,14 @@ async fn test_dual_replica_heals_the_blob_frontier_after_the_blob_arrives() {
 async fn test_dual_replica_retries_after_a_metadata_sync_error() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/", listener.local_addr().unwrap());
-    drop(listener);
+    // Hold the port and reset every connection so the replica always sees a transport failure. Dropping
+    // the listener would free the port for a parallel test's mock primary to rebind and answer, flaking
+    // the retry into a different sync outcome.
+    let _reset = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, Some(replica_config(&url, 10)));
     let state = build_state(&config).unwrap();

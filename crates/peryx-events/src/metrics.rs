@@ -855,22 +855,7 @@ fn aggregate(
         if let (Some(store), Some(bytes)) = (store, pending) {
             let _ = store.save(&bytes);
         }
-        if !downloads.is_empty() {
-            let mut daily = daily.write().expect("metrics lock");
-            for (key, bytes) in downloads {
-                let totals = daily.entry(key).or_default();
-                totals.downloads += 1;
-                totals.bytes += bytes;
-            }
-            if let Some(days) = retention_days {
-                expire_daily(&mut daily, clock(), days);
-            }
-            let pending = store.is_some().then(|| snapshot_daily(&daily));
-            drop(daily);
-            if let (Some(store), Some(snapshot)) = (store, pending) {
-                let _ = store.save_daily(&serde_json::to_vec(&snapshot).expect("serialize daily usage snapshot"));
-            }
-        }
+        apply_daily_batch(downloads, daily, retention_days, clock, store);
         // Acknowledge barriers only once this batch's snapshots are on disk, so a settled test observes
         // the durable state, not just the in-memory tree.
         #[cfg(any(test, feature = "test-util"))]
@@ -923,6 +908,40 @@ fn collect_daily(event: &Event, clock: &Clock, out: &mut Vec<(DailyKey, u64)>) {
             },
             *bytes,
         ));
+    }
+}
+
+/// Fold a batch's daily downloads into the shared buckets, apply retention, and persist the snapshot.
+///
+/// Split out of [`aggregate`] so the retention flush runs on the caller's thread. The aggregator calls
+/// it from a spawned thread whose coverage x86 llvm-cov does not capture reliably, so a direct unit
+/// test drives this on the test thread instead. Every statement stays a single unconditional region:
+/// no embedded closure or `clock()` sub-expression that x86 llvm-cov splits into a flapping dead arm.
+fn apply_daily_batch(
+    downloads: Vec<(DailyKey, u64)>,
+    daily: &RwLock<DailyBuckets>,
+    retention_days: Option<u32>,
+    clock: &Clock,
+    store: Option<&AnalyticsHandle>,
+) {
+    if downloads.is_empty() {
+        return;
+    }
+    let mut daily = daily.write().expect("metrics lock");
+    for (key, bytes) in downloads {
+        let totals = daily.entry(key).or_default();
+        totals.downloads += 1;
+        totals.bytes += bytes;
+    }
+    if let Some(days) = retention_days {
+        let now = clock();
+        expire_daily(&mut daily, now, days);
+    }
+    if let Some(store) = store {
+        let snapshot = snapshot_daily(&daily);
+        drop(daily);
+        let encoded = serde_json::to_vec(&snapshot).expect("serialize daily usage snapshot");
+        let _ = store.save_daily(&encoded);
     }
 }
 
@@ -1122,7 +1141,7 @@ mod tests {
     use super::{
         Clock, DailyBuckets, DailyKey, DailySnapshot, DailyTotals, DailyUsage, DownloadSnapshot, Event, Message,
         Metrics, PackageUsage, SECONDS_PER_DAY, SourceUsage, StatsTree, TimelineBucket, UnusedPackage, UsageInterval,
-        VersionUsage, aggregate, daily_rows,
+        VersionUsage, aggregate, apply_daily_batch, daily_rows,
     };
 
     fn store() -> (tempfile::TempDir, MetaStore) {
@@ -1415,6 +1434,73 @@ mod tests {
         assert_eq!(rows[0].day, 30);
         assert_eq!(rows[0].downloads, 1);
         assert_eq!(rows[0].bytes, 9);
+    }
+
+    fn bucket(day: i64, version: &str) -> DailyKey {
+        DailyKey {
+            day,
+            repository: "pypi".into(),
+            project: "flask".into(),
+            version: version.into(),
+            source: "up".into(),
+        }
+    }
+
+    #[test]
+    fn test_apply_daily_batch_expires_aged_buckets_and_persists() {
+        // Drive the retention flush on the test thread, where x86 coverage captures it, instead of only
+        // on the aggregator's spawned thread.
+        let (_dir, meta) = store();
+        let mut seeded = DailyBuckets::new();
+        seeded.insert(
+            bucket(10, "1.0"),
+            DailyTotals {
+                downloads: 5,
+                bytes: 50,
+            },
+        );
+        let daily = RwLock::new(seeded);
+
+        apply_daily_batch(
+            vec![(bucket(30, "2.0"), 9)],
+            &daily,
+            Some(7),
+            &clock_on_day(30),
+            Some(&meta.analytics()),
+        );
+
+        let rows = daily_rows(&daily.read().unwrap());
+        assert_eq!(rows.len(), 1, "the aged day-10 bucket survived retention: {rows:?}");
+        assert_eq!((rows[0].day, rows[0].downloads, rows[0].bytes), (30, 1, 9));
+        assert!(
+            meta.analytics().load_daily().unwrap().is_some(),
+            "the batch was not persisted"
+        );
+    }
+
+    #[test]
+    fn test_apply_daily_batch_without_retention_or_store_keeps_every_bucket() {
+        let mut seeded = DailyBuckets::new();
+        seeded.insert(
+            bucket(10, "1.0"),
+            DailyTotals {
+                downloads: 5,
+                bytes: 50,
+            },
+        );
+        let daily = RwLock::new(seeded);
+
+        apply_daily_batch(vec![(bucket(30, "2.0"), 9)], &daily, None, &clock_on_day(30), None);
+
+        // No retention window and no store: both buckets survive untouched.
+        assert_eq!(daily_rows(&daily.read().unwrap()).len(), 2);
+    }
+
+    #[test]
+    fn test_apply_daily_batch_ignores_an_empty_batch() {
+        let daily = RwLock::new(DailyBuckets::new());
+        apply_daily_batch(Vec::new(), &daily, Some(7), &clock_on_day(30), None);
+        assert!(daily_rows(&daily.read().unwrap()).is_empty());
     }
 
     #[test]

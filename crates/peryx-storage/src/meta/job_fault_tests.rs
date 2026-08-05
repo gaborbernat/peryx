@@ -1,104 +1,19 @@
-use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 
-use mockall::mock;
 use redb::backends::InMemoryBackend;
-use redb::{Database, StorageBackend as _};
 use rstest::rstest;
+
+use crate::meta::fault::{self, Fault};
 
 use super::*;
 
-mock! {
-    #[derive(Debug)]
-    Backend {}
-
-    impl redb::StorageBackend for Backend {
-        fn len(&self) -> io::Result<u64>;
-        fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()>;
-        fn set_len(&self, len: u64) -> io::Result<()>;
-        fn sync_data(&self) -> io::Result<()>;
-        fn write(&self, offset: u64, data: &[u8]) -> io::Result<()>;
-    }
-}
-
-#[derive(Debug)]
-struct Fault(AtomicI64);
-
-impl Fault {
-    fn disabled() -> Self {
-        Self(AtomicI64::new(-1))
-    }
-
-    fn arm(&self, after: i64) {
-        self.0.store(after, Ordering::SeqCst);
-    }
-
-    fn disable(&self) {
-        self.arm(-1);
-    }
-
-    fn pass(&self) -> io::Result<()> {
-        self.0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| match remaining {
-                -1 => Some(-1),
-                0 => None,
-                _ => Some(remaining - 1),
-            })
-            .map(drop)
-            .map_err(|_| io::Error::other("injected storage failure"))
-    }
-}
-
-fn backend(inner: Arc<InMemoryBackend>, fault: Arc<Fault>) -> MockBackend {
-    let mut backend = MockBackend::new();
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_len()
-        .returning(move || fail.pass().and_then(|()| storage.len()));
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_read()
-        .returning(move |offset, out| fail.pass().and_then(|()| storage.read(offset, out)));
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_set_len()
-        .returning(move |len| fail.pass().and_then(|()| storage.set_len(len)));
-    let storage = inner.clone();
-    let fail = fault.clone();
-    backend
-        .expect_sync_data()
-        .returning(move || fail.pass().and_then(|()| storage.sync_data()));
-    backend
-        .expect_write()
-        .returning(move |offset, data| fault.pass().and_then(|()| inner.write(offset, data)));
-    backend
-}
-
-fn open_store(inner: Arc<InMemoryBackend>, fault: Arc<Fault>, initialize: bool) -> MetaStore {
-    // Keep tree pages crossing the mocked boundary after a fault is armed.
-    let database = Database::builder()
-        .set_cache_size(0)
-        .create_with_backend(backend(inner, fault))
-        .unwrap();
-    if initialize {
-        let write = database.begin_write().unwrap();
-        write.open_table(SERIAL).unwrap();
-        write.open_table(JOB_RUN).unwrap();
-        write.commit().unwrap();
-    }
-    MetaStore {
-        db: Arc::new(crate::meta::MetaDatabase::ReadWrite(database)),
-    }
-}
-
 fn seeded_store() -> (MetaStore, Arc<InMemoryBackend>, Arc<Fault>, String) {
-    let inner = Arc::new(InMemoryBackend::new());
-    let fault = Arc::new(Fault::disabled());
-    let store = open_store(inner.clone(), fault.clone(), true);
+    let (inner, fault) = fault::backend();
+    let store = fault::create(&inner, &fault, |write| {
+        write.open_table(SERIAL)?;
+        write.open_table(JOB_RUN)?;
+        Ok(())
+    });
     let running = store
         .start_job_run(NewJobRun {
             kind: JobKind::CatalogSync,
@@ -209,13 +124,13 @@ fn test_job_run_operations_remain_atomic_after_backend_failures(#[case] operatio
         let (store, inner, fault, running) = seeded_store();
         let expected = store.list_job_runs().unwrap();
         drop(store);
-        let store = open_store(inner.clone(), fault.clone(), false);
+        let store = fault::reopen(&inner, &fault);
         fault.arm(fail_after);
         if invoke(&store, &running, operation) {
             failures += 1;
             fault.disable();
             drop(store);
-            let actual = open_store(inner, fault, false).list_job_runs().unwrap();
+            let actual = fault::reopen(&inner, &fault).list_job_runs().unwrap();
             assert_atomic_result(operation, &running, &expected, &actual);
         }
     }
@@ -230,7 +145,7 @@ fn test_job_run_operations_remain_atomic_after_backend_failures(#[case] operatio
 fn test_job_run_writes_reject_a_poisoned_backend(#[case] operation: Operation) {
     let (store, inner, fault, running) = seeded_store();
     drop(store);
-    let store = open_store(inner, fault.clone(), false);
+    let store = fault::reopen(&inner, &fault);
     fault.arm(0);
     assert!(store.get_job_run(&running).is_err());
     fault.disable();

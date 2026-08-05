@@ -235,7 +235,13 @@ async fn test_fetch_maps_a_non_page_body_to_malformed() {
 async fn test_fetch_maps_a_refused_connection_to_disconnected() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    drop(listener);
+    // Hold the port and reset every connection so the fetch always fails at the transport. Dropping the
+    // listener would free the port for a parallel test to rebind and answer, flaking the loss away.
+    let _reset = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
     let transport = transport(&format!("http://{address}/"), limits(256, 4 << 20));
 
     let error = transport.fetch_batch(request(0, 10)).await.unwrap_err();

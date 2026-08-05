@@ -272,7 +272,13 @@ async fn test_send_caps_an_oversized_reply() {
 async fn test_send_maps_a_refused_connection_to_unreachable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    drop(listener);
+    // Hold the port and reset every connection so the send always fails at the transport. Dropping the
+    // listener would free the port for a parallel test to rebind and answer, flaking the loss away.
+    let _reset = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
     let client = client(&format!("http://{address}/"), TOKEN);
 
     let error = client

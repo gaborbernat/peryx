@@ -242,9 +242,11 @@ async fn test_upload_webhook_is_signed_and_skips_duplicate_upload() {
     );
 
     assert_eq!(upload_peryxpkg(&h.state, "/hosted/", &wheel).await, StatusCode::OK);
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(sink.request_count(), 1);
+    // Deduplication is at enqueue, so the store synchronously holds one delivery; with only one delivery
+    // ever queued the worker can send at most the one request the sink already captured. Asserting the
+    // store is exact and needs no sleep-and-hope that a second request has not yet arrived.
     assert_eq!(h.state.meta.list_webhook_deliveries().unwrap().len(), 1);
+    assert_eq!(sink.request_count(), 1);
 }
 
 #[tokio::test]

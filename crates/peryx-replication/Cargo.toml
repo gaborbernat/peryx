@@ -21,6 +21,7 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["fs", "sync"] }
 tokio-util.workspace = true
 
@@ -32,6 +33,7 @@ stats_alloc.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tower = { workspace = true, features = ["util"] }
+tracing-subscriber.workspace = true
 
 [[bench]]
 name = "operation_envelope"

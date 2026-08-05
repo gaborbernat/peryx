@@ -133,6 +133,32 @@ reaches zero points at a stalled poll, which readiness reports as `sync_error` o
 `incompatible_schema` reason means the primary and replica were built against different replication protocol versions;
 upgrade the primary before routing reads to that replica.
 
+### DC group readiness
+
+A `dc` or `ha` writer that names a member roster folds the group's frontiers into one verdict on its own
+`GET /+replication/v1/ready`, under a `group_readiness` field an `operator:read` caller reads. The writer knows its own
+applied `serial`; each replica reports the highest serial it has applied by beating a small authenticated beacon to the
+writer's `POST /+replication/v1/heartbeat`, so the writer aggregates the group without dialing a replica. A replica
+reports under the `node_identity` it is configured with; a replica that names none beats nothing and the writer counts
+it as not reporting.
+
+The field carries four values. `ready` is whether the group can acknowledge a new write under its durability policy.
+`durable_frontier` is the highest serial the policy's required number of members have all applied, the serial the group
+guarantees is durable. `policy` names the quorum rule, `majority` — a strict majority of the configured members.
+`blocked` is `null` when the group is ready, otherwise the reason it is not: `writer_lost` when no writer is reporting,
+or `insufficient_members` with the `reporting` and `required` counts when a writer is present but too few members are.
+
+Membership is the fixed configured roster, so a vanished replica reads as one that is not reporting rather than
+shrinking the quorum into a smaller, unsafe one. A single lagging or lost replica never blocks readiness while the rest
+still meet the policy, and a serial a majority already holds stays durable even when a lost writer stops new writes from
+being acknowledged. Losing the writer stops new writes until it returns or an operator runs the fenced
+[promotion](#manual-promotion); no replica promotes itself on a timeout.
+
+A replica refuses every client mutation with `503 Service Unavailable` and `{"error":"read_only_replica"}` ahead of any
+handler, so a misrouted write fails closed rather than diverging a copy. A restarted replica resumes from the frontier
+it durably stored, re-applying only the pages past it, and beats its recovered frontier on its next beacon, so a restart
+rejoins the group's readiness without re-copying the journal.
+
 ## Peer artifact byte endpoint
 
 A `dc` or `ha` primary serves artifact bytes to authenticated peers at `GET /+replication/v1/blobs/sha256/{digest}`. The

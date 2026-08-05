@@ -9,6 +9,7 @@ mod analytics;
 mod analytics_transfer;
 mod authority;
 mod backoff;
+mod beacon;
 mod blob;
 mod blob_availability;
 mod blob_fetch;
@@ -67,6 +68,7 @@ pub use analytics_transfer::{
 };
 pub use authority::{Admission, AuthorityFence, AuthorityKey, CommitOutcome};
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
+pub use beacon::{BeaconError, BeaconSender, DEFAULT_BEACON_INTERVAL};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
 pub use blob_availability::{BlobAvailability, ReferencedBlob, blob_availability};
 pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
@@ -155,6 +157,8 @@ mod analytics_tests;
 mod authority_tests;
 #[cfg(test)]
 mod backoff_tests;
+#[cfg(test)]
+mod beacon_tests;
 #[cfg(test)]
 mod blob_availability_tests;
 #[cfg(test)]

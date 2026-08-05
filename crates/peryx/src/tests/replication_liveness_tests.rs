@@ -133,3 +133,59 @@ async fn test_primary_without_a_roster_mounts_no_heartbeat_ingest() {
     let document = health(&router, Some(&operator)).await;
     assert!(document.get("peers").is_none());
 }
+
+#[tokio::test]
+async fn test_group_readiness_blocks_until_the_replica_reports_then_clears() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = primary_with_roster(&dir);
+    let state = build_state(&config).unwrap();
+    let operator = operator(&state).await;
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let router = runtime.mount(router_for(state));
+
+    // Before the replica beats, only the writer reports, short of the majority the two-member group needs.
+    let readiness = health(&router, Some(&operator)).await["group_readiness"].clone();
+    assert_eq!(readiness["ready"], json!(false));
+    assert_eq!(readiness["policy"], "majority");
+    assert_eq!(readiness["durable_frontier"], json!(0));
+    assert_eq!(readiness["blocked"]["insufficient_members"]["reporting"], json!(1));
+    assert_eq!(readiness["blocked"]["insufficient_members"]["required"], json!(2));
+
+    // Once the replica reports its frontier, the group meets the majority and reads ready.
+    assert_eq!(
+        heartbeat(
+            &router,
+            json!({"node": "replica-a", "incarnation": 1, "sequence": 1, "applied": 0})
+        )
+        .await,
+        StatusCode::ACCEPTED,
+    );
+    let readiness = health(&router, Some(&operator)).await["group_readiness"].clone();
+    assert_eq!(readiness["ready"], json!(true));
+    assert_eq!(readiness["blocked"], Value::Null);
+    assert_eq!(readiness["durable_frontier"], json!(0));
+}
+
+#[tokio::test]
+async fn test_group_readiness_stays_hidden_from_an_unauthenticated_caller() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = primary_with_roster(&dir);
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let router = runtime.mount(router_for(state));
+
+    assert!(health(&router, None).await.get("group_readiness").is_none());
+}
+
+#[tokio::test]
+async fn test_a_rosterless_primary_publishes_no_group_readiness() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = primary_with_roster(&dir);
+    config.dc_membership = None;
+    let state = build_state(&config).unwrap();
+    let operator = operator(&state).await;
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let router = runtime.mount(router_for(state));
+
+    assert!(health(&router, Some(&operator)).await.get("group_readiness").is_none());
+}

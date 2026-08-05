@@ -39,6 +39,11 @@ pub struct HeartbeatReport {
     pub node: String,
     pub incarnation: u64,
     pub sequence: u64,
+    /// The highest metadata serial this member has durably applied at the beat, so the writer can
+    /// aggregate the group's durable frontier without polling each replica. Defaults to `None` so a
+    /// beacon from an older replica that reports no frontier still decodes.
+    #[serde(default)]
+    pub applied: Option<u64>,
 }
 
 /// The monotonic position of one beacon, ordered first by incarnation and then by sequence.
@@ -48,9 +53,13 @@ struct Beacon {
     sequence: u64,
 }
 
+#[derive(Clone, Copy)]
 struct Observation {
     beacon: Beacon,
     at: Instant,
+    /// The frontier the peer reported on this beat, retained so the writer's group-readiness fold reads
+    /// each member's durable serial from its latest accepted beacon.
+    applied: Option<u64>,
 }
 
 /// A tracker's verdict about one configured peer.
@@ -87,6 +96,8 @@ pub struct PeerHealth {
     pub incarnation: Option<u64>,
     pub sequence: Option<u64>,
     pub last_seen_seconds: Option<u64>,
+    /// The frontier the peer last reported, for an operator reading how far each replica has caught up.
+    pub applied: Option<u64>,
 }
 
 /// Ages self-reported beacons from the configured replica roster into per-peer suspicion.
@@ -134,7 +145,14 @@ impl LivenessTracker {
             {
                 return Err(LivenessRejection::Stale);
             }
-            observations.insert(report.node.clone(), Observation { beacon, at: now });
+            observations.insert(
+                report.node.clone(),
+                Observation {
+                    beacon,
+                    at: now,
+                    applied: report.applied,
+                },
+            );
         }
         Ok(())
     }
@@ -171,9 +189,31 @@ impl LivenessTracker {
                     sequence: observation.map(|observation| observation.beacon.sequence),
                     last_seen_seconds: observation
                         .map(|observation| now.saturating_duration_since(observation.at).as_secs()),
+                    applied: observation.and_then(|observation| observation.applied),
                 }
             })
             .collect()
+    }
+
+    /// The frontier `node` last reported, counted only while its beacon is still within the dead window.
+    ///
+    /// A member aged out to [`Suspicion::Dead`], one never observed, or one reporting no frontier holds
+    /// nothing the group can guarantee, so it reads `None` and the readiness fold treats it as a member
+    /// that is not currently contributing to durability. A live or merely suspect member contributes the
+    /// serial it last confirmed.
+    #[must_use]
+    pub fn applied_frontier(&self, node: &str, now: Instant) -> Option<u64> {
+        let observation = {
+            let observations = self
+                .observations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            observations.get(node).copied()
+        }?;
+        match self.classify(Some(&observation), now) {
+            Suspicion::Alive | Suspicion::Suspect => observation.applied,
+            Suspicion::Dead | Suspicion::Unknown => None,
+        }
     }
 
     fn classify(&self, observation: Option<&Observation>, now: Instant) -> Suspicion {

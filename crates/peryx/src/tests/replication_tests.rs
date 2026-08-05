@@ -1325,3 +1325,17 @@ async fn test_replica_cycle_reports_a_local_cursor_mismatch() {
 
     assert_eq!(caught_up, Some(true));
 }
+
+#[tokio::test]
+async fn test_a_replica_that_knows_its_identity_spawns_a_frontier_beacon() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(&dir, Some(replica_config("http://writer.invalid/", 1)));
+    config.node_identity = Some("replica-a".to_owned());
+    let state = build_state(&config).unwrap();
+    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    // Starting the replica spawns its loop and its frontier beacon; the beacon beats at the unreachable
+    // writer and drops the failure, so dropping the runtime stops both without the test observing a beat.
+    let availability = runtime.start();
+    assert!(availability.is_some());
+}

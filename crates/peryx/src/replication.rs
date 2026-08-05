@@ -27,10 +27,11 @@ use peryx_http::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
 };
 use peryx_replication::{
-    BlobPlaneReport, BlobSources, CapacityLimited, ChangePage, DEFAULT_DEAD_AFTER, DEFAULT_RECONNECT_POLICY,
-    DEFAULT_SET_LIMITS, DEFAULT_SUSPECT_AFTER, DEFAULT_TRANSFER_LIMITS, HttpBlobTransport, HttpPeerTransport,
-    LivenessTracker, PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, Retry, SetLimits, SyncError, SyncOutcome,
-    TransferLimits, TransportError, advance_blob_frontier, follower_router, liveness_router, primary_router,
+    BeaconSender, BlobPlaneReport, BlobSources, CapacityLimited, ChangePage, DEFAULT_BEACON_INTERVAL,
+    DEFAULT_DEAD_AFTER, DEFAULT_RECONNECT_POLICY, DEFAULT_SET_LIMITS, DEFAULT_SUSPECT_AFTER, DEFAULT_TRANSFER_LIMITS,
+    DurabilityPolicy, HttpBlobTransport, HttpPeerTransport, LivenessTracker, MemberFrontier, MemberRole,
+    PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, Retry, SetLimits, SyncError, SyncOutcome, TransferLimits,
+    TransportError, advance_blob_frontier, follower_router, group_readiness, liveness_router, primary_router,
     pull_outstanding, pull_round,
 };
 use peryx_storage::blob::BlobStorage;
@@ -38,7 +39,7 @@ use peryx_storage::meta::{DataCenterId, MetaStore};
 use peryx_upstream::redact_url;
 use serde_json::{Value, json};
 
-use crate::config::{AvailabilityConfig, Config, DcMembership, DcRole, ReplicationConfig};
+use crate::config::{AvailabilityConfig, Config, DcMembership, DcRole, ReplicationConfig, SecretSource};
 use crate::replication::availability_metrics::AvailabilityMetrics;
 use crate::replication::worker::{AvailabilityRuntime, WorkerShared};
 
@@ -271,7 +272,42 @@ struct AvailabilityNode {
     /// The writer's view of replica liveness, present only when a `dc`/`ha` primary follows a
     /// configured member roster. It informs routing hints and never gates this node's own readiness.
     liveness: Option<Arc<LivenessTracker>>,
+    /// The configured roster and durability policy a writer folds member frontiers against to publish
+    /// DC group readiness. Present only on a primary that names a member roster; a replica and a
+    /// rosterless node publish no group readiness.
+    group: Option<GroupReadinessSource>,
     workers: Option<Arc<WorkerShared>>,
+}
+
+/// The static inputs a writer needs to fold live member frontiers into DC group readiness: the full
+/// configured roster with each member's role, and the durability policy the group acknowledges under.
+#[derive(Clone)]
+struct GroupReadinessSource {
+    members: Vec<(String, MemberRole)>,
+    policy: DurabilityPolicy,
+}
+
+/// The roster and durability policy for a `dc`/`ha` writer, or `None` when no member roster is
+/// configured. The policy defaults to a strict majority of the configured members, the safe quorum for
+/// a static group, until an operator selects another.
+fn group_readiness_source(config: &Config) -> Option<GroupReadinessSource> {
+    let members = config
+        .dc_membership
+        .as_ref()?
+        .members
+        .iter()
+        .map(|member| {
+            let role = match member.role {
+                DcRole::Writer => MemberRole::Writer,
+                DcRole::Replica => MemberRole::Replica,
+            };
+            (member.node.clone(), role)
+        })
+        .collect();
+    Some(GroupReadinessSource {
+        members,
+        policy: DurabilityPolicy::Majority,
+    })
 }
 
 impl AvailabilityNode {
@@ -334,16 +370,56 @@ impl AvailabilityNode {
                 FieldClassification::Operator,
                 json!(serial),
             ));
+            let now = Instant::now();
             if let Some(liveness) = &self.liveness {
                 fields.push(ClassifiedField::new(
                     "peers",
                     FieldClassification::Operator,
-                    json!(liveness.summary(Instant::now())),
+                    json!(liveness.summary(now)),
+                ));
+            }
+            if let Some(group) = &self.group {
+                fields.push(ClassifiedField::new(
+                    "group_readiness",
+                    FieldClassification::Operator,
+                    self.group_readiness(group, serial, now),
                 ));
             }
         }
         let body = filter_fields(authorization, fields).expect("public and allowed scopes classify");
         (ready, body)
+    }
+
+    /// Fold the configured roster's live frontiers into the group's readiness and durable frontier. The
+    /// writer's own frontier is its committed `serial`; each replica's is the one it last reported over a
+    /// beacon still within the dead window, or `None` when it has gone silent. A silent or lost member
+    /// counts as not contributing, so the fixed roster size, never a shrunken one, measures the quorum.
+    fn group_readiness(&self, group: &GroupReadinessSource, serial: u64, now: Instant) -> Value {
+        let members: Vec<MemberFrontier> = group
+            .members
+            .iter()
+            .map(|(node, role)| {
+                let applied = match role {
+                    MemberRole::Writer => Some(serial),
+                    MemberRole::Replica => self
+                        .liveness
+                        .as_ref()
+                        .and_then(|liveness| liveness.applied_frontier(node, now)),
+                };
+                MemberFrontier {
+                    member: node.clone(),
+                    role: *role,
+                    applied,
+                }
+            })
+            .collect();
+        let readiness = group_readiness(&members, group.policy);
+        json!({
+            "ready": readiness.is_ready(),
+            "durable_frontier": readiness.durable_frontier,
+            "policy": "majority",
+            "blocked": readiness.blocked,
+        })
     }
 }
 
@@ -723,6 +799,62 @@ fn replica_transports(
 
 /// Track the configured replica members so the writer can age their beacons into routing hints. A
 /// process without a member roster, or a roster naming no replica, tracks nothing.
+/// Build a writer's replication router and availability node: the change feed, the analytics endpoint,
+/// the liveness ingest for a configured roster, and the group-readiness source it publishes.
+///
+/// # Errors
+/// Propagates a token read failure or a route-build failure.
+fn build_primary(
+    config: &Config,
+    state: &Arc<AppState>,
+    mode: &'static str,
+    source: &str,
+    token: &SecretSource,
+) -> anyhow::Result<(Router, AvailabilityNode)> {
+    let token = token.read().context("read the primary replication token")?;
+    let router = primary_router(
+        source.to_owned(),
+        token.clone(),
+        state.serving.meta.clone(),
+        state.serving.blobs.clone(),
+    )
+    .context("build primary replication routes")?;
+    let router = merge_analytics_endpoint(router, config, state, &token)?;
+    let liveness = primary_liveness(config);
+    let router = match &liveness {
+        Some(tracker) => router.merge(liveness_router(token, tracker.clone()).context("build liveness ingest routes")?),
+        None => router,
+    };
+    let node = AvailabilityNode {
+        app: state.clone(),
+        mode,
+        role: AvailabilityRole::Primary,
+        replica: None,
+        liveness,
+        group: group_readiness_source(config),
+        workers: None,
+    };
+    Ok((router, node))
+}
+
+/// The replica's frontier beacon, or `None` when it names no `node_identity` for the writer to
+/// recognize it by. The `upstream` and `token` are the ones the caller already validated building the
+/// metadata transport, so the beacon reuses them without re-validating and its constructor cannot fail.
+fn replica_beacon(config: &Config, state: &Arc<AppState>, upstream: &str, token: &str) -> Option<BeaconSender> {
+    let node = config.node_identity.as_deref()?;
+    Some(
+        BeaconSender::new(
+            upstream,
+            token,
+            node,
+            u64::try_from((state.clock)()).unwrap_or(0),
+            state.serving.meta.clone(),
+            DEFAULT_BEACON_INTERVAL,
+        )
+        .expect("the validated upstream and token also build the frontier beacon"),
+    )
+}
+
 fn primary_liveness(config: &Config) -> Option<Arc<LivenessTracker>> {
     let replicas: Vec<String> = config
         .dc_membership
@@ -752,6 +884,9 @@ pub struct ReplicationRuntime {
     /// The ownership consensus seed for an `ha` process, resolved synchronously here and ignited into a
     /// running node once the async runtime is up. `None` under `none` and `dc`, which run no group.
     consensus: Option<raft::ConsensusPlan>,
+    /// The replica's frontier beacon to its writer, spawned alongside the replica loop. `None` unless
+    /// this process follows an upstream and knows its own roster identity to report under.
+    beacon: Option<BeaconSender>,
 }
 
 /// The running ownership consensus an `ha` process holds for its lifetime.
@@ -824,34 +959,11 @@ impl ReplicationRuntime {
             AvailabilityConfig::Dc(_) => "dc",
             AvailabilityConfig::Ha(_) => "ha",
         };
-        let (primary, replica, availability) = match config.availability.replication() {
-            None => (None, None, None),
+        let (primary, replica, availability, beacon) = match config.availability.replication() {
+            None => (None, None, None, None),
             Some(ReplicationConfig::Primary { source, token }) => {
-                let token = token.read().context("read the primary replication token")?;
-                let router = primary_router(
-                    source.clone(),
-                    token.clone(),
-                    state.serving.meta.clone(),
-                    state.serving.blobs.clone(),
-                )
-                .context("build primary replication routes")?;
-                let router = merge_analytics_endpoint(router, config, state, &token)?;
-                let liveness = primary_liveness(config);
-                let router = match &liveness {
-                    Some(tracker) => {
-                        router.merge(liveness_router(token, tracker.clone()).context("build liveness ingest routes")?)
-                    }
-                    None => router,
-                };
-                let node = AvailabilityNode {
-                    app: state.clone(),
-                    mode,
-                    role: AvailabilityRole::Primary,
-                    replica: None,
-                    liveness,
-                    workers: None,
-                };
-                (Some(router), None, Some(node))
+                let (router, node) = build_primary(config, state, mode, source, token)?;
+                (Some(router), None, Some(node), None)
             }
             Some(ReplicationConfig::Replica {
                 upstream,
@@ -862,6 +974,7 @@ impl ReplicationRuntime {
                 let token = token.read().context("read the replica replication token")?;
                 let resume = state.meta.current_serial().context("read the replica serial")?;
                 let (metadata, transport) = replica_transports(config, upstream, &token, resume, *page_size)?;
+                let beacon = replica_beacon(config, state, upstream, &token);
                 let follower = follower_router(token, state.serving.meta.clone())
                     .context("build the follower change-feed routes")?;
                 let monitor = Arc::new(ReplicaMonitor::new(resume));
@@ -881,6 +994,7 @@ impl ReplicationRuntime {
                         upstream: redact_url(upstream),
                     }),
                     liveness: None,
+                    group: None,
                     workers: Some(workers),
                 };
                 (
@@ -902,6 +1016,7 @@ impl ReplicationRuntime {
                         runtime,
                     )),
                     Some(node),
+                    beacon,
                 )
             }
         };
@@ -916,6 +1031,7 @@ impl ReplicationRuntime {
             availability,
             analytics_puller: build_analytics_puller(config, state)?,
             consensus: raft::ConsensusPlan::from_config(config)?,
+            beacon,
         })
     }
 
@@ -977,6 +1093,9 @@ impl ReplicationRuntime {
         let _ = runtime.try_spawn(Box::pin(replica.run()));
         if let Some(puller) = self.analytics_puller {
             let _ = runtime.try_spawn(Box::pin(puller.run()));
+        }
+        if let Some(beacon) = self.beacon {
+            let _ = runtime.try_spawn(Box::pin(beacon.run()));
         }
         Some(runtime)
     }

@@ -1,8 +1,8 @@
 use peryx_storage::blob::{BlobDurability, Digest};
 
 use crate::ack::AckDecision;
-use crate::dc_ack::Deadline::{Expired, Live};
 use crate::dc_ack::DcAck;
+use crate::dc_ack::Deadline::{Expired, Live};
 use crate::filesystem_ack::{FilesystemAck, ReceiptOutcome};
 use crate::readiness::{DurabilityPolicy, ReadinessBlocker};
 use crate::receipt_quorum::ReceiptAck;
@@ -66,7 +66,11 @@ fn test_a_second_receipt_from_one_node_is_ignored() {
     assert_eq!(ack.record(receipt("a", digest(1))), ReceiptOutcome::Recorded);
     assert_eq!(ack.record(receipt("a", digest(1))), ReceiptOutcome::Ignored);
 
-    assert_eq!(ack.independent_receipts(), 1, "one node counts once however many it returns");
+    assert_eq!(
+        ack.independent_receipts(),
+        1,
+        "one node counts once however many it returns"
+    );
 }
 
 #[test]

@@ -165,7 +165,8 @@ pub async fn stream_detail(
     // Serve stale before taking the flight gate so concurrent hits do not queue; the spawned refresh
     // coalesces itself.
     if let Some(record) = super::stale_servable(&state, &key)? {
-        let _ = spawn_revalidation(state.clone(), key, cached_name, project, client);
+        let refresh = spawn_revalidation(state.clone(), key, cached_name, project, client);
+        detach_revalidation(&state, refresh);
         return transform_whole(&state, &hot_key, &record, context);
     }
 
@@ -462,6 +463,18 @@ fn spawn_revalidation(
     Some(tokio::spawn(revalidate(state, key, name, project, client, guard)))
 }
 
+/// Hand off the revalidation the serving path spawned. The request already answered from the stale
+/// bytes, so production drops the handle. A test build instead captures it against `state`, so
+/// [`settle_revalidations`] can await the refresh at a deterministic point rather than poll for it.
+fn detach_revalidation(state: &Arc<ServingState>, refresh: Option<tokio::task::JoinHandle<()>>) {
+    #[cfg(test)]
+    if let Some(refresh) = refresh {
+        revalidation_probe::capture(state, refresh);
+    }
+    #[cfg(not(test))]
+    let _ = (state, refresh);
+}
+
 /// Revalidate one page and release the single-flight hold however it ends. The request that spawned
 /// this already holds the stale bytes, so a failed refresh only logs and leaves the stale page in
 /// place for the next request to retry.
@@ -486,6 +499,54 @@ fn transform_error(err: crate::stream::TransformError) -> CacheError {
         crate::stream::TransformError::Truncated
         | crate::stream::TransformError::Trailing
         | crate::stream::TransformError::TooLarge => CacheError::Unavailable,
+    }
+}
+
+/// Handles for revalidations the serving path spawned and dropped, bucketed by serving state so a
+/// test awaits only its own refreshes.
+#[cfg(test)]
+mod revalidation_probe {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use peryx_driver::state::ServingState;
+    use tokio::task::JoinHandle;
+
+    fn pending() -> &'static Mutex<HashMap<usize, Vec<JoinHandle<()>>>> {
+        static PENDING: OnceLock<Mutex<HashMap<usize, Vec<JoinHandle<()>>>>> = OnceLock::new();
+        PENDING.get_or_init(Mutex::default)
+    }
+
+    /// The serving state's identity, stable across the `Arc` clones the router and driver hand around,
+    /// so a captured handle files under the bucket the owning test drains.
+    fn bucket(state: &Arc<ServingState>) -> usize {
+        Arc::as_ptr(state) as usize
+    }
+
+    pub(super) fn capture(state: &Arc<ServingState>, refresh: JoinHandle<()>) {
+        pending()
+            .lock()
+            .expect("revalidation probe")
+            .entry(bucket(state))
+            .or_default()
+            .push(refresh);
+    }
+
+    pub(super) fn drain(state: &Arc<ServingState>) -> Vec<JoinHandle<()>> {
+        pending()
+            .lock()
+            .expect("revalidation probe")
+            .remove(&bucket(state))
+            .unwrap_or_default()
+    }
+}
+
+/// Await every background revalidation the serving path spawned for `state` and dropped, giving a
+/// serving-path test a deterministic settle point in place of polling for the refresh to land.
+#[cfg(test)]
+pub async fn settle_revalidations(state: &Arc<ServingState>) {
+    for refresh in revalidation_probe::drain(state) {
+        let _ = refresh.await;
     }
 }
 

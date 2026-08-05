@@ -137,6 +137,7 @@ fn test_backend_delegates_every_call_then_faults_on_demand() {
     // yet every one must delegate to the inner backend when disarmed and fail once armed.
     let (inner, fault) = backend();
     let disk = faulted(&inner, &fault);
+    assert!(format!("{disk:?}").contains("FaultBackend"));
 
     disk.set_len(64).unwrap();
     disk.write(0, b"hello").unwrap();

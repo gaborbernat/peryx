@@ -288,3 +288,21 @@ fn test_the_frontier_acknowledges_the_given_epoch() {
         "the frontier covers epoch 7, so only the later-epoch entry stays"
     );
 }
+
+#[test]
+fn test_the_frontier_drains_every_epoch_below_the_current_authority() {
+    let members = [writer(Some(10)), replica("b", Some(10))];
+    let frontier = visibility_compaction_frontier(&members, DurabilityPolicy::Everywhere, 10, 5);
+
+    let mut state = VisibilityState::new();
+    // A high-water in a superseded epoch, at a serial far above the current epoch's durable serial: the
+    // earlier epoch is drained before the next begins, so the frontier covers it without bound.
+    visible_at(&mut state, "superseded-epoch", 2, 999);
+    state.compact(&frontier);
+
+    assert_eq!(
+        state.retained_artifacts(),
+        0,
+        "an entry left in an epoch below the current authority is drained and released"
+    );
+}

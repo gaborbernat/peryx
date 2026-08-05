@@ -54,7 +54,7 @@ pub enum PullError {
 /// # Panics
 /// Never in practice: the loop runs at least one pass and records that pass's error, so the final
 /// `expect` on an all-passes-failed result is unreachable.
-pub async fn pull_ranged<T: BlobTransport>(
+pub async fn pull_ranged<T: BlobTransport + ?Sized>(
     sources: &[&T],
     digest: &Digest,
     ranges: &[ByteRange],
@@ -81,7 +81,7 @@ pub async fn pull_ranged<T: BlobTransport>(
 
 /// One reassembly pass over `sources`: draw every range, adapt it to a piece, and digest-verify the
 /// tiled whole. The caller retries a failed pass over a reduced source set.
-async fn reassemble_pass<T: BlobTransport>(
+async fn reassemble_pass<T: BlobTransport + ?Sized>(
     sources: &[&T],
     digest: &Digest,
     ranges: &[ByteRange],
@@ -112,7 +112,7 @@ const RANGED_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 /// # Errors
 /// [`PullError`] when every source is exhausted for a range, a fetched range is the wrong length, or the
 /// reassembled blob does not verify against `digest`.
-pub async fn pull_ranged_blob<T: BlobTransport>(
+pub async fn pull_ranged_blob<T: BlobTransport + ?Sized>(
     sources: &[&T],
     digest: &Digest,
     total_length: usize,
@@ -123,6 +123,7 @@ pub async fn pull_ranged_blob<T: BlobTransport>(
 
 /// Tile `[0, total_length)` into consecutive `chunk`-byte ranges, the last one short. A zero-length blob
 /// yields no ranges, which [`reassemble_verified`] accepts as the empty blob.
+#[must_use]
 pub fn chunk_ranges(total_length: usize, chunk: usize) -> Vec<ByteRange> {
     let mut ranges = Vec::with_capacity(total_length.div_ceil(chunk.max(1)));
     let mut offset = 0;
@@ -134,7 +135,7 @@ pub fn chunk_ranges(total_length: usize, chunk: usize) -> Vec<ByteRange> {
     ranges
 }
 
-async fn fetch_range<T: BlobTransport>(
+async fn fetch_range<T: BlobTransport + ?Sized>(
     sources: &[&T],
     digest: &Digest,
     range: ByteRange,

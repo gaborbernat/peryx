@@ -449,3 +449,81 @@ async fn test_tail_errors_when_the_pump_vanishes_without_a_verdict() {
     let err = drain(&h.state, Digest::of(b"tail-target"), handle).await.unwrap_err();
     assert!(err.to_string().contains("abandoned"));
 }
+
+/// Seed a verified remote placement of `digest` in datacenter `east` and install a read-through whose
+/// only delegate serves those bytes, so a miss on this node fills from the peer instead of upstream.
+fn install_remote_placement(state: &Arc<AppState>, digest: &Digest, content: &Bytes) {
+    use std::collections::HashMap;
+
+    use peryx_driver::read_through::{DEFAULT_READ_THROUGH_LIMITS, DcTransport, MonotonicClock, RemotePlacementReader};
+    use peryx_identity::ArtifactDigest;
+    use peryx_replication::{LoopbackBlobSource, TransferLimits};
+    use peryx_storage::meta::{BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId};
+
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).unwrap();
+    let key = BlobPlacementKey {
+        digest: artifact.clone(),
+        backend: BackendId::new("filesystem").unwrap(),
+        data_center: DataCenterId::new("east").unwrap(),
+        location: BackendLocation::new("east/a").unwrap(),
+    };
+    state
+        .meta
+        .apply_blob_placement(&key, &BlobPlacementTransition::Stage, 1, 0)
+        .unwrap();
+    state
+        .meta
+        .apply_blob_placement(
+            &key,
+            &BlobPlacementTransition::Verify {
+                observed: artifact,
+                size: content.len() as u64,
+            },
+            1,
+            0,
+        )
+        .unwrap();
+    let blobs = HashMap::from([(digest.clone(), content.clone())]);
+    let delegate: DcTransport = Arc::new(LoopbackBlobSource::new(blobs, TransferLimits::default()));
+    let clock: MonotonicClock = Arc::new(|| 0);
+    let reader = RemotePlacementReader::new(
+        DataCenterId::new("home").unwrap(),
+        HashMap::from([("east".to_owned(), delegate)]),
+        DEFAULT_READ_THROUGH_LIMITS,
+        clock,
+    );
+    state.set_read_through(Arc::new(reader));
+}
+
+#[tokio::test]
+async fn test_stream_file_serves_a_remote_placement_without_upstream() {
+    let h = harness().await;
+    let content = Bytes::from_static(b"streamed from a verified peer placement");
+    let digest = Digest::of(&content);
+    install_remote_placement(&h.state, &digest, &content);
+
+    let outcome = live_stream_for(&h.state, &digest).await;
+
+    assert!(matches!(outcome, cache::FileOutcome::Cached(_)));
+    assert!(h.state.blobs.head(&digest).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_file_path_serves_a_remote_placement_without_upstream() {
+    let h = harness().await;
+    let content = Bytes::from_static(b"materialized from a verified peer placement");
+    let digest = Digest::of(&content);
+    install_remote_placement(&h.state, &digest, &content);
+
+    let lease = cache::file_path(
+        h.state.serving.clone(),
+        digest.clone(),
+        "pypi".to_owned(),
+        "x.whl".to_owned(),
+    )
+    .await
+    .unwrap();
+
+    assert!(lease.path().exists());
+    assert!(h.state.blobs.head(&digest).await.unwrap().is_some());
+}

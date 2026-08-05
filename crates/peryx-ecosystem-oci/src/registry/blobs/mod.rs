@@ -7,6 +7,7 @@ mod contents;
 use contents::{layer_contents_response, layer_query_member};
 use peryx_driver::conditional::applicable_range;
 use peryx_driver::range::unsatisfiable_range;
+use peryx_driver::read_through::fill_from_remote_placement;
 
 use super::uploads::created;
 use super::*;
@@ -159,6 +160,14 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         if let Some(metadata) = state.blobs.head(storage).await.map_err(blob_fault)?
             && self.blob_authorized(state, index, repo, digest)?
         {
+            return Ok(BlobFetch::Stored(metadata));
+        }
+        // A blob this repository already authorizes but whose bytes are not local yet can come from a
+        // peer that holds a verified placement, before falling back to an upstream member.
+        if self.blob_authorized(state, index, repo, digest)?
+            && let Some(metadata) = fill_remote(state, storage).await
+        {
+            state.cache.forget_flight(&gate_key);
             return Ok(BlobFetch::Stored(metadata));
         }
         let members = serving_members(state, index);
@@ -343,6 +352,12 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         drop(memberships);
         Ok(present)
     }
+}
+
+/// Fill the local content store from a verified remote placement, returning the stored metadata when a
+/// peer served the blob. A single-node registry has no read-through installed, so this is a no-op there.
+async fn fill_remote(state: &ServingState, storage: &Digest) -> Option<BlobMetadata> {
+    fill_from_remote_placement(state.read_through(), &state.meta, &state.blobs, storage).await
 }
 
 /// The outcome of fetching a missed blob from a virtual index's proxy members.

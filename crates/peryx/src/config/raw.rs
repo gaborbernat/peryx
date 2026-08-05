@@ -1,6 +1,7 @@
 //! The raw deserialization schema: partial overlays and unclassified `[[index]]` tables.
 
 use std::collections::BTreeMap;
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 
 use ipnet::IpNet;
@@ -125,6 +126,10 @@ pub struct RawAvailability {
     /// The `[availability.write_ack]` table: the durability quorum and client deadline a hosted write
     /// must reach before it is acknowledged. Absent takes the mode's default.
     pub write_ack: Option<RawWriteAck>,
+    /// The `[availability.read-through]` table: the bounds a serving read-through of a remote placement
+    /// runs under.
+    #[serde(rename = "read-through")]
+    pub read_through: Option<RawReadThrough>,
 }
 
 /// The raw `[availability.write_ack]` table before quorum and deadline resolution.
@@ -143,6 +148,35 @@ pub enum RawWriteAckPolicy {
     Local,
     Majority,
     Everywhere,
+}
+
+/// The raw `[availability.read-through]` table before its bounds are resolved against their defaults.
+///
+/// Every field is optional and falls back to the built-in default; a zero is rejected at parse time by
+/// the non-zero field types.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RawReadThrough {
+    pub concurrency: Option<NonZeroUsize>,
+    pub per_fetch_bytes: Option<NonZeroU64>,
+    pub chunk_bytes: Option<NonZeroUsize>,
+    pub max_fanout: Option<NonZeroUsize>,
+    pub trip_after: Option<u32>,
+    pub cooldown_secs: Option<u64>,
+    /// The `[availability.read-through.retry]` sub-table: the whole reconnect schedule, tuned together or
+    /// left at its default.
+    pub retry: Option<RawReadThroughRetry>,
+}
+
+/// The raw `[availability.read-through.retry]` sub-table. Present means every field is given, so the
+/// schedule is set as a whole rather than half-overridden.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct RawReadThroughRetry {
+    pub base_ms: u64,
+    pub multiplier: NonZeroU32,
+    pub max_delay_secs: u64,
+    pub max_attempts: NonZeroU32,
 }
 
 /// The raw `[availability.listener]` table before address and TLS validation.

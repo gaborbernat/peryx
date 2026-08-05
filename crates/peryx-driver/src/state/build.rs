@@ -348,6 +348,7 @@ impl AppState {
                 ownership: std::sync::OnceLock::new(),
                 control: std::sync::OnceLock::new(),
                 cross_dc_copier: std::sync::OnceLock::new(),
+                read_through: std::sync::OnceLock::new(),
             }),
             drivers: std::array::from_fn(|_| None),
             absolute_prefixes: Vec::new(),

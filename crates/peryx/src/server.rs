@@ -175,8 +175,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     // A `dc` or `ha` node records authoritative OCI mutations in the replication outbox; single-node
     // `none` carries no replica to reconcile them, so it journals nothing.
     peryx_ecosystem_oci::install(&mut state, oci_settings, config.availability.replication().is_some());
-    let ldap_logins = ldap_logins(&config.auth.ldap_providers, &state.meta)?;
-    state.set_ldap_logins(ldap_logins);
+    state.set_ldap_logins(ldap_logins(&config.auth.ldap_providers, &state.meta)?);
     let oidc_logins = oidc_logins(&config.auth.oidc_providers, &state.meta)?;
     state.set_oidc_logins(oidc_logins);
     state.read_only = read_only;
@@ -195,6 +194,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     }
     state.set_openapi(crate::api::openapi_json());
     let state = Arc::new(state);
+    crate::replication::install_read_through(config, &state)?;
     if !state.read_only && !state.webhooks.is_empty() {
         peryx_events::webhook::kick(state.serving.clone());
     }

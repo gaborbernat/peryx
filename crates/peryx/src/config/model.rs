@@ -10,6 +10,7 @@ use std::time::Duration;
 use peryx_core::Ecosystem;
 use peryx_driver::jobs::{MAINTENANCE_INTERVAL, Schedule, ScheduledJob};
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig};
+use peryx_driver::read_through::ReadThroughLimits;
 use peryx_http::{DEFAULT_HOT_CACHE_BYTES, DEFAULT_MAX_STALE_SECS};
 use peryx_identity::{Action, ExternalGroupGrant, Glob, Grant, IndexAcl, NamedToken, ProviderId};
 use peryx_policy::PolicyConfig;
@@ -69,6 +70,9 @@ pub struct Config {
     /// The private availability control listener a `dc` or `ha` node exposes, when one is configured.
     /// Single-node `none` opens none, so the field is `None` there and the runtime allocates no socket.
     pub availability_listener: Option<AvailabilityListenerConfig>,
+    /// The bounds a serving read-through of a remote placement runs under, when the operator tuned them.
+    /// Absent leaves the built-in defaults, which the runtime applies when it installs the capability.
+    pub read_through: Option<ReadThroughLimits>,
     pub jobs: JobsConfig,
     /// Where blobs are stored: the local filesystem (default) or an S3-compatible object store.
     pub blob: BlobStorageConfig,
@@ -899,6 +903,7 @@ impl Default for Config {
             write_ack: WriteAckConfig::default(),
             dc_membership: None,
             availability_listener: None,
+            read_through: None,
             jobs: JobsConfig::default(),
             blob: BlobStorageConfig::Filesystem,
         }

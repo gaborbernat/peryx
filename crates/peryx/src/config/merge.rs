@@ -31,9 +31,11 @@ use super::model::{
 use super::raw::{
     PartialAuthConfig, PartialConfig, PartialJobsConfig, PartialLogConfig, PartialRateLimitConfig, PartialRouteLimit,
     RawAcme, RawAvailability, RawAvailabilityListener, RawBlobStorage, RawCredentialExec, RawDcMember,
-    RawExternalGroupGrant, RawIndex, RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawReplication,
-    RawScheduledJob, RawTls, RawToken, RawUpstream, RawWebhook, RawWriteAck, RawWriteAckPolicy,
+    RawExternalGroupGrant, RawIndex, RawJobSchedule, RawLdapMode, RawLdapProvider, RawOidcProvider, RawReadThrough,
+    RawReplication, RawScheduledJob, RawTls, RawToken, RawUpstream, RawWebhook, RawWriteAck, RawWriteAckPolicy,
 };
+use peryx_driver::read_through::{DEFAULT_READ_THROUGH_LIMITS, ReadThroughLimits};
+use peryx_replication::{CircuitConfig, ReconnectPolicy};
 
 impl Config {
     /// Overlay a partial source on top of these values, returning the merged config.
@@ -92,10 +94,12 @@ impl Config {
             let members = availability.members.take();
             let listener = availability.listener.take();
             let write_ack = availability.write_ack.take();
+            let read_through = availability.read_through.take();
             self.availability = classify_availability(availability)?;
             self.dc_membership = classify_membership(self.availability.mode(), group, members)?;
             self.availability_listener = classify_listener(self.availability.mode(), listener)?;
             self.write_ack = classify_write_ack(self.availability.mode(), write_ack)?;
+            self.read_through = classify_read_through(self.availability.mode(), read_through)?;
         }
         if let Some(blob) = partial.blob {
             self.blob = classify_blob(blob)?;
@@ -479,6 +483,41 @@ fn classify_listener(
         bind,
         tls,
         allow_remote_plaintext,
+    }))
+}
+
+/// Resolve the `[availability.read-through]` table into the bounds a remote-placement read-through runs
+/// under, or `None` when no table is configured and the runtime keeps its built-in defaults. Single-node
+/// `none` mode streams no remote placements, so pairing it with a table is a configuration error. Each
+/// absent field falls back to its default; the retry sub-table, when present, sets the whole schedule.
+fn classify_read_through(
+    mode: AvailabilityMode,
+    raw: Option<RawReadThrough>,
+) -> Result<Option<ReadThroughLimits>, ConfigError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if mode == AvailabilityMode::None {
+        return Err(ConfigError::Availability {
+            reason: "`none` mode streams no remote placements; select `dc` or `ha` first",
+        });
+    }
+    let base = DEFAULT_READ_THROUGH_LIMITS;
+    Ok(Some(ReadThroughLimits {
+        concurrency: raw.concurrency.unwrap_or(base.concurrency),
+        per_fetch_bytes: raw.per_fetch_bytes.unwrap_or(base.per_fetch_bytes),
+        chunk_bytes: raw.chunk_bytes.unwrap_or(base.chunk_bytes),
+        max_fanout: raw.max_fanout.unwrap_or(base.max_fanout),
+        circuit: CircuitConfig {
+            trip_after: raw.trip_after.unwrap_or(base.circuit.trip_after),
+            cooldown: raw.cooldown_secs.map_or(base.circuit.cooldown, Duration::from_secs),
+        },
+        policy: raw.retry.map_or(base.policy, |retry| {
+            ReconnectPolicy::new(
+                Duration::from_millis(retry.base_ms),
+                retry.multiplier,
+                Duration::from_secs(retry.max_delay_secs),
+                retry.max_attempts,
+            )
+        }),
     }))
 }
 

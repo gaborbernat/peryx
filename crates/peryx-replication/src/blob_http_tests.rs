@@ -310,3 +310,31 @@ async fn test_fetch_maps_a_deadline_to_timeout() {
 
     assert_eq!(error, TransportError::Timeout);
 }
+
+#[tokio::test]
+async fn test_fetch_maps_a_mid_body_drop_to_disconnected() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // The response promises a full body, sends part of it, then drops the connection. Reading the body
+    // fails partway on an early EOF, which the transport maps to a retryable disconnect rather than
+    // mistaking the short read for a complete blob.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial-body")
+                .await;
+        }
+    });
+
+    let error = transport(&format!("http://{address}/"), 1024)
+        .fetch_blob(whole(&Digest::of(b"x")))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error, TransportError::Disconnected);
+    task.abort();
+}

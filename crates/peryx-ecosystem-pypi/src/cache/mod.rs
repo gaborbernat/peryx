@@ -35,6 +35,8 @@ pub use mutate::{
     TrashContext, download_status, project_status, promote_release, remove_files, restore_files, set_yanked,
 };
 pub(crate) use mutate::{store_upload, upload_exists};
+#[cfg(test)]
+pub(crate) use page_stream::settle_revalidations;
 pub use page_stream::{PageOutcome, materialize_detail, stream_detail};
 pub use provenance::{ProvenanceBody, provenance_bytes};
 pub use resolve::{DetailPage, list_serial, resolve_detail, resolve_detail_page, resolve_list};

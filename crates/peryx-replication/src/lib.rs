@@ -178,6 +178,8 @@ mod driver_tests;
 #[cfg(test)]
 mod envelope_tests;
 #[cfg(test)]
+mod epoch_reservation_tests;
+#[cfg(test)]
 mod failover_tests;
 #[cfg(test)]
 mod filesystem_ack_tests;

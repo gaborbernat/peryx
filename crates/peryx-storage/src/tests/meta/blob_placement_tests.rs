@@ -468,3 +468,85 @@ fn test_status_projects_each_state() {
     );
     assert_eq!(BlobPlacementState::Revoked.status(), BlobPlacementStatus::Revoked);
 }
+
+#[test]
+fn test_record_local_placement_verifies_the_home_datacenter() {
+    let (_dir, store) = store();
+    let backend = BackendId::new("filesystem").unwrap();
+    let outcome = store
+        .record_local_placement(&backend, &dc("home"), &digest(7), 2_048, 3, 100)
+        .unwrap();
+    assert_eq!(outcome.record().state, BlobPlacementState::Verified { size: 2_048 });
+    let routing = store.route_blob_placements(&digest(7), &dc("peer")).unwrap();
+    assert_eq!(
+        routing.verified_remote.len(),
+        1,
+        "a peer routes a read-through to the home placement"
+    );
+    assert_eq!(routing.verified_remote[0].key.data_center, dc("home"));
+}
+
+#[test]
+fn test_record_local_placement_is_idempotent_on_a_republish() {
+    let (_dir, store) = store();
+    let backend = BackendId::new("filesystem").unwrap();
+    store
+        .record_local_placement(&backend, &dc("home"), &digest(7), 2_048, 3, 100)
+        .unwrap();
+    let outcome = store
+        .record_local_placement(&backend, &dc("home"), &digest(7), 2_048, 3, 200)
+        .unwrap();
+    assert!(
+        matches!(outcome, BlobPlacementOutcome::Unchanged(_)),
+        "a re-push of an already-verified digest leaves the record as is",
+    );
+}
+
+#[test]
+fn test_record_local_placement_recovers_a_failed_placement() {
+    // A placement that failed an integrity check re-stages and verifies when the home republishes it.
+    let (_dir, store) = store();
+    let backend = BackendId::new("filesystem").unwrap();
+    let placement = BlobPlacementKey {
+        digest: digest(7),
+        backend: backend.clone(),
+        data_center: dc("home"),
+        location: BackendLocation::for_digest(&digest(7)),
+    };
+    store
+        .apply_blob_placement(&placement, &BlobPlacementTransition::Stage, 3, 10)
+        .unwrap();
+    store
+        .apply_blob_placement(
+            &placement,
+            &BlobPlacementTransition::Fail {
+                class: BlobPlacementFailure::DigestMismatch,
+            },
+            3,
+            20,
+        )
+        .unwrap();
+    let outcome = store
+        .record_local_placement(&backend, &dc("home"), &digest(7), 2_048, 3, 100)
+        .unwrap();
+    assert_eq!(outcome.record().state, BlobPlacementState::Verified { size: 2_048 });
+}
+
+#[test]
+fn test_record_local_placement_rejects_a_stale_fence() {
+    let (_dir, store) = store();
+    let backend = BackendId::new("filesystem").unwrap();
+    let placement = BlobPlacementKey {
+        digest: digest(7),
+        backend: backend.clone(),
+        data_center: dc("home"),
+        location: BackendLocation::for_digest(&digest(7)),
+    };
+    store
+        .apply_blob_placement(&placement, &BlobPlacementTransition::Stage, 5, 10)
+        .unwrap();
+    let error = store
+        .record_local_placement(&backend, &dc("home"), &digest(7), 2_048, 2, 200)
+        .unwrap_err();
+    assert!(matches!(error, BlobPlacementError::StaleFence { .. }));
+}

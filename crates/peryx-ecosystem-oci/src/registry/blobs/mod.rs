@@ -543,6 +543,7 @@ pub(super) async fn commit_blob(
     match pending.commit(&storage).await {
         Ok(_receipt) => {
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
+            state.record_home_placement(storage.as_str(), bytes, fence);
             Ok(blob_created(name, digest))
         }
         Err(err) => {
@@ -602,6 +603,7 @@ pub(super) async fn commit_staged_upload(
         Ok(()) => {
             state.meta.remove_upload(session)?;
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
+            state.record_home_placement(storage.as_str(), bytes, fence);
             Ok(blob_created(name, digest))
         }
         Err(err) => {

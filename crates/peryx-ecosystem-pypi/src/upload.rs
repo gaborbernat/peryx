@@ -392,9 +392,20 @@ pub(crate) async fn stage_publish(
     })
 }
 
-/// Write the store record that publishes a staged upload, bumping the serial. Returns `false` for a
-/// same-bytes duplicate. Runs after the caller re-checks the authority fence, so the record write is the
-/// single visible effect a superseded epoch fences out.
+/// A published upload's outcome: whether the store wrote a new file, and the content-addressed blobs it
+/// committed so the caller can record the home datacenter's verified placement for each.
+pub(crate) struct Published {
+    /// `false` for a same-bytes duplicate the store left unchanged.
+    pub stored: bool,
+    /// The committed blobs — the content artifact, its metadata sibling, and any provenance — each with
+    /// its byte length. The bytes are on disk whatever `stored` reports, since a duplicate re-commits the
+    /// same content, so recording each placement stays correct on a re-push.
+    pub placements: Vec<(Digest, u64)>,
+}
+
+/// Write the store record that publishes a staged upload, bumping the serial. Reports a same-bytes
+/// duplicate as [`stored`](Published::stored) `false`. Runs after the caller re-checks the authority
+/// fence, so the record write is the single visible effect a superseded epoch fences out.
 ///
 /// # Errors
 /// Returns [`UploadStoreError`] if the metadata write or an existing-record decode fails.
@@ -403,12 +414,19 @@ pub(crate) fn commit_publish(
     name: &str,
     publish: PreparedPublish,
     mut quota: Option<crate::quota::PendingQuota>,
-) -> Result<bool, UploadStoreError> {
+) -> Result<Published, UploadStoreError> {
     let PreparedPublish {
         record,
         metadata_digest,
         provenance,
     } = publish;
+    let mut placements = vec![
+        (record.digest.clone(), record.content_size),
+        (metadata_digest.clone(), record.metadata.len() as u64),
+    ];
+    if let Some((digest, size)) = &provenance {
+        placements.push((digest.clone(), *size));
+    }
     let stored = store_record(
         meta,
         name,
@@ -420,7 +438,7 @@ pub(crate) fn commit_publish(
     if let Some(quota) = &mut quota {
         quota.finish();
     }
-    Ok(stored)
+    Ok(Published { stored, placements })
 }
 
 /// Blocking counterpart for offline import commands.

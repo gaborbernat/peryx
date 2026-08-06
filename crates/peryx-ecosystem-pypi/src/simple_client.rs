@@ -142,31 +142,21 @@ impl SimpleClientExt for UpstreamClient {
 
 impl SimpleClientExt for UpstreamRouter {
     async fn fetch_project(&self, project: &str, _etag: Option<&str>) -> Result<SimpleResponse, UpstreamError> {
-        let mut candidates = self.candidates(project).peekable();
-        loop {
-            let upstream = candidates.next().expect("an upstream route always has a candidate");
-            let result = SimpleClientExt::fetch_project(upstream.client(), project, None).await;
-            record_health(upstream, &result);
-            if fallback_result(&result) && candidates.peek().is_some() {
-                tracing::warn!(project, upstream = upstream.name(), "trying fallback");
-                continue;
-            }
-            return attribute_source(upstream, result);
-        }
+        route(
+            self.candidates(project),
+            |upstream| SimpleClientExt::fetch_project(upstream.client(), project, None),
+            |upstream| tracing::warn!(project, upstream = upstream.name(), "trying fallback"),
+        )
+        .await
     }
 
     async fn fetch_index(&self) -> Result<SimpleResponse, UpstreamError> {
-        let mut candidates = self.candidates("").peekable();
-        loop {
-            let upstream = candidates.next().expect("an upstream route always has a candidate");
-            let result = SimpleClientExt::fetch_index(upstream.client()).await;
-            record_health(upstream, &result);
-            if fallback_result(&result) && candidates.peek().is_some() {
-                tracing::warn!(upstream = upstream.name(), "upstream unavailable, trying fallback");
-                continue;
-            }
-            return attribute_source(upstream, result);
-        }
+        route(
+            self.candidates(""),
+            |upstream| SimpleClientExt::fetch_index(upstream.client()),
+            |upstream| tracing::warn!(upstream = upstream.name(), "upstream unavailable, trying fallback"),
+        )
+        .await
     }
 
     async fn head_index(
@@ -175,39 +165,55 @@ impl SimpleClientExt for UpstreamRouter {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<SimpleHead, UpstreamError> {
-        let mut candidates = self.candidates("").peekable();
-        loop {
-            let upstream = candidates.next().expect("an upstream route always has a candidate");
-            let matches_source = source == Some(upstream.name());
-            let result = upstream
-                .client()
-                .head_index(
+        route(
+            self.candidates(""),
+            |upstream| {
+                let matches_source = source == Some(upstream.name());
+                upstream.client().head_index(
                     None,
                     matches_source.then_some(etag).flatten(),
                     matches_source.then_some(last_modified).flatten(),
                 )
-                .await;
-            record_health(upstream, &result);
-            if fallback_result(&result) && candidates.peek().is_some() {
-                tracing::warn!(upstream = upstream.name(), "upstream unavailable, trying fallback");
-                continue;
-            }
-            return attribute_source(upstream, result);
-        }
+            },
+            |upstream| tracing::warn!(upstream = upstream.name(), "upstream unavailable, trying fallback"),
+        )
+        .await
     }
 
     async fn head_project(&self, project: &str, _etag: Option<&str>) -> Result<SimpleHead, UpstreamError> {
-        let mut candidates = self.candidates(project).peekable();
-        loop {
-            let upstream = candidates.next().expect("an upstream route always has a candidate");
-            let result = upstream.client().head_project(project, None).await;
-            record_health(upstream, &result);
-            if fallback_result(&result) && candidates.peek().is_some() {
-                tracing::warn!(project, upstream = upstream.name(), "trying fallback");
-                continue;
-            }
-            return attribute_source(upstream, result);
+        route(
+            self.candidates(project),
+            |upstream| upstream.client().head_project(project, None),
+            |upstream| tracing::warn!(project, upstream = upstream.name(), "trying fallback"),
+        )
+        .await
+    }
+}
+
+/// Try each eligible upstream in request order, falling through to the next when a source answers with
+/// a retryable failure and one remains. Returns [`UpstreamError::NoEligibleSource`] when the candidate
+/// list is empty, so a route that resolves to no source surfaces a typed error instead of panicking.
+async fn route<'a, T, Fut>(
+    candidates: impl Iterator<Item = &'a NamedUpstream>,
+    attempt: impl Fn(&'a NamedUpstream) -> Fut,
+    on_fallback: impl Fn(&NamedUpstream),
+) -> Result<T, UpstreamError>
+where
+    T: SimpleStatus,
+    Fut: Future<Output = Result<T, UpstreamError>>,
+{
+    let mut candidates = candidates.peekable();
+    loop {
+        let Some(upstream) = candidates.next() else {
+            return Err(UpstreamError::NoEligibleSource);
+        };
+        let result = attempt(upstream).await;
+        record_health(upstream, &result);
+        if fallback_result(&result) && candidates.peek().is_some() {
+            on_fallback(upstream);
+            continue;
         }
+        return attribute_source(upstream, result);
     }
 }
 
@@ -241,7 +247,8 @@ fn fallback_result<T: SimpleStatus>(result: &Result<T, UpstreamError>) -> bool {
             | UpstreamError::Url(_)
             | UpstreamError::MissingContentType { .. }
             | UpstreamError::UnsupportedContentType { .. }
-            | UpstreamError::ResponseTooLarge { .. },
+            | UpstreamError::ResponseTooLarge { .. }
+            | UpstreamError::NoEligibleSource,
         ) => false,
     }
 }
@@ -482,9 +489,9 @@ mod tests {
 
     use bytes::Bytes;
     use futures_util::{Stream, StreamExt as _, stream};
-    use peryx_upstream::UpstreamError;
+    use peryx_upstream::{NamedUpstream, UpstreamError};
 
-    use super::{MAX_SIMPLE_PAGE_BYTES, read_capped};
+    use super::{MAX_SIMPLE_PAGE_BYTES, SimpleResponse, read_capped, route};
 
     fn body(sizes: Vec<usize>) -> impl Stream<Item = Result<Bytes, reqwest::Error>> {
         stream::iter(sizes.into_iter().map(|size| Ok(Bytes::from(vec![b'a'; size]))))
@@ -514,5 +521,18 @@ mod tests {
     #[test]
     fn test_simple_page_cap_matches_the_project_sync_cap() {
         assert_eq!(MAX_SIMPLE_PAGE_BYTES as u64, crate::cache::MAX_PROJECT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn test_route_reports_no_eligible_source_for_an_empty_candidate_list() {
+        let error = route(
+            std::iter::empty::<&NamedUpstream>(),
+            |_upstream| std::future::ready(Err::<SimpleResponse, _>(UpstreamError::ResponseTooLarge { limit: 0 })),
+            |_upstream| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, UpstreamError::NoEligibleSource));
     }
 }

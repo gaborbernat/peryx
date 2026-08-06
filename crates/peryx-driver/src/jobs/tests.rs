@@ -1409,6 +1409,10 @@ async fn test_reclamation_job_delegates_to_the_registered_reclaimer_under_the_fe
     };
     assert_eq!(job.kind(), "reclamation");
     assert_eq!(job.scope(), "");
+    assert!(
+        job.repository().is_none(),
+        "a node-wide reclamation pass names no repository"
+    );
     assert_eq!(
         job.lease_scope(),
         LeaseScope::ClusterSingleton("reclamation".to_owned())

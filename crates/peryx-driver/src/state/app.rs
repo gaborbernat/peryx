@@ -82,6 +82,10 @@ pub struct ServingState {
     /// quorum. Empty on a single-node `none` process and on any deployment whose quorum the local receipt
     /// alone satisfies, so the gather touches the network only when a larger same-DC quorum needs it.
     pub(super) receipt_sources: Vec<std::sync::Arc<dyn peryx_replication::ReceiptSource + Send + Sync>>,
+    /// The eligible remote datacenters an `ha` filesystem write gathers metadata acknowledgements from to
+    /// prove its metadata operation remote-durable. Empty outside `ha` mode and whenever no remote
+    /// datacenter is configured, so the gather touches the network only when a remote must acknowledge.
+    pub(super) remote_frontier_sources: Vec<std::sync::Arc<dyn peryx_replication::RemoteFrontierSource + Send + Sync>>,
     /// Immutable repository-route positions for request dispatch.
     pub(super) route_resolver: RouteResolver,
     pub indexes: Vec<Index>,
@@ -251,6 +255,15 @@ impl ServingState {
     #[must_use]
     pub fn receipt_sources(&self) -> &[std::sync::Arc<dyn peryx_replication::ReceiptSource + Send + Sync>] {
         &self.receipt_sources
+    }
+
+    /// The eligible remote datacenters an `ha` write gathers metadata acknowledgements from. Empty outside
+    /// `ha` mode, so the producer runs no remote gather and the metadata dimension is the local commit.
+    #[must_use]
+    pub fn remote_frontier_sources(
+        &self,
+    ) -> &[std::sync::Arc<dyn peryx_replication::RemoteFrontierSource + Send + Sync>] {
+        &self.remote_frontier_sources
     }
 
     /// The authority role this node was configured with, from its replication role rather than its

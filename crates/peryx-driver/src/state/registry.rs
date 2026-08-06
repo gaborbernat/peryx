@@ -175,6 +175,15 @@ impl AppState {
         self.serving_mut().receipt_sources = sources;
     }
 
+    /// Install the eligible remote datacenters an `ha` write gathers metadata acknowledgements from, so
+    /// its metadata dimension resolves from a remote commit rather than the local journal alone.
+    pub fn set_remote_frontier_sources(
+        &mut self,
+        sources: Vec<std::sync::Arc<dyn peryx_replication::RemoteFrontierSource + Send + Sync>>,
+    ) {
+        self.serving_mut().remote_frontier_sources = sources;
+    }
+
     /// Install the authority role the binary resolved from the configured replication role, so the
     /// topology snapshot reports a configured primary as the writer even when it serves read-only.
     pub fn set_availability_role(&mut self, role: peryx_core::NodeRole) {

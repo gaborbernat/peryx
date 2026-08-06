@@ -48,6 +48,8 @@ mod readiness;
 mod receipt_quorum;
 mod reconcile;
 mod remote_durability;
+mod remote_frontier;
+mod remote_frontier_http;
 mod replica;
 pub mod sim;
 mod status;
@@ -134,6 +136,12 @@ pub use reconcile::{
     cleanup, drain_reconcile, reconcile,
 };
 pub use remote_durability::{MetadataOperation, RemoteAck, RemoteDurability, assess_remote_metadata_durability};
+pub use remote_frontier::{
+    DEFAULT_FRONTIER_POLL, LoopbackRemoteFrontierSource, RemoteFrontierSource, gather_remote_acks,
+};
+pub use remote_frontier_http::{
+    FrontierReply, HttpRemoteFrontierError, HttpRemoteFrontierSource, MetadataFrontierProvider, frontier_router,
+};
 pub use replica::{AppliedPage, Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};
 pub use telemetry::{OperationTelemetry, sampled};
@@ -231,6 +239,10 @@ mod receipt_quorum_tests;
 mod reconcile_tests;
 #[cfg(test)]
 mod remote_durability_tests;
+#[cfg(test)]
+mod remote_frontier_http_tests;
+#[cfg(test)]
+mod remote_frontier_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]

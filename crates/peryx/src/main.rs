@@ -166,6 +166,11 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
         if let Some(receipts) = peryx::server::receipt_endpoint_router(config, &state.serving.blobs)? {
             router = router.merge(receipts);
         }
+        // Remote datacenters query this node for how far it has durably applied an authority's metadata,
+        // so an `ha` write elsewhere can prove its operation remote-durable.
+        if let Some(frontiers) = peryx::server::frontier_endpoint_router(config, &state)? {
+            router = router.merge(frontiers);
+        }
         let _replication = replication.start();
         let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port)
             .parse()

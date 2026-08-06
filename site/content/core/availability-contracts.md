@@ -129,6 +129,27 @@ blob is unavailable, not given wrong bytes.
 | Partition response  | commit locally                   | refuse with `503` until peer reachable | refuse with `503` until remote reachable |
 | Retry               | idempotent (absent stays absent) | idempotent (absent stays absent)       | idempotent (absent stays absent)         |
 
+## How `ha` proves remote metadata durability
+
+An `ha` acknowledgement waits for one **eligible remote datacenter** to commit the exact metadata operation. Each remote
+reports how far it has durably applied and under which authority epoch; the ingress folds those reports against the
+operation's own epoch and apply frontier. A remote counts only when it committed under the operation's epoch — a remote
+fenced at a stale or advanced epoch is excluded, not counted — and once it has applied through the operation's frontier.
+One eligible remote is enough: `ha` promises a second failure domain, not a quorum of every datacenter. The ingress
+prefers each remote datacenter's writer, since it issues the authoritative serials, and queries one address per remote.
+
+The wait is bounded by the client write deadline (`[availability.write_ack] deadline`), which is separate from the
+background retry that keeps converging after the client stops waiting. A write whose deadline expires before a remote
+acknowledges is reported **retry-safe**, not failed: the operation may have committed remotely just after the client
+gave up, so mapping the timeout to a definite failure would be a false negative. A repeat of the call resolves to
+success once a remote has applied — it never reruns the mutation, because every mutation is idempotent by its operation
+identity, so a home lost after a remote applied but before the response reached the client still resolves a retry to
+success.
+
+A group configured with a **single remote datacenter** makes that datacenter every write's only remote durable copy.
+Removing it drops remote durability for the whole group, so it is an explicit administrator action, and peryx warns at
+startup when only one remote datacenter is configured.
+
 ## Why a partition refuses instead of accepting
 
 `dc` and `ha` promise durability in a failure domain their acknowledgement names. During a partition that cuts peryx off

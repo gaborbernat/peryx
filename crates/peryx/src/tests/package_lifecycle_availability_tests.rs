@@ -105,12 +105,27 @@ fn dc_writer_config(dir: &tempfile::TempDir) -> Config {
 
 /// An `ha` writer: the same primary posture reached through an `ha` roster, so the mode label differs
 /// and the durability requirement is replicated.
+/// A single-datacenter `ha` roster: one writer, no remote datacenter to wait on. A single-process `ha`
+/// behavior test proves its writes locally, since cross-datacenter write completion needs a reachable
+/// remote and is exercised by the multi-process availability harness rather than faked here.
+fn solo_group() -> DcMembership {
+    DcMembership {
+        group: "east".to_owned(),
+        members: vec![DcMember {
+            node: WRITER_IDENTITY.to_owned(),
+            dc: "east-1".to_owned(),
+            address: "10.0.0.1:8080".to_owned(),
+            role: DcRole::Writer,
+        }],
+    }
+}
+
 fn ha_writer_config(dir: &tempfile::TempDir) -> Config {
     Config {
         data_dir: dir.path().to_path_buf(),
         writer_identity: Some(WRITER_IDENTITY.to_owned()),
         availability: AvailabilityConfig::Ha(primary_replication()),
-        dc_membership: Some(group()),
+        dc_membership: Some(solo_group()),
         indexes: lifecycle_indexes(),
         ..Config::default()
     }
@@ -190,6 +205,22 @@ fn claim_writer(dir: &tempfile::TempDir) {
 /// read-only gate.
 fn writer_node(config: &Config) -> (Arc<AppState>, Router) {
     let state = build_state(config).unwrap();
+    let router = router_for(state.clone());
+    (state, router)
+}
+
+/// A writer whose `ha` metadata dimension waits on `remotes`, so the ingress POST resolves its metadata
+/// acknowledgement from a remote frontier rather than the local journal alone. A single-datacenter roster
+/// configures no remote to wait on, so the sources are injected directly into the freshly built state,
+/// which is still uniquely owned before the router clones it.
+fn writer_node_with_remotes(
+    config: &Config,
+    remotes: Vec<Arc<dyn peryx_replication::RemoteFrontierSource + Send + Sync>>,
+) -> (Arc<AppState>, Router) {
+    let mut state = build_state(config).unwrap();
+    Arc::get_mut(&mut state)
+        .expect("the freshly built state is uniquely owned before the router clones it")
+        .set_remote_frontier_sources(remotes);
     let router = router_for(state.clone());
     (state, router)
 }
@@ -400,6 +431,26 @@ async fn test_pypi_lifecycle_completes_in_every_availability_mode(
         StatusCode::OK,
     );
     assert_eq!(pypi_present(&router, "prod", PROJECT).await, StatusCode::OK);
+}
+
+/// An `ha` publish waits on a remote datacenter's metadata frontier: with an eligible remote already
+/// holding the operation, the write proves durable and returns `200`, the same client-visible outcome as
+/// a single-datacenter write. This drives the ingress POST's remote-metadata arm, which a single-DC `ha`
+/// roster (no remote to wait on) never reaches.
+#[tokio::test]
+async fn test_ha_publish_waits_on_a_covering_remote_metadata_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    // With no ownership group, the committed authority epoch is 0; a frontier at the ceiling covers any
+    // serial the store commits, so this remote holds every operation the write can produce.
+    let remote = peryx_replication::LoopbackRemoteFrontierSource::reporting("west-1", 0, u64::MAX);
+    let (_state, router) = writer_node_with_remotes(&ha_writer_config(&dir), vec![Arc::new(remote)]);
+
+    assert_eq!(
+        upload_as(&router, "staging", PROJECT, VERSION, UPLOAD).await,
+        StatusCode::OK,
+        "an eligible remote holding the operation proves the write remote-durable"
+    );
+    assert_eq!(pypi_present(&router, "staging", PROJECT).await, StatusCode::OK);
 }
 
 /// The `OCI` manifest lifecycle reaches its documented outcome in each mode: a push publishes a tag, a

@@ -295,10 +295,9 @@ async fn admit_and_store(
     // the ownership group; a later file finds a home already set and only reads it. The project routes
     // through its canonical authority key — its PEP 503 normalized name — so every name variant homes
     // under one authority.
+    let authority = crate::name::authority_key(project);
     if stored {
-        state
-            .claim_first_publish_home(&crate::name::authority_key(project))
-            .await;
+        state.claim_first_publish_home(&authority).await;
     }
     // The bytes are durable whether this stored fresh content or deduplicated an identical resend, so the
     // intent advances to admitted either way, which lets the reaper reclaim it.
@@ -312,11 +311,30 @@ async fn admit_and_store(
         acknowledge::local_node_id(state.availability_topology()),
         digest.clone(),
     );
+    let remote_sources = state.remote_frontier_sources();
+    let metadata = if remote_sources.is_empty() {
+        // No remote datacenter is configured to wait on: a `none`/`dc` write, or an `ha` group that spans
+        // a single datacenter. The local journal commit is then the whole metadata dimension and the write
+        // acknowledges locally. This is distinct from a remote that is configured but unreachable, which
+        // the gather in the other arm waits out and reports retry-safe rather than acknowledging.
+        acknowledge::MetadataDimension::Local(AckDecision::Acknowledged)
+    } else {
+        // An `ha` write waits for an eligible remote datacenter to commit the exact operation: the
+        // authority epoch it committed under and the metadata serial that covers it. A serial that cannot
+        // be read fails closed to a frontier no remote covers, so the write reports retry-safe rather than
+        // falsely durable.
+        acknowledge::MetadataDimension::Remote {
+            sources: remote_sources,
+            authority: &authority,
+            operation: peryx_replication::MetadataOperation {
+                epoch: state.committed_authority_epoch(&authority).await,
+                frontier: state.meta.current_serial().unwrap_or(u64::MAX),
+            },
+        }
+    };
     let outcome = acknowledge::resolve_dc_ack(
         ack,
-        // The metadata write committed to the local journal synchronously; the remote group-readiness
-        // source that would downgrade this is deferred with the cross-DC transport.
-        AckDecision::Acknowledged,
+        metadata,
         &digest,
         state.receipt_sources(),
         state.write_ack_deadline(),

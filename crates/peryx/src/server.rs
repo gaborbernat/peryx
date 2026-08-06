@@ -1,7 +1,8 @@
 //! Assembling the HTTP server from configuration.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read as _;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -19,7 +20,10 @@ use peryx_identity::{
     OidcProviderSettings, SessionSealer, Signer,
 };
 use peryx_policy::{Policy, PolicyDecisionRecorder, PolicyEvaluation};
-use peryx_replication::{HttpReceiptSource, ReceiptSource, receipt_router};
+use peryx_replication::{
+    FrontierReply, HttpReceiptSource, HttpRemoteFrontierSource, MetadataFrontierProvider, ReceiptSource,
+    RemoteFrontierSource, frontier_router, receipt_router,
+};
 use peryx_storage::blob::{BlobStorage, S3Config};
 use peryx_storage::meta::{MetaStore, NewPolicyDecision};
 use peryx_upstream::{
@@ -28,9 +32,9 @@ use peryx_upstream::{
 };
 
 use crate::config::{
-    AuthConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, DcRole,
-    IndexConfig, IndexKind as ConfigKind, LdapBindConfig, LdapProviderConfig, OidcProviderConfig, ReplicationConfig,
-    SecretSource, UpstreamTlsConfig, WebhookSecret,
+    AuthConfig, AvailabilityConfig, AvailabilityMode, BlobStorageConfig, Config, CredentialFailureMode,
+    CredentialRefreshConfig, DcRole, IndexConfig, IndexKind as ConfigKind, LdapBindConfig, LdapProviderConfig,
+    OidcProviderConfig, ReplicationConfig, SecretSource, UpstreamTlsConfig, WebhookSecret,
 };
 
 /// The derived views a read must not outrun. A replica gates reads on whole-blob availability as well
@@ -227,6 +231,7 @@ fn configure_availability(state: &mut AppState, config: &Config, read_only: bool
     state.set_availability_topology(availability_topology(config, read_only));
     state.set_write_ack(config.write_ack.policy, config.write_ack.deadline);
     state.set_receipt_sources(receipt_sources(config)?);
+    state.set_remote_frontier_sources(remote_frontier_sources(config)?);
     Ok(())
 }
 
@@ -304,6 +309,130 @@ pub fn receipt_endpoint_router(config: &Config, blobs: &BlobStorage) -> anyhow::
         .read()
         .context("read the replication token for the peer receipt endpoint")?;
     let router = receipt_router(token, blobs.clone()).context("build peer receipt routes")?;
+    Ok(Some(router))
+}
+
+/// Interpret a rostered member address as an HTTP base URL, defaulting to `http` when it carries no
+/// scheme, so an internal `host:port` address still builds a usable transport rather than failing startup.
+fn member_base_url(address: &str) -> String {
+    if address.starts_with("http://") || address.starts_with("https://") {
+        address.to_owned()
+    } else {
+        format!("http://{address}")
+    }
+}
+
+/// One address per remote datacenter to query for its metadata frontier, preferring the datacenter's
+/// writer since it issues the authoritative serials. The local datacenter is never its own remote.
+pub(crate) fn remote_dc_roster(membership: &crate::config::DcMembership, local_dc: &str) -> BTreeMap<String, String> {
+    let mut roster: BTreeMap<String, String> = BTreeMap::new();
+    for member in &membership.members {
+        if member.dc == local_dc {
+            continue;
+        }
+        match roster.entry(member.dc.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(member.address.clone());
+            }
+            Entry::Occupied(mut slot) if member.role == DcRole::Writer => {
+                slot.insert(member.address.clone());
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+    roster
+}
+
+/// The eligible remote datacenters an `ha` write gathers metadata acknowledgements from: one address per
+/// remote datacenter, writer-preferred, behind the shared replication credential.
+///
+/// Yields an empty set outside `ha` mode and whenever the node waits on no remote — no membership, no
+/// writer identity, this node absent from the roster, or a single-datacenter group — so a `none`/`dc`
+/// node and a degenerate single-DC `ha` node run no remote gather.
+///
+/// # Errors
+/// Returns an error when the replication token cannot be read or a remote address is not a usable base.
+pub(crate) fn remote_frontier_sources(
+    config: &Config,
+) -> anyhow::Result<Vec<Arc<dyn RemoteFrontierSource + Send + Sync>>> {
+    if config.availability.mode() != AvailabilityMode::Ha {
+        return Ok(Vec::new());
+    }
+    let (Some(membership), Some(identity), Some(replication)) = (
+        config.dc_membership.as_ref(),
+        config.writer_identity.as_deref(),
+        config.availability.replication(),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let Some(local) = membership.members.iter().find(|member| member.node == identity) else {
+        return Ok(Vec::new());
+    };
+    let roster = remote_dc_roster(membership, &local.dc);
+    if roster.is_empty() {
+        return Ok(Vec::new());
+    }
+    if roster.len() == 1 {
+        // The sole remote datacenter holds every write's only remote durable copy, so removing it drops
+        // remote durability for the whole group; that removal must be an explicit administrator action.
+        // Named outside the macro so the lookup runs whether or not a warn-level subscriber is installed.
+        let sole = roster.keys().next().expect("one remote datacenter is present");
+        tracing::warn!(
+            datacenter = %sole,
+            "ha configured with a single remote datacenter; it is the sole remote durable copy for every write",
+        );
+    }
+    let token = receipt_token(replication)
+        .read()
+        .context("read the replication token for remote metadata-frontier gathering")?;
+    let mut sources: Vec<Arc<dyn RemoteFrontierSource + Send + Sync>> = Vec::new();
+    for (datacenter, address) in &roster {
+        let source = HttpRemoteFrontierSource::new(
+            &member_base_url(address),
+            datacenter.clone(),
+            token.clone(),
+            RECEIPT_FETCH_TIMEOUT,
+        )
+        .with_context(|| format!("build remote metadata-frontier transport for datacenter {datacenter}"))?;
+        sources.push(Arc::new(source));
+    }
+    Ok(sources)
+}
+
+/// Reports this node's metadata frontier for an authority to a remote datacenter, reading the epoch from
+/// the ownership authority and the applied frontier from the metadata journal.
+struct AppStateFrontierProvider(Arc<AppState>);
+
+#[async_trait::async_trait]
+impl MetadataFrontierProvider for AppStateFrontierProvider {
+    async fn frontier(&self, authority: &str) -> Option<FrontierReply> {
+        let applied_frontier = self.0.serving.meta.current_serial().ok()?;
+        let epoch = self.0.committed_authority_epoch(authority).await;
+        Some(FrontierReply {
+            epoch,
+            applied_frontier,
+        })
+    }
+}
+
+/// The remote-frontier endpoint an `ha` node serves to its remote datacenters, reporting how far it has
+/// durably applied an authority's metadata.
+///
+/// Returns `None` outside `ha` mode, since only a remote datacenter queries it. Rides the token-gated
+/// replication surface alongside the receipt endpoint.
+///
+/// # Errors
+/// Returns an error when the replication token cannot be read or the endpoint credential is empty.
+pub fn frontier_endpoint_router(config: &Config, state: &Arc<AppState>) -> anyhow::Result<Option<Router>> {
+    // Only an `ha` node has a remote datacenter to answer; a `none` or `dc` node serves no frontier.
+    let AvailabilityConfig::Ha(replication) = &config.availability else {
+        return Ok(None);
+    };
+    let token = receipt_token(replication)
+        .read()
+        .context("read the replication token for the remote frontier endpoint")?;
+    let provider: Arc<dyn MetadataFrontierProvider> = Arc::new(AppStateFrontierProvider(state.clone()));
+    let router = frontier_router(token, provider).context("build remote frontier routes")?;
     Ok(Some(router))
 }
 

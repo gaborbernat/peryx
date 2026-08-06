@@ -578,7 +578,8 @@ fn snapshot_jobs(jobs: &JobsConfig) -> Option<SnapshotJobs> {
             .iter()
             .map(|schedule| {
                 let (repository, source, max_projects, concurrency, timeout_secs) = match &schedule.job {
-                    peryx_driver::jobs::ScheduledJob::CacheMaintenance => (None, None, None, None, None),
+                    peryx_driver::jobs::ScheduledJob::CacheMaintenance
+                    | peryx_driver::jobs::ScheduledJob::PlacementReconcile(_) => (None, None, None, None, None),
                     peryx_driver::jobs::ScheduledJob::DcCopy(parameters) => {
                         (None, None, None, Some(parameters.concurrency.get()), None)
                     }

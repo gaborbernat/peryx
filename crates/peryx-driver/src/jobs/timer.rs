@@ -15,7 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     CACHE_MAINTENANCE, CatalogSyncParameters, DcCopyParameters, JobHistoryCleanup, JobScheduler, MAINTENANCE_INTERVAL,
-    WriteLedgerReap, scheduled_job, submit_dc_copy, submit_maintenance,
+    PlacementReconcileParameters, WriteLedgerReap, scheduled_job, submit_dc_copy, submit_maintenance,
+    submit_placement_reconcile,
 };
 use crate::state::AppState;
 
@@ -31,6 +32,9 @@ pub enum ScheduledJob {
     CatalogSync(CatalogSyncParameters),
     /// Copy the filesystem blobs the local data center owes from its peers, in the background.
     DcCopy(DcCopyParameters),
+    /// Reconcile the local data center's filesystem placements against the replication policy, retiring
+    /// out-of-policy copies and re-verifying stored ones, in the background.
+    PlacementReconcile(PlacementReconcileParameters),
 }
 
 impl ScheduledJob {
@@ -41,6 +45,7 @@ impl ScheduledJob {
             Self::CacheMaintenance => CACHE_MAINTENANCE,
             Self::CatalogSync(_) => "catalog_sync",
             Self::DcCopy(_) => "dc_copy",
+            Self::PlacementReconcile(_) => "placement_reconcile",
         }
     }
 
@@ -48,6 +53,7 @@ impl ScheduledJob {
         match self {
             Self::CacheMaintenance => submit_maintenance(app, scheduler),
             Self::DcCopy(parameters) => submit_dc_copy(scheduler, *parameters),
+            Self::PlacementReconcile(parameters) => submit_placement_reconcile(scheduler, *parameters),
             Self::CatalogSync(_) => match scheduled_job(app, self) {
                 Ok(job) => {
                     scheduler.submit(job);

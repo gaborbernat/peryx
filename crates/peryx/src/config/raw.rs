@@ -230,6 +230,7 @@ pub enum RawScheduledJob {
     CacheMaintenance,
     CatalogSync,
     DcCopy,
+    PlacementReconcile,
 }
 
 /// One process replication role before secret and numeric validation.

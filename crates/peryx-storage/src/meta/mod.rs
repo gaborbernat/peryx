@@ -75,7 +75,8 @@ pub use placement::{
     PlacementEvent, PlacementRepairPage,
 };
 pub use placement_reconcile::{
-    DigestReconciliation, MAX_PLACEMENT_RECONCILE_BATCH, PlacementReconcileError, PlacementReconcilePage,
+    DigestReconciliation, LocalVerifiedPlacementPage, MAX_PLACEMENT_RECONCILE_BATCH, PlacementReconcileError,
+    PlacementReconcilePage,
 };
 pub use policy_decision::{
     NewPolicyDecision, PolicyDecisionItem, PolicyDecisionPage, PolicyDecisionQuery, PolicyDecisionQueryError,

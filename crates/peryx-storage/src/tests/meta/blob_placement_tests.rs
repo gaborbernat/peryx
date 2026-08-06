@@ -307,6 +307,37 @@ fn test_transitioning_an_absent_placement_reports_it_missing(
 }
 
 #[test]
+fn test_an_integrity_failure_demotes_a_verified_copy_to_a_digest_mismatch() {
+    let (_dir, store) = store();
+    let placement = key(1, "dc-a", "loc");
+    store
+        .apply_blob_placement(&placement, &BlobPlacementTransition::Stage, 1, 10)
+        .unwrap();
+    drive_to(&store, &placement, BlobPlacementState::Verified { size: 1 });
+
+    // A verified copy whose stored bytes fail re-verification demotes to a digest mismatch, which makes it
+    // a re-copy candidate again rather than a served but corrupt placement.
+    let outcome = store
+        .apply_blob_placement(
+            &placement,
+            &BlobPlacementTransition::Fail {
+                class: BlobPlacementFailure::DigestMismatch,
+            },
+            1,
+            20,
+        )
+        .unwrap();
+
+    assert!(matches!(outcome, BlobPlacementOutcome::Applied(_)));
+    assert_eq!(
+        outcome.record().state,
+        BlobPlacementState::Failed {
+            class: BlobPlacementFailure::DigestMismatch
+        }
+    );
+}
+
+#[test]
 fn test_a_digest_cannot_exceed_its_placement_bound() {
     let (_dir, store) = store();
     for index in 0..MAX_PLACEMENTS_PER_DIGEST {

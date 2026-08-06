@@ -6,6 +6,7 @@
 
 #![cfg(feature = "availability-e2e")]
 
+mod dc_group_readiness;
 mod harness;
 
 use std::time::{Duration, Instant};

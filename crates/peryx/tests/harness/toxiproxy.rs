@@ -175,6 +175,23 @@ impl Proxy {
             .ok_or_else(|| HarnessError::Toxiproxy(format!("add latency toxic returned {}", response.status())))
     }
 
+    /// Remove the latency toxic a [`pause`](Proxy::pause) added, so the link runs at full speed again.
+    ///
+    /// # Errors
+    /// Returns [`HarnessError::Toxiproxy`] when the control call fails.
+    pub fn resume(&self) -> Result<(), HarnessError> {
+        let response = self
+            .http
+            .delete(format!("{}/proxies/{}/toxics/pause", self.control, self.name))
+            .send()
+            .map_err(|error| HarnessError::Toxiproxy(format!("remove latency toxic: {error}")))?;
+        response
+            .status()
+            .is_success()
+            .then_some(())
+            .ok_or_else(|| HarnessError::Toxiproxy(format!("remove latency toxic returned {}", response.status())))
+    }
+
     fn set_enabled(&self, enabled: bool) -> Result<(), HarnessError> {
         let response = self
             .http

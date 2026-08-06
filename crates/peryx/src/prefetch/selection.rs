@@ -182,20 +182,38 @@ fn read_requirements(path: &Path, selectors: &mut Vec<String>, seen: &mut BTreeS
         if line.is_empty() {
             continue;
         }
-        if let Some(nested) = line
-            .strip_prefix("-r ")
-            .or_else(|| line.strip_prefix("--requirement "))
-            .or_else(|| line.strip_prefix("-c "))
-            .or_else(|| line.strip_prefix("--constraint "))
-        {
+        if let Some(nested) = include_target(line) {
             let fallback_parent = Path::new(".");
-            let nested = path.parent().unwrap_or(fallback_parent).join(nested.trim());
+            let nested = path.parent().unwrap_or(fallback_parent).join(nested);
             read_requirements(&nested, selectors, seen)?;
         } else if !line.starts_with('-') {
             selectors.push(line.to_owned());
         }
     }
     Ok(())
+}
+
+// pip accepts `-r`/`--requirement` and `-c`/`--constraint` with the path attached (`-rchild.txt`),
+// joined by `=` (`--requirement=child.txt`), or separated by whitespace, so match each form rather
+// than a single space-delimited prefix.
+fn include_target(line: &str) -> Option<&str> {
+    for flag in ["--requirement", "--constraint", "-r", "-c"] {
+        let Some(rest) = line.strip_prefix(flag) else {
+            continue;
+        };
+        let target = match rest.chars().next() {
+            None => continue,
+            Some('=') => &rest[1..],
+            Some(ch) if ch.is_whitespace() => rest,
+            Some(_) if flag.starts_with("--") => continue,
+            Some(_) => rest,
+        };
+        let target = target.trim();
+        if !target.is_empty() {
+            return Some(target);
+        }
+    }
+    None
 }
 
 fn requirement_line(line: &str) -> &str {

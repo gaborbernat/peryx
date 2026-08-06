@@ -9,9 +9,6 @@ use super::{PROJECTS_PREFIX, UPLOAD_PREFIX};
 ///
 /// # Errors
 /// Returns a store error if the read fails.
-///
-/// # Panics
-/// Never in practice: `upload_key_parts` yields one of the configured index names.
 pub fn summarize_indexes(
     meta: &MetaStore,
     index_names: &[String],
@@ -34,15 +31,14 @@ pub fn summarize_indexes(
         let Some((index, project, fallback_filename)) = upload_key_parts(&key[UPLOAD_PREFIX.len()..], &ordered) else {
             continue;
         };
-        let summary = summaries
-            .get_mut(index)
-            .expect("upload_key_parts yields one of the configured index names");
-        summary.upload_count += 1;
-        if let Some(upload) = meta
-            .get_driver_value(&key)?
-            .and_then(|value| recent_upload(project, fallback_filename, &value))
-        {
-            push_recent(&mut summary.recent_uploads, upload, recent_limit);
+        if let Some(summary) = summaries.get_mut(index) {
+            summary.upload_count += 1;
+            if let Some(upload) = meta
+                .get_driver_value(&key)?
+                .and_then(|value| recent_upload(project, fallback_filename, &value))
+            {
+                push_recent(&mut summary.recent_uploads, upload, recent_limit);
+            }
         }
     }
     Ok(summaries)
@@ -256,6 +252,25 @@ mod tests {
         let summary = meta.summarize_indexes(&["hosted".to_owned()], 5).unwrap();
         assert_eq!(summary["hosted"].upload_count, 1);
         assert!(summary["hosted"].recent_uploads.is_empty());
+    }
+
+    #[test]
+    fn test_summarize_indexes_skips_a_stale_upload_key_without_panicking() {
+        let (_dir, meta) = store();
+        // An upload left behind by an index that is no longer configured must not crash the summary path.
+        upload(
+            &meta,
+            "retired",
+            "flask",
+            "flask-1.0.whl",
+            "1.0",
+            "2026-01-01T00:00:00Z",
+            10,
+        );
+        let summary = meta.summarize_indexes(&["hosted".to_owned()], 5).unwrap();
+        assert_eq!(summary["hosted"].upload_count, 0);
+        assert!(summary["hosted"].recent_uploads.is_empty());
+        assert!(!summary.contains_key("retired"));
     }
 
     #[test]

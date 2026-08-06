@@ -71,6 +71,19 @@ async fn push_blob(app: &axum::Router, repo: &str, blob: &[u8]) -> StatusCode {
     .0
 }
 
+/// Delete a blob under the upload token, returning the response status.
+async fn delete_blob(app: &axum::Router, repo: &str, digest: &str) -> StatusCode {
+    send_body(
+        app,
+        Method::DELETE,
+        &format!("/v2/{repo}/blobs/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await
+    .0
+}
+
 /// Push a manifest by tag under the upload token, returning the response status.
 async fn push_manifest(app: &axum::Router, repo: &str, tag: &str, body: &[u8]) -> StatusCode {
     send_body(
@@ -237,6 +250,87 @@ async fn test_repeated_push_of_one_digest_charges_bytes_once() {
     assert_eq!(
         (usage.accounted_bytes.committed, usage.file_bytes.committed),
         (blob.len() as u64, blob.len() as u64)
+    );
+}
+
+#[tokio::test]
+async fn test_deleting_a_blob_releases_its_quota() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = quota_store(
+        &dir,
+        &PolicyConfig {
+            max_accounted_bytes: Some(64),
+            ..PolicyConfig::default()
+        },
+    );
+    let (first, second) = (b"first-layer".as_slice(), b"second-distinct-layer".as_slice());
+    let first_digest = oci_digest(first);
+    assert_eq!(push_blob(&app, "store/app", first).await, StatusCode::CREATED);
+    assert_eq!(push_blob(&app, "store/app", second).await, StatusCode::CREATED);
+
+    assert_eq!(
+        delete_blob(&app, "store/app", &first_digest).await,
+        StatusCode::ACCEPTED
+    );
+
+    // The deleted blob's bytes leave every repository counter, the surviving blob keeps its own, and the
+    // project stays because it still serves the second blob.
+    let usage = state.meta.quota_usage("store").unwrap();
+    assert_eq!(
+        (
+            usage.accounted_bytes.committed,
+            usage.file_bytes.committed,
+            usage.projects.committed,
+        ),
+        (second.len() as u64, second.len() as u64, 1)
+    );
+
+    // The blob no longer serves the repository, and deleting it again is a no-op.
+    assert_eq!(
+        send(&app, Method::GET, &format!("/v2/store/app/blobs/{first_digest}"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        delete_blob(&app, "store/app", &first_digest).await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn test_deleting_a_shared_digest_frees_bytes_after_the_last_reference() {
+    let dir = tempfile::tempdir().unwrap();
+    let blob = b"a-shared-layer".as_slice();
+    let (state, app) = quota_store(
+        &dir,
+        &PolicyConfig {
+            max_accounted_bytes: Some(64),
+            ..PolicyConfig::default()
+        },
+    );
+    let digest = oci_digest(blob);
+    assert_eq!(push_blob(&app, "store/app", blob).await, StatusCode::CREATED);
+    assert_eq!(push_blob(&app, "store/api", blob).await, StatusCode::CREATED);
+
+    // Deleting one repository's copy drops that reference and its logical bytes, but the single
+    // deduplicated accounted copy stays while the other repository still serves the digest.
+    assert_eq!(delete_blob(&app, "store/app", &digest).await, StatusCode::ACCEPTED);
+    let usage = state.meta.quota_usage("store").unwrap();
+    assert_eq!(
+        (
+            usage.accounted_bytes.committed,
+            usage.file_bytes.committed,
+            usage.projects.committed,
+        ),
+        (blob.len() as u64, blob.len() as u64, 1)
+    );
+
+    // The last reference leaves; the shared bytes are finally freed.
+    assert_eq!(delete_blob(&app, "store/api", &digest).await, StatusCode::ACCEPTED);
+    assert_eq!(
+        state.meta.quota_usage("store").unwrap(),
+        peryx_storage::meta::QuotaUsage::default()
     );
 }
 

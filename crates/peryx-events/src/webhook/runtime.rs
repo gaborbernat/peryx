@@ -225,24 +225,28 @@ mod tests {
         assert!(matches_error(&err));
     }
 
+    #[rstest]
+    #[case(301)]
+    #[case(302)]
+    #[case(307)]
+    #[case(308)]
     #[tokio::test]
-    async fn test_delivery_client_surfaces_redirects_instead_of_following_them() {
+    async fn test_delivery_client_surfaces_redirects_instead_of_following_them(#[case] status: u16) {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(307).insert_header("location", "/followed"))
+            .respond_with(ResponseTemplate::new(status).insert_header("location", "/followed"))
             .expect(1)
             .mount(&server)
             .await;
 
-        let status = WebhookRuntime::disabled()
+        let response = WebhookRuntime::disabled()
             .client
             .post(server.uri())
             .send()
             .await
-            .unwrap()
-            .status();
+            .unwrap();
 
-        assert_eq!(status, 307);
+        assert_eq!(response.status(), status);
     }
 
     #[test]

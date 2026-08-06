@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,6 +8,7 @@ use axum::http::StatusCode;
 use axum::http::{HeaderValue, header};
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::{MetaStore, NewWebhookDelivery, WebhookDeliveryRecord, WebhookDeliveryStatus};
+use rstest::rstest;
 use serde_json::json;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
@@ -80,6 +81,14 @@ struct WebhookSink {
 
 impl WebhookSink {
     async fn start(statuses: Vec<u16>) -> Self {
+        Self::start_with(statuses, None).await
+    }
+
+    async fn start_redirecting(statuses: Vec<u16>, location: String) -> Self {
+        Self::start_with(statuses, Some(location)).await
+    }
+
+    async fn start_with(statuses: Vec<u16>, location: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/hook", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -87,6 +96,7 @@ impl WebhookSink {
             listener,
             Arc::new(Mutex::new(VecDeque::from(statuses))),
             requests.clone(),
+            location,
         ));
         Self { url, requests }
     }
@@ -111,17 +121,40 @@ async fn accept_webhooks(
     listener: TcpListener,
     statuses: Arc<Mutex<VecDeque<u16>>>,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
+    location: Option<String>,
 ) {
     while let Ok((mut socket, _)) = listener.accept().await {
         let request = read_request(&mut socket).await;
         requests.lock().expect("request lock").push(request);
         let status = statuses.lock().expect("status lock").pop_front().unwrap_or(200);
+        let location = location
+            .as_deref()
+            .map(|value| format!("location: {value}\r\n"))
+            .unwrap_or_default();
         let response = format!(
-            "HTTP/1.1 {status} {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            "HTTP/1.1 {status} {}\r\n{location}content-length: 0\r\nconnection: close\r\n\r\n",
             reason(status)
         );
         socket.write_all(response.as_bytes()).await.unwrap();
     }
+}
+
+/// A second origin that a redirect Location would point at; it records every connection so a test can
+/// prove the delivery client never contacts it.
+async fn trap_origin() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/captured", listener.local_addr().unwrap());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::Relaxed);
+            let _ = socket
+                .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        }
+    });
+    (url, hits)
 }
 
 async fn read_request(socket: &mut tokio::net::TcpStream) -> CapturedRequest {
@@ -346,6 +379,38 @@ async fn test_webhook_delivery_marks_terminal_failure() {
     assert_eq!(failed.response_status, Some(500));
     assert_eq!(failed.next_attempt_at_unix, None);
     assert_eq!(failed.last_error.as_deref(), Some("http status 500"));
+}
+
+#[rstest]
+#[case(301)]
+#[case(302)]
+#[case(307)]
+#[case(308)]
+#[tokio::test]
+async fn test_webhook_redirect_is_a_terminal_failure_and_never_reaches_the_redirect_target(#[case] status: u16) {
+    let (trap_url, trap_hits) = trap_origin().await;
+    let sink = WebhookSink::start_redirecting(vec![status], trap_url).await;
+    let h = Harness::new(sink.url.clone(), &["upload"]);
+
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+
+    sink.wait_for_requests(1).await;
+    let failed = wait_for_delivery(&h.state, WebhookDeliveryStatus::Failed, 1).await;
+    assert_eq!(failed.response_status, Some(status));
+    assert_eq!(failed.next_attempt_at_unix, None);
+    assert_eq!(
+        failed.last_error,
+        Some(format!(
+            "webhook target returned redirect {status}; redirects are not followed"
+        ))
+    );
+    // The single signed POST reached only the configured origin, and the delivery never retries a
+    // redirect, so the Location the target advertised is never contacted.
+    assert_eq!(sink.request_count(), 1);
+    assert_eq!(trap_hits.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

@@ -146,6 +146,10 @@ pub struct ServingState {
     /// has resolved its roster and replication token. Absent when the process copies nothing — single
     /// node, no roster, or an object-store backend — so the job runs as a no-op.
     pub(super) cross_dc_copier: std::sync::OnceLock<Arc<dyn crate::jobs::CrossDcCopier>>,
+    /// The blob-reclamation selector the scheduled `Reclamation` job drives, registered once the binary
+    /// has resolved its data-center membership. Absent when the process reclaims nothing — single node, or
+    /// no membership — so the job runs as a no-op.
+    pub(super) blob_reclaimer: std::sync::OnceLock<Arc<dyn crate::jobs::BlobReclaimer>>,
     /// Serves a public download from a verified remote placement when the local content store misses,
     /// installed by the binary once a data-center roster and replication token are configured. Absent
     /// under single-node or roster-less modes, so a miss goes straight to the ecosystem's upstream path.
@@ -309,6 +313,18 @@ impl ServingState {
     #[must_use]
     pub fn cross_dc_copier(&self) -> Option<&Arc<dyn crate::jobs::CrossDcCopier>> {
         self.cross_dc_copier.get()
+    }
+
+    /// Register the blob-reclamation selector the scheduled `Reclamation` job drives. Set at most once; a
+    /// later call is ignored.
+    pub fn set_blob_reclaimer(&self, reclaimer: Arc<dyn crate::jobs::BlobReclaimer>) {
+        let _ = self.blob_reclaimer.set(reclaimer);
+    }
+
+    /// The registered blob-reclamation selector, or `None` when this process reclaims nothing.
+    #[must_use]
+    pub fn blob_reclaimer(&self) -> Option<&Arc<dyn crate::jobs::BlobReclaimer>> {
+        self.blob_reclaimer.get()
     }
 
     /// Install the remote-placement read-through capability. Set at most once, before the state is

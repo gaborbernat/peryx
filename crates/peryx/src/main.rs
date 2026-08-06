@@ -155,6 +155,9 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
         {
             state.set_placement_reconciler(std::sync::Arc::new(reconciler));
         }
+        if let Some(reclaimer) = peryx::availability::BlobReclamationSelector::from_config(config)? {
+            state.set_blob_reclaimer(std::sync::Arc::new(reclaimer));
+        }
         if !replication.is_replica() {
             for index in &state.indexes {
                 if let peryx_driver::IndexKind::Cached { client, offline: false } = &index.kind {

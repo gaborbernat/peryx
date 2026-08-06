@@ -16,10 +16,10 @@ use tracing::instrument::WithSubscriber as _;
 use super::attempts::{JobAttemptControl, JobAttemptError};
 use super::scheduler::{JobLimits, Submit};
 use super::{
-    CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, CrossDcCopier, DcCopyJob, DcCopyParameters, JobContext,
-    JobFailure, JobHistoryCleanup, JobReport, JobScheduler, LeaseScope, MaintenanceJob, NodeJob, PlacementReconcileJob,
-    PlacementReconcileParameters, PlacementReconciler, Schedule, ScheduledJob, SearchRebuildJob, run_schedules,
-    scheduled_job, submit_maintenance,
+    BlobReclaimer, CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, CrossDcCopier, DcCopyJob, DcCopyParameters,
+    JobContext, JobFailure, JobHistoryCleanup, JobReport, JobScheduler, LeaseScope, MaintenanceJob, NodeJob,
+    PlacementReconcileJob, PlacementReconcileParameters, PlacementReconciler, ReclamationJob, ReclamationParameters,
+    Schedule, ScheduledJob, SearchRebuildJob, run_schedules, scheduled_job, submit_maintenance,
 };
 use crate::serving::{EcosystemDriver, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
@@ -1343,6 +1343,133 @@ async fn test_a_placement_reconcile_schedule_submits_the_registered_reconciler()
     await_metric(
         &scheduler,
         "peryx_jobs_finished_total{kind=\"placement_reconcile\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    cancel.cancel();
+    timer.await.unwrap();
+    scheduler.shutdown().await;
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
+struct StubReclaimer {
+    ran: Arc<AtomicUsize>,
+    seen_fence: Arc<AtomicU64>,
+    report: JobReport,
+}
+
+#[async_trait]
+impl BlobReclaimer for StubReclaimer {
+    async fn reclaim_pass(
+        &self,
+        _state: &ServingState,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+        fence: u64,
+        _params: ReclamationParameters,
+    ) -> Result<JobReport, JobFailure> {
+        assert!(!cancelled(), "the pass observes the cooperative cancellation signal");
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        self.seen_fence.store(fence, Ordering::SeqCst);
+        Ok(self.report)
+    }
+}
+
+#[test]
+fn test_reclamation_parameters_default_to_the_bounded_batch() {
+    assert_eq!(ReclamationParameters::default(), ReclamationParameters::new());
+    assert_eq!(
+        ReclamationParameters::new().batch.get(),
+        super::DEFAULT_RECLAMATION_BATCH
+    );
+}
+
+#[test]
+fn test_a_reclamation_kind_reports_its_label() {
+    assert_eq!(
+        ScheduledJob::Reclamation(ReclamationParameters::new()).as_str(),
+        "reclamation"
+    );
+}
+
+#[tokio::test]
+async fn test_reclamation_job_delegates_to_the_registered_reclaimer_under_the_fence() {
+    let (_dir, state) = serving();
+    let ran = Arc::new(AtomicUsize::new(0));
+    let seen_fence = Arc::new(AtomicU64::new(0));
+    state.set_blob_reclaimer(Arc::new(StubReclaimer {
+        ran: ran.clone(),
+        seen_fence: seen_fence.clone(),
+        report: JobReport {
+            processed: 5,
+            changed: 2,
+        },
+    }));
+    let job = ReclamationJob {
+        parameters: ReclamationParameters::new(),
+    };
+    assert_eq!(job.kind(), "reclamation");
+    assert_eq!(job.scope(), "");
+    assert_eq!(
+        job.lease_scope(),
+        LeaseScope::ClusterSingleton("reclamation".to_owned())
+    );
+
+    let context = JobContext {
+        state,
+        cancel: CancellationToken::new(),
+        fence: 7,
+    };
+    let report = job.run(&context).await.unwrap();
+
+    assert_eq!(
+        report,
+        JobReport {
+            processed: 5,
+            changed: 2
+        }
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        seen_fence.load(Ordering::SeqCst),
+        7,
+        "the run passes its lease term as the fence"
+    );
+}
+
+#[tokio::test]
+async fn test_reclamation_job_is_a_no_op_without_a_registered_reclaimer() {
+    let (_dir, state) = serving();
+    let job = ReclamationJob {
+        parameters: ReclamationParameters::new(),
+    };
+
+    let report = job.run(&context(state, CancellationToken::new())).await.unwrap();
+
+    assert_eq!(report, JobReport::default());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_a_reclamation_schedule_submits_the_registered_reclaimer() {
+    let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
+    let ran = Arc::new(AtomicUsize::new(0));
+    app.serving.set_blob_reclaimer(Arc::new(StubReclaimer {
+        ran: ran.clone(),
+        seen_fence: Arc::new(AtomicU64::new(0)),
+        report: JobReport::default(),
+    }));
+    let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
+    let cancel = CancellationToken::new();
+    let plan = vec![Schedule {
+        job: ScheduledJob::Reclamation(ReclamationParameters::new()),
+        interval: Duration::from_mins(1),
+    }];
+    let timer = tokio::spawn(run_schedules(app.clone(), scheduler.clone(), plan, cancel.clone()));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_mins(1)).await;
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"reclamation\",outcome=\"succeeded\"} 1",
     )
     .await;
 

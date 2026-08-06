@@ -173,6 +173,10 @@ fn test_catalog_schedule_resolves_default_and_explicit_limits() {
     "job = \"placement_reconcile\"\nrepository = \"pypi\"",
     "placement reconcile accepts no job-specific fields"
 )]
+#[case::reclamation_fields(
+    "job = \"reclamation\"\nconcurrency = 4",
+    "reclamation accepts no job-specific fields"
+)]
 fn test_schedule_rejects_invalid_kind_parameters(#[case] fields: &str, #[case] expected: &str) {
     let partial = config::from_toml(
         PathBuf::from("x.toml"),
@@ -211,6 +215,14 @@ fn test_placement_reconcile_schedule_resolves_without_job_fields() {
         ScheduledJob::PlacementReconcile(_)
     ));
     assert_eq!(config.jobs.schedules[0].interval, Duration::from_mins(2));
+}
+
+#[test]
+fn test_reclamation_schedule_resolves_without_job_fields() {
+    let config = toml_config("[[jobs.schedule]]\njob = \"reclamation\"\ninterval_secs = 300\n");
+
+    assert!(matches!(config.jobs.schedules[0].job, ScheduledJob::Reclamation(_)));
+    assert_eq!(config.jobs.schedules[0].interval, Duration::from_mins(5));
 }
 
 #[rstest]

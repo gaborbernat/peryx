@@ -350,6 +350,7 @@ impl AppState {
                 ownership: std::sync::OnceLock::new(),
                 control: std::sync::OnceLock::new(),
                 cross_dc_copier: std::sync::OnceLock::new(),
+                blob_reclaimer: std::sync::OnceLock::new(),
                 read_through: std::sync::OnceLock::new(),
                 placement_reconciler: std::sync::OnceLock::new(),
             }),

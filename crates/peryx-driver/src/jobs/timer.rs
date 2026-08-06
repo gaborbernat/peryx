@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     CACHE_MAINTENANCE, CatalogSyncParameters, DcCopyParameters, JobHistoryCleanup, JobScheduler, MAINTENANCE_INTERVAL,
-    PlacementReconcileParameters, WriteLedgerReap, scheduled_job, submit_dc_copy, submit_maintenance,
-    submit_placement_reconcile,
+    PlacementReconcileParameters, ReclamationParameters, WriteLedgerReap, scheduled_job, submit_dc_copy,
+    submit_maintenance, submit_placement_reconcile, submit_reclamation,
 };
 use crate::state::AppState;
 
@@ -35,6 +35,8 @@ pub enum ScheduledJob {
     /// Reconcile the local data center's filesystem placements against the replication policy, retiring
     /// out-of-policy copies and re-verifying stored ones, in the background.
     PlacementReconcile(PlacementReconcileParameters),
+    /// Select unreferenced blobs safe for replicated reclamation, recording tombstones without deleting.
+    Reclamation(ReclamationParameters),
 }
 
 impl ScheduledJob {
@@ -46,6 +48,7 @@ impl ScheduledJob {
             Self::CatalogSync(_) => "catalog_sync",
             Self::DcCopy(_) => "dc_copy",
             Self::PlacementReconcile(_) => "placement_reconcile",
+            Self::Reclamation(_) => "reclamation",
         }
     }
 
@@ -54,6 +57,7 @@ impl ScheduledJob {
             Self::CacheMaintenance => submit_maintenance(app, scheduler),
             Self::DcCopy(parameters) => submit_dc_copy(scheduler, *parameters),
             Self::PlacementReconcile(parameters) => submit_placement_reconcile(scheduler, *parameters),
+            Self::Reclamation(parameters) => submit_reclamation(scheduler, *parameters),
             Self::CatalogSync(_) => match scheduled_job(app, self) {
                 Ok(job) => {
                     scheduler.submit(job);

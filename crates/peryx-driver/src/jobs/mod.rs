@@ -636,6 +636,108 @@ pub fn submit_placement_reconcile(scheduler: &JobScheduler, parameters: Placemen
     scheduler.submit(Arc::new(PlacementReconcileJob { parameters }));
 }
 
+const RECLAMATION: &str = "reclamation";
+
+/// Default candidate digests one reclamation pass scans before it yields the scheduler.
+pub const DEFAULT_RECLAMATION_BATCH: usize = 256;
+
+/// The bounds one scheduled reclamation-selection pass runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReclamationParameters {
+    /// Candidate digests a single pass scans before it yields, bounding the ledger it reads per pass.
+    pub batch: NonZeroUsize,
+}
+
+impl ReclamationParameters {
+    /// The default bound: a few hundred candidates per pass.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            batch: NonZeroUsize::MIN.saturating_add(DEFAULT_RECLAMATION_BATCH - 1),
+        }
+    }
+}
+
+impl Default for ReclamationParameters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The blob-reclamation selector a node registers to back its scheduled [`Reclamation`](ScheduledJob::Reclamation)
+/// pass.
+///
+/// Selecting a digest safe to reclaim reads the reference inventory across every ecosystem driver and the
+/// observed replication frontiers — dependencies this neutral crate does not carry — so the binary
+/// implements the selector and registers it on the [`ServingState`], exactly as it registers the
+/// [`CrossDcCopier`]. A process that registers none — single node, or no data-center membership — runs the
+/// job as a no-op. The pass records reclamation tombstones and never deletes bytes.
+#[async_trait]
+pub trait BlobReclaimer: Send + Sync {
+    /// Run one bounded selection pass over `state` under `fence`, the ownership group's cluster term: arm
+    /// a pending tombstone for each unreferenced, unservable digest at the current metadata frontier, and
+    /// mark ready any pending tombstone every replication plane has advanced past whose references have
+    /// not returned. Deletes no bytes. `cancelled` reports cooperative shutdown between units of work.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when the pass cannot complete.
+    async fn reclaim_pass(
+        &self,
+        state: &ServingState,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+        fence: u64,
+        params: ReclamationParameters,
+    ) -> Result<JobReport, JobFailure>;
+}
+
+/// The cluster-singleton job that runs one blob-reclamation selection pass through the registered
+/// [`BlobReclaimer`].
+///
+/// Reclamation decides destructive storage state, so exactly one node runs it at a time cluster-wide: the
+/// scheduler fences it under the ownership group's monotonic term through
+/// [`LeaseScope::ClusterSingleton`], and a superseded holder's writes are rejected. A process that
+/// registered no reclaimer does nothing, so an unconfigured node pays only the lease claim and the tick.
+pub struct ReclamationJob {
+    parameters: ReclamationParameters,
+}
+
+#[async_trait]
+impl NodeJob for ReclamationJob {
+    fn kind(&self) -> &'static str {
+        RECLAMATION
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    fn lease_scope(&self) -> LeaseScope {
+        LeaseScope::ClusterSingleton(RECLAMATION.to_owned())
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        match ctx.state().blob_reclaimer() {
+            Some(reclaimer) => {
+                reclaimer
+                    .reclaim_pass(
+                        ctx.state(),
+                        &|| ctx.is_cancelled(),
+                        ctx.authority_fence(),
+                        self.parameters,
+                    )
+                    .await
+            }
+            None => Ok(JobReport::default()),
+        }
+    }
+}
+
+/// Submit one cluster-singleton blob-reclamation selection pass. The scheduler drops it when a prior pass
+/// is still draining the ledger, so a slow pass never stacks.
+pub fn submit_reclamation(scheduler: &JobScheduler, parameters: ReclamationParameters) {
+    scheduler.submit(Arc::new(ReclamationJob { parameters }));
+}
+
 /// Submit one maintenance job per installed ecosystem driver. The scheduler runs them concurrently
 /// across ecosystems under its bounds and drops any whose predecessor is still sweeping.
 pub fn submit_maintenance(app: &AppState, scheduler: &JobScheduler) {

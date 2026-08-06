@@ -7,7 +7,8 @@ use std::time::Duration;
 use peryx_core::Ecosystem;
 use peryx_driver::jobs::{
     CatalogSyncParameters, DcCopyParameters, MAX_CATALOG_CONCURRENCY, MAX_CATALOG_PROJECTS_PER_RUN,
-    MAX_CATALOG_TIMEOUT, MAX_DC_COPY_CONCURRENCY, PlacementReconcileParameters, Schedule, ScheduledJob,
+    MAX_CATALOG_TIMEOUT, MAX_DC_COPY_CONCURRENCY, PlacementReconcileParameters, ReclamationParameters, Schedule,
+    ScheduledJob,
 };
 use peryx_driver::rate_limit::{DEFAULT_UPSTREAM_CONCURRENCY, RateLimitConfig, RouteLimit};
 use peryx_identity::{ExternalGroup, ExternalGroupGrant, GrantScope, ProviderId};
@@ -163,6 +164,20 @@ fn classify_schedule(index: usize, raw: RawJobSchedule) -> Result<Schedule, Conf
                 });
             }
             ScheduledJob::PlacementReconcile(PlacementReconcileParameters::new())
+        }
+        RawScheduledJob::Reclamation => {
+            if raw.repository.is_some()
+                || raw.source.is_some()
+                || raw.max_projects.is_some()
+                || raw.concurrency.is_some()
+                || raw.timeout_secs.is_some()
+            {
+                return Err(ConfigError::Jobs {
+                    index,
+                    reason: "reclamation accepts no job-specific fields",
+                });
+            }
+            ScheduledJob::Reclamation(ReclamationParameters::new())
         }
     };
     Ok(Schedule {

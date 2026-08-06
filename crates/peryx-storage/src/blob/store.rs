@@ -272,17 +272,12 @@ impl BlobStore {
     pub fn read_range(&self, digest: &Digest, range: Range<u64>) -> Result<Vec<u8>, BlobError> {
         let mut file = std::fs::File::open(self.path_for(digest)).map_err(|err| absent_or_io(err, digest))?;
         let bytes = file.metadata()?.len();
-        let invalid = || BlobError::invalid_range(range.start, range.end, bytes);
         if range.start > range.end || range.end > bytes {
-            return Err(invalid());
+            return Err(BlobError::invalid_range(range.start, range.end, bytes));
         }
-        #[cfg(target_pointer_width = "64")]
-        let range_len = usize::try_from(range.end - range.start).unwrap_or(usize::MAX);
-        #[cfg(not(target_pointer_width = "64"))]
-        let range_len = usize::try_from(range.end - range.start).map_err(|_| invalid())?;
-        file.seek(std::io::SeekFrom::Start(range.start))?;
-        let mut result = vec![0; range_len];
-        file.take(range_len as u64).read_exact(&mut result)?;
+        file.seek(SeekFrom::Start(range.start))?;
+        let mut result = Vec::new();
+        file.take(range.end - range.start).read_to_end(&mut result)?;
         Ok(result)
     }
 

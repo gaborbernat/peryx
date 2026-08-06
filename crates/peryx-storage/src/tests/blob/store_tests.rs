@@ -140,6 +140,19 @@ fn test_read_range_rejects_out_of_bounds_offsets() {
 }
 
 #[test]
+fn test_read_range_serves_the_whole_blob_and_rejects_one_byte_past_its_end() {
+    let (_dir, store) = store();
+    let digest = store.write(b"payload").unwrap();
+    // The largest in-bounds range ends exactly at the blob length and serves every byte.
+    assert_eq!(store.read_range(&digest, 0..7).unwrap(), b"payload");
+    // One byte past the end is a typed range error carrying the offending bounds, never a sentinel-sized
+    // allocation or a silently truncated read.
+    let error = store.read_range(&digest, 0..8).unwrap_err();
+    assert_eq!(error.kind(), crate::blob::BlobErrorKind::InvalidRange);
+    assert_eq!(error.invalid_range_values(), Some((0, 8, 7)));
+}
+
+#[test]
 fn test_health_check_creates_and_reads_the_store_root() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("blobs");

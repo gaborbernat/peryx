@@ -172,7 +172,7 @@ impl S3Client {
             .checked_add(self.config.request_timeout)
             .ok_or_else(|| S3Error::Request("request timeout exceeds the supported duration".to_owned()))?;
         let mut request = self.client().await.get_object().bucket(&self.config.bucket).key(key);
-        if let Some(range) = range {
+        if let Some(range) = &range {
             request = request.range(format!("bytes={}-{}", range.start, range.end.saturating_sub(1)));
         }
         let output = tokio::time::timeout_at(deadline, request.send())
@@ -180,11 +180,7 @@ impl S3Client {
             .map_err(|error| S3Error::Request(error.to_string()))?
             .map_err(aws_sdk_s3::Error::from)
             .map_err(|error| map_sdk_error(&error))?;
-        let total_bytes = output
-            .content_range()
-            .and_then(|value| value.rsplit('/').next())
-            .and_then(|value| value.parse().ok())
-            .map_or_else(|| object_length(output.content_length()), Ok)?;
+        let total_bytes = resolve_total_bytes(range.as_ref(), output.content_range(), output.content_length())?;
         let body = futures_util::stream::try_unfold((output.body, deadline), next_body_chunk).boxed();
         Ok(S3Get { total_bytes, body })
     }
@@ -393,6 +389,40 @@ fn object_length(length: Option<i64>) -> Result<u64, S3Error> {
         .ok_or(S3Error::InvalidResponse("content length"))
 }
 
+/// Resolve the object's total size, rejecting any range the backend did not honor. An S3-compatible
+/// endpoint or proxy can ignore `Range` and answer `200 OK` with the whole object, or return `206`
+/// with a shifted interval; trusting the advertised range while streaming a different body would
+/// hand the caller more bytes than it requested.
+fn resolve_total_bytes(
+    range: Option<&Range<u64>>,
+    content_range: Option<&str>,
+    content_length: Option<i64>,
+) -> Result<u64, S3Error> {
+    let Some(range) = range else {
+        // An unranged read has no recovery path for a partial body, so an unsolicited `Content-Range`
+        // is a protocol violation rather than a value to trust.
+        return match content_range {
+            Some(_) => Err(S3Error::InvalidResponse("content range")),
+            None => object_length(content_length),
+        };
+    };
+    let (start, end, total) = content_range
+        .and_then(parse_content_range)
+        .ok_or(S3Error::InvalidResponse("content range"))?;
+    if start != range.start || end != range.end.saturating_sub(1) {
+        return Err(S3Error::InvalidResponse("content range"));
+    }
+    Ok(total)
+}
+
+/// Parse a `Content-Range: bytes START-END/TOTAL` header into its numeric parts. A `*` total or any
+/// other deviation yields `None`, so the caller rejects the response instead of guessing.
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (interval, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = interval.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
+}
+
 fn map_sdk_error(error: &aws_sdk_s3::Error) -> S3Error {
     match error.code() {
         Some("NoSuchBucket" | "NoSuchKey" | "NotFound") => S3Error::NotFound,
@@ -411,12 +441,13 @@ mod tests {
     use aws_sdk_s3::config::Credentials;
     use aws_sdk_s3::primitives::SdkBody;
     use aws_smithy_http_client::test_util::{CaptureRequestReceiver, capture_request};
+    use futures_util::StreamExt as _;
     use rstest::rstest;
     use tokio::sync::OnceCell;
     use url::Url;
 
     use super::super::config::S3Settings;
-    use super::{BehaviorVersion, Builder, Client, Region, S3Client, S3Config, S3Error, S3Part};
+    use super::{BehaviorVersion, Builder, Client, Region, S3Client, S3Config, S3Error, S3Get, S3Part};
 
     const CHECKSUM: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
@@ -679,5 +710,115 @@ mod tests {
         let captured = request.expect_request();
         let body = std::str::from_utf8(captured.body().bytes().unwrap()).unwrap();
         assert_eq!(body.contains("<ChecksumSHA256>"), sends_checksum);
+    }
+
+    fn get_client(response: http::Response<SdkBody>) -> S3Client {
+        capturing_client(S3Config::new(base_settings()).unwrap(), Some(response)).0
+    }
+
+    fn get_response(
+        status: u16,
+        content_range: Option<&str>,
+        content_length: Option<usize>,
+        body: &'static [u8],
+    ) -> http::Response<SdkBody> {
+        let mut builder = http::Response::builder().status(status);
+        if let Some(value) = content_range {
+            builder = builder.header("Content-Range", value);
+        }
+        if let Some(length) = content_length {
+            builder = builder.header("Content-Length", length.to_string());
+        }
+        builder.body(SdkBody::from(body.to_vec())).unwrap()
+    }
+
+    async fn collect_body(get: S3Get) -> Vec<u8> {
+        let mut body = get.body;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = body.next().await {
+            bytes.extend_from_slice(&chunk.unwrap());
+        }
+        bytes
+    }
+
+    #[rstest]
+    #[case::single_byte(5..6, "bytes 5-5/10", b"x", 10)]
+    #[case::multi_byte(1..5, "bytes 1-4/7", b"acka", 7)]
+    #[tokio::test]
+    async fn test_get_accepts_a_partial_response_matching_the_request(
+        #[case] range: std::ops::Range<u64>,
+        #[case] content_range: &str,
+        #[case] expected: &'static [u8],
+        #[case] total: u64,
+    ) {
+        let client = get_client(get_response(206, Some(content_range), None, expected));
+
+        let get = client.get("cache/sha256/digest", Some(range)).await.unwrap();
+
+        assert_eq!(get.total_bytes, total);
+        assert_eq!(collect_body(get).await, expected);
+    }
+
+    #[rstest]
+    #[case::ignored_range(200, None, Some(7), b"package")]
+    #[case::shifted_range(206, Some("bytes 2-5/7"), None, b"ckag")]
+    #[case::truncated_range(206, Some("bytes 1-3/7"), None, b"ack")]
+    #[case::missing_bytes_unit(206, Some("1-4/7"), None, b"acka")]
+    #[case::missing_total(206, Some("bytes 1-4"), None, b"acka")]
+    #[case::missing_interval(206, Some("bytes 14/7"), None, b"acka")]
+    #[case::wildcard_total(206, Some("bytes 1-4/*"), None, b"acka")]
+    #[case::malformed_start(206, Some("bytes a-4/7"), None, b"acka")]
+    #[case::malformed_end(206, Some("bytes 1-b/7"), None, b"acka")]
+    #[case::malformed_total(206, Some("bytes 1-4/x"), None, b"acka")]
+    #[tokio::test]
+    async fn test_get_rejects_a_range_the_backend_did_not_honor(
+        #[case] status: u16,
+        #[case] content_range: Option<&str>,
+        #[case] content_length: Option<usize>,
+        #[case] body: &'static [u8],
+    ) {
+        let client = get_client(get_response(status, content_range, content_length, body));
+
+        let error = client.get("cache/sha256/digest", Some(1..5)).await.err().unwrap();
+
+        assert!(matches!(error, S3Error::InvalidResponse("content range")));
+    }
+
+    #[tokio::test]
+    async fn test_get_reads_a_whole_object_without_a_range() {
+        let client = get_client(get_response(200, None, Some(7), b"package"));
+
+        let get = client.get("cache/sha256/digest", None).await.unwrap();
+
+        assert_eq!(get.total_bytes, 7);
+        assert_eq!(collect_body(get).await, b"package");
+    }
+
+    #[tokio::test]
+    async fn test_get_rejects_an_unsolicited_partial_for_an_unranged_read() {
+        let client = get_client(get_response(206, Some("bytes 0-3/7"), None, b"pack"));
+
+        let error = client.get("cache/sha256/digest", None).await.err().unwrap();
+
+        assert!(matches!(error, S3Error::InvalidResponse("content range")));
+    }
+
+    #[tokio::test]
+    async fn test_get_rejects_an_unranged_read_without_a_content_length() {
+        let client = get_client(get_response(200, None, None, b""));
+
+        let error = client.get("cache/sha256/digest", None).await.err().unwrap();
+
+        assert!(matches!(error, S3Error::InvalidResponse("content length")));
+    }
+
+    #[tokio::test]
+    async fn test_get_serves_an_empty_range_without_a_request() {
+        let client = get_client(get_response(500, None, None, b""));
+
+        let get = client.get("cache/sha256/digest", Some(3..3)).await.unwrap();
+
+        assert_eq!(get.total_bytes, 0);
+        assert!(collect_body(get).await.is_empty());
     }
 }

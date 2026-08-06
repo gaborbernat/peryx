@@ -2,13 +2,13 @@
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use peryx_core::Ecosystem;
 use peryx_storage::blob::BlobStore;
-use peryx_storage::meta::{FinishJobRun, JobKind, JobOutcome, JobRunQuery, JobState, MetaStore, NewJobRun};
+use peryx_storage::meta::{FinishJobRun, JobKind, JobOutcome, JobRunQuery, JobState, LeaseState, MetaStore, NewJobRun};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber as _;
@@ -17,8 +17,8 @@ use super::attempts::{JobAttemptControl, JobAttemptError};
 use super::scheduler::{JobLimits, Submit};
 use super::{
     CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, CrossDcCopier, DcCopyJob, DcCopyParameters, JobContext,
-    JobFailure, JobHistoryCleanup, JobReport, JobScheduler, MaintenanceJob, NodeJob, Schedule, ScheduledJob,
-    SearchRebuildJob, run_schedules, scheduled_job, submit_maintenance,
+    JobFailure, JobHistoryCleanup, JobReport, JobScheduler, LeaseScope, MaintenanceJob, NodeJob, Schedule,
+    ScheduledJob, SearchRebuildJob, run_schedules, scheduled_job, submit_maintenance,
 };
 use crate::serving::{EcosystemDriver, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
@@ -1822,4 +1822,280 @@ async fn test_write_ledger_reap_surfaces_a_storage_fault() {
         .await
         .unwrap_err();
     assert!(failure.message().contains("read-only"), "{}", failure.message());
+}
+
+/// An ownership group double reporting a fixed cluster term, so a test mints a chosen fencing epoch for
+/// a cluster-singleton lease.
+struct FixedTerm(u64);
+
+#[async_trait]
+impl crate::state::OwnershipAuthority for FixedTerm {
+    async fn has_home(&self, _authority: &str) -> bool {
+        true
+    }
+
+    async fn claim_home(&self, _authority: &str) -> Result<crate::state::HomeClaim, crate::state::OwnershipError> {
+        Ok(crate::state::HomeClaim::AlreadyHomed)
+    }
+
+    fn cluster_status(&self) -> crate::state::ClusterStatus {
+        crate::state::ClusterStatus {
+            leader: None,
+            term: self.0,
+            voters: Vec::new(),
+        }
+    }
+
+    async fn committed_epoch(&self, _authority: &str) -> u64 {
+        0
+    }
+
+    async fn admit_epoch(&self, _authority: &str, _presented: u64) -> bool {
+        false
+    }
+
+    async fn transfer_home(
+        &self,
+        _authority: &str,
+        _new_home: &str,
+    ) -> Result<Option<crate::state::TransferOutcome>, crate::state::OwnershipError> {
+        Ok(None)
+    }
+}
+
+/// A cluster-singleton job that records the fence it leased and, when asked, claims the lease under a
+/// higher epoch mid-run to stand in for another node superseding it.
+struct SingletonJob {
+    key: String,
+    leased: Arc<AtomicU64>,
+    ran: Arc<AtomicUsize>,
+    supersede: Option<(String, u64)>,
+}
+
+impl SingletonJob {
+    fn new(key: &str, leased: Arc<AtomicU64>, ran: Arc<AtomicUsize>) -> Arc<Self> {
+        Arc::new(Self {
+            key: key.to_owned(),
+            leased,
+            ran,
+            supersede: None,
+        })
+    }
+
+    fn superseding(key: &str, leased: Arc<AtomicU64>, ran: Arc<AtomicUsize>, holder: &str, epoch: u64) -> Arc<Self> {
+        Arc::new(Self {
+            key: key.to_owned(),
+            leased,
+            ran,
+            supersede: Some((holder.to_owned(), epoch)),
+        })
+    }
+}
+
+#[async_trait]
+impl NodeJob for SingletonJob {
+    fn kind(&self) -> &'static str {
+        "singleton"
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    fn lease_scope(&self) -> LeaseScope {
+        LeaseScope::ClusterSingleton(self.key.clone())
+    }
+
+    fn persist_as(&self) -> Option<JobKind> {
+        Some(JobKind::CatalogSync)
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        self.leased.store(ctx.authority_fence(), Ordering::SeqCst);
+        if let Some((holder, epoch)) = &self.supersede {
+            let now = (ctx.state().clock)();
+            ctx.state()
+                .meta
+                .claim_job_lease(&self.key, holder, *epoch, now, 300)
+                .expect("a higher epoch takes the lease");
+        }
+        Ok(JobReport::default())
+    }
+}
+
+#[tokio::test]
+async fn test_a_cluster_singleton_leases_the_cluster_term_and_releases() {
+    let (_dir, state) = serving();
+    state.set_ownership_authority(Arc::new(FixedTerm(7)));
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+    let leased = Arc::new(AtomicU64::new(0));
+    let ran = Arc::new(AtomicUsize::new(0));
+
+    scheduler.submit(SingletonJob::new("reclaim", leased.clone(), ran.clone()));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"singleton\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the singleton ran once");
+    assert_eq!(
+        leased.load(Ordering::SeqCst),
+        7,
+        "the run leased the cluster term as its fence"
+    );
+    let lease = state.meta.job_lease("reclaim").unwrap().expect("the lease persisted");
+    assert_eq!(lease.epoch, 7);
+    assert_eq!(
+        lease.state,
+        LeaseState::Released,
+        "the run released the lease when it finished"
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_cluster_singleton_behind_a_higher_term_is_fenced_before_it_runs() {
+    let (_dir, state) = serving();
+    // Another node already holds the key under term 9; this node's group is behind at term 5.
+    state
+        .meta
+        .claim_job_lease("reclaim", "node-other", 9, 1_000, 300)
+        .unwrap();
+    state.set_ownership_authority(Arc::new(FixedTerm(5)));
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+    let leased = Arc::new(AtomicU64::new(0));
+    let ran = Arc::new(AtomicUsize::new(0));
+
+    scheduler.submit(SingletonJob::new("reclaim", leased.clone(), ran.clone()));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"singleton\",outcome=\"failed\"} 1",
+    )
+    .await;
+
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "a fenced run never executes its work");
+    let runs = job_runs(&state.meta);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].error.as_deref(),
+        Some("lease_not_held: a newer fence 9 supersedes the applied fence 5"),
+    );
+    // The higher holder keeps the lease untouched.
+    let lease = state.meta.job_lease("reclaim").unwrap().unwrap();
+    assert_eq!(lease.holder, "node-other");
+    assert_eq!(lease.epoch, 9);
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_cluster_singleton_superseded_mid_run_is_fenced() {
+    let (_dir, state) = serving();
+    state.set_ownership_authority(Arc::new(FixedTerm(7)));
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+    let leased = Arc::new(AtomicU64::new(0));
+    let ran = Arc::new(AtomicUsize::new(0));
+
+    // The run leases term 7, then another node takes the key at term 12 while it runs, so its success is
+    // fenced rather than counted.
+    scheduler.submit(SingletonJob::superseding(
+        "reclaim",
+        leased.clone(),
+        ran.clone(),
+        "node-other",
+        12,
+    ));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"singleton\",outcome=\"failed\"} 1",
+    )
+    .await;
+
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the run executed before it was fenced");
+    assert_eq!(leased.load(Ordering::SeqCst), 7, "the run leased term 7");
+    let runs = job_runs(&state.meta);
+    assert_eq!(
+        runs[0].error.as_deref(),
+        Some("authority_fenced: a newer holder superseded this cluster-singleton run"),
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_node_local_job_takes_no_lease() {
+    let (_dir, state) = serving();
+    state.set_ownership_authority(Arc::new(FixedTerm(4)));
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+
+    // A node-wide node-local job runs on every node, so it claims no control-plane lease.
+    scheduler.submit(TestJob::persisting(
+        "cleanup",
+        "",
+        Action::Return(Ok(JobReport::default())),
+    ));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"cleanup\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    assert!(
+        state.meta.job_leases().unwrap().is_empty(),
+        "a node-local job records no lease"
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_restarted_node_leases_the_live_term_not_a_persisted_token() {
+    let (_dir, state) = serving();
+    // A prior process held and released the key at term 5; the group has since advanced to term 6.
+    state
+        .meta
+        .claim_job_lease("reclaim", "node-old", 5, 1_000, 300)
+        .unwrap();
+    state.meta.release_job_lease("reclaim", "node-old", 5).unwrap();
+    state.set_ownership_authority(Arc::new(FixedTerm(6)));
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+    let leased = Arc::new(AtomicU64::new(0));
+    let ran = Arc::new(AtomicUsize::new(0));
+
+    scheduler.submit(SingletonJob::new("reclaim", leased.clone(), ran.clone()));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"singleton\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    assert_eq!(
+        leased.load(Ordering::SeqCst),
+        6,
+        "the run minted the live term, not the persisted token 5"
+    );
+    assert_eq!(state.meta.job_lease("reclaim").unwrap().unwrap().epoch, 6);
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_cluster_singleton_without_a_group_leases_the_zero_sentinel() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(2, 4, 2, 2));
+    let leased = Arc::new(AtomicU64::new(9));
+    let ran = Arc::new(AtomicUsize::new(0));
+
+    // A lone node runs no group, so it leases every singleton under the closed 0 term without contention.
+    scheduler.submit(SingletonJob::new("reclaim", leased.clone(), ran.clone()));
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"singleton\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    assert_eq!(leased.load(Ordering::SeqCst), 0, "no group leases the 0 sentinel");
+    let lease = state.meta.job_lease("reclaim").unwrap().unwrap();
+    assert_eq!(lease.epoch, 0);
+    assert_eq!(lease.state, LeaseState::Released);
+    scheduler.shutdown().await;
 }

@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
@@ -22,8 +22,20 @@ use peryx_storage::meta::{JobOutcome, MetaError, NewJobRun};
 
 use super::attempts::{CancelJobRun, JobAttemptError};
 use super::metrics::{JobMetrics, Outcome, Reject};
-use super::{JobContext, JobFailure, JobReport, NodeJob};
+use super::{JobContext, JobFailure, JobReport, LeaseScope, NodeJob};
 use crate::state::ServingState;
+
+/// How long a cluster-singleton lease stays held before it lapses absent a renewal. A run claims at
+/// start and releases at end, so the deadline only flags a holder that crashed mid-run; it is generous
+/// enough to cover a bounded pass without a renewal loop.
+const JOB_LEASE_SECS: i64 = 300;
+
+/// This process's stable lease-holder identity, minted once and reused so a run's release matches its
+/// claim. A restart is a new process and a new holder, which the ownership term supersedes.
+fn node_holder() -> &'static str {
+    static HOLDER: OnceLock<String> = OnceLock::new();
+    HOLDER.get_or_init(|| format!("node-{}", std::process::id()))
+}
 
 /// The bounds a [`JobScheduler`] runs under.
 #[derive(Debug, Clone, Copy)]
@@ -292,33 +304,29 @@ async fn run_persisted(
         },
         None => None,
     };
-    // Snapshot the authority epoch as the lease's fence: a run that outlives an authority transfer keeps
-    // writing under the epoch it started with, which the newer holder fences out.
-    let fence = match job.repository() {
-        Some(repository) => shared.state.committed_authority_epoch(repository).await,
-        None => 0,
-    };
-    let context = JobContext {
-        state: shared.state.clone(),
-        cancel: cancel.clone(),
-        fence,
-    };
-    let (mut result, panicked) = AssertUnwindSafe(job.run(&context)).catch_unwind().await.map_or_else(
-        |_| (Err(JobFailure::new("job_panic", "node-local job panicked")), true),
-        |result| (result, false),
-    );
-    // Fence stale-epoch work: a run that leased a real authority epoch but whose authority advanced
-    // while it ran wrote under a superseded epoch, so its success is rejected rather than counted. A
-    // node-wide job (fence 0) and a process with no group hold no epoch and are never fenced.
-    if fence != 0 && result.is_ok() {
-        let repository = job.repository().expect("a nonzero fence is taken from a repository");
-        if !shared.state.admit_authority_epoch(repository, fence).await {
-            result = Err(JobFailure::new(
-                "authority_fenced",
-                "a newer authority epoch superseded this run",
-            ));
+    // Take the run's fence: a per-repository job leases its authority epoch, a cluster-singleton job
+    // claims a control-plane lease under the ownership term, and either can be fenced before it runs when
+    // a newer holder already owns the work.
+    let (result, panicked) = match acquire_fence(job, shared).await {
+        Acquired::Held(fence) => {
+            let context = JobContext {
+                state: shared.state.clone(),
+                cancel: cancel.clone(),
+                fence: fence.epoch(),
+            };
+            let (mut result, panicked) = AssertUnwindSafe(job.run(&context)).catch_unwind().await.map_or_else(
+                |_| (Err(JobFailure::new("job_panic", "node-local job panicked")), true),
+                |result| (result, false),
+            );
+            // A run whose authority or lease was superseded while it ran wrote under a stale fence, so its
+            // success is rejected rather than counted; the lease is released either way.
+            if let Some(fenced) = finish_fence(&fence, shared, !panicked && result.is_ok()).await {
+                result = Err(fenced);
+            }
+            (result, panicked)
         }
-    }
+        Acquired::NotAcquired(reason) => (Err(JobFailure::new("lease_not_held", reason)), false),
+    };
     let cancelled = cancel.is_cancelled() && !panicked;
     let outcome = if panicked {
         Outcome::Failed
@@ -350,6 +358,94 @@ async fn run_persisted(
         }
     }
     (result.map_err(JobError::from), outcome)
+}
+
+/// The fence a run holds while it executes, and the ownership it re-checks and releases afterward.
+enum RunFence {
+    /// A per-repository job fenced by its authority epoch, or a node-local job with no repository at the
+    /// closed `0` sentinel, which is never fenced.
+    Repository { repository: Option<String>, epoch: u64 },
+    /// A cluster-singleton job holding a control-plane lease on `key` under the ownership term `epoch`.
+    Singleton { key: String, epoch: u64 },
+}
+
+impl RunFence {
+    /// The epoch a run stamps onto the records it writes, so a later holder fences it out.
+    const fn epoch(&self) -> u64 {
+        match self {
+            Self::Repository { epoch, .. } | Self::Singleton { epoch, .. } => *epoch,
+        }
+    }
+}
+
+/// The outcome of taking a run's fence before it executes.
+enum Acquired {
+    /// The fence is held; the run may execute.
+    Held(RunFence),
+    /// The cluster-singleton lease could not be claimed — a newer holder owns the term, or the store
+    /// could not be reached — so the run does not start and a later tick re-drives it. Carries the
+    /// reason for the durable run record.
+    NotAcquired(String),
+}
+
+/// Take the fence a run executes under: a node-local job leases its repository authority epoch without a
+/// control-plane call, and a cluster-singleton job claims a durable lease under the ownership term.
+async fn acquire_fence(job: &dyn NodeJob, shared: &Shared) -> Acquired {
+    match job.lease_scope() {
+        LeaseScope::NodeLocal => {
+            let epoch = match job.repository() {
+                Some(repository) => shared.state.committed_authority_epoch(repository).await,
+                None => 0,
+            };
+            Acquired::Held(RunFence::Repository {
+                repository: job.repository().map(ToOwned::to_owned),
+                epoch,
+            })
+        }
+        LeaseScope::ClusterSingleton(key) => {
+            let epoch = shared.state.cluster_term();
+            let now = (shared.state.clock)();
+            match shared
+                .state
+                .meta
+                .claim_job_lease(&key, node_holder(), epoch, now, JOB_LEASE_SECS)
+            {
+                Ok(_) => Acquired::Held(RunFence::Singleton { key, epoch }),
+                Err(error) => Acquired::NotAcquired(error.to_string()),
+            }
+        }
+    }
+}
+
+/// Re-check a finished run's fence and release a singleton lease. Returns the fencing failure when a
+/// newer holder superseded a run that would otherwise have succeeded; `ok` is whether the run produced a
+/// success to fence.
+async fn finish_fence(fence: &RunFence, shared: &Shared, ok: bool) -> Option<JobFailure> {
+    match fence {
+        RunFence::Repository {
+            repository: Some(repository),
+            epoch,
+        } if *epoch != 0 => (ok && !shared.state.admit_authority_epoch(repository, *epoch).await)
+            .then(|| JobFailure::new("authority_fenced", "a newer authority epoch superseded this run")),
+        RunFence::Repository { .. } => None,
+        RunFence::Singleton { key, epoch } => {
+            let superseded = shared
+                .state
+                .meta
+                .job_lease(key)
+                .ok()
+                .flatten()
+                .is_some_and(|lease| lease.epoch > *epoch);
+            // Release at our epoch; a release the supersede already fenced is a harmless stale no-op.
+            let _ = shared.state.meta.release_job_lease(key, node_holder(), *epoch);
+            (ok && superseded).then(|| {
+                JobFailure::new(
+                    "authority_fenced",
+                    "a newer holder superseded this cluster-singleton run",
+                )
+            })
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

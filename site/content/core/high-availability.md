@@ -224,6 +224,38 @@ unhealthy, which surfaces as the `worker_unhealthy` readiness reason above; the 
 still satisfy rather than aborting. Shutting the node down stops the workers without blocking the foreground runtime; a
 replica reapplies any page it had not yet committed when it restarts.
 
+## Fenced cluster jobs
+
+Background jobs carry an authority fence so an old owner cannot mutate authoritative metadata or destructive storage
+state after ownership has moved. A job declares one of two ownership scopes, and the runner applies the matching fence
+before it runs the work and again before it counts the result.
+
+A **node-local** job — cache maintenance, a search rebuild, a per-repository sweep — runs on every node independently
+and takes no control-plane lease. A per-repository job is already fenced by its repository's authority epoch: the run
+leases the committed epoch when it starts and its success is rejected if the authority transferred while it ran, so a
+former home's late write loses to the new home's. A node-wide node-local job that names no repository holds the closed
+`0` sentinel and is never fenced, and it makes no control-plane call at all.
+
+A **cluster-singleton** job — one that must run on a single node cluster-wide — claims a durable control-plane lease on
+its singleton key before it runs. The lease is minted under the ownership group's monotonic term: the run stamps that
+term as its fence, and a claim from a term below the recorded one is a superseded worker that is rejected without taking
+the lease. A partitioned former owner therefore mints a stale term and loses the claim, so its run never starts and is
+recorded as failed with `lease_not_held`. A run that held the lease but was superseded by a higher term while it ran has
+its success rejected with `authority_fenced` rather than counted, and it releases the lease when it finishes so the next
+run takes it cleanly. The token is always read live from the group's term, never replayed from the persisted lease, so a
+restarted node cannot reuse an old token: it mints the current term and a stale one is fenced.
+
+A single-node `none` deployment runs no group and leases every singleton under the `0` term without contention, so the
+same job code runs unchanged on one node. Lease rows are durable and survive a restart; each records its holder, term,
+and renewal deadline, so a holder that stopped renewing is visible as a lapsed lease without changing who the fence
+admits.
+
+Fenced runs are visible through the ordinary `peryx_jobs_*` lifecycle counters: a fenced-before-start or superseded run
+increments the `failed` outcome for its kind, and its durable run record carries the `lease_not_held` or
+`authority_fenced` reason. Converting a node-local kind to a cluster singleton is a one-line change — return
+`LeaseScope::ClusterSingleton` with the singleton key from the job's `lease_scope` — after which the runner leases and
+fences it with no further wiring.
+
 ## Manual promotion
 
 1. Stop or fence the old writer so it cannot accept another mutation.

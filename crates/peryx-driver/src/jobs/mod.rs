@@ -166,6 +166,24 @@ impl JobContext {
     }
 }
 
+/// How a job's ownership is scoped across the cluster, deciding whether the runner takes a
+/// control-plane lease before it runs and which epoch fences its writes.
+///
+/// A per-repository job is already fenced by its authority epoch (see [`NodeJob::repository`]); this is
+/// the orthogonal control for the node-wide jobs a repository epoch does not cover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseScope {
+    /// The job runs on every node independently: cache maintenance, search rebuilds, a per-repository
+    /// job the authority epoch already fences. The runner takes no control-plane lease and makes no
+    /// control-plane call, so a node-local kind never depends on the ownership group.
+    NodeLocal,
+    /// Exactly one holder across the cluster runs the job at a time, keyed by `key`. The runner claims a
+    /// lease under the ownership group's monotonic term before the run, stamps that term as the run's
+    /// fence, and releases the lease after: a partitioned former holder mints a stale term and loses the
+    /// claim, and a holder the group superseded mid-run has its write fenced.
+    ClusterSingleton(String),
+}
+
 /// A unit of node-local maintenance the [`JobScheduler`] can run.
 #[async_trait]
 pub trait NodeJob: Send + Sync {
@@ -175,6 +193,13 @@ pub trait NodeJob: Send + Sync {
     /// The repository or resource this run acts on. Two runs sharing a kind and scope conflict and
     /// never overlap; different scopes run concurrently. Empty names a node-wide task.
     fn scope(&self) -> &str;
+
+    /// How this job's ownership is scoped across the cluster. The default [`LeaseScope::NodeLocal`] runs
+    /// the job on every node with no control-plane lease; a job that must run on one node at a time
+    /// returns [`LeaseScope::ClusterSingleton`] so the runner fences it through a control-plane lease.
+    fn lease_scope(&self) -> LeaseScope {
+        LeaseScope::NodeLocal
+    }
 
     /// The configured repository authorizing this attempt, when the scope names one repository.
     fn repository(&self) -> Option<&str> {

@@ -234,68 +234,98 @@ async fn test_trusted_proxy_reads_repeated_forwarded_fields_in_order() {
     assert_eq!((first, second), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS));
 }
 
-#[rstest::rstest]
-#[case::malformed_suffix("192.0.2.1, invalid, 198.51.100.20", "192.0.2.2, invalid, 198.51.100.20")]
-#[case::trusted_throughout("198.51.100.20, 198.51.100.21", "198.51.100.22")]
 #[tokio::test]
-async fn test_trusted_proxy_falls_back_to_peer_for_unusable_forwarded_chain(
-    #[case] first_header: &str,
-    #[case] second_header: &str,
+async fn test_trusted_proxy_falls_back_to_peer_for_fully_trusted_chain() {
+    let (harness, peer) = trusted_proxy_harness().await;
+
+    let first = status_with_peer(
+        &harness.state,
+        peer,
+        &[("x-forwarded-for", "198.51.100.20, 198.51.100.21")],
+    )
+    .await;
+    let second = status_with_peer(&harness.state, peer, &[("x-forwarded-for", "198.51.100.22")]).await;
+
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS));
+}
+
+// A trusted proxy sending a header we can't parse into a client used to collapse every such request
+// under the shared peer bucket. Distinct clients must not merge that way: each malformed request is
+// rejected outright, and a rejection never charges the peer's bucket that would then throttle the next.
+#[rstest::rstest]
+#[case::malformed_suffix(
+    &[("x-forwarded-for", "192.0.2.1, invalid, 198.51.100.20")],
+    &[("x-forwarded-for", "192.0.2.2, invalid, 198.51.100.20")],
+)]
+#[case::repeated_real_ip(
+    &[("x-real-ip", "192.0.2.1"), ("x-real-ip", "192.0.2.2")],
+    &[("x-real-ip", "192.0.2.3"), ("x-real-ip", "192.0.2.4")],
+)]
+#[case::unparseable_real_ip(&[("x-real-ip", "not-an-ip")], &[("x-real-ip", "also-not-an-ip")])]
+#[tokio::test]
+async fn test_trusted_proxy_rejects_malformed_forwarded_header(
+    #[case] first_headers: &[(&str, &str)],
+    #[case] second_headers: &[(&str, &str)],
 ) {
     let (harness, peer) = trusted_proxy_harness().await;
 
-    let first = status_with_peer(
-        &harness.state,
-        peer,
-        &[("x-forwarded-for", first_header), ("x-real-ip", "203.0.113.1")],
-    )
-    .await;
-    let second = status_with_peer(
-        &harness.state,
-        peer,
-        &[("x-forwarded-for", second_header), ("x-real-ip", "203.0.113.2")],
-    )
-    .await;
+    let (first, _, body) = request_with_peer(&harness.state, "/pypi/simple/", peer, first_headers).await;
+    let second = status_with_peer(&harness.state, peer, second_headers).await;
 
-    assert_eq!((first, second), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!((first, second), (StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST));
+    assert_eq!(body, "malformed forwarded header");
 }
 
 #[tokio::test]
-async fn test_trusted_proxy_rejects_repeated_real_ip_fields() {
+async fn test_trusted_proxy_without_forwarded_headers_buckets_on_peer() {
     let (harness, peer) = trusted_proxy_harness().await;
 
-    let first = status_with_peer(
-        &harness.state,
-        peer,
-        &[("x-real-ip", "192.0.2.1"), ("x-real-ip", "192.0.2.2")],
-    )
-    .await;
-    let second = status_with_peer(
-        &harness.state,
-        peer,
-        &[("x-real-ip", "192.0.2.3"), ("x-real-ip", "192.0.2.4")],
-    )
-    .await;
+    let first = status_with_peer(&harness.state, peer, &[]).await;
+    let second = status_with_peer(&harness.state, peer, &[]).await;
 
     assert_eq!((first, second), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS));
 }
 
 #[tokio::test]
-async fn test_trusted_proxy_rejects_non_text_forwarded_field() {
+async fn test_authenticated_principal_ignores_malformed_forwarded_header() {
+    let harness = authenticated_harness(limit_simple(1), DEFAULT_UPSTREAM_CONCURRENCY).await;
+    let peer = "198.51.100.10:5000".parse().unwrap();
+    let headers = [
+        ("x-forwarded-for", "192.0.2.1, invalid"),
+        ("authorization", "Basic cGlwOnNlY3JldA=="),
+    ];
+
+    // The token identifies the client, so a header we couldn't bucket an anonymous request on is
+    // irrelevant: the request is throttled by principal, never rejected as malformed.
+    let first = request_with_peer(&harness.state, "/pypi/simple/", peer, &headers)
+        .await
+        .0;
+    let second = request_with_peer(&harness.state, "/pypi/simple/", peer, &headers)
+        .await
+        .0;
+
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS));
+}
+
+#[rstest::rstest]
+#[case::forwarded_for("x-forwarded-for")]
+#[case::real_ip("x-real-ip")]
+#[tokio::test]
+async fn test_trusted_proxy_rejects_non_text_forwarded_field(#[case] header: &'static str) {
     let (harness, peer) = trusted_proxy_harness().await;
     let request = || {
         let mut request = get_request("/pypi/simple/", &[]);
         request.extensions_mut().insert(ConnectInfo(peer));
         request
             .headers_mut()
-            .insert("x-forwarded-for", HeaderValue::from_bytes(&[0xff]).unwrap());
+            .insert(header, HeaderValue::from_bytes(&[0xff]).unwrap());
         request
     };
 
     let (first, ..) = send(&harness.state, request()).await;
     let (second, ..) = send(&harness.state, request()).await;
 
-    assert_eq!((first, second), (StatusCode::OK, StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!((first, second), (StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST));
 }
 
 #[tokio::test]
@@ -513,6 +543,25 @@ async fn test_token_denials_are_logged_as_token_clients() {
         .unwrap_or_else(|| panic!("{}", capture.text()));
     assert_eq!(field(event, "event"), Some("rate_limit"));
     assert_eq!(field(event, "result"), Some("denied"));
+}
+
+#[tokio::test]
+async fn test_malformed_forwarded_header_is_logged_as_rejected() {
+    let capture = LogCapture::default();
+    let _guard = capture.install();
+    let (harness, peer) = trusted_proxy_harness().await;
+
+    let status = status_with_peer(&harness.state, peer, &[("x-forwarded-for", "192.0.2.1, invalid")]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let events = capture.security_events();
+    let event = events
+        .iter()
+        .find(|event| field(event, "reason") == Some("malformed_forwarded_header"))
+        .unwrap_or_else(|| panic!("{}", capture.text()));
+    assert_eq!(field(event, "event"), Some("rate_limit"));
+    assert_eq!(field(event, "action"), Some("http_request"));
+    assert_eq!(field(event, "result"), Some("rejected"));
 }
 
 async fn authenticated_harness(rate_limit: RateLimitConfig, upstream_concurrency: usize) -> Harness {

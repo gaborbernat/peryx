@@ -312,6 +312,19 @@ struct Limited {
     retry_after: u64,
 }
 
+/// The outcome of reading a trusted proxy's forwarded headers.
+enum ForwardedClient {
+    /// An untrusted client address to bucket the request on.
+    Resolved(IpAddr),
+    /// Every hop was a trusted proxy, so the peer address is the closest identity we have.
+    TrustedChain,
+    /// A forwarded value couldn't be parsed into a client, so there is no identity to bucket on.
+    Malformed,
+}
+
+/// A trusted proxy sent a forwarded header we can't resolve to a client identity.
+struct MalformedForwarded;
+
 #[derive(Default)]
 pub struct UpstreamLimits {
     entries: HashMap<String, Arc<UpstreamLimit>>,
@@ -460,7 +473,21 @@ pub async fn enforce(State(state): State<Arc<AppState>>, request: axum::extract:
     } else {
         peryx_identity::Principal::Anonymous
     };
-    let actor = state.rate_limits.actor_key(principal, &request);
+    // A trusted proxy handed us a forwarded header we can't parse into a client identity. Folding those
+    // requests under the shared peer bucket would merge distinct clients into one throttle, so fail
+    // closed instead of collapsing them.
+    let Ok(actor) = state.rate_limits.actor_key(principal, &request) else {
+        tracing::info!(
+            target: "peryx::security",
+            security_event = true,
+            event = "rate_limit",
+            action = "http_request",
+            result = "rejected",
+            reason = "malformed_forwarded_header",
+            "rejected request with malformed forwarded header"
+        );
+        return malformed_forwarded_response();
+    };
     match state.rate_limits.check(class, actor) {
         Ok(()) => next.run(request).await,
         Err(limited) => {
@@ -538,65 +565,96 @@ fn route_driver<'a>(
 }
 
 impl RateLimiter {
-    fn actor_key(&self, principal: peryx_identity::Principal, request: &axum::extract::Request) -> ActorKey {
+    fn actor_key(
+        &self,
+        principal: peryx_identity::Principal,
+        request: &axum::extract::Request,
+    ) -> Result<ActorKey, MalformedForwarded> {
         match principal {
-            peryx_identity::Principal::Named { subject } => ActorKey::Token(self.principal_hasher.hash_one(subject)),
-            peryx_identity::Principal::Anonymous => {
-                ActorKey::Ip(self.client_ip(request).unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            peryx_identity::Principal::Named { subject } => {
+                Ok(ActorKey::Token(self.principal_hasher.hash_one(subject)))
             }
+            peryx_identity::Principal::Anonymous => Ok(ActorKey::Ip(
+                self.client_ip(request)?.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            )),
         }
     }
 
-    fn client_ip(&self, request: &axum::extract::Request) -> Option<IpAddr> {
-        let peer = request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()?
-            .0
-            .ip()
-            .to_canonical();
+    /// Resolve the address that identifies an anonymous client's throttle bucket.
+    ///
+    /// `Ok(None)` means the request carried no connection info at all, which only happens off the real
+    /// server path; the caller folds it into the loopback bucket. `Err` means a trusted proxy sent a
+    /// forwarded header we can't turn into a client identity: distinct clients would otherwise collapse
+    /// into the single peer bucket, so the request is rejected rather than bucketed.
+    fn client_ip(&self, request: &axum::extract::Request) -> Result<Option<IpAddr>, MalformedForwarded> {
+        let Some(peer) = request.extensions().get::<ConnectInfo<SocketAddr>>() else {
+            return Ok(None);
+        };
+        let peer = peer.0.ip().to_canonical();
         if !self.trusts_proxy(peer) {
-            return Some(peer);
+            return Ok(Some(peer));
         }
-        Some(self.forwarded_client_ip(request.headers()).unwrap_or(peer))
+        match self.forwarded_client_ip(request.headers()) {
+            ForwardedClient::Resolved(client) => Ok(Some(client)),
+            ForwardedClient::TrustedChain => Ok(Some(peer)),
+            ForwardedClient::Malformed => Err(MalformedForwarded),
+        }
     }
 
-    fn forwarded_client_ip(&self, headers: &HeaderMap) -> Option<IpAddr> {
+    fn forwarded_client_ip(&self, headers: &HeaderMap) -> ForwardedClient {
         let forwarded_values = headers.get_all("x-forwarded-for");
         if forwarded_values.iter().next().is_none() {
-            let mut real_values = headers.get_all("x-real-ip").iter();
-            let real_value = real_values.next()?.to_str().ok()?;
-            if real_values.next().is_some() {
-                return None;
-            }
-            return real_value
-                .trim()
-                .parse::<IpAddr>()
-                .map(|address| address.to_canonical())
-                .ok();
+            return real_ip(headers);
         }
 
-        let mut client = None;
-        let mut suffix_malformed = false;
+        // Scan the chain left to right, letting each hop overwrite the verdict. An untrusted address
+        // becomes the client, a malformed token discards any client found so far (a proxy closer to us
+        // than the last usable hop lied), and a trusted address leaves the verdict untouched. The final
+        // state reflects the rightmost hop that mattered: a resolved client, a fully trusted chain, or a
+        // malformed suffix we must not fold under the peer bucket.
+        let mut client = ForwardedClient::TrustedChain;
         for forwarded_value in forwarded_values {
             let Ok(forwarded_value) = forwarded_value.to_str() else {
-                client = None;
-                suffix_malformed = true;
+                client = ForwardedClient::Malformed;
                 continue;
             };
             for part in forwarded_value.split(',') {
                 let Ok(address) = part.trim().parse::<IpAddr>().map(|address| address.to_canonical()) else {
-                    client = None;
-                    suffix_malformed = true;
+                    client = ForwardedClient::Malformed;
                     continue;
                 };
                 if !self.trusts_proxy(address) {
-                    client = Some(address);
-                    suffix_malformed = false;
+                    client = ForwardedClient::Resolved(address);
                 }
             }
         }
-        if suffix_malformed { None } else { client }
+        client
     }
+}
+
+fn real_ip(headers: &HeaderMap) -> ForwardedClient {
+    let mut real_values = headers.get_all("x-real-ip").iter();
+    let Some(real_value) = real_values.next() else {
+        return ForwardedClient::TrustedChain;
+    };
+    // A second X-Real-IP or a non-address value is ambiguous, not a client we can bucket on; reject
+    // rather than collapse to the peer.
+    if real_values.next().is_some() {
+        return ForwardedClient::Malformed;
+    }
+    let Ok(real_value) = real_value.to_str() else {
+        return ForwardedClient::Malformed;
+    };
+    real_value
+        .trim()
+        .parse::<IpAddr>()
+        .map_or(ForwardedClient::Malformed, |address| {
+            ForwardedClient::Resolved(address.to_canonical())
+        })
+}
+
+fn malformed_forwarded_response() -> Response {
+    (StatusCode::BAD_REQUEST, "malformed forwarded header").into_response()
 }
 
 fn limited_response(retry_after: u64) -> Response {

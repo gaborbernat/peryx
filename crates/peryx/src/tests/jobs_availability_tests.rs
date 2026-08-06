@@ -135,12 +135,27 @@ fn dc_writer_config(dir: &tempfile::TempDir) -> Config {
 
 /// An `ha` writer: the same primary posture reached through an `ha` roster, so the mode label differs and
 /// the durability requirement is replicated.
+/// A single-datacenter `ha` roster: one writer, no remote datacenter to wait on. A single-process `ha`
+/// behavior test proves its writes locally, since cross-datacenter write completion needs a reachable
+/// remote and is exercised by the multi-process availability harness rather than faked here.
+fn solo_group() -> DcMembership {
+    DcMembership {
+        group: "east".to_owned(),
+        members: vec![DcMember {
+            node: WRITER_IDENTITY.to_owned(),
+            dc: "east-1".to_owned(),
+            address: "10.0.0.1:8080".to_owned(),
+            role: DcRole::Writer,
+        }],
+    }
+}
+
 fn ha_writer_config(dir: &tempfile::TempDir) -> Config {
     Config {
         data_dir: dir.path().to_path_buf(),
         writer_identity: Some(WRITER_IDENTITY.to_owned()),
         availability: AvailabilityConfig::Ha(primary_replication()),
-        dc_membership: Some(group()),
+        dc_membership: Some(solo_group()),
         indexes: feature_indexes(),
         ..Config::default()
     }

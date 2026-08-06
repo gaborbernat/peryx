@@ -327,6 +327,7 @@ impl AppState {
                 write_ack_policy: peryx_replication::DurabilityPolicy::Local,
                 write_ack_deadline: std::time::Duration::from_secs(5),
                 receipt_sources: Vec::new(),
+                remote_frontier_sources: Vec::new(),
                 route_resolver: peryx_index::RouteResolver::new(&indexes),
                 indexes,
                 cache: peryx_index::ServingCache::new(hot_cache_bytes, ttl_secs),

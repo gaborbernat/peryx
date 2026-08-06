@@ -31,7 +31,8 @@ use crate::config::{
 };
 use crate::server::{
     build_blob_storage, build_index_settings, build_indexes, build_router, build_state, check_config,
-    receipt_endpoint_router, receipt_sources, recover_job_attempts, router_for, upstream_auth,
+    frontier_endpoint_router, receipt_endpoint_router, receipt_sources, recover_job_attempts, remote_frontier_sources,
+    router_for, upstream_auth,
 };
 
 fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
@@ -2073,4 +2074,226 @@ async fn test_receipt_endpoint_router_serves_a_held_receipt() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+fn ha_config(members: Vec<DcMember>, identity: &str, token: SecretSource) -> Config {
+    Config {
+        writer_identity: Some(identity.to_owned()),
+        availability: AvailabilityConfig::Ha(ReplicationConfig::Primary {
+            source: "ingress".to_owned(),
+            token,
+        }),
+        dc_membership: Some(DcMembership {
+            group: "group".to_owned(),
+            members,
+        }),
+        ..Config::default()
+    }
+}
+
+#[test]
+fn test_remote_frontier_sources_are_empty_outside_ha() {
+    let config = dc_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "west", "http://peer/", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    assert!(
+        remote_frontier_sources(&config).unwrap().is_empty(),
+        "a dc-mode node waits on no remote"
+    );
+}
+
+#[test]
+fn test_remote_frontier_sources_are_empty_for_a_single_datacenter_group() {
+    let config = ha_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "east", "http://peer/", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    assert!(remote_frontier_sources(&config).unwrap().is_empty());
+}
+
+#[test]
+fn test_remote_frontier_sources_cover_each_remote_datacenter_writer_preferred() {
+    let config = ha_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("west-replica", "west", "http://replica.west/", DcRole::Replica),
+            dc_member("west-writer", "west", "http://writer.west/", DcRole::Writer),
+            dc_member("south", "south", "http://south/", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::Literal("t".to_owned()),
+    );
+    let sources = remote_frontier_sources(&config).unwrap();
+
+    let datacenters: std::collections::BTreeSet<String> =
+        sources.iter().map(|source| source.datacenter().to_owned()).collect();
+    assert_eq!(
+        datacenters,
+        std::collections::BTreeSet::from(["south".to_owned(), "west".to_owned()]),
+        "one source per remote datacenter, and the local datacenter never appears",
+    );
+}
+
+#[test]
+fn test_remote_dc_roster_prefers_the_datacenter_writer_address() {
+    let membership = DcMembership {
+        group: "group".to_owned(),
+        members: vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            // west lists the replica first, then the writer replaces it.
+            dc_member("west-replica", "west", "http://replica.west/", DcRole::Replica),
+            dc_member("west-writer", "west", "http://writer.west/", DcRole::Writer),
+            // south lists the writer first, so a later replica is skipped.
+            dc_member("south-writer", "south", "http://writer.south/", DcRole::Writer),
+            dc_member("south-replica", "south", "http://replica.south/", DcRole::Replica),
+        ],
+    };
+
+    let roster = crate::server::remote_dc_roster(&membership, "east");
+
+    assert_eq!(
+        roster,
+        std::collections::BTreeMap::from([
+            ("south".to_owned(), "http://writer.south/".to_owned()),
+            ("west".to_owned(), "http://writer.west/".to_owned()),
+        ]),
+        "the writer's address wins over a replica's in the same datacenter, whichever is rostered first",
+    );
+}
+
+#[test]
+fn test_remote_frontier_sources_surface_an_unreadable_token() {
+    let config = ha_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "west", "http://peer/", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::File("/does/not/exist".into()),
+    );
+
+    assert!(remote_frontier_sources(&config).is_err());
+}
+
+#[test]
+fn test_remote_frontier_sources_reject_an_unusable_remote_address() {
+    let config = ha_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "west", "not a url", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    assert!(remote_frontier_sources(&config).is_err());
+}
+
+#[test]
+fn test_remote_frontier_sources_are_empty_without_a_roster() {
+    let config = Config {
+        writer_identity: Some("local".to_owned()),
+        availability: AvailabilityConfig::Ha(ReplicationConfig::Primary {
+            source: "ingress".to_owned(),
+            token: SecretSource::Literal("t".to_owned()),
+        }),
+        ..Config::default()
+    };
+
+    assert!(remote_frontier_sources(&config).unwrap().is_empty());
+}
+
+#[test]
+fn test_remote_frontier_sources_are_empty_when_the_node_is_absent_from_the_roster() {
+    let config = ha_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "west", "http://peer/", DcRole::Replica),
+        ],
+        "ghost",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    assert!(remote_frontier_sources(&config).unwrap().is_empty());
+}
+
+#[test]
+fn test_remote_frontier_sources_accept_a_scheme_less_address() {
+    // A rostered `host:port` address with no scheme builds a usable transport rather than failing
+    // startup, so a bare internal address does not panic build_state.
+    let config = ha_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "west", "10.0.0.2:8080", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    let sources = remote_frontier_sources(&config).unwrap();
+
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].datacenter(), "west");
+}
+
+#[test]
+fn test_frontier_endpoint_router_is_absent_outside_ha() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Config::default()
+    };
+    let state = build_state(&config).unwrap();
+
+    assert!(frontier_endpoint_router(&config, &state).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_frontier_endpoint_router_serves_a_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        writer_identity: Some("local".to_owned()),
+        availability: AvailabilityConfig::Ha(ReplicationConfig::Primary {
+            source: "local".to_owned(),
+            token: SecretSource::Literal("secret".to_owned()),
+        }),
+        dc_membership: Some(DcMembership {
+            group: "group".to_owned(),
+            members: vec![
+                dc_member("local", "east", "http://local/", DcRole::Writer),
+                dc_member("peer", "west", "http://peer/", DcRole::Replica),
+            ],
+        }),
+        ..Config::default()
+    };
+    let state = build_state(&config).unwrap();
+    let router = frontier_endpoint_router(&config, &state).unwrap().unwrap();
+
+    let response = router
+        .oneshot(
+            Request::get("/+replication/v1/frontier/proj")
+                .header(header::AUTHORIZATION, "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(reply.get("applied_frontier").is_some(), "{reply}");
+    assert!(reply.get("epoch").is_some(), "{reply}");
 }

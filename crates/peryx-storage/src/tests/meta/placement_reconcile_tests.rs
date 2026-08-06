@@ -5,7 +5,8 @@ use peryx_identity::ArtifactDigest;
 
 use crate::meta::{
     BackendId, BackendLocation, BlobPlacementFailure, BlobPlacementKey, BlobPlacementTransition, DataCenterId,
-    DigestReconciliation, MAX_PLACEMENT_RECONCILE_BATCH, MetaStore, PlacementReconcileError, PlacementReconcilePage,
+    DigestReconciliation, LocalVerifiedPlacementPage, MAX_PLACEMENT_RECONCILE_BATCH, MetaStore,
+    PlacementReconcileError, PlacementReconcilePage,
 };
 
 const FENCE: u64 = 5;
@@ -227,4 +228,92 @@ fn test_reconcile_rejects_an_out_of_range_limit() {
         PlacementReconcileError::InvalidLimit.to_string(),
         format!("limit must be between 1 and {MAX_PLACEMENT_RECONCILE_BATCH}")
     );
+}
+
+fn scan_local(store: &MetaStore, local: &str) -> LocalVerifiedPlacementPage {
+    store.scan_local_verified_placements(&dc(local), None, 10).unwrap()
+}
+
+#[test]
+fn test_local_verified_scan_returns_only_local_verified_placements() {
+    let (_dir, store) = store();
+    let local = key(1, "east", "east/01");
+    verify(&store, &local);
+    verify(&store, &key(2, "west", "west/02")); // remote, verified
+    stage(&store, &key(3, "east", "east/03")); // local, only pending
+
+    let page = scan_local(&store, "east");
+
+    assert_eq!(
+        page.placements.len(),
+        1,
+        "only the local verified placement is returned"
+    );
+    assert_eq!(page.placements[0].key, local);
+    assert_eq!(page.scanned, 3, "every ledger row is read even when most do not match");
+    assert_eq!(page.next_cursor, None);
+}
+
+#[test]
+fn test_local_verified_scan_skips_a_locally_failed_or_revoked_placement() {
+    let (_dir, store) = store();
+    let failed = key(1, "east", "east/01");
+    stage(&store, &failed);
+    store
+        .apply_blob_placement(
+            &failed,
+            &BlobPlacementTransition::Fail {
+                class: BlobPlacementFailure::SourceUnavailable,
+            },
+            FENCE,
+            0,
+        )
+        .unwrap();
+    let revoked = key(2, "east", "east/02");
+    verify(&store, &revoked);
+    store
+        .apply_blob_placement(&revoked, &BlobPlacementTransition::Revoke, FENCE, 0)
+        .unwrap();
+
+    let page = scan_local(&store, "east");
+
+    assert!(
+        page.placements.is_empty(),
+        "only verified placements are integrity candidates"
+    );
+}
+
+#[test]
+fn test_local_verified_scan_pages_by_rows_read_and_resumes_after_the_cursor() {
+    let (_dir, store) = store();
+    for suffix in 1..=3 {
+        verify(&store, &key(suffix, "east", &format!("east/{suffix:02}")));
+    }
+
+    let first = store.scan_local_verified_placements(&dc("east"), None, 2).unwrap();
+    assert_eq!(first.scanned, 2);
+    assert_eq!(first.placements.len(), 2);
+    let cursor = first.next_cursor.expect("more rows remain past the first page");
+
+    let second = store
+        .scan_local_verified_placements(&dc("east"), Some(&cursor), 2)
+        .unwrap();
+    assert_eq!(
+        second.placements.len(),
+        1,
+        "the last placement resumes after the cursor"
+    );
+    assert_eq!(second.next_cursor, None);
+    assert_eq!(second.placements[0].key, key(3, "east", "east/03"));
+}
+
+#[test]
+fn test_local_verified_scan_rejects_an_out_of_range_limit() {
+    let (_dir, store) = store();
+
+    let low = store.scan_local_verified_placements(&dc("east"), None, 0);
+    assert!(matches!(low, Err(PlacementReconcileError::InvalidLimit)));
+
+    let high = store.scan_local_verified_placements(&dc("east"), None, MAX_PLACEMENT_RECONCILE_BATCH + 1);
+    assert!(matches!(high, Err(PlacementReconcileError::InvalidLimit)));
 }

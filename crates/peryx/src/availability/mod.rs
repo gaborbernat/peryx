@@ -2,6 +2,8 @@
 
 mod dc_copy;
 mod listener;
+mod placement_reconcile;
 
 pub use dc_copy::CrossDcBlobCopier;
 pub use listener::{AVAILABILITY_PROTOCOL_VERSION, AvailabilityPosture, router};
+pub use placement_reconcile::FilesystemPlacementReconciler;

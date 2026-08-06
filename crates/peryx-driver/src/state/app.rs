@@ -146,6 +146,10 @@ pub struct ServingState {
     /// installed by the binary once a data-center roster and replication token are configured. Absent
     /// under single-node or roster-less modes, so a miss goes straight to the ecosystem's upstream path.
     pub(super) read_through: std::sync::OnceLock<Arc<crate::read_through::RemotePlacementReader>>,
+    /// The placement reconciler the scheduled `PlacementReconcile` job drives, registered once the binary
+    /// has resolved its data-center membership. Absent when the process reconciles nothing — a single data
+    /// center, or no membership — so the job runs as a no-op.
+    pub(super) placement_reconciler: std::sync::OnceLock<Arc<dyn crate::jobs::PlacementReconciler>>,
 }
 
 /// The whole process state: the serving data every handler needs, plus the driver registry only the
@@ -305,6 +309,18 @@ impl ServingState {
     #[must_use]
     pub fn read_through(&self) -> Option<&crate::read_through::RemotePlacementReader> {
         self.read_through.get().map(|reader| &**reader)
+    }
+
+    /// Register the placement reconciler the scheduled `PlacementReconcile` job drives. Set at most once;
+    /// a later call is ignored.
+    pub fn set_placement_reconciler(&self, reconciler: Arc<dyn crate::jobs::PlacementReconciler>) {
+        let _ = self.placement_reconciler.set(reconciler);
+    }
+
+    /// The registered placement reconciler, or `None` when this process reconciles nothing.
+    #[must_use]
+    pub fn placement_reconciler(&self) -> Option<&Arc<dyn crate::jobs::PlacementReconciler>> {
+        self.placement_reconciler.get()
     }
 
     /// Assign `authority`'s home on its first publish, best effort. A publish path calls this after it

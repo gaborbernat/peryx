@@ -537,6 +537,98 @@ pub fn submit_dc_copy(scheduler: &JobScheduler, parameters: DcCopyParameters) {
     scheduler.submit(Arc::new(DcCopyJob { parameters }));
 }
 
+/// The node-wide job kind label for the placement-reconciliation pass.
+const PLACEMENT_RECONCILE: &str = "placement_reconcile";
+
+/// Default distinct digests one reconciliation pass classifies per ledger page before it resumes past
+/// its cursor. The pass loops until the ledger is drained, so this bounds one page's read, not the pass.
+pub const DEFAULT_PLACEMENT_RECONCILE_BATCH: usize = 256;
+/// Startup rejects a larger page so one pass reads a bounded slice of the placement ledger at a time.
+pub const MAX_PLACEMENT_RECONCILE_BATCH: usize = 1_000;
+
+/// The bounds one scheduled placement-reconciliation pass runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementReconcileParameters {
+    /// Distinct digests classified per ledger page a single pass reads.
+    pub batch: NonZeroUsize,
+}
+
+impl PlacementReconcileParameters {
+    /// The default bound: a few hundred digests per page.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            batch: NonZeroUsize::MIN.saturating_add(DEFAULT_PLACEMENT_RECONCILE_BATCH - 1),
+        }
+    }
+}
+
+impl Default for PlacementReconcileParameters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The placement reconciler a node registers to back its scheduled placement-reconciliation pass.
+///
+/// Reconciliation compares the placement ledger against the replication policy — which data centers
+/// should hold each digest — read from configuration this neutral crate does not carry, so the binary
+/// implements the reconciler and registers it on the [`ServingState`], exactly as it registers the
+/// [`CrossDcCopier`]. A process that registers none — a single data center, or no membership — runs the
+/// job as a no-op.
+#[async_trait]
+pub trait PlacementReconciler: Send + Sync {
+    /// Run one bounded reconciliation pass over `state`: fence the work to the ownership group's cluster
+    /// term, scan the placement ledger for divergence from the replication policy, and retire the local
+    /// data center's out-of-policy placements, skipping any digest a revocation or an in-flight
+    /// reclamation has withdrawn. `cancelled` reports cooperative shutdown between units of work.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when the pass cannot complete.
+    async fn reconcile_pass(
+        &self,
+        state: &ServingState,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+        params: PlacementReconcileParameters,
+    ) -> Result<JobReport, JobFailure>;
+}
+
+/// The node-wide job that runs one placement-reconciliation pass through the registered
+/// [`PlacementReconciler`].
+///
+/// A process that registered none does nothing, so an unconfigured node pays only the scheduler tick.
+pub struct PlacementReconcileJob {
+    parameters: PlacementReconcileParameters,
+}
+
+#[async_trait]
+impl NodeJob for PlacementReconcileJob {
+    fn kind(&self) -> &'static str {
+        PLACEMENT_RECONCILE
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
+        match ctx.state().placement_reconciler() {
+            Some(reconciler) => {
+                reconciler
+                    .reconcile_pass(ctx.state(), &|| ctx.is_cancelled(), self.parameters)
+                    .await
+            }
+            None => Ok(JobReport::default()),
+        }
+    }
+}
+
+/// Submit one node-wide placement-reconciliation pass. The scheduler drops it when a prior pass is still
+/// draining the ledger, so a slow pass never stacks.
+pub fn submit_placement_reconcile(scheduler: &JobScheduler, parameters: PlacementReconcileParameters) {
+    scheduler.submit(Arc::new(PlacementReconcileJob { parameters }));
+}
+
 /// Submit one maintenance job per installed ecosystem driver. The scheduler runs them concurrently
 /// across ecosystems under its bounds and drops any whose predecessor is still sweeping.
 pub fn submit_maintenance(app: &AppState, scheduler: &JobScheduler) {

@@ -117,6 +117,12 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
         {
             state.set_cross_dc_copier(std::sync::Arc::new(copier));
         }
+        if let Some(store) = state.blobs.filesystem_store()
+            && let Some(reconciler) =
+                peryx::availability::FilesystemPlacementReconciler::from_config(config, store.clone())?
+        {
+            state.set_placement_reconciler(std::sync::Arc::new(reconciler));
+        }
         if !replication.is_replica() {
             for index in &state.indexes {
                 if let peryx_driver::IndexKind::Cached { client, offline: false } = &index.kind {

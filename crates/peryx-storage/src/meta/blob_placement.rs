@@ -153,8 +153,9 @@ pub enum BlobPlacementState {
     Pending,
     /// The backend confirmed the object with a matching digest and this byte size.
     Verified { size: u64 },
-    /// A transfer attempt failed for a classified reason. A verified placement in another location is a
-    /// different key and is left untouched.
+    /// A transfer attempt failed for a classified reason, or a verified copy failed an integrity re-check
+    /// (a [`DigestMismatch`](BlobPlacementFailure::DigestMismatch)) and demoted here. A verified placement
+    /// in another location is a different key and is left untouched.
     Failed { class: BlobPlacementFailure },
     /// The placement was withdrawn from serving, for reclamation or an administrative decision.
     Revoked,
@@ -203,7 +204,8 @@ pub enum BlobPlacementTransition {
     Stage,
     /// Prove completion with the backend's observed digest and byte size.
     Verify { observed: ArtifactDigest, size: u64 },
-    /// Record a classified transfer failure.
+    /// Record a classified transfer failure from a pending transfer, or demote a verified copy that failed
+    /// an integrity re-check via [`DigestMismatch`](BlobPlacementFailure::DigestMismatch).
     Fail { class: BlobPlacementFailure },
     /// Withdraw the placement from serving.
     Revoke,
@@ -327,6 +329,20 @@ fn decide(
         (Some(record), T::Fail { class }) if matches!(record.state, S::Pending) => {
             change(S::Failed { class: *class }, Some(record))
         }
+        // A verified copy that fails an integrity re-check has bytes that no longer match its address, so
+        // it demotes to a digest-mismatch failure — the one failure a settled copy can develop on its own,
+        // which makes it a re-copy candidate again rather than a served but corrupt placement.
+        (
+            Some(record),
+            T::Fail {
+                class: BlobPlacementFailure::DigestMismatch,
+            },
+        ) if matches!(record.state, S::Verified { .. }) => change(
+            S::Failed {
+                class: BlobPlacementFailure::DigestMismatch,
+            },
+            Some(record),
+        ),
         (Some(record), T::Fail { .. }) if matches!(record.state, S::Failed { .. }) => Decision::Unchanged(record),
         (Some(record), T::Revoke) if matches!(record.state, S::Revoked) => Decision::Unchanged(record),
         (Some(record), T::Revoke) => change(S::Revoked, Some(record)),

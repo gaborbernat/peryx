@@ -62,12 +62,6 @@ impl<E: From<MetaError>> From<MetaError> for FinalizeFlow<E> {
     }
 }
 
-impl<E: From<super::QuotaError>> From<super::QuotaError> for FinalizeFlow<E> {
-    fn from(err: super::QuotaError) -> Self {
-        Self::User(E::from(err))
-    }
-}
-
 impl MetaStore {
     /// Commit an admitted write's `body` rows, its journal, a [`Published`](OperationState::Published)
     /// outcome for `operation` replaying `response`, and the advance of `intent_key` to

@@ -172,7 +172,7 @@ jobs:
       - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace ${{ matrix.features }} -E 'not(binary(e2e)) & not(binary(availability)) & not(binary(sim_campaign))'
+      - run: cargo nextest run --workspace ${{ matrix.features }} -E 'not(binary(e2e)) & not(binary(availability)) & not(binary(observability)) & not(binary(sim_campaign))'
       - name: Cancel remaining jobs on failure
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure

@@ -17,6 +17,14 @@ fn beacon(node: &str, incarnation: u64, sequence: u64) -> HeartbeatReport {
         node: node.to_owned(),
         incarnation,
         sequence,
+        applied: None,
+    }
+}
+
+fn beacon_at(node: &str, incarnation: u64, sequence: u64, applied: u64) -> HeartbeatReport {
+    HeartbeatReport {
+        applied: Some(applied),
+        ..beacon(node, incarnation, sequence)
     }
 }
 
@@ -270,4 +278,71 @@ async fn test_ingest_response_body_names_the_rejection() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body, "reporting node is not a configured group member".as_bytes());
+}
+
+#[test]
+fn test_applied_frontier_reports_the_last_beat() {
+    let tracker = tracker();
+    let now = Instant::now();
+
+    tracker.observe(&beacon_at("replica-a", 1, 1, 42), now).unwrap();
+
+    assert_eq!(tracker.applied_frontier("replica-a", now), Some(42));
+}
+
+#[test]
+fn test_applied_frontier_survives_into_the_suspect_window() {
+    let tracker = tracker();
+    let now = Instant::now();
+    tracker.observe(&beacon_at("replica-a", 1, 1, 7), now).unwrap();
+
+    // Suspect (past the 10s suspect window, before the 30s dead window) still counts its last frontier.
+    assert_eq!(
+        tracker.applied_frontier("replica-a", now + Duration::from_secs(20)),
+        Some(7),
+    );
+}
+
+#[test]
+fn test_applied_frontier_drops_once_the_beacon_is_dead() {
+    let tracker = tracker();
+    let now = Instant::now();
+    tracker.observe(&beacon_at("replica-a", 1, 1, 7), now).unwrap();
+
+    // Past the dead window a silent member holds nothing the group can guarantee.
+    assert_eq!(
+        tracker.applied_frontier("replica-a", now + Duration::from_secs(31)),
+        None
+    );
+}
+
+#[test]
+fn test_applied_frontier_is_none_for_an_unobserved_or_unconfigured_node() {
+    let tracker = tracker();
+    let now = Instant::now();
+
+    assert_eq!(tracker.applied_frontier("replica-b", now), None);
+    assert_eq!(tracker.applied_frontier("stranger", now), None);
+}
+
+#[test]
+fn test_applied_frontier_is_none_for_a_beat_that_reports_no_frontier() {
+    let tracker = tracker();
+    let now = Instant::now();
+    tracker.observe(&beacon("replica-a", 1, 1), now).unwrap();
+
+    assert_eq!(tracker.applied_frontier("replica-a", now), None);
+}
+
+#[test]
+fn test_summary_carries_the_reported_frontier() {
+    let tracker = tracker();
+    let now = Instant::now();
+    tracker.observe(&beacon_at("replica-a", 1, 1, 9), now).unwrap();
+
+    let summary = tracker.summary(now);
+    let peer = summary.iter().find(|peer| peer.node == "replica-a").unwrap();
+    assert_eq!(peer.applied, Some(9));
+    let unheard = summary.iter().find(|peer| peer.node == "replica-b").unwrap();
+    assert_eq!(unheard.applied, None);
 }

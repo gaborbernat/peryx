@@ -92,6 +92,17 @@ pub enum HarnessError {
     },
 }
 
+impl HarnessError {
+    /// Whether a node aborted startup because another process had already bound its port. Ports are
+    /// drawn by binding `:0` and releasing, so a parallel test can claim a just-freed port before this
+    /// node's child re-binds it; the child then dies with `EADDRINUSE`. A whole-cluster retry on fresh
+    /// ports clears it, since the port is baked into every node's shared roster and cannot be swapped
+    /// after the fact.
+    fn is_port_collision(&self) -> bool {
+        matches!(self, Self::ExitedEarly { log, .. } if log.contains("Address already in use"))
+    }
+}
+
 /// The availability mode a node runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -206,9 +217,29 @@ impl Topology {
 
     /// Spawn every member and wait until each answers `/+status`.
     ///
+    /// A member whose freed port a parallel test reclaimed before its child re-bound it aborts with
+    /// `EADDRINUSE`; because the port is fixed in every node's shared roster it cannot be swapped in
+    /// place, so the whole cluster is torn down and retried on a fresh draw. Independent draws colliding
+    /// on every attempt is vanishingly unlikely, so a small bound removes the race without masking a
+    /// genuine bind failure, which recurs on every attempt and surfaces on the last.
+    ///
     /// # Errors
     /// Returns the first [`HarnessError`] a node reports while coming up.
     pub fn start(&self) -> Result<Cluster, HarnessError> {
+        const ATTEMPTS: usize = 5;
+        let mut attempt = 1;
+        loop {
+            match self.spawn_once() {
+                Ok(cluster) => return Ok(cluster),
+                Err(error) if attempt < ATTEMPTS && error.is_port_collision() => attempt += 1,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// One attempt at spawning the cluster on a fresh port draw. A partial cluster whose later member
+    /// fails is dropped here, so [`Node`]'s own `Drop` kills every process it already started.
+    fn spawn_once(&self) -> Result<Cluster, HarnessError> {
         let addresses: Vec<(u16, u16)> = self.members.iter().map(|_| (free_port(), free_port())).collect();
         let roster = self.roster_toml(&addresses);
         let writer = (self.mode != Mode::None).then(|| self.writer(&addresses));

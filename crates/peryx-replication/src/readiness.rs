@@ -70,7 +70,8 @@ impl DurabilityPolicy {
 }
 
 /// Why a group cannot acknowledge a new write at its policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReadinessBlocker {
     /// No member with the writer role is reporting a frontier, so no new authoritative write can be
     /// issued or acknowledged until the writer returns.

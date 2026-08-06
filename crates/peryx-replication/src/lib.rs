@@ -35,6 +35,7 @@ mod http;
 mod ingress_intent;
 mod liveness;
 mod multi_peer;
+mod multi_pull;
 mod ownership;
 mod peer;
 mod peer_http;
@@ -95,7 +96,7 @@ pub use failover::{Candidate, Failover, FailoverPolicy};
 pub use filesystem_ack::{FilesystemAck, ReceiptOutcome};
 pub use http::{
     DEFAULT_MAX_CHANGE_PAGE_SIZE, DEFAULT_MAX_CONCURRENT_BLOB_STREAMS, HttpPrimary, HttpPrimaryError,
-    PrimaryHttpConfigError, primary_router, primary_router_with_stream_limit,
+    PrimaryHttpConfigError, follower_router, primary_router, primary_router_with_stream_limit,
 };
 pub use ingress_intent::{
     Ecosystem, IngressIntent, IntentKey, IntentLedger, IntentState, StageOutcome, TransitionOutcome,
@@ -105,6 +106,7 @@ pub use liveness::{
     LivenessTracker, PeerHealth, Suspicion, liveness_router,
 };
 pub use multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RoundReport, SetLimits};
+pub use multi_pull::{PullRound, pull_round};
 pub use ownership::{
     AppliedMeta, Assignment, AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipError,
     OwnershipState, Rejection, TransferRecord,

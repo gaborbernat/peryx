@@ -140,6 +140,9 @@ pub struct PeerSet<T: PeerTransport> {
     limits: SetLimits,
     policy: ReconnectPolicy,
     cursor: usize,
+    source: Option<String>,
+    head: u64,
+    version: u16,
 }
 
 impl<T: PeerTransport> PeerSet<T> {
@@ -151,7 +154,33 @@ impl<T: PeerTransport> PeerSet<T> {
             limits,
             policy,
             cursor: 0,
+            source: None,
+            head: 0,
+            version: crate::protocol::PROTOCOL_VERSION,
         }
+    }
+
+    /// The protocol version the peers last advertised. A driver stamps this on the page it applies so the
+    /// apply path still rejects a peer speaking an unsupported version, the same as the single-source
+    /// sync did.
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// The authoritative stream source the peers last advertised, or `None` before any answered. Every
+    /// peer serves the same writer's stream, so this is the single identity a follower stamps its own
+    /// relayed pages with and a replica applies under.
+    #[must_use]
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// The highest head serial any peer has advertised, so the caller can report how far the replica lags
+    /// the stream even in a round that did not reach it.
+    #[must_use]
+    pub const fn head(&self) -> u64 {
+        self.head
     }
 
     /// Add a verified peer, resuming from its durably persisted `frontier`.
@@ -185,6 +214,20 @@ impl<T: PeerTransport> PeerSet<T> {
     #[must_use]
     pub fn buffered(&self, source: &str) -> Option<usize> {
         self.member(source).map(|member| member.channel.len())
+    }
+
+    /// The source identity of every peer in the set, in join order, so a driver can drain and commit
+    /// each after a round.
+    #[must_use]
+    pub fn sources(&self) -> Vec<String> {
+        self.members.iter().map(|member| member.source.clone()).collect()
+    }
+
+    /// Whether the set holds no peers, so a caller can tell an unconfigured multi-peer set from one that
+    /// is merely idle.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.members.is_empty()
     }
 
     /// Take every buffered change from a peer, in serial order, for the caller to apply and commit.
@@ -277,10 +320,17 @@ impl<T: PeerTransport> PeerSet<T> {
             Ok(frame) => frame,
             Err(error) => return self.back_off(index, &error, now),
         };
+        // Record the advertised version before contiguity validation, so a peer speaking an unsupported
+        // version is still surfaced even when it advertises an empty page a validation would reject first.
+        self.version = frame.page().version;
         let (reached, caught_up) = match validate_contiguous(after, frame.page()) {
             Ok(progress) => progress,
             Err(error) => return self.back_off(index, &error, now),
         };
+        if !frame.page().source.is_empty() {
+            self.source = Some(frame.page().source.clone());
+        }
+        self.head = self.head.max(frame.page().current_serial);
         let member = &mut self.members[index];
         member.attempt = 0;
         member.health = Health::Ready;

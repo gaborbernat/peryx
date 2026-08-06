@@ -63,7 +63,7 @@ async fn test_none_mode_spawns_no_availability_background_work(#[case] build: fn
     let state = build_state(&config).unwrap();
     assert!(!state.read_only, "none retains single-node write behavior");
 
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
     assert!(!runtime.is_replica());
     assert_eq!(runtime.sync_cycle().await, None, "no replica loop to cycle");
     assert!(

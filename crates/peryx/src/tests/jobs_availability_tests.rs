@@ -634,7 +634,7 @@ async fn start_primary() -> (tempfile::TempDir, String, tokio::task::JoinHandle<
 async fn test_a_replica_surfaces_feature_state_only_within_its_frontier() {
     let (_primary_dir, upstream, serve) = start_primary().await;
     let dir = tempfile::tempdir().unwrap();
-    let (state, router, runtime) = replica_node(&dc_replica_config(&dir, &upstream));
+    let (state, router, mut runtime) = replica_node(&dc_replica_config(&dir, &upstream));
     let root = admin(&state).await;
 
     // Partitioned: no cycle has run, so the replica holds nothing past serial zero and cannot see the
@@ -724,6 +724,8 @@ fn committed(index: u64) -> CommandReceipt {
         term: 5,
         index,
         outcome: CommandOutcome::Committed,
+        old_voters: Vec::new(),
+        new_voters: Vec::new(),
     }
 }
 

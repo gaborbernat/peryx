@@ -6,32 +6,55 @@ use crate::index::{Index, IndexKind};
 
 /// Immutable repository-route positions for request dispatch.
 pub struct RouteResolver {
-    positions: HashMap<Box<str>, usize>,
+    root: Node,
+}
+
+/// One segment of the route trie: the index position registered at this exact prefix, if any, and the
+/// children reached by the next path segment.
+#[derive(Default)]
+struct Node {
+    position: Option<usize>,
+    children: HashMap<Box<str>, Self>,
 }
 
 impl RouteResolver {
-    /// Copy validated routes once so request lookup can borrow path slices.
+    /// Index every route as a chain of segment nodes so a later lookup hashes each request segment once
+    /// instead of re-hashing the whole prefix at every depth.
     #[must_use]
     pub fn new(indexes: &[Index]) -> Self {
-        Self {
-            positions: indexes
-                .iter()
-                .enumerate()
-                .map(|(position, index)| (Box::from(index.route.as_str()), position))
-                .collect(),
+        let mut root = Node::default();
+        for (position, index) in indexes.iter().enumerate() {
+            let mut node = &mut root;
+            for segment in index.route.split('/') {
+                node = node.children.entry(Box::from(segment)).or_default();
+            }
+            node.position = Some(position);
         }
+        Self { root }
     }
 
-    /// Resolve the longest segment-aligned route prefix without allocating.
+    /// Resolve the longest segment-aligned route prefix without allocating, in one linear forward pass:
+    /// walk the trie segment by segment, remembering the deepest node that is itself a route.
     #[must_use]
     pub fn resolve<'a>(&self, path: &'a str) -> Option<(usize, &'a str)> {
-        let mut end = path.len();
+        let mut node = &self.root;
+        let mut best: Option<(usize, usize)> = None;
+        let mut start = 0;
         loop {
-            if let Some(&position) = self.positions.get(&path[..end]) {
-                return Some((position, if end == path.len() { "" } else { &path[end + 1..] }));
+            let end = path[start..].find('/').map_or(path.len(), |offset| start + offset);
+            let Some(child) = node.children.get(&path[start..end]) else {
+                break;
+            };
+            node = child;
+            if let Some(position) = node.position {
+                best = Some((position, end));
             }
-            end = path[..end].rfind('/')?;
+            if end == path.len() {
+                break;
+            }
+            start = end + 1;
         }
+        best.map(|(position, end)| (position, if end == path.len() { "" } else { &path[end + 1..] }))
     }
 }
 
@@ -116,6 +139,57 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn test_route_resolver_walks_through_a_non_terminal_prefix() {
+        let indexes = vec![index("deep", "a/b/c", hosted())];
+        let resolver = RouteResolver::new(&indexes);
+        assert_eq!(
+            [
+                resolver.resolve("a"),
+                resolver.resolve("a/b"),
+                resolver.resolve("a/b/c"),
+                resolver.resolve("a/b/c/d"),
+                resolver.resolve("a/x/c"),
+            ],
+            [None, None, Some((0, "")), Some((0, "d")), None]
+        );
+    }
+
+    #[test]
+    fn test_route_resolver_matches_the_naive_reference_on_arbitrary_paths() {
+        let indexes = vec![
+            index("root", "team", hosted()),
+            index("dev", "team/dev", hosted()),
+            index("deep", "team/dev/tools", hosted()),
+        ];
+        let resolver = RouteResolver::new(&indexes);
+        for path in [
+            "team",
+            "team/",
+            "team/dev",
+            "team/dev/tools",
+            "team/dev/tools/extra",
+            "team/development",
+            "team//dev",
+            "other",
+            "",
+        ] {
+            assert_eq!(resolver.resolve(path), naive_resolve(&indexes, path), "path {path:?}");
+        }
+    }
+
+    fn naive_resolve<'a>(indexes: &[Index], path: &'a str) -> Option<(usize, &'a str)> {
+        let mut best: Option<(usize, &str)> = None;
+        for (position, index) in indexes.iter().enumerate() {
+            if let Some(rest) = remainder(path, &index.route)
+                && best.is_none_or(|(current, _)| index.route.len() > indexes[current].route.len())
+            {
+                best = Some((position, rest));
+            }
+        }
+        best
     }
 
     #[test]

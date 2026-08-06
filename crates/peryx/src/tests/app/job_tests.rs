@@ -288,10 +288,35 @@ fn test_job_reindex_rebuilds_the_search_index_and_records_a_node_wide_run() {
 #[test]
 fn test_job_drain_finalizes_retained_intents_and_records_an_authority_drain_run() {
     let (_dir, meta, config) = store_and_config();
-    meta.stage_intent("corp\u{0}flask\u{0}k1", "digest-a", 3, b"body", 100, 1)
-        .unwrap();
-    meta.stage_intent("corp\u{0}flask\u{0}k2", "digest-b", 4, b"body2", 100, 1)
-        .unwrap();
+    let limits = peryx_storage::meta::IntentLimits {
+        max_records: 100,
+        max_bytes: 1 << 20,
+        backpressure_percent: 80,
+    };
+    meta.stage_intent(
+        peryx_storage::meta::IntentAdmission {
+            authority: "corp/flask",
+            key: "corp\u{0}flask\u{0}k1",
+            digest: "digest-a",
+            size: 3,
+            payload: b"body",
+        },
+        limits,
+        1,
+    )
+    .unwrap();
+    meta.stage_intent(
+        peryx_storage::meta::IntentAdmission {
+            authority: "corp/flask",
+            key: "corp\u{0}flask\u{0}k2",
+            digest: "digest-b",
+            size: 4,
+            payload: b"body2",
+        },
+        limits,
+        1,
+    )
+    .unwrap();
     drop(meta);
     let mut out = Vec::new();
 

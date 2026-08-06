@@ -67,8 +67,8 @@ a write, the ingress datacenter that received it retains it as an intent (see th
 [availability contracts](@/core/availability-contracts.md)). When the home moves, those intents have to be finalized at
 the new home. That is the drain, run with [`peryx job drain`](@/core/cli.md#job-drain):
 
-- **Ordered.** It finalizes the retained intents in a stable key order, so the drain is deterministic and two operators
-  running it reach the same result.
+- **Ordered.** It finalizes the retained intents in the stable order they were admitted, held by a durable never-reused
+  sequence that survives a restart, so the drain is deterministic and two operators running it reach the same result.
 - **Resumable.** Each finalize only advances an intent, never re-applies it, so a drain interrupted partway resumes at
   the first intent still pending rather than double-finalizing the ones already settled. Re-running a completed drain is
   a no-op.

@@ -1732,9 +1732,24 @@ async fn test_write_ledger_reap_drains_settled_rows_and_keeps_pending() {
     // retention window has elapsed by then. An admitted intent and a finalized operation are reaped; a
     // pending intent whose write may still finalize is kept.
     let past = -3000;
+    let limits = peryx_storage::meta::IntentLimits {
+        max_records: 1000,
+        max_bytes: 1 << 20,
+        backpressure_percent: 80,
+    };
     state
         .meta
-        .stage_intent("done", "digest-a", 10, b"x", 1000, past)
+        .stage_intent(
+            peryx_storage::meta::IntentAdmission {
+                authority: "auth",
+                key: "done",
+                digest: "digest-a",
+                size: 10,
+                payload: b"x",
+            },
+            limits,
+            past,
+        )
         .unwrap();
     state
         .meta
@@ -1742,7 +1757,17 @@ async fn test_write_ledger_reap_drains_settled_rows_and_keeps_pending() {
         .unwrap();
     state
         .meta
-        .stage_intent("live", "digest-b", 10, b"x", 1000, past)
+        .stage_intent(
+            peryx_storage::meta::IntentAdmission {
+                authority: "auth",
+                key: "live",
+                digest: "digest-b",
+                size: 10,
+                payload: b"x",
+            },
+            limits,
+            past,
+        )
         .unwrap();
     state.meta.claim_operation("op", Some(0), past).unwrap();
     state

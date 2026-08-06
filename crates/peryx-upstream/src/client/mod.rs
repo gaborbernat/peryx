@@ -696,17 +696,22 @@ fn validate_content_range(headers: &HeaderMap, start: u64, end: u64) -> Result<(
     let Some(rest) = value.strip_prefix("bytes ") else {
         return Err(RangeError::Invalid(format!("unexpected Content-Range {value:?}")));
     };
-    let Some((actual, _total)) = rest.split_once('/') else {
+    let Some((actual, total)) = rest.split_once('/') else {
         return Err(RangeError::Invalid(format!("unexpected Content-Range {value:?}")));
     };
     let Some((actual_start, actual_end)) = actual.split_once('-') else {
         return Err(RangeError::Invalid(format!("unexpected Content-Range {value:?}")));
     };
-    if actual_start.parse::<u64>().ok() == Some(start) && actual_end.parse::<u64>().ok() == Some(end) {
-        Ok(())
-    } else {
-        Err(RangeError::Invalid(format!(
+    if actual_start.parse::<u64>().ok() != Some(start) || actual_end.parse::<u64>().ok() != Some(end) {
+        return Err(RangeError::Invalid(format!(
             "expected Content-Range bytes {start}-{end}, got {value:?}"
-        )))
+        )));
     }
+    // RFC 9110: complete-length is "*" (unknown) or a decimal strictly greater than last-byte-pos.
+    if total != "*" && total.parse::<u64>().ok().is_none_or(|total| total <= end) {
+        return Err(RangeError::Invalid(format!(
+            "invalid Content-Range total for bytes {start}-{end}, got {value:?}"
+        )));
+    }
+    Ok(())
 }

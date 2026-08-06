@@ -167,6 +167,29 @@ async fn test_fetch_range_requests_identity_bytes() {
     assert!(client.may_support_ranges());
 }
 
+#[tokio::test]
+async fn test_fetch_range_accepts_unknown_total() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/pkg.whl"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 1-3/*")
+                .set_body_bytes(b"hee".to_vec()),
+        )
+        .mount(&server)
+        .await;
+    let client = simple_client(&server);
+
+    let bytes = client
+        .fetch_range(&format!("{}/files/pkg.whl", server.uri()), 1, 3)
+        .await
+        .unwrap();
+
+    assert_eq!(&bytes[..], b"hee");
+    assert!(client.may_support_ranges());
+}
+
 #[rstest]
 #[case::unsupported_status(200, None, b"whole-file".as_slice())]
 #[case::missing_content_range(206, None, b"hee".as_slice())]
@@ -174,6 +197,9 @@ async fn test_fetch_range_requests_identity_bytes() {
 #[case::missing_total(206, Some("bytes 1-3"), b"hee".as_slice())]
 #[case::missing_span(206, Some("bytes 1/5"), b"hee".as_slice())]
 #[case::offset_mismatch(206, Some("bytes 2-4/5"), b"hee".as_slice())]
+#[case::end_mismatch(206, Some("bytes 1-4/6"), b"hee".as_slice())]
+#[case::non_numeric_total(206, Some("bytes 1-3/not-a-number"), b"hee".as_slice())]
+#[case::total_not_past_end(206, Some("bytes 1-3/3"), b"hee".as_slice())]
 #[tokio::test]
 async fn test_fetch_range_disables_on_bad_range_response(
     #[case] status: u16,

@@ -46,7 +46,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             };
         }
         let tags = self.visible_tag_names(state, name, repo, active, &members).await?;
-        Ok(tag_list_response(name, tags, query))
+        Ok(tag_list_response(name, &tags, query))
     }
 
     /// Collect tag names in member-shadowing order, with tombstones masking only their own or lower
@@ -456,7 +456,7 @@ fn referrers_response(manifests: &[serde_json::Value], filter: Option<&str>) -> 
 
 /// Apply distribution-spec `n`/`last` pagination to a sorted set: the page after `last`, truncated to
 /// `n`, and the `(n, last-of-page)` cursor for a `Link` when more remains.
-fn paginate(items: std::collections::BTreeSet<String>, query: &str) -> (Vec<String>, Option<(usize, String)>) {
+fn paginate(items: &std::collections::BTreeSet<String>, query: &str) -> (Vec<String>, Option<(usize, String)>) {
     let params = query_params(query);
     let last = params.get("last").map_or("", String::as_str);
     let limit = params.get("n").and_then(|value| value.parse::<usize>().ok());
@@ -466,17 +466,20 @@ fn paginate(items: std::collections::BTreeSet<String>, query: &str) -> (Vec<Stri
     if limit == Some(0) {
         return (Vec::new(), None);
     }
-    let mut page: Vec<String> = items.into_iter().filter(|item| item.as_str() > last).collect();
-    let next = limit.filter(|&n| page.len() > n).map(|n| {
-        page.truncate(n);
-        (n, page.last().cloned().unwrap_or_default())
-    });
+    // The set is sorted, so `range` seeks past `last` and yields the tail lazily; only `n`/`n+1`
+    // members are ever visited, keeping peak memory proportional to the page rather than the set.
+    let mut rest = items.range::<str, _>((std::ops::Bound::Excluded(last), std::ops::Bound::Unbounded));
+    let Some(n) = limit else {
+        return (rest.cloned().collect(), None);
+    };
+    let page: Vec<String> = rest.by_ref().take(n).cloned().collect();
+    let next = rest.next().and_then(|_| page.last()).map(|marker| (n, marker.clone()));
     (page, next)
 }
 
 /// Build a `tags/list` response over a sorted tag set, applying `n`/`last` pagination and a `Link`
 /// header to the next page when the set is truncated.
-fn tag_list_response(name: &str, tags: std::collections::BTreeSet<String>, query: &str) -> Response {
+fn tag_list_response(name: &str, tags: &std::collections::BTreeSet<String>, query: &str) -> Response {
     let (page, next) = paginate(tags, query);
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -513,7 +516,7 @@ pub(super) fn serve_catalog(state: &ServingState, query: &str) -> Result<Respons
             });
         }
     }
-    let (page, next) = paginate(repositories, query);
+    let (page, next) = paginate(&repositories, query);
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");

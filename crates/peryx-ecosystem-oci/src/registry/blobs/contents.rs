@@ -9,18 +9,24 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use peryx_storage::archive::{self, ArchiveError, MemberChunk};
 
-/// The `member` (and its `offset`) a layer-contents request selects, or `None` to list the layer.
-pub(super) fn layer_query_member(query: &str) -> Option<(String, u64)> {
+/// The `member` (and its `offset`) a layer-contents request selects, or `None` to list the layer. A
+/// malformed `offset` is a client mistake, not a silent seek to zero, so it fails the request rather
+/// than hiding the bad parameter behind a preview from the start of the member.
+pub(super) fn layer_query_member(query: &str) -> Result<Option<(String, u64)>, Response> {
     let mut member = None;
     let mut offset = 0;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "member" => member = Some(value.into_owned()),
-            "offset" => offset = value.parse().unwrap_or(0),
+            "offset" => {
+                offset = value
+                    .parse()
+                    .map_err(|_| (StatusCode::BAD_REQUEST, "offset must be a non-negative integer").into_response())?;
+            }
             _ => {}
         }
     }
-    member.map(|member| (member, offset))
+    Ok(member.map(|member| (member, offset)))
 }
 
 /// A synthetic filename that tells the archive engine how the layer blob is framed. The engine picks

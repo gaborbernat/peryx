@@ -10,9 +10,9 @@ use peryx_storage::meta::MetaStore;
 
 use super::snapshot::config_snapshot;
 use super::{
-    BACKUP_FORMAT, BLOB_INDEX_HEADER, BackupManifest, ManifestAvailability, ManifestBlobIndex, ManifestFile,
-    backup_blob_path, backup_blob_relpath, config_availability, copy_hashed, hash_existing_file, is_empty_dir,
-    unix_now, write_hashed, write_manifest,
+    Access, BACKUP_FORMAT, BLOB_INDEX_HEADER, BackupManifest, ManifestAvailability, ManifestBlobIndex, ManifestFile,
+    backup_blob_path, backup_blob_relpath, config_availability, copy_hashed, create_private_dir_all,
+    hash_existing_file, is_empty_dir, tighten_private_dir, unix_now, write_hashed, write_manifest,
 };
 use crate::config::Config;
 
@@ -34,44 +34,21 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
         &config.data_dir.join("peryx.redb"),
         &path.join("metadata/peryx.redb"),
         "metadata/peryx.redb",
+        Access::Private,
     )
     .context(metadata_context)?;
 
     let source_blobs = BlobStorage::filesystem(config.data_dir.join("blobs"));
-    let mut blob_count = 0_u64;
-    let mut blob_bytes = 0_u64;
-    let (metadata_frontier, placements, writer_identity) = {
+    let (blob_count, blob_bytes, metadata_frontier, placements, writer_identity) = {
         let meta = MetaStore::open_existing(path.join("metadata/peryx.redb")).context("open copied metadata store")?;
         let mut index = BufWriter::new(File::create(path.join("blobs.tsv")).context("create blobs.tsv")?);
         writeln!(index, "{BLOB_INDEX_HEADER}")?;
-        for digest in crate::app::referenced_blob_digests(&meta).context("scan metadata blob references")? {
-            let digest = Digest::from_hex(&digest).context("metadata scan returned an invalid digest")?;
-            let source = source_blobs
-                .blocking()
-                .materialize(&digest)
-                .with_context(|| format!("referenced blob {} is missing", digest.as_str()))?;
-            let backup_path = backup_blob_path(path, &digest);
-            let copied = copy_hashed(source.path(), &backup_path, &backup_blob_relpath(&digest))
-                .context(format!("copy referenced blob {}", digest.as_str()))?;
-            if copied.sha256 != digest.as_str() {
-                bail!(
-                    "referenced blob {} hashed as {} while copying",
-                    digest.as_str(),
-                    copied.sha256
-                );
-            }
-            blob_count += 1;
-            blob_bytes += copied.size_bytes;
-            let digest_hex = digest.as_str();
-            let size = copied.size_bytes;
-            let relpath = backup_blob_relpath(&digest);
-            writeln!(index, "{digest_hex}\t{size}\t{relpath}")?;
-        }
+        let (blob_count, blob_bytes) = copy_referenced_blobs(&meta, &source_blobs, path, &mut index)?;
         index.into_inner()?.sync_all()?;
         let metadata_frontier = meta.current_serial().context("read metadata frontier")?;
         let placements = meta.count_artifact_placements().context("count artifact placements")?;
         let writer_identity = meta.writer_identity().context("read metadata writer identity")?;
-        (metadata_frontier, placements, writer_identity)
+        (blob_count, blob_bytes, metadata_frontier, placements, writer_identity)
     };
     let (mode, membership) = config_availability(config);
     let availability = ManifestAvailability {
@@ -120,6 +97,47 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
     Ok(())
 }
 
+/// Copy every blob the metadata store references into the backup, writing one index row per blob and
+/// returning the count and total bytes. Blobs are content-addressed artifacts, so they carry the
+/// platform-default mode under the owner-only backup root rather than a private one.
+fn copy_referenced_blobs(
+    meta: &MetaStore,
+    source_blobs: &BlobStorage,
+    path: &Path,
+    index: &mut impl Write,
+) -> anyhow::Result<(u64, u64)> {
+    let mut blob_count = 0_u64;
+    let mut blob_bytes = 0_u64;
+    for digest in crate::app::referenced_blob_digests(meta).context("scan metadata blob references")? {
+        let digest = Digest::from_hex(&digest).context("metadata scan returned an invalid digest")?;
+        let source = source_blobs
+            .blocking()
+            .materialize(&digest)
+            .with_context(|| format!("referenced blob {} is missing", digest.as_str()))?;
+        let relpath = backup_blob_relpath(&digest);
+        let copied = copy_hashed(
+            source.path(),
+            &backup_blob_path(path, &digest),
+            &relpath,
+            Access::Shared,
+        )
+        .context(format!("copy referenced blob {}", digest.as_str()))?;
+        if copied.sha256 != digest.as_str() {
+            bail!(
+                "referenced blob {} hashed as {} while copying",
+                digest.as_str(),
+                copied.sha256
+            );
+        }
+        blob_count += 1;
+        blob_bytes += copied.size_bytes;
+        let digest_hex = digest.as_str();
+        let size = copied.size_bytes;
+        writeln!(index, "{digest_hex}\t{size}\t{relpath}")?;
+    }
+    Ok((blob_count, blob_bytes))
+}
+
 fn prepare_new_backup_dir(path: &Path) -> anyhow::Result<()> {
     if path.exists() {
         anyhow::ensure!(
@@ -128,6 +146,7 @@ fn prepare_new_backup_dir(path: &Path) -> anyhow::Result<()> {
             path.display()
         );
         anyhow::ensure!(is_empty_dir(path)?, "backup path {} is not empty", path.display());
+        return tighten_private_dir(path);
     }
-    std::fs::create_dir_all(path).context(format!("create backup directory {}", path.display()))
+    create_private_dir_all(path)
 }

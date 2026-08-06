@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{copy_hashed, hashed_parent, write_hashed};
+use super::{Access, copy_hashed, hashed_parent, write_hashed};
 
 #[test]
 fn test_hashed_parent_names_the_enclosing_directory() {
@@ -18,7 +18,7 @@ fn test_hashed_parent_reports_a_root_path_as_parentless() {
 
 #[test]
 fn test_copy_hashed_reports_a_parentless_destination() {
-    let err = copy_hashed(Path::new("/does/not/matter"), Path::new("/"), "root").unwrap_err();
+    let err = copy_hashed(Path::new("/does/not/matter"), Path::new("/"), "root", Access::Shared).unwrap_err();
     assert!(err.to_string().contains("no parent directory"), "{err}");
 }
 

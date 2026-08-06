@@ -130,7 +130,7 @@ rcgen = "0.13.2"
 # The availability harness signals process groups through nix, a unix-only API; its callers are
 # `cfg(unix)`-gated, so other platforms compile the harness without it.
 [target.'cfg(unix)'.dev-dependencies]
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.29", features = ["fs", "signal"] }
 
 [lints]
 workspace = true

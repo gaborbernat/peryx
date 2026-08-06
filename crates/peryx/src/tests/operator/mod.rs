@@ -1,6 +1,8 @@
 mod backup_tests;
 mod import_tests;
 mod integration_tests;
+#[cfg(unix)]
+mod permission_tests;
 mod restore_tests;
 mod verify_tests;
 mod writer_tests;

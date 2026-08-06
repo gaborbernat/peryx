@@ -3,7 +3,8 @@
 use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, TransferOutcome};
 use peryx_identity::Principal;
 use peryx_storage::meta::{
-    AccountingClass, ArtifactPlacement, ArtifactSource, IntentPhase, NewQuotaReservation, OperationState,
+    AccountingClass, ArtifactPlacement, ArtifactSource, IntentAdmission, IntentLimits, IntentPhase,
+    NewQuotaReservation, OperationState,
 };
 
 use super::support::*;
@@ -31,10 +32,32 @@ fn operation() -> String {
     format!("{INTENT_KEY}:{}", digest())
 }
 
+/// Generous per-authority ceilings; the finalize tests exercise a single admission, not the bounds.
+const LIMITS: IntentLimits = IntentLimits {
+    max_records: 1_000,
+    max_bytes: 1 << 30,
+    backpressure_percent: 80,
+};
+
+/// Stage the admitted intent for `digest`, the durable record a home finalize reads.
+fn stage(meta: &MetaStore, digest: &str) {
+    meta.stage_intent(
+        IntentAdmission {
+            authority: AUTHORITY,
+            key: INTENT_KEY,
+            digest,
+            size: ARTIFACT.len() as u64,
+            payload: b"payload",
+        },
+        LIMITS,
+        1000,
+    )
+    .unwrap();
+}
+
 /// Stage the admitted intent and place the artifact's bytes, the state a home finalize reads.
 fn admit(meta: &MetaStore) {
-    meta.stage_intent(INTENT_KEY, &digest(), ARTIFACT.len() as u64, b"payload", 64, 1000)
-        .unwrap();
+    stage(meta, &digest());
     meta.put_artifact_placement(&digest(), &ArtifactPlacement::record(ArtifactSource::Hosted, true))
         .unwrap();
 }
@@ -191,11 +214,7 @@ async fn test_finalize_returns_not_staged_for_an_absent_intent() {
 async fn test_a_validation_failure_rejects_before_publication(#[case] failure: FinalizeFailure) {
     let harness = harness_with(true, true).await;
     let digest = digest();
-    harness
-        .state
-        .meta
-        .stage_intent(INTENT_KEY, &digest, ARTIFACT.len() as u64, b"payload", 64, 1000)
-        .unwrap();
+    stage(&harness.state.meta, &digest);
     // Place the bytes for every case but the one whose refusal is their absence.
     if failure != FinalizeFailure::MissingPlacement {
         harness
@@ -243,11 +262,7 @@ async fn test_a_validation_failure_rejects_before_publication(#[case] failure: F
 #[tokio::test]
 async fn test_a_transient_refusal_finalizes_on_retry_once_the_condition_clears() {
     let harness = harness_with(true, true).await;
-    harness
-        .state
-        .meta
-        .stage_intent(INTENT_KEY, &digest(), ARTIFACT.len() as u64, b"payload", 64, 1000)
-        .unwrap();
+    stage(&harness.state.meta, &digest());
     let principal = Principal::Named {
         subject: "uploader".to_owned(),
     };

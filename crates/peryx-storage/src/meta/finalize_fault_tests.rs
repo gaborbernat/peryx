@@ -8,8 +8,14 @@ use redb::{Database, StorageBackend as _};
 
 use super::*;
 use crate::meta::{
-    DRIVER_KV, INGRESS_INTENT, IntentPhase, JOURNAL, JOURNAL_BLOBS, JOURNAL_MUTATIONS, MetaDatabase, OPERATION_OUTCOME,
-    OperationState, SERIAL,
+    DRIVER_KV, INGRESS_INTENT, IntentAdmission, IntentLimits, IntentPhase, JOURNAL, JOURNAL_BLOBS, JOURNAL_MUTATIONS,
+    MetaDatabase, OPERATION_OUTCOME, OperationState, SERIAL,
+};
+
+const LIMITS: IntentLimits = IntentLimits {
+    max_records: 1_000,
+    max_bytes: 1 << 30,
+    backpressure_percent: 80,
 };
 
 mock! {
@@ -107,7 +113,19 @@ fn seeded() -> (MetaStore, Arc<InMemoryBackend>, Arc<Fault>) {
     let inner = Arc::new(InMemoryBackend::new());
     let fault = Arc::new(Fault::disabled());
     let store = open_store(inner.clone(), fault.clone(), true);
-    store.stage_intent("intent", "digest", 8, b"payload", 16, 1).unwrap();
+    store
+        .stage_intent(
+            IntentAdmission {
+                authority: "auth",
+                key: "intent",
+                digest: "digest",
+                size: 8,
+                payload: b"payload",
+            },
+            LIMITS,
+            1,
+        )
+        .unwrap();
     (store, inner, fault)
 }
 

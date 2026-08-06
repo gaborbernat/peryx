@@ -1,6 +1,13 @@
 use crate::meta::{
-    AccountingClass, FinalizeOutcome, FinalizedWrite, IntentPhase, MetaError, MetaStore, NewQuotaReservation,
-    OperationState, QuotaError, QuotaReservationRecord, QuotaValue,
+    AccountingClass, FinalizeOutcome, FinalizedWrite, IntentAdmission, IntentLimits, IntentPhase, MetaError, MetaStore,
+    NewQuotaReservation, OperationState, QuotaError, QuotaReservationRecord, QuotaValue,
+};
+
+/// Generous per-authority ceilings; these tests exercise a single admission, not the bounds.
+const LIMITS: IntentLimits = IntentLimits {
+    max_records: 1_000,
+    max_bytes: 1 << 30,
+    backpressure_percent: 80,
 };
 
 fn write(response: &[u8], expiry_unix: Option<i64>, now: i64) -> FinalizedWrite<'_> {
@@ -36,7 +43,19 @@ fn reservation(store: &MetaStore) -> QuotaReservationRecord {
 }
 
 fn staged(store: &MetaStore) {
-    store.stage_intent("intent", "digest", 8, b"payload", 16, 1).unwrap();
+    store
+        .stage_intent(
+            IntentAdmission {
+                authority: "auth",
+                key: "intent",
+                digest: "digest",
+                size: 8,
+                payload: b"payload",
+            },
+            LIMITS,
+            1,
+        )
+        .unwrap();
 }
 
 fn publish(store: &MetaStore, response: &[u8]) -> Result<FinalizeOutcome, MetaError> {

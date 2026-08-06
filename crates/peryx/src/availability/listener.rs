@@ -16,17 +16,20 @@
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::{HeaderMap, HeaderName, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use peryx_driver::authz::Decision;
 use peryx_driver::state::{AppState, ControlCommand, ControlError};
 use peryx_identity::{Resource, Scope, UserId, parse_basic};
+use peryx_replication::{AuthorityKey, DatacenterId, TransferAudit, TransferRequest};
+use serde::Deserialize;
 use serde_json::json;
 
+use crate::availability::{TransferCancelError, TransferCoordinator, TransferDriveError, TransferRunError};
 use crate::config::{AvailabilityConfig, ReplicationConfig};
 
 /// The request header a client stamps to make a command idempotent: a repeat carrying the same value
@@ -74,6 +77,7 @@ impl AvailabilityPosture {
 struct ListenerState {
     app: Arc<AppState>,
     posture: AvailabilityPosture,
+    coordinator: Arc<TransferCoordinator>,
 }
 
 /// Assemble the availability control router: an administrator-authenticated, version-prefixed surface
@@ -84,11 +88,17 @@ struct ListenerState {
 /// identity store, so an unauthenticated caller cannot probe the surface.
 ///
 /// [`AvailabilityListenerConfig`]: crate::config::AvailabilityListenerConfig
-pub fn router(app: Arc<AppState>, posture: AvailabilityPosture) -> Router {
-    let state = ListenerState { app, posture };
+pub fn router(app: Arc<AppState>, posture: AvailabilityPosture, coordinator: Arc<TransferCoordinator>) -> Router {
+    let state = ListenerState {
+        app,
+        posture,
+        coordinator,
+    };
     Router::new()
         .route("/availability/v1/status", get(status))
         .route("/availability/v1/commands", post(command))
+        .route("/availability/v1/transfers", post(start_transfer))
+        .route("/availability/v1/transfers/{authority}", delete(cancel_transfer))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES))
         .with_state(state)
@@ -203,6 +213,142 @@ fn command_error(error: &ControlError) -> Response {
         ControlError::NotLeader { .. } | ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         ControlError::Invalid(_) => StatusCode::CONFLICT,
         ControlError::Overloaded => StatusCode::TOO_MANY_REQUESTS,
+    };
+    (status, error.to_string()).into_response()
+}
+
+/// A requested fenced transfer: which authority moves, between which datacenters, and why.
+///
+/// The barrier the move waits on is the node's own current metadata serial rather than a client value, so
+/// a caller cannot ask the move to commit before the target has replicated this node's writes. The actor
+/// comes from the authenticated principal, not the body, so the audit records who truly ordered it.
+#[derive(Deserialize)]
+struct TransferBody {
+    authority: String,
+    source: String,
+    target: String,
+    reason: String,
+}
+
+/// Start a fenced authority transfer: fence it behind this node's current metadata serial, then drive it
+/// to a sealed audit through the coordinator.
+///
+/// The move commits through the ownership consensus group once the target has caught up, so it requires
+/// the [`Scope::AdministrationWrite`] scope and a node that runs a group and control plane; a node that
+/// runs neither answers `503`. A transfer already running for the authority is a `409`, a target that
+/// never reaches the barrier within the budget is a `504`, and a committed move answers with its audit.
+async fn start_transfer(
+    State(state): State<ListenerState>,
+    Extension(actor): Extension<UserId>,
+    headers: HeaderMap,
+    Json(body): Json<TransferBody>,
+) -> Response {
+    if let Some(denied) = scope_denied(&state.app, &actor, Scope::AdministrationWrite) {
+        return denied;
+    }
+    let (Some(control), Some(ownership)) = (state.app.control_plane(), state.app.ownership_authority()) else {
+        return no_consensus();
+    };
+    let barrier = match state.app.meta.current_serial() {
+        Ok(serial) => serial,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("read the transfer barrier: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let request = TransferRequest {
+        authority: AuthorityKey(body.authority),
+        source: DatacenterId(body.source),
+        target: DatacenterId(body.target),
+        actor: actor.to_string(),
+        reason: body.reason,
+        barrier,
+    };
+    let key = headers.get(&IDEMPOTENCY_KEY).and_then(|value| value.to_str().ok());
+    match state
+        .coordinator
+        .run(request, control, ownership, &state.app.meta, key)
+        .await
+    {
+        Ok(audit) => transfer_committed(&audit),
+        Err(error) => run_error(&error),
+    }
+}
+
+/// Cancel a fenced transfer that has not committed, so an operator can abandon a move whose target never
+/// caught up. Requires the [`Scope::AdministrationWrite`] scope. An unknown authority is `404`, a move
+/// that already committed is a `409`, and a cancelled move answers `204`.
+async fn cancel_transfer(
+    State(state): State<ListenerState>,
+    Extension(actor): Extension<UserId>,
+    Path(authority): Path<String>,
+) -> Response {
+    if let Some(denied) = scope_denied(&state.app, &actor, Scope::AdministrationWrite) {
+        return denied;
+    }
+    match state.coordinator.cancel(&authority).await {
+        Ok(()) => (StatusCode::NO_CONTENT, [(header::CACHE_CONTROL, "no-store")]).into_response(),
+        Err(error) => cancel_error(&error),
+    }
+}
+
+/// The `200` response carrying a sealed transfer audit: who moved what, from where to where, the barrier
+/// it waited on, and the epoch and log index the committed move minted.
+fn transfer_committed(audit: &TransferAudit) -> Response {
+    let body = json!({
+        "authority": audit.authority.0,
+        "source": audit.source.0,
+        "target": audit.target.0,
+        "actor": audit.actor,
+        "reason": audit.reason,
+        "barrier": audit.barrier,
+        "epoch": audit.epoch.0,
+        "commit_index": audit.commit_index,
+    });
+    (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+}
+
+/// The `503` a node without a consensus group and control plane answers, having nothing to commit a move
+/// through.
+fn no_consensus() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "this node runs no ownership consensus group",
+    )
+        .into_response()
+}
+
+/// Map a transfer drive failure to its HTTP response: an already-running transfer is a `409`, a target
+/// that never caught up in budget is a retryable `504`, and a drive failure resolves against its cause.
+fn run_error(error: &TransferRunError) -> Response {
+    match error {
+        TransferRunError::Busy(_) => (StatusCode::CONFLICT, error.to_string()).into_response(),
+        TransferRunError::BarrierNotReached => (StatusCode::GATEWAY_TIMEOUT, error.to_string()).into_response(),
+        TransferRunError::Drive(drive) => drive_error(drive),
+    }
+}
+
+/// Map a drive failure to its HTTP response: an unreachable target frontier or a failed persist is a
+/// retryable `503`, a plan the move refused is a `409`, and a refused commit resolves as a command does.
+fn drive_error(error: &TransferDriveError) -> Response {
+    match error {
+        TransferDriveError::Commit(control) => command_error(control),
+        TransferDriveError::Plan(plan) => (StatusCode::CONFLICT, plan.to_string()).into_response(),
+        TransferDriveError::Frontier(_) | TransferDriveError::Persist(_) => {
+            (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
+        }
+    }
+}
+
+/// Map a transfer cancel failure to its HTTP response: an unknown authority is `404`, a committed move
+/// that can no longer be cancelled is `409`.
+fn cancel_error(error: &TransferCancelError) -> Response {
+    let status = match error {
+        TransferCancelError::Unknown(_) => StatusCode::NOT_FOUND,
+        TransferCancelError::AlreadyCommitted(_) => StatusCode::CONFLICT,
     };
     (status, error.to_string()).into_response()
 }

@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::routing::get;
+use axum::{Json as AxumJson, Router};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use peryx_driver::authz::AuthorizationService;
@@ -12,12 +14,14 @@ use peryx_driver::state::{
 };
 use peryx_driver::users::UserService;
 use peryx_identity::{GrantScope, PasswordPolicy, Role};
+use peryx_replication::{ChangePage, PROTOCOL_VERSION};
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
-use serde_json::Value;
+use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tower::ServiceExt as _;
 
-use crate::availability::{AvailabilityPosture, router};
+use crate::availability::{AvailabilityPosture, FrontierSource, RosterFrontierSource, TransferCoordinator, router};
 use crate::config::{AvailabilityConfig, ReplicationConfig, SecretSource};
 
 const ADMIN: &str = "Alice";
@@ -25,10 +29,10 @@ const OPERATOR: &str = "Olivia";
 const PASSWORD: &str = "local password";
 
 async fn app() -> (tempfile::TempDir, Arc<AppState>) {
-    build_app(false).await
+    build_app(false, false).await
 }
 
-async fn build_app(break_identity_store: bool) -> (tempfile::TempDir, Arc<AppState>) {
+async fn build_app(break_identity_store: bool, break_serial: bool) -> (tempfile::TempDir, Arc<AppState>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");
     let meta = MetaStore::open(&path).unwrap();
@@ -50,6 +54,17 @@ async fn build_app(break_identity_store: bool) -> (tempfile::TempDir, Arc<AppSta
             .unwrap();
         transaction
             .open_table(redb::TableDefinition::<&str, u64>::new("server_user_verifier"))
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    if break_serial {
+        let database = redb::Database::open(&path).unwrap();
+        let transaction = database.begin_write().unwrap();
+        transaction
+            .delete_table(redb::TableDefinition::<&str, u64>::new("serial"))
+            .unwrap();
+        transaction
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new("serial"))
             .unwrap();
         transaction.commit().unwrap();
     }
@@ -82,6 +97,14 @@ fn basic(user: &str, password: &str) -> String {
     format!("Basic {}", STANDARD.encode(format!("{user}:{password}")))
 }
 
+/// A coordinator over an empty roster, for the routes that never drive a transfer.
+fn coordinator() -> Arc<TransferCoordinator> {
+    Arc::new(TransferCoordinator::new(Arc::new(RosterFrontierSource::new(
+        Vec::new(),
+        "token",
+    ))))
+}
+
 async fn request(
     state: &Arc<AppState>,
     posture: AvailabilityPosture,
@@ -92,7 +115,7 @@ async fn request(
     if let Some(value) = auth {
         builder = builder.header(header::AUTHORIZATION, value);
     }
-    let response = router(state.clone(), posture)
+    let response = router(state.clone(), posture, coordinator())
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -301,7 +324,7 @@ async fn test_revoking_administration_forbids_a_prior_administrator() {
 
 #[tokio::test]
 async fn test_identity_store_failure_is_service_unavailable() {
-    let (_dir, state) = build_app(true).await;
+    let (_dir, state) = build_app(true, false).await;
 
     let (status, _, _) = request(
         &state,
@@ -331,7 +354,7 @@ async fn test_listener_serves_then_drains_on_shutdown() {
     let shutdown = tokio_util::sync::CancellationToken::new();
     let signal = shutdown.clone();
     let server = tokio::spawn(async move {
-        axum::serve(listener, router(state, dc_writer()).into_make_service())
+        axum::serve(listener, router(state, dc_writer(), coordinator()).into_make_service())
             .with_graceful_shutdown(async move { signal.cancelled().await })
             .await
             .unwrap();
@@ -406,7 +429,7 @@ async fn post_command(
     if let Some(value) = key {
         builder = builder.header("idempotency-key", value);
     }
-    let response = router(state.clone(), dc_writer())
+    let response = router(state.clone(), dc_writer(), coordinator())
         .oneshot(builder.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();
@@ -528,4 +551,429 @@ async fn test_status_reports_command_metrics_when_a_plane_runs() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["commands"]["completed"], 1);
     assert_eq!(body["commands"]["p50_ms"], 0);
+}
+
+/// A change-feed peer reporting a fixed applied serial, so a transfer can probe a real target frontier.
+struct ChangeFeed {
+    url: String,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ChangeFeed {
+    async fn start(current_serial: u64) -> Self {
+        let router = Router::new().route(
+            "/+replication/v1/changes",
+            get(move || async move {
+                AxumJson(ChangePage {
+                    version: PROTOCOL_VERSION,
+                    source: "west".to_owned(),
+                    after: 0,
+                    current_serial,
+                    changes: Vec::new(),
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        Self {
+            url: format!("http://{address}/"),
+            task,
+        }
+    }
+}
+
+impl Drop for ChangeFeed {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A frontier reporting a fixed applied serial and signalling each probe, so a test can hold a transfer
+/// active while it drives a second request through the listener.
+struct GatedFrontier {
+    probed: Arc<Notify>,
+    applied: u64,
+}
+
+#[async_trait::async_trait]
+impl FrontierSource for GatedFrontier {
+    async fn applied_frontier(&self, _datacenter: &str) -> anyhow::Result<Option<u64>> {
+        self.probed.notify_one();
+        Ok(Some(self.applied))
+    }
+}
+
+fn gated_frontier(applied: u64) -> (Arc<dyn FrontierSource>, Arc<Notify>) {
+    let probed = Arc::new(Notify::new());
+    (
+        Arc::new(GatedFrontier {
+            probed: probed.clone(),
+            applied,
+        }),
+        probed,
+    )
+}
+
+/// A coordinator that probes `frontier` without wall-clock delay, keeping the concurrency tests fast.
+fn coordinator_over(frontier: Arc<dyn FrontierSource>) -> Arc<TransferCoordinator> {
+    Arc::new(TransferCoordinator::with_schedule(frontier, Duration::ZERO, 3))
+}
+
+/// A coordinator resolving datacenter `west` to `url`'s change feed.
+fn coordinator_for(url: &str) -> Arc<TransferCoordinator> {
+    coordinator_over(Arc::new(RosterFrontierSource::new(
+        vec![("west".to_owned(), url.to_owned())],
+        "token",
+    )))
+}
+
+fn transfer_request_body() -> Value {
+    json!({ "authority": "proj", "source": "east", "target": "west", "reason": "drain east" })
+}
+
+async fn post_transfer(
+    state: &Arc<AppState>,
+    coordinator: Arc<TransferCoordinator>,
+    auth: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    post_keyed_transfer(state, coordinator, auth, None, body).await
+}
+
+/// Post a transfer carrying an optional `Idempotency-Key`, so a replay across a retry collapses to the
+/// one committed move the first request booked.
+async fn post_keyed_transfer(
+    state: &Arc<AppState>,
+    coordinator: Arc<TransferCoordinator>,
+    auth: Option<&str>,
+    key: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/availability/v1/transfers")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(value) = auth {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = key {
+        builder = builder.header("idempotency-key", value);
+    }
+    let response = router(state.clone(), dc_writer(), coordinator)
+        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+async fn delete_transfer(
+    state: &Arc<AppState>,
+    coordinator: Arc<TransferCoordinator>,
+    auth: Option<&str>,
+    authority: &str,
+) -> StatusCode {
+    let mut builder = Request::builder()
+        .method("DELETE")
+        .uri(format!("/availability/v1/transfers/{authority}"));
+    if let Some(value) = auth {
+        builder = builder.header(header::AUTHORIZATION, value);
+    }
+    router(state.clone(), dc_writer(), coordinator)
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
+/// A node running a consensus group and control plane, so a transfer can commit and seal an audit.
+fn with_consensus(state: &Arc<AppState>, result: Result<CommandReceipt, ControlError>) {
+    state.set_ownership_authority(Arc::new(FixedGroup));
+    with_control(state, result);
+}
+
+#[tokio::test]
+async fn test_a_transfer_drives_through_the_change_feed_to_a_sealed_audit() {
+    let (_dir, state) = app().await;
+    with_consensus(&state, Ok(committed(9)));
+    let feed = ChangeFeed::start(5).await;
+
+    let (status, body) = post_transfer(
+        &state,
+        coordinator_for(&feed.url),
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["target"], "west");
+    assert_eq!(body["reason"], "drain east");
+    assert_eq!(body["commit_index"], 9);
+    assert_eq!(body["epoch"], 0);
+    // The committed move sealed a durable audit under the authority.
+    assert_eq!(state.meta.transfer_audits("proj").unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_a_repeated_transfer_idempotency_key_commits_one_move() {
+    let (_dir, state) = app().await;
+    state.set_ownership_authority(Arc::new(FixedGroup));
+    let control = with_control(&state, Ok(committed(9)));
+    let feed = ChangeFeed::start(5).await;
+    let coordinator = coordinator_for(&feed.url);
+    let auth = basic(ADMIN, PASSWORD);
+
+    let (first, _) = post_keyed_transfer(
+        &state,
+        coordinator.clone(),
+        Some(&auth),
+        Some("k1"),
+        transfer_request_body(),
+    )
+    .await;
+    let (second, _) = post_keyed_transfer(&state, coordinator, Some(&auth), Some("k1"), transfer_request_body()).await;
+
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(
+        *control.calls.lock().unwrap(),
+        1,
+        "the replay never reached the consensus group"
+    );
+}
+
+#[tokio::test]
+async fn test_a_transfer_forbids_a_non_administrator() {
+    let (_dir, state) = app().await;
+    let feed = ChangeFeed::start(5).await;
+
+    let (status, _) = post_transfer(
+        &state,
+        coordinator_for(&feed.url),
+        Some(&basic(OPERATOR, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_a_transfer_without_a_consensus_group_is_unavailable() {
+    let (_dir, state) = app().await;
+    let feed = ChangeFeed::start(5).await;
+
+    // Neither an ownership group nor a control plane is registered, so the node has nothing to commit through.
+    let (status, _) = post_transfer(
+        &state,
+        coordinator_for(&feed.url),
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_a_transfer_to_an_unreadable_target_is_unavailable() {
+    let (_dir, state) = app().await;
+    with_consensus(&state, Ok(committed(9)));
+
+    // The target resolves to an unusable address, so the frontier probe fails and the move cannot proceed.
+    let coordinator = coordinator_over(Arc::new(RosterFrontierSource::new(
+        vec![("west".to_owned(), "not a url".to_owned())],
+        "token",
+    )));
+    let (status, _) = post_transfer(
+        &state,
+        coordinator,
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_a_transfer_that_never_reaches_the_barrier_times_out() {
+    let (_dir, state) = app().await;
+    with_consensus(&state, Ok(committed(9)));
+    // Raise this node's serial above the target's, so the target never reaches the barrier.
+    for _ in 0..10 {
+        state.meta.next_serial().unwrap();
+    }
+    let feed = ChangeFeed::start(5).await;
+
+    let (status, _) = post_transfer(
+        &state,
+        coordinator_for(&feed.url),
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert!(state.meta.transfer_audits("proj").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_a_transfer_with_an_unreadable_barrier_is_unavailable() {
+    let (_dir, state) = build_app(false, true).await;
+    with_consensus(&state, Ok(committed(9)));
+    let feed = ChangeFeed::start(5).await;
+
+    // The node runs a consensus group, but its serial cannot be read, so the barrier is unavailable.
+    let (status, _) = post_transfer(
+        &state,
+        coordinator_for(&feed.url),
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_a_transfer_whose_commit_is_refused_maps_the_control_error() {
+    let (_dir, state) = app().await;
+    with_consensus(&state, Err(ControlError::NotLeader { leader: None }));
+    let feed = ChangeFeed::start(5).await;
+
+    let (status, _) = post_transfer(
+        &state,
+        coordinator_for(&feed.url),
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    // The target caught up but the commit was refused, so the move resolves as the command would.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(state.meta.transfer_audits("proj").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_cancelling_an_unregistered_transfer_is_not_found() {
+    let (_dir, state) = app().await;
+
+    let status = delete_transfer(&state, coordinator(), Some(&basic(ADMIN, PASSWORD)), "ghost").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_cancelling_a_transfer_forbids_a_non_administrator() {
+    let (_dir, state) = app().await;
+
+    let status = delete_transfer(&state, coordinator(), Some(&basic(OPERATOR, PASSWORD)), "proj").await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_cancelling_a_committed_transfer_is_refused() {
+    let (_dir, state) = app().await;
+    with_consensus(&state, Ok(committed(9)));
+    let feed = ChangeFeed::start(5).await;
+    let coordinator = coordinator_for(&feed.url);
+    let (ok, _) = post_transfer(
+        &state,
+        coordinator.clone(),
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+    assert_eq!(ok, StatusCode::OK);
+
+    // The committed transfer stays registered, so a later cancel is refused rather than lost.
+    let status = delete_transfer(&state, coordinator, Some(&basic(ADMIN, PASSWORD)), "proj").await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_a_transfer_for_a_running_authority_conflicts() {
+    let (_dir, state) = app().await;
+    with_consensus(&state, Ok(committed(9)));
+    for _ in 0..10 {
+        state.meta.next_serial().unwrap();
+    }
+    let (frontier, probed) = gated_frontier(5);
+    let coordinator = Arc::new(TransferCoordinator::with_schedule(
+        frontier,
+        Duration::from_secs(30),
+        10,
+    ));
+    let running = tokio::spawn({
+        let state = state.clone();
+        let coordinator = coordinator.clone();
+        async move {
+            post_transfer(
+                &state,
+                coordinator,
+                Some(&basic(ADMIN, PASSWORD)),
+                transfer_request_body(),
+            )
+            .await
+        }
+    });
+    probed.notified().await;
+
+    // The first transfer holds the authority, so a second for the same authority conflicts.
+    let (status, _) = post_transfer(
+        &state,
+        coordinator,
+        Some(&basic(ADMIN, PASSWORD)),
+        transfer_request_body(),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    running.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_cancelling_an_active_transfer_resolves_its_run_as_a_conflict() {
+    let (_dir, state) = app().await;
+    with_consensus(&state, Ok(committed(9)));
+    for _ in 0..10 {
+        state.meta.next_serial().unwrap();
+    }
+    let (frontier, probed) = gated_frontier(5);
+    let coordinator = Arc::new(TransferCoordinator::with_schedule(
+        frontier,
+        Duration::from_millis(10),
+        5,
+    ));
+    let running = tokio::spawn({
+        let state = state.clone();
+        let coordinator = coordinator.clone();
+        async move {
+            post_transfer(
+                &state,
+                coordinator,
+                Some(&basic(ADMIN, PASSWORD)),
+                transfer_request_body(),
+            )
+            .await
+        }
+    });
+    probed.notified().await;
+
+    // Cancelling the waiting transfer abandons its plan.
+    let cancelled = delete_transfer(&state, coordinator.clone(), Some(&basic(ADMIN, PASSWORD)), "proj").await;
+    assert_eq!(cancelled, StatusCode::NO_CONTENT);
+
+    // Its run then observes the cancelled plan and resolves as a conflict rather than a committed move.
+    tokio::time::advance(Duration::from_millis(20)).await;
+    let (status, _) = running.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(state.meta.transfer_audits("proj").unwrap().is_empty());
 }

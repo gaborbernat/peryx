@@ -108,6 +108,7 @@ tracing-journald = "0.3"
 [dev-dependencies]
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 peryx-events = { workspace = true, features = ["test-util"] }
 rstest.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "multipart"] }

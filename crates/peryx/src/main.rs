@@ -96,6 +96,38 @@ fn syslog_layer(_format: LogFormat) -> anyhow::Result<BoxedLayer> {
     anyhow::bail!("the syslog log sink requires a Unix platform")
 }
 
+/// Assemble the transfer coordinator the availability listener drives, resolving each configured
+/// datacenter to the address its change-feed answers on and authenticating every frontier probe with the
+/// node's replication token.
+fn availability_coordinator(
+    config: &Config,
+) -> anyhow::Result<std::sync::Arc<peryx::availability::TransferCoordinator>> {
+    let peers: Vec<(String, String)> = config
+        .dc_membership
+        .as_ref()
+        .map(|membership| {
+            membership
+                .members
+                .iter()
+                .map(|member| (member.dc.clone(), member.address.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let token = match config.availability.replication() {
+        Some(config::ReplicationConfig::Primary { token, .. } | config::ReplicationConfig::Replica { token, .. }) => {
+            token
+                .read()
+                .context("read the replication token for authority transfers")?
+        }
+        None => String::new(),
+    };
+    let frontier: std::sync::Arc<dyn peryx::availability::FrontierSource> =
+        std::sync::Arc::new(peryx::availability::RosterFrontierSource::new(peers, token));
+    Ok(std::sync::Arc::new(peryx::availability::TransferCoordinator::new(
+        frontier,
+    )))
+}
+
 fn run_server(config: &Config) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
@@ -151,7 +183,8 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
             config.availability_listener.clone(),
             peryx::availability::AvailabilityPosture::from_config(&config.availability),
         ) {
-            let mut listener_router = peryx::availability::router(state.clone(), posture);
+            let coordinator = availability_coordinator(config)?;
+            let mut listener_router = peryx::availability::router(state.clone(), posture, coordinator);
             // Peers dial this node's advertised address for raft RPCs, so the receive-side router rides
             // the peer-facing availability listener, not the public package routes. Without it a voter
             // sends RPCs but answers none and the group never reaches quorum.

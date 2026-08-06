@@ -654,7 +654,9 @@ async fn test_upstream_acquire_times_out_when_saturated() {
 
     let denied = limits.acquire("pypi").await;
 
-    assert!(matches!(denied, Err(UpstreamLimited { retry_after: 1 })));
+    // Retry-after mirrors the full `UPSTREAM_WAIT_TIMEOUT` (30s) we just spent, so a saturated
+    // limiter isn't hammered again a single second later.
+    assert!(matches!(denied, Err(UpstreamLimited { retry_after: 30 })));
     assert_eq!(limits.snapshots()[0].denied, 1);
     assert_eq!(limits.totals().in_flight, 1);
     assert_eq!(limits.totals().denied, 1);
@@ -670,7 +672,7 @@ async fn test_request_returns_429_when_upstream_cap_saturated() {
     drop(held);
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(headers[header::RETRY_AFTER].to_str().unwrap(), "1");
+    assert_eq!(headers[header::RETRY_AFTER].to_str().unwrap(), "30");
     assert!(body.contains("rate limit exceeded"));
 }
 
@@ -722,7 +724,7 @@ async fn test_virtual_index_surfaces_429_when_only_layer_is_rate_limited() {
     drop(held);
 
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(headers[header::RETRY_AFTER].to_str().unwrap(), "1");
+    assert_eq!(headers[header::RETRY_AFTER].to_str().unwrap(), "30");
 }
 
 #[test]

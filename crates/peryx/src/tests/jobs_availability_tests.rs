@@ -724,6 +724,8 @@ fn committed(index: u64) -> CommandReceipt {
         term: 5,
         index,
         outcome: CommandOutcome::Committed,
+        old_voters: Vec::new(),
+        new_voters: Vec::new(),
     }
 }
 

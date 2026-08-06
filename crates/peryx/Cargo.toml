@@ -110,7 +110,7 @@ aws-config.workspace = true
 aws-sdk-s3.workspace = true
 peryx-events = { workspace = true, features = ["test-util"] }
 rstest.workspace = true
-reqwest = { workspace = true, features = ["blocking", "json"] }
+reqwest = { workspace = true, features = ["blocking", "json", "multipart"] }
 tempfile = "3"
 tower = { workspace = true, features = ["util"] }
 http-body-util.workspace = true

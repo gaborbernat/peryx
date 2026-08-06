@@ -324,3 +324,35 @@ fn test_replica_recovers_metadata_after_a_writer_disconnect() {
         .expect("the writer restarts on its port");
     await_caught_up(&cluster.nodes()[replica]);
 }
+
+#[test]
+fn test_publishes_a_wheel_and_downloads_it_by_content_address() {
+    // The publish and bytes-download helpers the multiprocess proofs build on: a real upload over the
+    // legacy multipart API lands the fixture wheel on the node, and a GET of its content-addressed file
+    // URL returns exactly the bytes that were published, byte for byte.
+    let cluster = Topology::single().start().expect("cluster starts");
+    let node = &cluster.nodes()[0];
+
+    let (code, body) = node.publish().expect("publish reaches the node");
+    assert_eq!((code, body.as_str()), (200, "upload accepted"));
+
+    let (code, bytes) = node.download_wheel().expect("download reaches the node");
+    assert_eq!(code, 200);
+    assert_eq!(
+        bytes,
+        harness::WHEEL,
+        "the download returns the published bytes unchanged"
+    );
+}
+
+#[test]
+fn test_a_node_serves_only_the_blobs_it_holds() {
+    // The negative half of placing a blob on one node and not another: a node that never received the
+    // upload has no local copy, so its content-addressed download is a 404 rather than a foreign hit.
+    // The peer-serve read-through ([#923], gated on [#924]) is what later turns this miss into a fetch.
+    let cluster = Topology::single().start().expect("cluster starts");
+    let node = &cluster.nodes()[0];
+
+    let (code, _) = node.download_wheel().expect("download reaches the node");
+    assert_eq!(code, 404, "an unpublished blob has no local copy");
+}

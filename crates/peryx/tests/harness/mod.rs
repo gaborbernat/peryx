@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+use peryx_storage::blob::Digest;
 use tempfile::TempDir;
 
 pub use toxiproxy::{Proxy, Toxiproxy};
@@ -44,6 +45,26 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`Node::http_get_as`].
 pub const ADMIN_USER: &str = "harness-admin";
 pub const ADMIN_PASSWORD: &str = "harness-admin-secret";
+
+/// The write-granting secret the harness configures on every node's `hosted` index, so a test can
+/// publish a package through [`Node::publish`] with the `__token__` upload convention.
+pub const UPLOAD_TOKEN: &str = "harness-upload-secret";
+
+/// A real wheel with parseable metadata (project `veloxdemo`, version `1.0.0`), so [`Node::publish`]
+/// stages an artifact the publish path admits. Its digest and filename address the download.
+pub const WHEEL: &[u8] = include_bytes!("../../../../tests/frontend/fixtures/veloxdemo-1.0.0-py3-none-any.whl");
+/// The project and version the fixture wheel carries.
+pub const WHEEL_PROJECT: &str = "veloxdemo";
+pub const WHEEL_VERSION: &str = "1.0.0";
+pub const WHEEL_FILENAME: &str = "veloxdemo-1.0.0-py3-none-any.whl";
+
+/// The content address of the fixture [`WHEEL`]: its lowercase-hex SHA-256. The upload's
+/// `sha256_digest` field carries it, and it addresses the artifact in the download URL
+/// `/hosted/files/{digest}/{filename}`, so a test names the same blob it published.
+#[must_use]
+pub fn wheel_digest() -> String {
+    Digest::of(WHEEL).as_str().to_owned()
+}
 
 /// A harness failure, distinct from a node's own error, so a self-test can assert why the harness gave
 /// up rather than only that it did.
@@ -564,6 +585,58 @@ impl Node {
         Some((code, response.text().unwrap_or_default()))
     }
 
+    /// Publish the fixture [`WHEEL`] to this node's local `hosted` index through the legacy multipart
+    /// upload API twine and `uv publish` drive, authenticating with the `__token__` convention and
+    /// [`UPLOAD_TOKEN`]. Returns the upload's status and body (`200` and `upload accepted` on success),
+    /// or `None` when the node is unreachable.
+    ///
+    /// Publishing to one node, not another, is how a test places a blob on a single datacenter: the
+    /// bytes land only where they are uploaded, so a sibling that never replicated them answers a local
+    /// [`Self::download_wheel`] with `404` until the peer-serve read-through fills it.
+    #[must_use]
+    pub fn publish(&self) -> Option<(u16, String)> {
+        let content = reqwest::blocking::multipart::Part::bytes(WHEEL.to_vec()).file_name(WHEEL_FILENAME);
+        let form = reqwest::blocking::multipart::Form::new()
+            .text(":action", "file_upload")
+            .text("name", WHEEL_PROJECT)
+            .text("version", WHEEL_VERSION)
+            .text("filetype", "bdist_wheel")
+            .text("sha256_digest", wheel_digest())
+            .part("content", content);
+        let response = self
+            .http
+            .post(format!("http://127.0.0.1:{}/hosted/", self.port))
+            .basic_auth("__token__", Some(UPLOAD_TOKEN))
+            .multipart(form)
+            .send()
+            .ok()?;
+        let code = response.status().as_u16();
+        Some((code, response.text().unwrap_or_default()))
+    }
+
+    /// `GET {path}` against the public port, returning the status and the raw response body, or `None`
+    /// when the node is unreachable. The bytes counterpart to [`Self::http_get`], for an artifact whose
+    /// body is binary and must survive a byte-for-byte comparison rather than a lossy UTF-8 decode.
+    #[must_use]
+    pub fn download(&self, path: &str) -> Option<(u16, Vec<u8>)> {
+        let response = self
+            .http
+            .get(format!("http://127.0.0.1:{}{path}", self.port))
+            .send()
+            .ok()?;
+        let code = response.status().as_u16();
+        Some((code, response.bytes().ok()?.to_vec()))
+    }
+
+    /// Download the fixture [`WHEEL`] from this node by its content address, the local file URL a Simple
+    /// detail page points at: `GET /hosted/files/{sha256}/{filename}`. Returns the status and bytes, or
+    /// `None` when unreachable. A node that holds the blob answers `200` with bytes equal to [`WHEEL`];
+    /// one that does not answers `404`, which the peer-serve read-through turns into a remote fetch.
+    #[must_use]
+    pub fn download_wheel(&self) -> Option<(u16, Vec<u8>)> {
+        self.download(&format!("/hosted/files/{}/{WHEEL_FILENAME}", wheel_digest()))
+    }
+
     /// `GET {path}` against this node's private availability control listener with admin Basic
     /// credentials, returning the status code and body, or `None` when unreachable.
     ///
@@ -709,7 +782,12 @@ fn node_config(
         let _ = writeln!(config, "writer_identity = \"{}\"", writer.0);
         let _ = writeln!(config, "node_identity = \"{}\"\n", member.node);
     }
-    config.push_str("[[index]]\nname = \"hosted\"\nhosted = true\n\n");
+    config.push_str("[[index]]\nname = \"hosted\"\nhosted = true\nvolatile = true\n\n");
+    // A write-granting token so the publish helpers can upload; anonymous reads stay open for downloads.
+    let _ = write!(
+        config,
+        "[[index.access_token]]\nname = \"uploader\"\nsecret = \"{UPLOAD_TOKEN}\"\nprojects = [\"*\"]\nactions = [\"write\", \"delete\"]\n\n",
+    );
     if let Some(writer) = writer {
         config.push_str(roster);
         if matches!(member.role, Role::Writer) {

@@ -12,7 +12,8 @@
 //! and ecosystem that emit it, so a hosted index never reports a caching counter.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, SyncSender, TrySendError, channel, sync_channel};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,6 +41,17 @@ const MAX_USAGE_WINDOW_DAYS: i64 = 366;
 /// The current on-disk shape of the daily-usage snapshot. A snapshot written under any other schema
 /// is rebuilt from zero rather than trusted, so a forward-incompatible format never blocks startup.
 const DAILY_SCHEMA: u32 = 1;
+
+/// How many unconsumed events the recording channel buffers before [`Metrics::record`] starts
+/// dropping. Recording is loss-tolerant, so the queue caps overload at a fixed slot count rather than
+/// absorbing it into an unbounded allocation that grows with traffic duration. Each buffered download
+/// retains a handful of short strings, so the ceiling holds metrics memory to tens of megabytes even
+/// when the aggregator stalls behind slow analytics writes.
+const EVENT_QUEUE_CAPACITY: usize = 65_536;
+
+/// Log the running drop total on the first drop and then once per this many further drops, so a
+/// sustained overload stays visible in logs without emitting a line per lost event.
+const DROP_LOG_INTERVAL: u64 = 1_024;
 
 /// One request-path observation.
 #[derive(Debug, Clone)]
@@ -405,9 +417,12 @@ enum Message {
 /// The recording half handed to request handlers: a clone-cheap sender plus the shared snapshots.
 #[derive(Clone)]
 pub struct Metrics {
-    sender: Sender<Message>,
+    sender: SyncSender<Message>,
     tree: Arc<RwLock<StatsTree>>,
     daily: Arc<RwLock<DailyBuckets>>,
+    /// Events [`Metrics::record`] dropped because the bounded queue was full, so overload is
+    /// countable rather than silently swallowed into unbounded memory.
+    dropped: Arc<AtomicU64>,
     /// Dates a usage query's window; the same clock the aggregator buckets downloads by.
     clock: Clock,
     /// The daily-bucket retention bound, so a query can report and clamp to the retained floor.
@@ -422,7 +437,7 @@ impl Metrics {
     /// Panics if the OS refuses to spawn the aggregator thread.
     #[must_use]
     pub fn start() -> Self {
-        Self::spawn(None, None, system_clock())
+        Self::spawn(None, None, system_clock(), EVENT_QUEUE_CAPACITY)
     }
 
     /// Start an aggregator with durable usage: restore the persisted per-file totals and daily buckets,
@@ -434,11 +449,11 @@ impl Metrics {
     /// Panics if the OS refuses to spawn the aggregator thread.
     #[must_use]
     pub fn start_durable(store: AnalyticsHandle, retention_days: Option<u32>, clock: Clock) -> Self {
-        Self::spawn(Some(store), retention_days, clock)
+        Self::spawn(Some(store), retention_days, clock, EVENT_QUEUE_CAPACITY)
     }
 
-    fn spawn(store: Option<AnalyticsHandle>, retention_days: Option<u32>, clock: Clock) -> Self {
-        let (sender, receiver) = channel();
+    fn spawn(store: Option<AnalyticsHandle>, retention_days: Option<u32>, clock: Clock, capacity: usize) -> Self {
+        let (sender, receiver) = sync_channel(capacity);
         let mut initial = StatsTree::new();
         if let Some(snapshot) = store
             .as_ref()
@@ -472,6 +487,7 @@ impl Metrics {
             sender,
             tree,
             daily,
+            dropped: Arc::new(AtomicU64::new(0)),
             clock: query_clock,
             retention_days,
         }
@@ -569,8 +585,25 @@ impl Metrics {
     }
 
     /// Record one event; never blocks, and a stopped aggregator is ignored.
+    ///
+    /// The queue is bounded, so when the aggregator falls behind request traffic the event is dropped
+    /// rather than buffered without limit: recording is loss-tolerant, and holding a fixed memory
+    /// ceiling matters more than a stray observation. Every drop increments [`Metrics::dropped`] and,
+    /// throttled, logs the running total so sustained overload stays visible.
     pub fn record(&self, event: Event) {
-        let _ = self.sender.send(Message::Event(event));
+        if let Err(TrySendError::Full(_)) = self.sender.try_send(Message::Event(event)) {
+            let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            if total == 1 || total.is_multiple_of(DROP_LOG_INTERVAL) {
+                tracing::warn!(target: "peryx::metrics", dropped = total, "metrics event queue full, dropping event");
+            }
+        }
+    }
+
+    /// How many events [`Metrics::record`] has dropped because the bounded queue was full. A non-zero
+    /// value means the aggregator fell behind request traffic; the retained work stayed bounded.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Block until the aggregator has drained and applied every event recorded before this call, and
@@ -1277,6 +1310,39 @@ mod tests {
             source: source.map(Into::into),
             bytes,
         }
+    }
+
+    #[test]
+    fn test_record_bounds_the_queue_and_counts_drops_under_overload() {
+        // A stalled aggregator must cap retained work at the queue capacity rather than absorb overload
+        // into unbounded memory. Hold the write lock the aggregator needs to apply an event, which parks
+        // it after it has pulled at most one event off the channel, then flood the recorder well past
+        // capacity: the buffer saturates, every further record is dropped, and the drops are counted.
+        let capacity = 8;
+        let metrics = Metrics::spawn(None, None, clock_on_day(0), capacity);
+        let sends = (capacity * 4) as u64;
+        let processed = {
+            let _parked = metrics.tree.write().unwrap();
+            for _ in 0..sends {
+                metrics.record(download("pypi", "numpy", "numpy-1.whl", 1));
+            }
+            assert!(metrics.dropped() > 0, "overload was not reported");
+            sends - metrics.dropped()
+        };
+        assert!(
+            processed <= capacity as u64 + 1,
+            "retained {processed} events, past the {capacity}-slot bound",
+        );
+        metrics.settle();
+        let aggregated: u64 = metrics
+            .index_totals()
+            .values()
+            .map(|counters| counters.base.downloads)
+            .sum();
+        assert_eq!(
+            aggregated, processed,
+            "every event that was not dropped must be aggregated"
+        );
     }
 
     #[test]

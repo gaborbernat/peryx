@@ -26,11 +26,16 @@
 //! # Deferred frontier source
 //!
 //! The [`ObservedFrontier`] a candidate's readiness gates on — how far each replica and backup has
-//! durably applied — has no live runtime source yet: the per-member applied serial rides #515's liveness
-//! beacon, which is not merged. So [`DeferredFrontiers`] reports the closed `{0, 0}` frontier, exactly as
-//! the hosted-write ack defers its cross-datacenter receipt transport: selection and tombstoning run
-//! live, and readiness stays conservative until the beacon's applied frontier feeds the observer. A test
-//! injects a [`ReclamationFrontiers`] stub to exercise every readiness arm.
+//! durably applied — has no live runtime source wired here yet. The replica dimension can now ride the
+//! merged liveness beacon: a writer's `LivenessTracker::applied_frontier` reports each replica's last
+//! confirmed serial and the group's frontier is their minimum. Threading it is a follow-up, because the
+//! selector is composed in the binary from configuration alone while the tracker lives inside the
+//! replication runtime; a `ServingState` seam the composition root registers, mirroring
+//! `set_blob_reclaimer`, feeds the observer without coupling the two construction sites. The backup
+//! dimension stays deferred until a backup-applied serial exists, exactly as the hosted-write ack defers
+//! its cross-datacenter receipt transport. So [`DeferredFrontiers`] reports the closed `{0, 0}` frontier:
+//! selection and tombstoning run live, and readiness stays conservative until the beacon feeds the
+//! observer. A test injects a [`ReclamationFrontiers`] stub to exercise every readiness arm.
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;

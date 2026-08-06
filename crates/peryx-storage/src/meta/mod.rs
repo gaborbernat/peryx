@@ -10,6 +10,7 @@ use std::sync::Arc;
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase as _, TableDefinition};
 
 mod analytics;
+mod blob_chunk_digest;
 mod blob_placement;
 mod bootstrap;
 mod cross_dc_copy;
@@ -180,6 +181,7 @@ const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new
 /// so a package read resolves both dimensions with one indexed lookup and no content-store probe.
 const ARTIFACT_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("artifact_placement");
 const BLOB_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("blob_placement");
+const BLOB_CHUNK_DIGEST: TableDefinition<&str, &[u8]> = TableDefinition::new("blob_chunk_digest");
 /// The durable transfer attempts populating blob placements: one current attempt and a bounded retry
 /// history per `(digest, backend, data center, location)`, keyed by placement then attempt sequence.
 const TRANSFER_ATTEMPT: TableDefinition<&str, &[u8]> = TableDefinition::new("transfer_attempt");
@@ -321,6 +323,7 @@ impl MetaStore {
             txn.open_table(DIGEST_REVOCATION_STATE)?;
             txn.open_table(ARTIFACT_PLACEMENT)?;
             txn.open_table(BLOB_PLACEMENT)?;
+            txn.open_table(BLOB_CHUNK_DIGEST)?;
             txn.open_table(TRANSFER_ATTEMPT)?;
             txn.open_table(UPLOAD_SESSION)?;
             txn.open_table(RECLAMATION_TOMBSTONE)?;

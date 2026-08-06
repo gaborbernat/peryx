@@ -11,7 +11,7 @@ use peryx_replication::{
     BlobRequest, BlobTransport, ByteRange, CapacityLimited, CircuitConfig, DEFAULT_RECONNECT_POLICY, ReconnectPolicy,
     TransportError,
 };
-use peryx_storage::blob::{BlobError, BlobStorage, Digest};
+use peryx_storage::blob::{BlobError, BlobStorage, CHUNK_BYTES, ChunkedDigest, Digest};
 use peryx_storage::meta::{
     BackendId, BackendLocation, BlobPlacementFailure, BlobPlacementKey, BlobPlacementRecord, BlobPlacementState,
     BlobPlacementTransition, DataCenterId, MetaStore,
@@ -122,6 +122,23 @@ fn seed_verified(meta: &MetaStore, digest: &Digest, dc: &str, backend: &str, loc
         0,
     )
     .unwrap();
+}
+
+/// The chunked digest of `content` under `size`-byte chunks, for seeding the catalog.
+fn chunked(content: &[u8], size: u64) -> ChunkedDigest {
+    ChunkedDigest::of(content, std::num::NonZeroU64::new(size).unwrap())
+}
+
+/// Catalog `chunked` for `digest`, so a read-through streams it chunk by chunk.
+fn seed_chunk_digest(meta: &MetaStore, digest: &Digest, chunked: &ChunkedDigest) {
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).unwrap();
+    meta.put_blob_chunk_digest(&artifact, chunked).unwrap();
+}
+
+/// The catalogued chunked digest of `digest`, if any.
+fn stored_chunk_digest(meta: &MetaStore, digest: &Digest) -> Option<ChunkedDigest> {
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).unwrap();
+    meta.blob_chunk_digest(&artifact).unwrap()
 }
 
 fn frozen_clock(seconds: u64) -> (Arc<AtomicU64>, MonotonicClock) {
@@ -530,4 +547,223 @@ fn test_read_through_errors_render() {
 fn test_default_limits_match_the_constant() {
     assert_eq!(ReadThroughLimits::default(), DEFAULT_READ_THROUGH_LIMITS);
     assert_eq!(DEFAULT_READ_THROUGH_LIMITS.policy, DEFAULT_RECONNECT_POLICY);
+}
+
+#[tokio::test]
+async fn test_streams_a_catalogued_blob_chunk_by_chunk() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"a very large archive drawn in several bounded chunks");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    seed_chunk_digest(&meta, &digest, &chunked(&content, 8));
+    let reader = reader(
+        "home",
+        delegates([("east", serving(&content))]),
+        DEFAULT_READ_THROUGH_LIMITS,
+    );
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Served);
+    let stored = blobs.open(&digest, None).await.unwrap();
+    assert_eq!(stored.collect(u64::MAX).await.unwrap(), content);
+}
+
+#[tokio::test]
+async fn test_streaming_falls_through_per_chunk_to_a_healthy_source() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"one peer poisons every chunk, the other serves them");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    seed_verified(&meta, &digest, "west", "filesystem", "west/a", content.len() as u64);
+    seed_chunk_digest(&meta, &digest, &chunked(&content, 8));
+    let poisoned = peer(content.clone(), 0, TransportError::Disconnected, Corruption::Content);
+    let reader = reader(
+        "home",
+        delegates([("east", poisoned), ("west", serving(&content))]),
+        DEFAULT_READ_THROUGH_LIMITS,
+    );
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Served);
+    let stored = blobs.open(&digest, None).await.unwrap();
+    assert_eq!(stored.collect(u64::MAX).await.unwrap(), content);
+}
+
+#[tokio::test]
+async fn test_streaming_is_unavailable_when_every_source_poisons_a_chunk() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"no source serves an honest chunk");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    seed_chunk_digest(&meta, &digest, &chunked(&content, 8));
+    let poisoned = peer(content.clone(), 0, TransportError::Disconnected, Corruption::Content);
+    let reader = reader("home", delegates([("east", poisoned)]), DEFAULT_READ_THROUGH_LIMITS);
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Unavailable);
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_streaming_retries_a_transient_chunk_loss_then_serves() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"the first chunk fetch drops, the retry lands it");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    seed_chunk_digest(&meta, &digest, &chunked(&content, 8));
+    let flaky = peer(content.clone(), 1, TransportError::Timeout, Corruption::None);
+    let limits = ReadThroughLimits {
+        circuit: CircuitConfig {
+            trip_after: 5,
+            cooldown: Duration::from_secs(30),
+        },
+        ..DEFAULT_READ_THROUGH_LIMITS
+    };
+    let reader = reader("home", delegates([("east", flaky)]), limits);
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Served);
+    let stored = blobs.open(&digest, None).await.unwrap();
+    assert_eq!(stored.collect(u64::MAX).await.unwrap(), content);
+}
+
+#[tokio::test]
+async fn test_streaming_gives_up_when_a_chunk_source_is_terminal() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"the peer denies holding the chunk");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    seed_chunk_digest(&meta, &digest, &chunked(&content, 8));
+    let missing = peer(
+        content.clone(),
+        usize::MAX,
+        TransportError::BlobNotFound {
+            digest: digest.as_str().to_owned(),
+        },
+        Corruption::None,
+    );
+    let reader = reader("home", delegates([("east", missing)]), DEFAULT_READ_THROUGH_LIMITS);
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Unavailable);
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_streaming_commit_rejects_a_catalog_that_collides_with_a_source() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"the content the digest actually names");
+    let digest = Digest::of(&content);
+    let corrupt: Vec<u8> = content.iter().map(|byte| byte ^ 0xFF).collect();
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    // Catalog the chunks of the corrupt bytes under the honest digest, so each chunk verifies against the
+    // poisoned catalog yet the reassembled whole is not the requested content.
+    seed_chunk_digest(&meta, &digest, &chunked(&corrupt, 8));
+    let source = peer(content.clone(), 0, TransportError::Disconnected, Corruption::Content);
+    let reader = reader("home", delegates([("east", source)]), DEFAULT_READ_THROUGH_LIMITS);
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Unavailable);
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_streaming_becomes_unavailable_when_the_only_source_trips_open() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"the only peer trips its circuit and stays open");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    seed_chunk_digest(&meta, &digest, &chunked(&content, 8));
+    let down = peer(content.clone(), usize::MAX, TransportError::Timeout, Corruption::None);
+    let limits = ReadThroughLimits {
+        circuit: CircuitConfig {
+            trip_after: 1,
+            cooldown: Duration::from_secs(30),
+        },
+        ..DEFAULT_READ_THROUGH_LIMITS
+    };
+    let reader = reader("home", delegates([("east", down)]), limits);
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Unavailable);
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_streaming_surfaces_a_local_commit_fault() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let root = dir.path().join("blobs");
+    std::fs::create_dir_all(&root).unwrap();
+    // A file where the content-addressed fan-out root must be a directory: staging a chunk succeeds, but
+    // publishing the verified whole cannot create its destination path, a local fault distinct from a
+    // digest mismatch.
+    std::fs::write(root.join("sha256"), b"not a directory").unwrap();
+    let blobs = BlobStorage::filesystem(&root);
+    let content = Bytes::from_static(b"verified chunks that cannot be published");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    seed_chunk_digest(&meta, &digest, &chunked(&content, 8));
+    let reader = reader(
+        "home",
+        delegates([("east", serving(&content))]),
+        DEFAULT_READ_THROUGH_LIMITS,
+    );
+
+    let err = reader.read_through(&meta, &blobs, &digest).await.unwrap_err();
+
+    assert!(matches!(err, ReadThroughError::Blob(_)));
+}
+
+#[tokio::test]
+async fn test_whole_fallback_catalogs_the_chunk_digest_for_the_next_fetch() {
+    let (_dir, meta, blobs) = stores();
+    let content = Bytes::from_static(b"first fetch buffers the whole, and records its chunks");
+    let digest = Digest::of(&content);
+    seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    let reader = reader(
+        "home",
+        delegates([("east", serving(&content))]),
+        DEFAULT_READ_THROUGH_LIMITS,
+    );
+    assert!(stored_chunk_digest(&meta, &digest).is_none());
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Served);
+    assert_eq!(
+        stored_chunk_digest(&meta, &digest),
+        Some(ChunkedDigest::of(&content, CHUNK_BYTES))
+    );
+}
+
+#[tokio::test]
+async fn test_whole_fallback_serves_even_when_the_catalog_write_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let content = Bytes::from_static(b"served despite a read-only catalog");
+    let digest = Digest::of(&content);
+    {
+        let writable = MetaStore::open(&path).unwrap();
+        seed_verified(&writable, &digest, "east", "filesystem", "east/a", content.len() as u64);
+    }
+    let meta = MetaStore::open_existing_read_only(&path).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+    let reader = reader(
+        "home",
+        delegates([("east", serving(&content))]),
+        DEFAULT_READ_THROUGH_LIMITS,
+    );
+
+    let outcome = reader.read_through(&meta, &blobs, &digest).await.unwrap();
+
+    assert_eq!(outcome, ReadThroughOutcome::Served);
+    assert!(blobs.head(&digest).await.unwrap().is_some());
 }

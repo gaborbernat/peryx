@@ -1,10 +1,14 @@
+use std::num::NonZeroU64;
+
 use async_trait::async_trait;
 use bytes::Bytes;
-use peryx_storage::blob::Digest;
+use peryx_storage::blob::{ChunkedDigest, Digest};
 
 use crate::blob::{BlobRequest, BlobTransport, ByteRange};
 use crate::blob_piece::PieceError;
-use crate::blob_pull::{PullError, chunk_ranges, pull_ranged, pull_ranged_blob};
+use crate::blob_pull::{
+    ChunkFailure, ChunkUnavailable, PullError, chunk_ranges, pull_chunk_verified, pull_ranged, pull_ranged_blob,
+};
 use crate::blob_reassembly::ReassemblyError;
 use crate::peer::TransportError;
 
@@ -239,6 +243,120 @@ async fn test_pull_ranged_blob_verifies_the_empty_blob() {
     let bytes = pull_ranged_blob(&[&source], &expected, 0).await;
 
     assert_eq!(bytes, Ok(Bytes::new()));
+}
+
+fn chunked(content: &[u8], size: u64) -> ChunkedDigest {
+    ChunkedDigest::of(content, NonZeroU64::new(size).unwrap())
+}
+
+#[tokio::test]
+async fn test_pull_chunk_verified_returns_a_verified_chunk() {
+    let content = b"0123456789";
+    let digest = Digest::of(content);
+    let chunks = chunked(content, 4);
+    let source = serve(content);
+
+    let bytes = pull_chunk_verified(&[&source], &digest, &chunks, 1, 10).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(b"4567")));
+}
+
+#[tokio::test]
+async fn test_pull_chunk_verified_covers_the_ragged_last_chunk() {
+    let content = b"0123456789";
+    let digest = Digest::of(content);
+    let chunks = chunked(content, 4);
+    let source = serve(content);
+
+    let bytes = pull_chunk_verified(&[&source], &digest, &chunks, 2, 10).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(b"89")));
+}
+
+#[tokio::test]
+async fn test_pull_chunk_verified_falls_through_a_transport_loss() {
+    let content = b"0123456789";
+    let digest = Digest::of(content);
+    let chunks = chunked(content, 4);
+    let down = fail(TransportError::Timeout);
+    let up = serve(content);
+
+    let bytes = pull_chunk_verified(&[&down, &up], &digest, &chunks, 0, 10).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(b"0123")));
+}
+
+#[tokio::test]
+async fn test_pull_chunk_verified_falls_through_a_wrong_content_source() {
+    let content = b"0123456789";
+    let digest = Digest::of(content);
+    let chunks = chunked(content, 4);
+    let poisoned = garbage();
+    let healthy = serve(content);
+
+    let bytes = pull_chunk_verified(&[&poisoned, &healthy], &digest, &chunks, 0, 10).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(b"0123")));
+}
+
+#[tokio::test]
+async fn test_pull_chunk_verified_falls_through_a_wrong_length_source() {
+    let content = b"0123456789";
+    let digest = Digest::of(content);
+    let chunks = chunked(content, 4);
+    // A source holding only three bytes under-delivers the four-byte range, so its body is the wrong length.
+    let short = serve(b"012");
+    let healthy = serve(content);
+
+    let bytes = pull_chunk_verified(&[&short, &healthy], &digest, &chunks, 0, 10).await;
+
+    assert_eq!(bytes, Ok(Bytes::from_static(b"0123")));
+}
+
+#[tokio::test]
+async fn test_pull_chunk_verified_exhausts_and_classifies_each_failure() {
+    let content = b"0123456789";
+    let digest = Digest::of(content);
+    let chunks = chunked(content, 4);
+    let down = fail(TransportError::Timeout);
+    let poisoned = garbage();
+    let short = serve(b"01");
+
+    let result = pull_chunk_verified(&[&down, &poisoned, &short], &digest, &chunks, 0, 10).await;
+
+    assert_eq!(
+        result,
+        Err(ChunkUnavailable {
+            index: 0,
+            range: range(0, 4),
+            failures: vec![
+                (0, ChunkFailure::Transport(TransportError::Timeout)),
+                (1, ChunkFailure::DigestMismatch),
+                (2, ChunkFailure::WrongLength { expected: 4, got: 2 }),
+            ],
+        })
+    );
+}
+
+#[tokio::test]
+async fn test_chunk_unavailable_keeps_only_the_recoverable_transport_failures() {
+    let content = b"0123456789";
+    let digest = Digest::of(content);
+    let chunks = chunked(content, 4);
+    let down = fail(TransportError::Timeout);
+    let poisoned = garbage();
+    let short = serve(b"01");
+
+    let ChunkUnavailable { failures, .. } = pull_chunk_verified(&[&down, &poisoned, &short], &digest, &chunks, 0, 10)
+        .await
+        .unwrap_err();
+
+    let unavailable = ChunkUnavailable {
+        index: 0,
+        range: range(0, 4),
+        failures,
+    };
+    assert_eq!(unavailable.transport_failures(), vec![(0, TransportError::Timeout)]);
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use peryx_core::LexiconRegistry;
@@ -8,7 +9,7 @@ use peryx_core::LexiconRegistry;
 use super::Stores;
 use crate::context::IndexerCtx;
 use crate::engine::{RebuildOutcome, RebuildProgress};
-use crate::{PackageDocument, PackageIndexer, PackageSearch, PackageSource, SearchError, SearchParams};
+use crate::{PackageDocument, PackageIndexer, PackageSearch, PackageSource, SEARCH_VIEW, SearchError, SearchParams};
 
 /// A test indexer whose document set the test mutates between refreshes, so a rebuild can be shown to
 /// publish content a lazy refresh would not yet pick up.
@@ -33,6 +34,24 @@ impl PackageIndexer for NamedDocs {
                 text: name.clone(),
             })
             .collect())
+    }
+}
+
+/// Counts each derive and, when asked, advances the store serial as it derives, so a rebuild's off-lock
+/// snapshot is seen to race a concurrent mutation and re-derive under the lock.
+struct CountingDocs {
+    calls: Arc<AtomicUsize>,
+    advance_serial: bool,
+    names: Vec<&'static str>,
+}
+
+impl PackageIndexer for CountingDocs {
+    fn documents(&self, ctx: &IndexerCtx<'_>) -> Result<Vec<PackageDocument>, SearchError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if self.advance_serial {
+            ctx.meta.next_serial().unwrap();
+        }
+        Ok(self.names.iter().map(|name| pypi_doc(name, name)).collect())
     }
 }
 
@@ -248,6 +267,70 @@ fn test_search_during_a_rebuild_serves_the_prior_index() {
         .unwrap();
 
     assert_eq!(served.get(), Some(2));
+    assert_eq!(total(&search, &stores, &lexicons), 3);
+}
+
+#[test]
+fn test_rebuild_derives_once_off_lock_when_no_mutation_races() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(CountingDocs {
+        calls: calls.clone(),
+        advance_serial: false,
+        names: vec!["a", "b"],
+    }));
+    // A non-empty serial to publish, so the persisted frontier proves the snapshot's serial rather than
+    // the empty default an unwritten store shares with it.
+    stores.meta.next_serial().unwrap();
+    stores.meta.next_serial().unwrap();
+
+    search
+        .rebuild(&stores.indexer_ctx(), NonZeroUsize::new(4).unwrap(), &mut no_cancel)
+        .unwrap();
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "the derive ran once, off the writer lock"
+    );
+    assert_eq!(
+        stores.meta.view_frontier(SEARCH_VIEW).unwrap(),
+        Some(2),
+        "the off-lock snapshot's serial is the one published"
+    );
+    assert_eq!(total(&search, &stores, &lexicons), 2);
+}
+
+#[test]
+fn test_rebuild_re_derives_under_lock_when_a_mutation_advances_the_serial() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(CountingDocs {
+        calls: calls.clone(),
+        advance_serial: true,
+        names: vec!["a", "b", "c"],
+    }));
+
+    search
+        .rebuild(&stores.indexer_ctx(), NonZeroUsize::new(4).unwrap(), &mut no_cancel)
+        .unwrap();
+
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        2,
+        "the off-lock snapshot raced a serial bump, so the derive re-ran once under the lock"
+    );
+    assert_eq!(
+        stores.meta.view_frontier(SEARCH_VIEW).unwrap(),
+        Some(1),
+        "the re-derived snapshot's serial is the one published"
+    );
     assert_eq!(total(&search, &stores, &lexicons), 3);
 }
 

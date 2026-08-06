@@ -23,8 +23,8 @@ use crate::protocol::PlacementAvailability;
 
 /// One blob a metadata serial references, with the evidence deciding whether this replica can serve it.
 ///
-/// The evidence is the placement the authority advertises and whether the bytes are present and verified
-/// locally.
+/// The evidence is the placement the authority advertises, whether the bytes are present and verified
+/// locally, and whether a peer datacenter holds them for cross-DC read-through to serve on demand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferencedBlob {
     /// The metadata serial that references the blob. A digest referenced by several serials appears once
@@ -36,14 +36,19 @@ pub struct ReferencedBlob {
     pub availability: PlacementAvailability,
     /// Whether this replica holds verified bytes for the blob.
     pub present_locally: bool,
+    /// Whether the policy places the blob only on a reachable peer datacenter, so this replica defers it
+    /// to cross-DC read-through rather than holding the bytes. A deferred blob is serveable through the
+    /// peer that holds it, so it does not hold the frontier back the way a plain local miss does.
+    pub served_by_peer: bool,
 }
 
 impl ReferencedBlob {
-    /// Whether this replica can serve the blob: verified bytes are present locally and the authority
-    /// advertises the placement as [`Verified`](PlacementAvailability::Verified).
+    /// Whether this replica can serve the blob: the authority advertises the placement as
+    /// [`Verified`](PlacementAvailability::Verified), and either verified bytes are present locally or a
+    /// peer datacenter holds them for read-through to serve.
     #[must_use]
     pub const fn is_available(&self) -> bool {
-        self.present_locally && matches!(self.availability, PlacementAvailability::Verified)
+        (self.present_locally || self.served_by_peer) && matches!(self.availability, PlacementAvailability::Verified)
     }
 }
 

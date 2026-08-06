@@ -791,6 +791,94 @@ async fn test_dual_replica_heals_the_blob_frontier_after_the_blob_arrives() {
     assert_eq!(state.meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
 }
 
+/// Advertise a verified placement of `digest` in datacenter `dc`, the descriptor a replica reads to decide
+/// a blob lives on a peer.
+fn seed_remote_placement(meta: &MetaStore, digest: &Digest, dc: &str, size: u64) {
+    use peryx_identity::ArtifactDigest;
+    use peryx_storage::meta::{BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId};
+
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).unwrap();
+    let key = BlobPlacementKey {
+        digest: artifact.clone(),
+        backend: BackendId::new("filesystem").unwrap(),
+        data_center: DataCenterId::new(dc).unwrap(),
+        location: BackendLocation::new(format!("filesystem/{}", digest.as_str())).unwrap(),
+    };
+    meta.apply_blob_placement(&key, &BlobPlacementTransition::Stage, 1, 10)
+        .unwrap();
+    meta.apply_blob_placement(
+        &key,
+        &BlobPlacementTransition::Verify {
+            observed: artifact,
+            size,
+        },
+        1,
+        20,
+    )
+    .unwrap();
+}
+
+/// A replica config that resolves its own `dc-a` from `node_identity` and reaches the writer's `dc-b` as a
+/// remote peer, so a blob placed only in `dc-b` is deferred to read-through.
+fn cross_dc_replica_config(dir: &tempfile::TempDir, upstream: &str) -> Config {
+    MetaStore::open(dir.path().join("peryx.redb"))
+        .unwrap()
+        .claim_writer_identity(WRITER_IDENTITY)
+        .unwrap();
+    Config {
+        data_dir: dir.path().to_path_buf(),
+        writer_identity: Some(WRITER_IDENTITY.to_owned()),
+        node_identity: Some("replica-a".to_owned()),
+        availability: AvailabilityConfig::Dc(replica_config(upstream, 10)),
+        dc_membership: Some(DcMembership {
+            group: "g".to_owned(),
+            members: vec![
+                DcMember {
+                    node: "replica-a".to_owned(),
+                    dc: "dc-a".to_owned(),
+                    address: "http://replica-a.invalid:8080".to_owned(),
+                    role: DcRole::Replica,
+                },
+                DcMember {
+                    node: WRITER_IDENTITY.to_owned(),
+                    dc: "dc-b".to_owned(),
+                    address: upstream.to_owned(),
+                    role: DcRole::Writer,
+                },
+            ],
+        }),
+        ..Config::default()
+    }
+}
+
+#[tokio::test]
+async fn test_dual_replica_defers_a_peer_held_blob_to_read_through() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    // The primary holds the blob, so a whole-pull would succeed; deferral must skip it regardless.
+    let digest = primary_blobs.write(b"artifact").unwrap();
+    primary_meta
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), 8);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"upload".to_vec()]))
+        })
+        .unwrap();
+    let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = cross_dc_replica_config(&replica_dir, &server.url);
+    let state = build_state(&config).unwrap();
+    // The placement descriptor names peer dc-b, none in the local dc-a, as if it rode in the replicated page.
+    seed_remote_placement(&state.meta, &digest, "dc-b", 8);
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+
+    // The metadata committed, but the peer-held blob was left absent for read-through rather than pulled...
+    assert_eq!(state.meta.current_serial().unwrap(), 1);
+    assert!(state.blobs.head(&digest).await.unwrap().is_none());
+    // ...and its serial is still readable, since the blob frontier advances on the peer placement alone.
+    assert_eq!(state.meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
+}
+
 #[tokio::test]
 async fn test_dual_replica_retries_after_a_metadata_sync_error() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

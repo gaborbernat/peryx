@@ -9,7 +9,7 @@
 //! advancing [`BLOB_VIEW`] once the bytes are down is the loop's job, gated by the blob-availability
 //! frontier so a serial stays out of the readable frontier until its blobs are here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 
 use bytes::Bytes;
@@ -101,18 +101,79 @@ pub async fn pull_referenced<T: BlobTransport>(
 ///
 /// `simple` is the whole-blob transport every single-source blob falls through to, the digest-verified
 /// whole-blob path the plane has always used. `delegates` maps a data center to its ranged transport and
-/// `local_dc` names this replica's own data center, so a same-datacenter source is preferred: a blob whose
-/// verified placements resolve to two or more distinct delegates is pulled as a multi-source ranged fetch
-/// instead. `delegates` is empty until placement descriptors ride in the replicated page, so today every
-/// blob is single-source and takes the whole-blob path; once they arrive a multi-placement blob draws its
-/// ranges across the peers that hold it.
+/// `local_dc` names this replica's own data center, so a same-datacenter source is preferred. The keys of
+/// `delegates` are the peer data centers this replica can reach, and a blob's advertised placements decide
+/// how it is drawn:
+///
+/// - Placed only on reachable peers, none in `local_dc`: deferred to cross-DC read-through, which fills a
+///   public download from the peer that holds it. The replica leaves the bytes absent rather than drawing
+///   them eagerly.
+/// - Placed locally with two or more reachable copies: pulled as a multi-source ranged fetch across the
+///   peers that hold it.
+/// - Anything else, including a blob no descriptor places on a reachable peer: drawn whole over `simple`.
+///
+/// With an empty `delegates` and an empty `local_dc` every blob takes the whole-blob path, the behavior a
+/// replica keeps until it resolves its own data center and its peers.
 pub struct BlobSources<'a, T> {
     /// The whole-blob transport for a single-source blob.
     pub simple: &'a T,
-    /// The per-data-center ranged transports a multi-source blob draws from.
+    /// The per-data-center ranged transports a multi-source blob draws from, keyed by the reachable peer
+    /// data center each one serves.
     pub delegates: &'a HashMap<String, T>,
     /// This replica's own data center, preferred when a blob has a local placement.
     pub local_dc: &'a str,
+}
+
+/// How the blob puller should source one absent blob, decided from its advertised placements.
+enum BlobDisposition {
+    /// The policy places the blob only on reachable peers, none in `local_dc`, so it is left absent for
+    /// cross-DC read-through to fill on a public download rather than drawn eagerly.
+    Defer,
+    /// The blob has two or more reachable placements: drawn as ranges across the peers that hold it.
+    Ranged(Vec<String>),
+    /// A single or no reachable placement, or a blob placed locally: drawn whole over `simple`.
+    Whole,
+}
+
+/// Classify one blob from its advertised `descriptors`, `local_dc`, and the `reachable` peer data centers.
+///
+/// A verified placement in `local_dc` makes this replica a holder, so the blob is pulled (whole, or ranged
+/// when two or more reachable peers also hold it) rather than deferred. With no local placement but a
+/// verified placement on a reachable peer the blob is deferred to read-through. Everything else — no
+/// verified placement, or one no reachable peer can serve — falls to the whole-blob path over the upstream
+/// `simple` transport.
+fn classify_blob(descriptors: &[PlacementDescriptor], local_dc: &str, reachable: &BTreeSet<String>) -> BlobDisposition {
+    let FetchPlan::Sources(ordered) = plan_blob_fetch(descriptors, local_dc) else {
+        return BlobDisposition::Whole;
+    };
+    let has_local = ordered.iter().any(|descriptor| descriptor.data_center == local_dc);
+    let mut sources = Vec::new();
+    for descriptor in ordered {
+        if reachable.contains(&descriptor.data_center) && !sources.contains(&descriptor.data_center) {
+            sources.push(descriptor.data_center);
+        }
+    }
+    if !has_local && !sources.is_empty() {
+        BlobDisposition::Defer
+    } else if sources.len() >= 2 {
+        BlobDisposition::Ranged(sources)
+    } else {
+        BlobDisposition::Whole
+    }
+}
+
+/// Whether the policy defers `digest` to cross-DC read-through: placed only on a reachable peer, none in
+/// `local_dc`. The frontier advance uses this to let a deferred blob through, since read-through serves it.
+fn deferred_to_peer(descriptors: &[PlacementDescriptor], local_dc: &str, reachable: &BTreeSet<String>) -> bool {
+    matches!(classify_blob(descriptors, local_dc, reachable), BlobDisposition::Defer)
+}
+
+/// The placement descriptors a peer advertises for `digest`, read from the local ledger. A journal digest
+/// is a canonical lowercase-hex sha256, exactly what [`ArtifactDigest::from_sha256`] accepts.
+fn placement_descriptors(meta: &MetaStore, digest: &Digest) -> Result<Vec<PlacementDescriptor>, SyncError> {
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).expect("a journal digest is canonical sha256 hex");
+    let placements = meta.blob_placements(&artifact)?;
+    Ok(placements.iter().map(PlacementDescriptor::from).collect())
 }
 
 /// Pull every blob the journal tail after the current [`BLOB_VIEW`] frontier references that this replica
@@ -125,12 +186,13 @@ pub struct BlobSources<'a, T> {
 /// on a later one, and a restarted replica re-derives the set from the journal with no lost in-memory
 /// pending.
 ///
-/// Each absent blob is classified from its advertised placements: one whose verified placements resolve to
-/// two or more distinct [`delegates`](BlobSources::delegates) is fetched as a ranged multi-source pull
-/// ([`pull_ranged_blob`]) that falls through source to source and verifies the reassembled whole; every
-/// other blob defers to [`pull_referenced`] over [`simple`](BlobSources::simple). The trusted journal size
-/// bounds the ranged reassembly's pre-allocation, never a peer advertisement. Only verified whole blobs
-/// are committed, so a ranged fetch that a peer corrupts fails closed rather than landing bad bytes.
+/// Each absent blob is classified from its advertised placements by [`classify_blob`]: one placed only on
+/// reachable peers is deferred to cross-DC read-through and left absent; one placed locally with two or
+/// more reachable copies is fetched as a ranged multi-source pull ([`pull_ranged_blob`]) that falls
+/// through source to source and verifies the reassembled whole; every other blob defers to
+/// [`pull_referenced`] over [`simple`](BlobSources::simple). The trusted journal size bounds the ranged
+/// reassembly's pre-allocation, never a peer advertisement. Only verified whole blobs are committed, so a
+/// ranged fetch that a peer corrupts fails closed rather than landing bad bytes.
 ///
 /// # Errors
 /// The same failures as [`pull_referenced`], a terminal ranged-fetch loss ([`SyncError::BlobFetchFailed`]),
@@ -142,6 +204,7 @@ pub async fn pull_outstanding<T: BlobTransport>(
     batch: NonZeroUsize,
     concurrency: NonZeroUsize,
 ) -> Result<BlobPlaneReport, SyncError> {
+    let reachable: BTreeSet<String> = sources.delegates.keys().cloned().collect();
     let referenced = referenced_over_tail(meta, batch)?;
     let mut simple = Vec::new();
     let mut ranged = Vec::new();
@@ -149,11 +212,12 @@ pub async fn pull_outstanding<T: BlobTransport>(
         if blobs.head(digest).await?.is_some() {
             continue;
         }
-        let plan = planned_source_dcs(meta, digest, sources)?;
-        if plan.len() >= 2 {
-            ranged.push((digest.clone(), *size, plan));
-        } else {
-            simple.push((digest.clone(), *size));
+        let descriptors = placement_descriptors(meta, digest)?;
+        match classify_blob(&descriptors, sources.local_dc, &reachable) {
+            // A peer datacenter holds it; read-through fills a public download rather than a whole-pull.
+            BlobDisposition::Defer => {}
+            BlobDisposition::Ranged(dcs) => ranged.push((digest.clone(), *size, dcs)),
+            BlobDisposition::Whole => simple.push((digest.clone(), *size)),
         }
     }
     let mut report = pull_referenced(sources.simple, blobs, meta, &simple, concurrency).await?;
@@ -161,31 +225,6 @@ pub async fn pull_outstanding<T: BlobTransport>(
         pull_one_ranged(meta, blobs, sources, &digest, size, &plan, &mut report).await?;
     }
     Ok(report)
-}
-
-/// The ordered, distinct data centers a ranged pull of `digest` should draw from: its verified placements
-/// planned by [`plan_blob_fetch`], kept only where a [`delegate`](BlobSources::delegates) transport can
-/// reach them, and deduplicated so two placements in one data center count as one source. A digest with no
-/// advertised placement, an unverified set, or no reachable delegate yields an empty plan and falls to the
-/// whole-blob path.
-fn planned_source_dcs<T>(
-    meta: &MetaStore,
-    digest: &Digest,
-    sources: &BlobSources<'_, T>,
-) -> Result<Vec<String>, SyncError> {
-    let artifact = ArtifactDigest::from_sha256(digest.as_str()).expect("a journal digest is canonical sha256 hex");
-    let placements = meta.blob_placements(&artifact)?;
-    let descriptors: Vec<PlacementDescriptor> = placements.iter().map(PlacementDescriptor::from).collect();
-    let FetchPlan::Sources(ordered) = plan_blob_fetch(&descriptors, sources.local_dc) else {
-        return Ok(Vec::new());
-    };
-    let mut dcs = Vec::new();
-    for descriptor in ordered {
-        if sources.delegates.contains_key(&descriptor.data_center) && !dcs.contains(&descriptor.data_center) {
-            dcs.push(descriptor.data_center);
-        }
-    }
-    Ok(dcs)
 }
 
 /// Drive one ranged multi-source pull and fold its result into `report`. A source exhaustion leaves the
@@ -247,18 +286,24 @@ fn referenced_over_tail(meta: &MetaStore, batch: NonZeroUsize) -> Result<Vec<(Di
 ///
 /// The frontier re-derives from durable state alone: it reads the journal tail after the current
 /// [`BLOB_VIEW`] frontier, bounded to `batch` records, and folds each referenced blob's local presence
-/// through [`blob_availability`]. No separate durable cursor is kept, so a restart recomputes the same
-/// serial from the journal and the blob store. The `batch` bound caps the work: a persistently-missing
-/// blob pins the frontier at that serial at `O(batch)` cost per pass rather than an unbounded rescan, and
-/// the frontier simply advances one batch at a time when the plane keeps up. It moves only the frontier,
-/// committing no bytes and no metadata.
+/// through [`blob_availability`]. A blob absent locally but placed only on a reachable peer — one
+/// [`deferred_to_peer`], with `local_dc` and the `reachable` peer data centers deciding it — is serveable
+/// through cross-DC read-through, so it passes the frontier rather than pinning it the way a plain local
+/// miss does. No separate durable cursor is kept, so a restart recomputes the same serial from the journal
+/// and the blob store. The `batch` bound caps the work: a persistently-missing blob pins the frontier at
+/// that serial at `O(batch)` cost per pass rather than an unbounded rescan, and the frontier simply
+/// advances one batch at a time when the plane keeps up. It moves only the frontier, committing no bytes
+/// and no metadata.
 ///
 /// # Errors
-/// Returns a store error reading the journal, probing blob presence, or writing the frontier.
+/// Returns a store error reading the journal, probing blob presence, reading a blob's placements, or
+/// writing the frontier.
 pub async fn advance_blob_frontier(
     meta: &MetaStore,
     blobs: &BlobStorage,
     batch: NonZeroUsize,
+    local_dc: &str,
+    reachable: &BTreeSet<String>,
 ) -> Result<u64, SyncError> {
     let frontier = meta.view_frontier(BLOB_VIEW)?.unwrap_or(0);
     let (_authority, records) = meta.journal_page_after(frontier, batch.get())?;
@@ -268,19 +313,26 @@ pub async fn advance_blob_frontier(
     let mut referenced = Vec::new();
     for record in &records {
         for blob in &record.blobs {
-            let present_locally = match Digest::from_hex(&blob.sha256) {
-                Some(digest) => blobs.head(&digest).await?.is_some(),
+            let (present_locally, served_by_peer) = match Digest::from_hex(&blob.sha256) {
+                Some(digest) if blobs.head(&digest).await?.is_some() => (true, false),
+                // Absent locally: it still passes the frontier when a reachable peer holds it, since
+                // read-through serves that public download; otherwise it holds the frontier closed.
+                Some(digest) => (
+                    false,
+                    deferred_to_peer(&placement_descriptors(meta, &digest)?, local_dc, reachable),
+                ),
                 // A journal digest that cannot parse cannot be served, so it holds the frontier closed.
-                None => false,
+                None => (false, false),
             };
             referenced.push(ReferencedBlob {
                 serial: record.serial,
                 digest: blob.sha256.clone(),
                 // #830: a whole-blob #826 page advertises no placement, so a referenced blob is treated as
-                // Verified and only local presence gates it; when placement descriptors ride in the page,
-                // the real advertised availability replaces this.
+                // Verified and only presence or peer deferral gates it; when placement descriptors ride in
+                // the page, the real advertised availability replaces this.
                 availability: PlacementAvailability::Verified,
                 present_locally,
+                served_by_peer,
             });
         }
     }

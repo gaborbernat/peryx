@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use peryx_driver::serving::EcosystemDriver;
 use peryx_driver::state::AppState;
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
@@ -360,6 +361,102 @@ fn test_driver_references_reads_the_reference_inventory() {
     let referenced = inventory.referenced(&meta).unwrap();
 
     assert!(referenced.is_empty(), "an empty store references no blobs");
+}
+
+struct StubDriver {
+    trash: Result<Vec<peryx_core::TrashRecord>, String>,
+}
+
+#[async_trait]
+impl EcosystemDriver for StubDriver {
+    fn ecosystem(&self) -> peryx_core::Ecosystem {
+        peryx_core::Ecosystem::Pypi
+    }
+
+    fn classify_route(&self, _path: &str) -> peryx_driver::rate_limit::RouteClass {
+        peryx_driver::rate_limit::RouteClass::Listing
+    }
+
+    fn discover_index(
+        &self,
+        _index: peryx_driver::state::IndexDescription,
+        _base: Option<&peryx_driver::discovery::BaseUrl>,
+    ) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    fn trash_records(
+        &self,
+        _meta: &MetaStore,
+        _index_names: &[String],
+    ) -> Result<Vec<peryx_core::TrashRecord>, String> {
+        self.trash.clone()
+    }
+}
+
+fn trashed(digest: Option<&str>) -> peryx_core::TrashRecord {
+    peryx_core::TrashRecord {
+        ecosystem: peryx_core::Ecosystem::Pypi,
+        repository: "pypi".to_owned(),
+        name: "demo".to_owned(),
+        reference: None,
+        digest: digest.map(ToOwned::to_owned),
+        reason: None,
+        actor: None,
+        deleted_at_unix: 0,
+        retained: true,
+    }
+}
+
+#[test]
+fn test_collect_references_surfaces_a_reference_scan_error() {
+    let (_meta_dir, meta) = meta();
+    let drivers: Vec<Arc<dyn EcosystemDriver>> = Vec::new();
+
+    let error = collect_references(
+        Err(anyhow::anyhow!("reference read failed")),
+        drivers.iter(),
+        &meta,
+        &[],
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error, "reference read failed",
+        "a base reference read error surfaces verbatim"
+    );
+}
+
+#[test]
+fn test_collect_references_surfaces_a_trash_scan_error() {
+    let (_meta_dir, meta) = meta();
+    let drivers: Vec<Arc<dyn EcosystemDriver>> = vec![Arc::new(StubDriver {
+        trash: Err("store unreadable".to_owned()),
+    })];
+
+    let error = collect_references(Ok(BTreeSet::new()), drivers.iter(), &meta, &[]).unwrap_err();
+
+    assert_eq!(
+        error, "scan pypi trash: store unreadable",
+        "a trash scan error names its ecosystem"
+    );
+}
+
+#[test]
+fn test_collect_references_folds_trashed_digests_over_the_base_set() {
+    let (_meta_dir, meta) = meta();
+    let base = BTreeSet::from(["already".to_owned()]);
+    let drivers: Vec<Arc<dyn EcosystemDriver>> = vec![Arc::new(StubDriver {
+        trash: Ok(vec![trashed(Some("sha256:aabb")), trashed(Some("ccdd")), trashed(None)]),
+    })];
+
+    let referenced = collect_references(Ok(base), drivers.iter(), &meta, &[]).unwrap();
+
+    assert_eq!(
+        referenced,
+        BTreeSet::from(["already".to_owned(), "aabb".to_owned(), "ccdd".to_owned()]),
+        "a prefixed digest is stripped, a bare digest is kept, and a digestless record is skipped"
+    );
 }
 
 #[test]

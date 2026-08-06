@@ -39,6 +39,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use peryx_driver::jobs::{BlobReclaimer, JobFailure, JobReport, ReclamationParameters};
+use peryx_driver::serving::EcosystemDriver;
 use peryx_driver::state::ServingState;
 use peryx_identity::ArtifactDigest;
 use peryx_storage::meta::{MetaStore, ObservedFrontier, ReadyOutcome, ReclamationState, SelectOutcome};
@@ -71,23 +72,36 @@ struct DriverReferences {
 
 impl ReferenceInventory for DriverReferences {
     fn referenced(&self, meta: &MetaStore) -> Result<BTreeSet<String>, String> {
-        let mut referenced = match crate::app::referenced_blob_digests(meta) {
-            Ok(referenced) => referenced,
-            Err(reason) => return Err(reason.to_string()),
-        };
-        for driver in crate::server::drivers().present() {
-            let records = match driver.trash_records(meta, &self.index_names) {
-                Ok(records) => records,
-                Err(reason) => return Err(format!("scan {} trash: {reason}", driver.ecosystem().as_str())),
-            };
-            for record in records {
-                if let Some(digest) = record.digest {
-                    referenced.insert(digest.strip_prefix("sha256:").unwrap_or(&digest).to_owned());
-                }
+        collect_references(
+            crate::app::referenced_blob_digests(meta),
+            crate::server::drivers().present(),
+            meta,
+            &self.index_names,
+        )
+    }
+}
+
+/// Union `base` with every installed ecosystem's trashed digests, because a trashed artifact can be
+/// restored and so still pins its bytes. Kept free of the global driver registry and the reference
+/// collector so a test drives its scan-failure and digest-folding arms against chosen drivers.
+fn collect_references<'a>(
+    base: anyhow::Result<BTreeSet<String>>,
+    drivers: impl Iterator<Item = &'a Arc<dyn EcosystemDriver>>,
+    meta: &MetaStore,
+    index_names: &[String],
+) -> Result<BTreeSet<String>, String> {
+    let mut referenced = base.map_err(|reason| reason.to_string())?;
+    for driver in drivers {
+        let records = driver
+            .trash_records(meta, index_names)
+            .map_err(|reason| format!("scan {} trash: {reason}", driver.ecosystem().as_str()))?;
+        for record in records {
+            if let Some(digest) = record.digest {
+                referenced.insert(digest.strip_prefix("sha256:").unwrap_or(&digest).to_owned());
             }
         }
-        Ok(referenced)
     }
+    Ok(referenced)
 }
 
 /// The production frontier observer while the live per-member applied serial is deferred: it reports the

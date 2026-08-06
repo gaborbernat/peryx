@@ -379,3 +379,79 @@ async fn test_mirror_rejects_non_mirror_targets() {
         assert!(err.to_string().contains(expected), "{selector}: {err}");
     }
 }
+
+async fn mount_project(server: &MockServer, name: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/simple/{name}/")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            detail_page(
+                name,
+                vec![file_entry(
+                    &format!("{name}-1.0.tar.gz"),
+                    Digest::of(name.as_bytes()).as_str(),
+                    4,
+                )],
+            ),
+            "application/vnd.pypi.simple.v1+json",
+        ))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn test_mirror_plan_accepts_pip_include_syntax() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let forms = [
+        ("django", "-rattached-r.txt", "attached-r.txt"),
+        ("flask", "--requirement=eq-req.txt", "eq-req.txt"),
+        ("requests", "-cattached-c.txt", "attached-c.txt"),
+        ("click", "--constraint=eq-con.txt", "eq-con.txt"),
+        ("jinja2", "-r\ttab-r.txt", "tab-r.txt"),
+        ("urllib3", "--requirement   spaced-req.txt", "spaced-req.txt"),
+    ];
+    let mut root = String::new();
+    for (name, directive, child) in forms {
+        std::fs::write(dir.path().join(child), format!("{name}\n")).unwrap();
+        root.push_str(directive);
+        root.push('\n');
+        mount_project(&server, name).await;
+    }
+    std::fs::write(dir.path().join("requirements.txt"), root).unwrap();
+    let mut options = command_options(dir.path(), Vec::new());
+    options.requirements.push(dir.path().join("requirements.txt"));
+
+    let text = run_ok(
+        &mirror(&dir, &server),
+        &PrefetchCommand::Plan(PrefetchPlanArgs { options }),
+    )
+    .await;
+    for (name, ..) in forms {
+        assert!(
+            text.contains(&format!("page\tpypi\t{name}")),
+            "missing {name} in:\n{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_mirror_plan_skips_malformed_include_directives() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    std::fs::write(dir.path().join("child.txt"), "flask\n").unwrap();
+    std::fs::write(
+        dir.path().join("requirements.txt"),
+        "-r child.txt\n-r\n--requirement=\n--requirements=missing.txt\n",
+    )
+    .unwrap();
+    mount_project(&server, "flask").await;
+    let mut options = command_options(dir.path(), Vec::new());
+    options.requirements.push(dir.path().join("requirements.txt"));
+
+    let text = run_ok(
+        &mirror(&dir, &server),
+        &PrefetchCommand::Plan(PrefetchPlanArgs { options }),
+    )
+    .await;
+    assert!(text.contains("page\tpypi\tflask"), "missing flask in:\n{text}");
+}

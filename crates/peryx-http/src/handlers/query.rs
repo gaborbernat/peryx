@@ -47,17 +47,36 @@ fn search_access(state: &AppState, headers: &HeaderMap, indexes: &[Index]) -> Op
 /// Run [`search_response`] on the blocking pool. A tantivy query is mmap I/O plus CPU scoring, so
 /// keeping it off the async workers stops a burst of searches from stalling concurrent serving.
 ///
-/// # Panics
-/// Panics if the blocking task panics; [`search_response`] returns every error as a response, so it
-/// does not.
+/// [`search_response`] renders every error as a response, so the task is not expected to panic. An
+/// unexpected one is contained here as a `500` rather than propagated, so a single faulting query
+/// fails its own request instead of aborting the runtime.
 pub async fn search_response_offloaded(
     state: Arc<AppState>,
     params: SearchParams,
     access: Option<SearchAccess>,
 ) -> Response {
-    tokio::task::spawn_blocking(move || search_response(&state, params, access.as_ref()))
-        .await
-        .expect("search task never panics")
+    offload_search(move || search_response(&state, params, access.as_ref())).await
+}
+
+/// Run a search-rendering closure on the blocking pool, mapping a task panic to a `500` response.
+async fn offload_search<F>(render: F) -> Response
+where
+    F: FnOnce() -> Response + Send + 'static,
+{
+    match tokio::task::spawn_blocking(render).await {
+        Ok(response) => response,
+        Err(err) => search_task_panic_response(&err),
+    }
+}
+
+/// Render the `500` response for a search task that panicked on the blocking pool.
+fn search_task_panic_response(err: &tokio::task::JoinError) -> Response {
+    tracing::error!(error = %err, "search task panicked");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(serde_json::json!({ "error": "search failed" })),
+    )
+        .into_response()
 }
 
 /// Run a search over cached package documents and render the result document.
@@ -83,4 +102,36 @@ pub fn search_error_response(err: &SearchError) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, axum::Json(serde_json::json!({ "error": err.to_string() }))).into_response()
+}
+
+#[cfg(test)]
+mod pure_tests {
+    //! Direct coverage for the blocking-pool wrapper. A real search never panics, so the router flow
+    //! cannot reach the join-error arm; these drive the wrapper with closures the handler would never
+    //! produce.
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+
+    use super::{offload_search, search_task_panic_response};
+
+    #[tokio::test]
+    async fn test_offload_search_returns_the_closure_response() {
+        let response = offload_search(|| StatusCode::OK.into_response()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_offload_search_maps_a_panicked_task_to_500() {
+        let response = offload_search(|| panic!("boom")).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_search_task_panic_response_is_500() {
+        let err = tokio::task::spawn_blocking(|| panic!("boom")).await.unwrap_err();
+        assert_eq!(
+            search_task_panic_response(&err).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }

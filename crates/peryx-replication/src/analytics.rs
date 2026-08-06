@@ -311,18 +311,26 @@ impl ApplyState {
 
 /// The receiving side of analytics replication on a replica.
 ///
-/// It holds the converged [`ApplyState`], the per-producer sealed-day cursor a pull resumes from, and
-/// the durability [`Frontier`] compaction releases replay keys past.
+/// It holds the converged [`ApplyState`], the per-producer sealed-day cursor a pull resumes from, the
+/// per-producer accepted frontier a completeness query reads, and the durability [`Frontier`] compaction
+/// releases replay keys past.
 ///
 /// The cursor is the highest sealed-day sequence this replica has accepted from each producer, so a pull
 /// asks only for days beyond it and a re-pull of an accepted day is a recognized duplicate. Compaction
 /// runs off a separate [`acknowledge`](Self::acknowledge) signal: a replay key is released only once it
 /// is durable everywhere, never merely because this replica applied it, since a producer may still resend
 /// it to a peer that has not caught up.
+///
+/// The accepted frontier is the highest `(epoch, sequence)` interval this replica has folded from each
+/// producer. Unlike the cursor it keeps the epoch, so a completeness query can tell a producer that
+/// restarted under a fresh generation apart from one still on its original one, and unlike the durability
+/// frontier it survives compaction, since releasing a replay key never lowers the position already
+/// accepted.
 #[derive(Debug, Clone)]
 pub struct AnalyticsReceiver {
     state: ApplyState,
     cursors: BTreeMap<ProducerId, i64>,
+    accepted: BTreeMap<ProducerId, (AuthorityEpoch, u64)>,
     frontier: Frontier,
 }
 
@@ -333,6 +341,7 @@ struct ReceiverSnapshot {
     schema: u32,
     state: Vec<u8>,
     cursors: Vec<(ProducerId, i64)>,
+    accepted: Vec<FrontierAck>,
     frontier: Vec<FrontierAck>,
 }
 
@@ -350,6 +359,7 @@ impl AnalyticsReceiver {
         Self {
             state: ApplyState::new(limits),
             cursors: BTreeMap::new(),
+            accepted: BTreeMap::new(),
             frontier: Frontier::default(),
         }
     }
@@ -380,8 +390,25 @@ impl AnalyticsReceiver {
             let day = i64::try_from(batch.interval.sequence).unwrap_or(i64::MAX);
             let cursor = self.cursors.entry(batch.interval.producer.clone()).or_insert(-1);
             *cursor = (*cursor).max(day);
+            let position = (batch.interval.epoch, batch.interval.sequence);
+            let accepted = self.accepted.entry(batch.interval.producer.clone()).or_insert(position);
+            *accepted = (*accepted).max(position);
         }
         Ok(outcome)
+    }
+
+    /// The highest `(epoch, sequence)` interval accepted from `producer`, or `None` before any. A
+    /// completeness query reads it as the producer's accepted frontier: how far its stream this replica
+    /// has folded, epoch and all.
+    #[must_use]
+    pub fn accepted_frontier(&self, producer: &ProducerId) -> Option<(AuthorityEpoch, u64)> {
+        self.accepted.get(producer).copied()
+    }
+
+    /// The accepted aggregate dimensions and their converged totals, for a completeness query to fold
+    /// over a day range and repository scope.
+    pub(crate) fn accepted_rows(&self) -> impl Iterator<Item = (&AggregateKey, &AggregateDelta)> {
+        self.state.totals.iter()
     }
 
     /// The accepted total for `key`.
@@ -421,6 +448,15 @@ impl AnalyticsReceiver {
                 .iter()
                 .map(|(producer, &day)| (producer.clone(), day))
                 .collect(),
+            accepted: self
+                .accepted
+                .iter()
+                .map(|(producer, &(epoch, sequence))| FrontierAck {
+                    producer: producer.clone(),
+                    epoch,
+                    sequence,
+                })
+                .collect(),
             frontier: self
                 .frontier
                 .acknowledgements()
@@ -456,6 +492,11 @@ impl AnalyticsReceiver {
         Ok(Self {
             state: ApplyState::restore(&snapshot.state, limits)?,
             cursors: snapshot.cursors.into_iter().collect(),
+            accepted: snapshot
+                .accepted
+                .into_iter()
+                .map(|ack| (ack.producer, (ack.epoch, ack.sequence)))
+                .collect(),
             frontier,
         })
     }

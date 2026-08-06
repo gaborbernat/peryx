@@ -1,4 +1,5 @@
 mod acl_tests;
+mod analytics_completeness_tests;
 mod analytics_tests;
 mod availability_tests;
 mod blob_placements_tests;

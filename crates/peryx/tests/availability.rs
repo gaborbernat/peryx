@@ -7,6 +7,7 @@
 #![cfg(feature = "availability-e2e")]
 
 mod harness;
+mod pypi_failover;
 
 use std::time::{Duration, Instant};
 

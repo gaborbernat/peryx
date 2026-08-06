@@ -177,8 +177,8 @@ fn read_requirements(path: &Path, selectors: &mut Vec<String>, seen: &mut BTreeS
         return Ok(());
     }
     let text = std::fs::read_to_string(&path).context(format!("read requirements {}", path.display()))?;
-    for line in text.lines() {
-        let line = requirement_line(line);
+    for logical in logical_lines(&text) {
+        let line = requirement_line(&logical);
         if line.is_empty() {
             continue;
         }
@@ -216,12 +216,59 @@ fn include_target(line: &str) -> Option<&str> {
     None
 }
 
-fn requirement_line(line: &str) -> &str {
-    let line = line.trim();
-    if line.starts_with('#') {
-        return "";
+// Reduce a requirements file to pip's logical lines: join backslash continuations, then drop
+// comments. pip joins a physical line ending in an unescaped `\` with the next one, but never
+// treats a comment line as a continuation even when it ends in `\`.
+fn logical_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut pending: Option<String> = None;
+    for raw in text.lines() {
+        if !is_comment_line(raw) && raw.ends_with('\\') {
+            pending
+                .get_or_insert_with(String::new)
+                .push_str(raw.trim_end_matches('\\'));
+            continue;
+        }
+        let logical = pending.take().map_or_else(
+            || raw.to_owned(),
+            |mut head| {
+                head.push_str(raw);
+                head
+            },
+        );
+        push_logical(&mut lines, &logical);
     }
-    let line = line.split_once(" #").map_or(line, |(requirement, _)| requirement);
+    if let Some(head) = pending {
+        push_logical(&mut lines, &head);
+    }
+    lines
+}
+
+fn push_logical(lines: &mut Vec<String>, logical: &str) {
+    let content = strip_comment(logical).trim();
+    if !content.is_empty() {
+        lines.push(content.to_owned());
+    }
+}
+
+fn is_comment_line(line: &str) -> bool {
+    line.trim_start().starts_with('#')
+}
+
+// pip's COMMENT_RE strips from the first `#` that starts a line or follows whitespace (a tab
+// counts); a `#` glued to a preceding token is part of the token, not a comment.
+fn strip_comment(line: &str) -> &str {
+    let mut after_whitespace = true;
+    for (idx, ch) in line.char_indices() {
+        if ch == '#' && after_whitespace {
+            return &line[..idx];
+        }
+        after_whitespace = ch.is_whitespace();
+    }
+    line
+}
+
+fn requirement_line(line: &str) -> &str {
     line.split_once(" --")
         .map_or(line, |(requirement, _)| requirement)
         .trim()

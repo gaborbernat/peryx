@@ -41,6 +41,7 @@ pub use record::{
     ProjectMetaState, ProjectStatusRecord, UpstreamAttestation,
 };
 pub use summary::summarize_indexes;
+pub(crate) use uploads::publish_file_in_txn;
 pub(crate) use uploads::scan_upload_policy_snapshot;
 pub use uploads::{
     Guard, MetadataSibling, PromotedRelease, ProvenanceSibling, PublishedFile, UploadMutation, delete_override,

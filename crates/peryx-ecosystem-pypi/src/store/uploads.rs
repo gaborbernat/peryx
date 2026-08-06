@@ -147,7 +147,7 @@ impl<E> From<QuotaError> for PublishError<E> {
     }
 }
 
-fn publish_file_in_txn<E: From<MetaError>>(
+pub fn publish_file_in_txn<E: From<MetaError>>(
     txn: &mut DriverTxn,
     file: &PublishedFile,
     guard: impl FnOnce(Option<&[u8]>) -> Result<Guard, E>,

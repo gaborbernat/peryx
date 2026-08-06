@@ -362,6 +362,16 @@ pub trait EcosystemDriver: Send + Sync {
         0
     }
 
+    /// Finalize this ecosystem's admitted-but-unfinalized uploads at their authority's home datacenter,
+    /// once per server maintenance tick. An upload is admitted wherever a client reaches, staged as a
+    /// pending ingress intent; its authority's home turns it into an authoritative release. This is the
+    /// home-side trigger the scheduled maintenance pass invokes, so a node finalizes the backlog it owns
+    /// and its own fence turns away an intent it does not home. Returns how many intents it finalized. A
+    /// driver without ingress admission finalizes nothing, so the default is a no-op.
+    async fn finalize_admitted(&self, _state: Arc<ServingState>) -> u64 {
+        0
+    }
+
     /// Rebuild this driver's derived views for the authoritative keys a replica just copied from the
     /// primary, so the views reflect the applied serial before the neutral apply path advances the
     /// readable frontier over it. `changed_keys` are raw store keys spanning every ecosystem; a driver

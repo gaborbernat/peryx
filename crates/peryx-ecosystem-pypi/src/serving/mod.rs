@@ -39,6 +39,8 @@ use crate::discovery;
 mod acknowledge;
 mod admission;
 mod changelog;
+pub mod finalize;
+pub(crate) mod finalize_sweep;
 mod get;
 mod inspect;
 mod mutate;
@@ -472,6 +474,10 @@ impl EcosystemDriver for PypiServing {
                 changed: summary.changed,
             })
             .map_err(|err| err.user_message())
+    }
+
+    async fn finalize_admitted(&self, state: Arc<ServingState>) -> u64 {
+        finalize_sweep::finalize_admitted(&state).await
     }
 
     fn apply_replicated_changes(&self, state: &ServingState, changed_keys: &[String]) -> Result<(), ViewBlock> {

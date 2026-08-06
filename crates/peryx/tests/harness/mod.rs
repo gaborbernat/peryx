@@ -245,10 +245,69 @@ impl Topology {
         let writer = (self.mode != Mode::None).then(|| self.writer(&addresses));
         let mut nodes = Vec::with_capacity(self.members.len());
         for (member, &(public, control)) in self.members.iter().zip(&addresses) {
-            let node = Node::spawn(self, member, public, control, writer.as_ref(), &roster)?;
+            let node = Node::spawn(self, member, public, control, writer.as_ref(), None, &roster)?;
             nodes.push(node);
         }
         Ok(Cluster { nodes })
+    }
+
+    /// Spawn the cluster with each replica's link to the writer routed through its own Toxiproxy proxy,
+    /// so a test can slow or cut one replica's metadata-and-beacon link in isolation and watch the
+    /// writer's group readiness react. A replica dials the proxy as its upstream; the proxy forwards to
+    /// the writer's public port, so both the follower sync and the frontier beacon share the faultable
+    /// link. When `healthy` is false each proxy starts partitioned, so a replica comes up but cannot
+    /// reach the writer until the test heals it — a replica that joins the group after the writer.
+    ///
+    /// Only meaningful for a `dc`/`ha` topology, the one shape with a writer replicas follow.
+    ///
+    /// # Errors
+    /// The first [`HarnessError`] a node or the proxy server reports while coming up. Retries the whole
+    /// draw on a port collision, exactly as [`start`](Self::start) does.
+    pub fn start_proxied(&self, toxiproxy: &mut Toxiproxy, healthy: bool) -> Result<Proxied, HarnessError> {
+        const ATTEMPTS: usize = 5;
+        let mut attempt = 1;
+        loop {
+            match self.spawn_proxied(toxiproxy, healthy) {
+                Ok(proxied) => return Ok(proxied),
+                Err(error) if attempt < ATTEMPTS && error.is_port_collision() => attempt += 1,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn spawn_proxied(&self, toxiproxy: &mut Toxiproxy, healthy: bool) -> Result<Proxied, HarnessError> {
+        let addresses: Vec<(u16, u16)> = self.members.iter().map(|_| (free_port(), free_port())).collect();
+        let roster = self.roster_toml(&addresses);
+        let writer = self.writer(&addresses);
+        let mut nodes = Vec::with_capacity(self.members.len());
+        let mut proxies = std::collections::HashMap::new();
+        for (member, &(public, control)) in self.members.iter().zip(&addresses) {
+            let upstream = if matches!(member.role, Role::Replica) {
+                let proxy = toxiproxy.proxy(&format!("127.0.0.1:{}", writer.1))?;
+                if !healthy {
+                    proxy.partition()?;
+                }
+                let base = format!("http://{}", proxy.endpoint());
+                proxies.insert(member.node.clone(), proxy);
+                Some(base)
+            } else {
+                None
+            };
+            let node = Node::spawn(
+                self,
+                member,
+                public,
+                control,
+                Some(&writer),
+                upstream.as_deref(),
+                &roster,
+            )?;
+            nodes.push(node);
+        }
+        Ok(Proxied {
+            cluster: Cluster { nodes },
+            proxies,
+        })
     }
 
     /// Validate the generated config for the first member through `peryx config check`, without spawning
@@ -276,7 +335,7 @@ impl Topology {
         let config = dir.path().join("peryx.toml");
         std::fs::write(
             &config,
-            node_config(self, member, addresses[0].1, writer.as_ref(), &roster),
+            node_config(self, member, addresses[0].1, writer.as_ref(), None, &roster),
         )
         .expect("write config");
         let output = Command::new(BIN)
@@ -329,6 +388,33 @@ impl Topology {
             .find(|(member, _)| matches!(member.role, Role::Writer))
             .map(|(member, &(public, _))| (member.node.clone(), public))
             .expect("a dc or ha topology has a writer")
+    }
+}
+
+/// A cluster spawned with [`Topology::start_proxied`]: every replica reaches its writer through a
+/// dedicated Toxiproxy proxy, so a test can pause or cut one replica's link to the writer in isolation.
+/// Dropping it tears the cluster down; the proxies belong to the [`Toxiproxy`] the caller still holds.
+pub struct Proxied {
+    cluster: Cluster,
+    proxies: std::collections::HashMap<String, Proxy>,
+}
+
+impl Proxied {
+    /// The spawned cluster.
+    #[must_use]
+    pub const fn cluster(&self) -> &Cluster {
+        &self.cluster
+    }
+
+    /// The spawned cluster, for mutation (kill, restart, wait).
+    pub const fn cluster_mut(&mut self) -> &mut Cluster {
+        &mut self.cluster
+    }
+
+    /// The proxy fronting a replica's link to the writer, by the replica's configured identity.
+    #[must_use]
+    pub fn proxy(&self, replica: &str) -> Option<&Proxy> {
+        self.proxies.get(replica)
     }
 }
 
@@ -440,11 +526,16 @@ impl Node {
         port: u16,
         control_port: u16,
         writer: Option<&(String, u16)>,
+        upstream: Option<&str>,
         roster: &str,
     ) -> Result<Self, HarnessError> {
         let data = TempDir::new().expect("temp data dir");
         let config = data.path().join("peryx.toml");
-        std::fs::write(&config, node_config(topology, member, control_port, writer, roster)).expect("write config");
+        std::fs::write(
+            &config,
+            node_config(topology, member, control_port, writer, upstream, roster),
+        )
+        .expect("write config");
         if topology.bootstrap_admin {
             bootstrap_admin(&config, data.path());
         }
@@ -801,6 +892,7 @@ fn node_config(
     member: &MemberSpec,
     control_port: u16,
     writer: Option<&(String, u16)>,
+    upstream: Option<&str>,
     roster: &str,
 ) -> String {
     // Top-level keys must precede any table, or TOML folds them into the last `[[index]]`.
@@ -828,10 +920,11 @@ fn node_config(
                 writer.0, topology.token,
             );
         } else {
+            let base = upstream.map_or_else(|| format!("http://127.0.0.1:{}", writer.1), str::to_owned);
             let _ = write!(
                 config,
-                "[availability.replication]\nrole = \"replica\"\nupstream = \"http://127.0.0.1:{}\"\ntoken = \"{}\"\n\n",
-                writer.1, topology.token,
+                "[availability.replication]\nrole = \"replica\"\nupstream = \"{base}\"\ntoken = \"{}\"\n\n",
+                topology.token,
             );
         }
         let _ = writeln!(config, "[availability.listener]\nbind = \"127.0.0.1:{control_port}\"");

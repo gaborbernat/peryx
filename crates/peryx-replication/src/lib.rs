@@ -80,7 +80,9 @@ pub use blob_placement::{FetchPlan, plan_blob_fetch};
 pub use blob_plane::{
     BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_outstanding, pull_referenced,
 };
-pub use blob_pull::{PullError, chunk_ranges, pull_ranged, pull_ranged_blob};
+pub use blob_pull::{
+    ChunkFailure, ChunkUnavailable, PullError, chunk_ranges, pull_chunk_verified, pull_ranged, pull_ranged_blob,
+};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
 pub use byte_ack::{ByteAckDecision, decide_byte_ack};

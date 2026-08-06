@@ -29,8 +29,17 @@
 //!
 //! Advertising the fetched bytes as a local placement is deliberately out of scope: that record is
 //! fence-coupled and owned by the placement lifecycle, so this only populates the content store.
-//! Incremental chunk-by-chunk streaming to the client is likewise deferred; a whole blob is reassembled
-//! before it is served.
+//!
+//! # Incremental chunk-verified staging
+//! When the [`blob_chunk_digest`](peryx_storage::meta::MetaStore::blob_chunk_digest) catalog holds the
+//! digest's [`ChunkedDigest`] — recorded by a node that whole-verified the same content — a read-through
+//! streams the blob chunk by chunk instead of reassembling the whole in memory: it draws each chunk range,
+//! verifies it against its own recorded digest through [`pull_chunk_verified`], and stages it to disk
+//! before drawing the next. One chunk is held in memory at a time and each is written before the next is
+//! fetched, so a very large blob no longer forces the whole into a reassembly buffer. The commit still
+//! whole-verifies the digest as the safety net. A digest with no catalogued chunks falls back to whole-blob
+//! staging and records its [`ChunkedDigest`] from that verified pull, so the next fetch of the same content
+//! can stream.
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -40,10 +49,11 @@ use std::time::Duration;
 use bytes::Bytes;
 use peryx_identity::ArtifactDigest;
 use peryx_replication::{
-    BlobTransport, CircuitBreaker, CircuitConfig, DEFAULT_CIRCUIT, DEFAULT_RECONNECT_POLICY, FetchPlan,
-    PlacementDescriptor, PullError, ReconnectPolicy, Retry, TransportError, chunk_ranges, plan_blob_fetch, pull_ranged,
+    BlobTransport, ChunkUnavailable, CircuitBreaker, CircuitConfig, DEFAULT_CIRCUIT, DEFAULT_RECONNECT_POLICY,
+    FetchPlan, PlacementDescriptor, PullError, ReconnectPolicy, Retry, TransportError, chunk_ranges, plan_blob_fetch,
+    pull_chunk_verified, pull_ranged,
 };
-use peryx_storage::blob::{BlobError, BlobMetadata, BlobStorage, Digest};
+use peryx_storage::blob::{BlobError, BlobErrorKind, BlobMetadata, BlobStorage, CHUNK_BYTES, ChunkedDigest, Digest};
 use peryx_storage::meta::{BlobPlacementRecord, BlobPlacementState, DataCenterId, MetaError, MetaStore};
 
 /// A source of the current unix time the circuit breaker measures cooldowns against.
@@ -122,6 +132,18 @@ pub enum ReadThroughError {
     Blob(#[source] BlobError),
 }
 
+/// What one chunk-verified streaming pass produced.
+enum StreamOutcome {
+    /// Every chunk was verified, staged, and the whole blob committed under its digest.
+    Committed,
+    /// A chunk could not be drawn from any open source; the pass carries the per-source failures so the
+    /// caller can trip circuits and decide whether a retry could recover.
+    ChunkUnavailable(ChunkUnavailable),
+    /// Every chunk verified against the catalog but the committed whole failed its digest — a colluding
+    /// catalog and source the safety net rejected. Nothing was left in the store.
+    WholeMismatch,
+}
+
 /// One verified remote placement selected as a fetch source: the data center whose circuit gates it, the
 /// transport that reaches it, and the trusted byte length it advertises through replicated metadata.
 struct Source {
@@ -198,7 +220,13 @@ impl RemotePlacementReader {
         let Some((sources, total_length)) = self.select(&routing.verified_remote) else {
             return Ok(ReadThroughOutcome::Unavailable);
         };
-        self.fetch(blobs, digest, &sources, total_length).await
+        match meta.blob_chunk_digest(&artifact).map_err(ReadThroughError::Meta)? {
+            Some(chunked) => {
+                self.fetch_streaming(blobs, digest, &sources, total_length, &chunked)
+                    .await
+            }
+            None => self.fetch(meta, &artifact, blobs, digest, &sources, total_length).await,
+        }
     }
 
     /// Order the verified remote placements into fetch sources and read the trusted total length.
@@ -247,8 +275,14 @@ impl RemotePlacementReader {
 
     /// Draw `digest` across the open sources in order and stage the verified whole, retrying transient
     /// exhaustion under the reconnect policy.
+    ///
+    /// This is the fallback taken when no chunk digests are catalogued for `digest`: it reassembles the
+    /// whole blob, verifies it, commits it, and records its [`ChunkedDigest`] so the next fetch of the same
+    /// content streams chunk by chunk instead.
     async fn fetch(
         &self,
+        meta: &MetaStore,
+        artifact: &ArtifactDigest,
         blobs: &BlobStorage,
         digest: &Digest,
         sources: &[Source],
@@ -270,7 +304,9 @@ impl RemotePlacementReader {
             match pull_ranged(&transports, digest, &ranges, total_length, digest).await {
                 Ok(bytes) => {
                     self.record_success(&open[0].data_center);
+                    let chunked = ChunkedDigest::of(&bytes, CHUNK_BYTES);
                     self.commit(blobs, digest, bytes).await?;
+                    catalog_chunks(meta, artifact, digest, &chunked);
                     return Ok(ReadThroughOutcome::Served);
                 }
                 Err(PullError::Exhausted { failures, .. }) => {
@@ -285,6 +321,87 @@ impl RemotePlacementReader {
                 }
                 Err(PullError::Piece(_) | PullError::Reassembly(_)) => return Ok(ReadThroughOutcome::Unavailable),
             }
+        }
+    }
+
+    /// Stream `digest` chunk by chunk from the open sources, staging each verified chunk into the content
+    /// store as it arrives, and retry transient exhaustion under the reconnect policy.
+    ///
+    /// Each pass draws every chunk of `chunked` in order, verifying it against its own recorded digest
+    /// before it is staged, so a bad chunk falls through to another source without the whole blob ever
+    /// entering memory. A pass that exhausts a chunk over reachable transports backs off and retries from
+    /// a fresh stage; one that exhausts on non-transport failures — or whose whole-blob commit fails its
+    /// safety-net verify against a colluding catalog and source — is [`Unavailable`](ReadThroughOutcome).
+    async fn fetch_streaming(
+        &self,
+        blobs: &BlobStorage,
+        digest: &Digest,
+        sources: &[Source],
+        total_length: usize,
+        chunked: &ChunkedDigest,
+    ) -> Result<ReadThroughOutcome, ReadThroughError> {
+        let mut attempt = 1u32;
+        loop {
+            let now = self.now();
+            let open: Vec<&Source> = sources
+                .iter()
+                .filter(|source| self.available(&source.data_center, now))
+                .collect();
+            if open.is_empty() {
+                return Ok(ReadThroughOutcome::Unavailable);
+            }
+            match self.stream_chunks(blobs, digest, chunked, total_length, &open).await? {
+                StreamOutcome::Committed => {
+                    self.record_success(&open[0].data_center);
+                    return Ok(ReadThroughOutcome::Served);
+                }
+                StreamOutcome::WholeMismatch => return Ok(ReadThroughOutcome::Unavailable),
+                StreamOutcome::ChunkUnavailable(unavailable) => {
+                    let failures = unavailable.transport_failures();
+                    self.record_failures(&open, &failures, now);
+                    if failures.is_empty() {
+                        return Ok(ReadThroughOutcome::Unavailable);
+                    }
+                    match self.policy.on_error(representative(&failures), attempt) {
+                        Retry::After(delay) => {
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                        }
+                        Retry::GiveUp { .. } => return Ok(ReadThroughOutcome::Unavailable),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw every chunk of `chunked` from the open `sources` into a pending blob and commit the whole.
+    ///
+    /// One chunk is held in memory at a time and each is written to disk before the next is drawn, so the
+    /// footprint is bounded regardless of blob size. The commit whole-verifies the digest as the safety
+    /// net over the trusted per-chunk digests; a mismatch there means the catalog and a source agreed on
+    /// bytes that are not the requested content, which leaves no local blob and yields
+    /// [`WholeMismatch`](StreamOutcome::WholeMismatch).
+    async fn stream_chunks(
+        &self,
+        blobs: &BlobStorage,
+        digest: &Digest,
+        chunked: &ChunkedDigest,
+        total_length: usize,
+        open: &[&Source],
+    ) -> Result<StreamOutcome, ReadThroughError> {
+        let transports: Vec<&(dyn BlobTransport + Send + Sync)> =
+            open.iter().map(|source| source.transport.as_ref()).collect();
+        let mut write = blobs.begin().await.map_err(ReadThroughError::Blob)?;
+        for index in 0..chunked.len() {
+            match pull_chunk_verified(&transports, digest, chunked, index, total_length as u64).await {
+                Ok(bytes) => write.write_chunk(bytes).await.map_err(ReadThroughError::Blob)?,
+                Err(unavailable) => return Ok(StreamOutcome::ChunkUnavailable(unavailable)),
+            }
+        }
+        match write.commit(digest).await {
+            Ok(_) => Ok(StreamOutcome::Committed),
+            Err(error) if error.kind() == BlobErrorKind::DigestMismatch => Ok(StreamOutcome::WholeMismatch),
+            Err(error) => Err(ReadThroughError::Blob(error)),
         }
     }
 
@@ -355,6 +472,15 @@ const fn verified_size(record: &BlobPlacementRecord) -> Option<u64> {
     match record.state {
         BlobPlacementState::Verified { size } => Some(size),
         _ => None,
+    }
+}
+
+/// Record `chunked` for `digest` in the catalog so a later read-through streams it, tolerating a write
+/// failure: the blob is already committed and serveable, so a metadata cache miss must not fail the
+/// request that produced it.
+fn catalog_chunks(meta: &MetaStore, artifact: &ArtifactDigest, digest: &Digest, chunked: &ChunkedDigest) {
+    if let Err(error) = meta.put_blob_chunk_digest(artifact, chunked) {
+        tracing::warn!(digest = digest.as_str(), %error, "could not catalog blob chunk digests");
     }
 }
 

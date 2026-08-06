@@ -11,7 +11,7 @@
 //! caller commits the returned bytes, as it does for [`fetch_missing`](crate::blob_fetch::fetch_missing).
 
 use bytes::Bytes;
-use peryx_storage::blob::Digest;
+use peryx_storage::blob::{ChunkedDigest, Digest};
 
 use crate::blob::{BlobRequest, BlobTransport, ByteRange};
 use crate::blob_piece::{PieceError, blob_piece};
@@ -133,6 +133,98 @@ pub fn chunk_ranges(total_length: usize, chunk: usize) -> Vec<ByteRange> {
         offset += length;
     }
     ranges
+}
+
+/// How one source failed to serve a single chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkFailure {
+    /// The source could not be reached or refused the range.
+    Transport(TransportError),
+    /// The source returned a body of the wrong length for the range.
+    WrongLength { expected: usize, got: usize },
+    /// The source returned right-length bytes that did not hash to the chunk's recorded digest.
+    DigestMismatch,
+}
+
+/// Why one chunk of a blob could not be drawn from any source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkUnavailable {
+    /// The chunk index within the blob's [`ChunkedDigest`].
+    pub index: usize,
+    /// The byte span the chunk covers.
+    pub range: ByteRange,
+    /// Each source's failure, in source order.
+    pub failures: Vec<(usize, ChunkFailure)>,
+}
+
+impl ChunkUnavailable {
+    /// The transport-level failures among the sources, so a caller can decide whether a retry could
+    /// recover: a source that failed only its chunk digest will not, one that failed a reachable transport
+    /// might. The index is into the same source slice the pull ran over.
+    #[must_use]
+    pub fn transport_failures(&self) -> Vec<(usize, TransportError)> {
+        self.failures
+            .iter()
+            .filter_map(|(index, failure)| match failure {
+                ChunkFailure::Transport(error) => Some((*index, error.clone())),
+                ChunkFailure::WrongLength { .. } | ChunkFailure::DigestMismatch => None,
+            })
+            .collect()
+    }
+}
+
+/// Draw chunk `index` of `chunked` for `digest` across `sources` in order, returning its verified bytes.
+///
+/// The per-chunk counterpart to [`pull_ranged`]: where that reassembles the whole blob and digest-verifies
+/// it once at the end, this verifies each chunk against its own recorded digest as it arrives, so a chunk
+/// is trusted — and can be staged or forwarded — before the rest of the blob is drawn. A source that
+/// disconnects, returns the wrong number of bytes, or returns right-length bytes that fail the chunk digest
+/// is skipped for the next, so one bad source never blocks a chunk another can serve. The recorded
+/// per-chunk digests are trusted metadata a node wrote from whole-verified bytes, so a source cannot forge
+/// a chunk past them. Nothing is committed; the caller stages the returned bytes.
+///
+/// # Errors
+/// [`ChunkUnavailable`] when every source fails the chunk, carrying each source's failure in source order.
+///
+/// # Panics
+/// Never in practice: the caller draws `index` in `0..chunked.len()`, for which
+/// [`ChunkedDigest::range`] returns the covered span.
+pub async fn pull_chunk_verified<T: BlobTransport + ?Sized>(
+    sources: &[&T],
+    digest: &Digest,
+    chunked: &ChunkedDigest,
+    index: usize,
+    total_length: u64,
+) -> Result<Bytes, ChunkUnavailable> {
+    let span = chunked
+        .range(index, total_length)
+        .expect("index is within the chunk count");
+    let range = ByteRange {
+        offset: usize::try_from(span.start).unwrap_or(usize::MAX),
+        length: usize::try_from(span.end - span.start).unwrap_or(usize::MAX),
+    };
+    let mut failures = Vec::new();
+    for (source_index, source) in sources.iter().enumerate() {
+        let request = BlobRequest {
+            digest: digest.clone(),
+            range: Some(range),
+        };
+        match source.fetch_blob(request).await {
+            Err(error) => failures.push((source_index, ChunkFailure::Transport(error))),
+            Ok(bytes) if bytes.len() != range.length => failures.push((
+                source_index,
+                ChunkFailure::WrongLength {
+                    expected: range.length,
+                    got: bytes.len(),
+                },
+            )),
+            Ok(bytes) if !chunked.verify_chunk(index, &bytes) => {
+                failures.push((source_index, ChunkFailure::DigestMismatch));
+            }
+            Ok(bytes) => return Ok(Bytes::from(bytes)),
+        }
+    }
+    Err(ChunkUnavailable { index, range, failures })
 }
 
 async fn fetch_range<T: BlobTransport + ?Sized>(

@@ -120,14 +120,29 @@ struct Shared {
     queue: Arc<Semaphore>,
     per_kind: KeyedLimiter,
     per_repository: KeyedLimiter,
-    inflight: Mutex<HashSet<String>>,
+    inflight: Mutex<Inflight>,
     metrics: Arc<JobMetrics>,
     cancel: CancellationToken,
 }
 
+/// The conflict keys of currently admitted runs, split by kind so a probe borrows the scope instead
+/// of building a combined key: an admitted run stores one owned scope, and every refused submission
+/// checks membership without allocating.
+type Inflight = HashMap<&'static str, HashSet<Box<str>>>;
+
 impl Shared {
-    fn lock_inflight(&self) -> MutexGuard<'_, HashSet<String>> {
+    fn lock_inflight(&self) -> MutexGuard<'_, Inflight> {
         self.inflight.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Release the `(kind, scope)` conflict key held by a finished run, dropping the kind's set once it
+    /// empties so the map never accumulates idle kinds.
+    fn release_conflict(inflight: &mut Inflight, kind: &'static str, scope: &str) {
+        let scopes = inflight.get_mut(kind).expect("an admitted run holds its conflict key");
+        scopes.remove(scope);
+        if scopes.is_empty() {
+            inflight.remove(kind);
+        }
     }
 }
 
@@ -148,7 +163,7 @@ impl JobScheduler {
             queue: Arc::new(Semaphore::new(limits.queue.get())),
             per_kind: KeyedLimiter::new(limits.per_kind),
             per_repository: KeyedLimiter::new(limits.per_repository),
-            inflight: Mutex::new(HashSet::new()),
+            inflight: Mutex::new(Inflight::new()),
             metrics: Arc::new(JobMetrics::default()),
             cancel: CancellationToken::new(),
         };
@@ -205,18 +220,22 @@ impl JobScheduler {
         if self.shared.cancel.is_cancelled() {
             return Submit::ShuttingDown;
         }
-        let key = conflict_key(kind, job.scope());
-        if !self.shared.lock_inflight().insert(key.clone()) {
+        let scope = job.scope();
+        let mut inflight = self.shared.lock_inflight();
+        if inflight.get(kind).is_some_and(|scopes| scopes.contains(scope)) {
+            drop(inflight);
             self.shared.metrics.rejected(kind, Reject::Conflict);
             return Submit::Conflict;
         }
         let Ok(slot) = self.shared.queue.clone().try_acquire_owned() else {
-            self.shared.lock_inflight().remove(&key);
+            drop(inflight);
             self.shared.metrics.rejected(kind, Reject::QueueFull);
             return Submit::QueueFull;
         };
+        inflight.entry(kind).or_default().insert(Box::from(scope));
+        drop(inflight);
         self.tracker
-            .spawn(run_admitted(self.shared.clone(), job, key, slot, completion));
+            .spawn(run_admitted(self.shared.clone(), job, slot, completion));
         Submit::Queued
     }
 
@@ -234,7 +253,6 @@ impl JobScheduler {
 async fn run_admitted(
     shared: Arc<Shared>,
     job: Arc<dyn NodeJob>,
-    key: String,
     slot: OwnedSemaphorePermit,
     completion: Option<oneshot::Sender<Result<JobReport, String>>>,
 ) {
@@ -248,14 +266,10 @@ async fn run_admitted(
     let _kind = shared.per_kind.acquire(job.kind()).await;
     let _repository = shared.per_repository.acquire(job.scope()).await;
     let result = execute(job.as_ref(), &shared, &shared.cancel.child_token()).await;
-    shared.lock_inflight().remove(&key);
+    Shared::release_conflict(&mut shared.lock_inflight(), job.kind(), job.scope());
     if let Some(completion) = completion {
         let _ = completion.send(result.map_err(|error| error.to_string()));
     }
-}
-
-fn conflict_key(kind: &str, scope: &str) -> String {
-    format!("{kind}\u{0}{scope}")
 }
 
 async fn execute(job: &dyn NodeJob, shared: &Shared, cancel: &CancellationToken) -> Result<JobReport, JobError> {

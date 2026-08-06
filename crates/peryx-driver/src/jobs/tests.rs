@@ -408,6 +408,39 @@ async fn test_a_second_submission_of_the_same_kind_and_scope_conflicts() {
 }
 
 #[tokio::test]
+async fn test_the_same_kind_and_scope_is_admitted_again_once_the_run_finishes() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+    scheduler
+        .run(TestJob::new("probe", "a", Action::Return(Ok(JobReport::default()))))
+        .await
+        .unwrap();
+    let again = TestJob::new("probe", "a", Action::Return(Ok(JobReport::default())));
+    scheduler.run(again.clone()).await.unwrap();
+    assert_eq!(again.ran.load(Ordering::SeqCst), 1);
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_finishing_one_scope_leaves_a_sibling_scope_of_the_same_kind_tracked() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+    let hold = Arc::new(Notify::new());
+    let sibling = TestJob::new("probe", "b", Action::Block(hold.clone()));
+    assert_eq!(scheduler.submit(sibling.clone()), Submit::Queued);
+    sibling.started.notified().await;
+    scheduler
+        .run(TestJob::new("probe", "a", Action::Return(Ok(JobReport::default()))))
+        .await
+        .unwrap();
+    let sibling_again = TestJob::new("probe", "b", Action::Return(Ok(JobReport::default())));
+    assert_eq!(scheduler.submit(sibling_again.clone()), Submit::Conflict);
+    hold.notify_one();
+    scheduler.shutdown().await;
+    assert_eq!(sibling_again.ran.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn test_a_submission_past_a_full_queue_is_refused() {
     let (_dir, state) = serving();
     let scheduler = JobScheduler::new(state, limits(2, 1, 2, 2));

@@ -209,7 +209,10 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             BlobFetch::Gateway(response) => return Ok(response),
         }
         let lease = state.blobs.materialize(&storage).await.map_err(blob_fault)?;
-        let selected = layer_query_member(query);
+        let selected = match layer_query_member(query) {
+            Ok(selected) => selected,
+            Err(response) => return Ok(response),
+        };
         let task = tokio::task::spawn_blocking(move || layer_contents_response(lease.path(), selected));
         Ok(join_layer_contents(task).await)
     }

@@ -215,20 +215,20 @@ async fn test_contents_offset_past_the_member_is_range_not_satisfiable() {
 }
 
 #[tokio::test]
-async fn test_contents_tolerates_a_non_numeric_offset() {
+async fn test_contents_rejects_a_non_numeric_offset() {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = hosted_writable(&dir, TOKEN);
     let digest = upload(&app, &gzip_layer()).await;
 
-    // A garbled offset falls back to 0 rather than failing the request.
+    // A garbled offset is a client mistake, not a silent seek to the start of the member.
     let (status, _, body) = send(
         &app,
         Method::GET,
         &format!("/v2/store/app/blobs/{digest}/contents?member=app%2Fconfig.toml&offset=abc"),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body[..], b"name = \"peryx\"\nport = 8080\n");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(&body[..], b"offset must be a non-negative integer");
 }
 
 #[tokio::test]

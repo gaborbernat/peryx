@@ -11,9 +11,19 @@
 //! persists it. Splitting the two keeps the barrier wait and the single committed move distinct, so a
 //! cancel that races the commit resolves against the plan rather than a half-applied move.
 
-use peryx_driver::state::{ControlCommand, ControlError, ControlPlane};
-use peryx_replication::{AuthorityEpoch, TransferAudit, TransferError, TransferPhase, TransferPlan};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::time::Duration;
+
+use peryx_driver::state::{ControlCommand, ControlError, ControlPlane, OwnershipAuthority};
+use peryx_replication::{
+    AuthorityEpoch, BatchRequest, DEFAULT_TRANSFER_LIMITS, HttpPeerTransport, PeerTransport, TransferAudit,
+    TransferError, TransferPhase, TransferPlan,
+};
 use peryx_storage::meta::{MetaError, MetaStore, TransferAudit as StoredTransferAudit};
+
+/// How long a frontier probe waits for the target's change-feed to answer before it reads as unreachable.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reads a datacenter's applied metadata frontier, the highest serial it has durably applied, so the
 /// barrier gate can tell when the target has replicated the source's writes.
@@ -123,6 +133,59 @@ pub async fn commit_transfer(
     meta.record_transfer_audit(&stored(&audit))
         .map_err(TransferDriveError::Persist)?;
     Ok(audit)
+}
+
+/// The ownership consensus group reads back a committed epoch, so a driver can derive it from committed
+/// state after a move without threading it through the receipt.
+#[async_trait::async_trait]
+impl EpochOracle for Arc<dyn OwnershipAuthority> {
+    async fn committed_epoch(&self, authority: &str) -> u64 {
+        OwnershipAuthority::committed_epoch(self.as_ref(), authority).await
+    }
+}
+
+/// Probes a datacenter's change-feed for its applied frontier, resolving the datacenter to a base address
+/// from the availability roster.
+///
+/// The feed's `current_serial` is the highest metadata serial that datacenter has durably applied. A
+/// datacenter absent from the roster, or one whose feed cannot be reached or has synced nothing, reads as
+/// no frontier so the barrier gate keeps the move waiting rather than committing to a target that has not
+/// caught up.
+pub struct RosterFrontierSource {
+    peers: Vec<(String, String)>,
+    token: String,
+}
+
+impl RosterFrontierSource {
+    /// Build a source over `peers`, each a `(datacenter, base URL)` pair, authenticating every probe with
+    /// `token`.
+    #[must_use]
+    pub fn new(peers: Vec<(String, String)>, token: impl Into<String>) -> Self {
+        Self {
+            peers,
+            token: token.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FrontierSource for RosterFrontierSource {
+    async fn applied_frontier(&self, datacenter: &str) -> anyhow::Result<Option<u64>> {
+        let Some((_, address)) = self.peers.iter().find(|(name, _)| name == datacenter) else {
+            return Ok(None);
+        };
+        let transport = HttpPeerTransport::new(address, self.token.clone(), DEFAULT_TRANSFER_LIMITS, PROBE_TIMEOUT)?;
+        let request = BatchRequest {
+            after: 0,
+            max_operations: NonZeroUsize::new(1).expect("1 is non-zero"),
+        };
+        // An unreachable target, or one that has synced no source yet, reads as no frontier so the move
+        // keeps waiting rather than committing to a target that has not caught up.
+        transport
+            .fetch_batch(request)
+            .await
+            .map_or_else(|_| Ok(None), |frame| Ok(Some(frame.frontier().1)))
+    }
 }
 
 /// Flatten a sealed audit into the primitive record the store persists.

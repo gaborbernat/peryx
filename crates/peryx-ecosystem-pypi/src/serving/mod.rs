@@ -39,6 +39,7 @@ use crate::discovery;
 mod acknowledge;
 mod admission;
 mod changelog;
+pub mod finalize;
 mod get;
 mod inspect;
 mod mutate;

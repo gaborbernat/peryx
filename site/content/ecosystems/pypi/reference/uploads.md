@@ -67,6 +67,11 @@ metadata or changes home authority: those run downstream once the home is reacha
 minority therefore keeps admitting and retaining eligible uploads durably near the client, and the retained intents
 drain at the new home once [authority transfers](@/core/availability-authority-transfer.md) to a survivor.
 
+**Finalization.** Admission stages the upload; the authority's home datacenter turns it into a release. That step
+validates the intent against current state and commits the metadata and its outbox entry in one transaction. See
+[finalizing admitted uploads](@/core/availability-finalization.md) for the fence, the validation checks, and how a retry
+replays one result.
+
 ## Project size quota
 
 An index policy can set `max_project_size_bytes` for hosted PyPI uploads. The limit counts each distribution file's

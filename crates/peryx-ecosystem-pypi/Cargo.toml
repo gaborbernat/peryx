@@ -42,6 +42,7 @@ serving = [
   "dep:rustls",
   "dep:thiserror",
   "dep:async-trait",
+  "dep:uuid",
   "dep:tracing",
   "dep:tokio",
   "dep:tokio-util",
@@ -77,6 +78,7 @@ peryx-search = { workspace = true, optional = true }
 peryx-policy = { workspace = true, optional = true }
 peryx-identity = { workspace = true, optional = true }
 peryx-storage = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 peryx-upstream = { workspace = true, optional = true }
 axum = { workspace = true, features = ["multipart"], optional = true }
 tower-http = { workspace = true, optional = true }

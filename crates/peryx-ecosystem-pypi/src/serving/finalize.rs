@@ -1,0 +1,311 @@
+//! Finalize an admitted upload at its authority's home datacenter.
+//!
+//! A node admits an upload's bytes wherever they arrive, staging an [ingress
+//! intent](peryx_storage::meta::MetaStore::staged_intent). The intent's authority home is the one
+//! place that turns it into an authoritative release: it validates the intent against current state and
+//! commits the metadata, its outbox journal, the operation's terminal outcome, and the intent's advance
+//! in one transaction, so a crash never leaves a published artifact no replica receives.
+//!
+//! Finalization is fenced and idempotent. A stale authority epoch, a permission the intent no longer
+//! holds, a placement the bytes never reached, or a checksum that disagrees with what was admitted each
+//! rejects the finalize before publication. Only the publish is durable: it runs through
+//! [`commit_finalized_write`](peryx_storage::meta::MetaStore::commit_finalized_write), which stamps the
+//! operation's terminal outcome in the same transaction as the metadata, so a retry after a timeout or a
+//! restart replays the one committed result rather than publishing twice. A refusal carries no such
+//! record, so an upload blocked on a condition that later clears finalizes on its next attempt.
+//!
+//! Routing an admitted intent to its home and moving the bytes there is [#541]'s job and excluded here;
+//! this module is the mechanism that home invokes, and a test drives it directly with a descriptor
+//! standing in for what routing supplies.
+//!
+//! [#541]: https://github.com/tox-dev/peryx/issues/541
+
+use peryx_driver::state::ServingState;
+use peryx_identity::{Action, Principal, authorize};
+use peryx_storage::meta::{FinalizedWrite, MetaError, QuotaError};
+use uuid::Uuid;
+
+use crate::store::{Guard, MetadataSibling, ProvenanceSibling, PublishedFile, publish_file_in_txn};
+
+/// The body a durable finalize stores and replays, matching the acknowledgement a synchronous upload
+/// returns once its write is proven durable.
+const DURABLE_ACK: &[u8] = b"upload accepted";
+
+/// Everything the home DC needs to publish an admitted upload, standing in for what [#541] routing
+/// supplies. A test constructs it directly; the transport of the bytes it names is out of scope here.
+///
+/// [#541]: https://github.com/tox-dev/peryx/issues/541
+pub struct FinalizeDescriptor<'a> {
+    /// The idempotency key the admission minted for this upload, whose terminal outcome a retry replays.
+    pub operation: &'a str,
+    /// The authority whose home fences this finalize by committed epoch.
+    pub authority: &'a str,
+    /// The principal the upload authenticated as, re-authorized against the current ACL in case a
+    /// permission changed between admission and finalization.
+    pub principal: &'a Principal,
+    /// The hosted index that owns the write.
+    pub index_name: &'a str,
+    /// The project's normalized name, which keys its rows.
+    pub normalized: &'a str,
+    /// The project's display name, as the uploader spelled it.
+    pub display: &'a str,
+    /// The distribution filename.
+    pub filename: &'a str,
+    /// The artifact's sha256, checked against the admitted intent's digest.
+    pub artifact_sha256: &'a str,
+    /// The artifact's byte length, checked against the admitted intent's size.
+    pub artifact_size: u64,
+    /// The serialized file record served on the project's page.
+    pub record: &'a [u8],
+    /// The release the file belongs to.
+    pub version: &'a str,
+    /// When the upload was submitted, as Unix seconds.
+    pub submitted_at_unix: i64,
+    /// The file's PEP 658 metadata sibling, when it has one.
+    pub metadata: Option<MetadataSibling<'a>>,
+    /// The file's PEP 740 provenance sibling, when the upload carried valid attestations.
+    pub provenance: Option<ProvenanceSibling<'a>>,
+    /// The pending quota reservation this file commits, when its upload is metered.
+    pub quota_reservation: Option<Uuid>,
+    /// When the stored operation outcome may be pruned, or `None` for no bound.
+    pub expiry_unix: Option<i64>,
+}
+
+/// A finalize's committed verdict. Only a published release is durable; a validation refusal is a
+/// transient [`FinalizeError`], re-evaluated on retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Finalization {
+    /// The upload committed for the first time; `response` is the acknowledgement a retry replays.
+    Published { response: Vec<u8> },
+    /// A prior finalize already committed this operation; its stored acknowledgement is replayed with no
+    /// second write.
+    Replayed { response: Vec<u8> },
+}
+
+/// Why a finalize refused to publish. A refusal is not durable: a retry re-evaluates it, so an upload
+/// blocked on a condition that later clears finalizes on its next attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeFailure {
+    /// The authority's committed epoch does not admit this finalize: its home moved or was never
+    /// assigned.
+    Fenced,
+    /// The principal no longer holds write on the index.
+    Unauthorized,
+    /// The artifact's bytes are not placed, so publishing would serve a file no store holds.
+    MissingPlacement,
+    /// The descriptor's digest or size disagrees with what was admitted.
+    ChecksumMismatch,
+}
+
+/// Why a finalize did not publish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalizeError {
+    /// No intent is staged under the key, so there is nothing to finalize.
+    NotStaged,
+    /// A validation refused publication. A retry re-evaluates the same check.
+    Rejected(FinalizeFailure),
+    /// The store failed to read, validate, or commit.
+    Store(String),
+}
+
+impl From<MetaError> for FinalizeError {
+    fn from(err: MetaError) -> Self {
+        Self::Store(err.to_string())
+    }
+}
+
+/// A store or quota error raised inside the publish transaction, kept as one channel so both leave the
+/// finalize through [`FinalizeError::Store`].
+enum StoreFail {
+    Meta(MetaError),
+    Quota(QuotaError),
+}
+
+impl From<MetaError> for StoreFail {
+    fn from(err: MetaError) -> Self {
+        Self::Meta(err)
+    }
+}
+
+impl From<QuotaError> for StoreFail {
+    fn from(err: QuotaError) -> Self {
+        Self::Quota(err)
+    }
+}
+
+impl From<StoreFail> for FinalizeError {
+    fn from(err: StoreFail) -> Self {
+        match err {
+            StoreFail::Meta(err) => Self::Store(err.to_string()),
+            StoreFail::Quota(err) => Self::Store(err.to_string()),
+        }
+    }
+}
+
+/// Finalize the upload staged under `intent_key` for the authority `descriptor` names.
+///
+/// Reads the staged intent, replays a terminal outcome for a retry, fences the finalize by the
+/// authority's committed epoch, validates the descriptor against the admitted intent and current state,
+/// and, when all hold, publishes the file's rows, its outbox journal, a `Published` outcome, and the
+/// intent's advance to [`Admitted`](peryx_storage::meta::IntentPhase::Admitted) in one transaction.
+///
+/// # Errors
+/// Returns [`FinalizeError::NotStaged`] when no intent is staged, [`FinalizeError::Rejected`] when a
+/// validation refuses publication, and [`FinalizeError::Store`] when the store fails. A refusal is
+/// transient: a retry re-evaluates it.
+pub async fn finalize_admitted_upload(
+    state: &ServingState,
+    intent_key: &str,
+    descriptor: &FinalizeDescriptor<'_>,
+) -> Result<Finalization, FinalizeError> {
+    let Some(intent) = state.meta.staged_intent(intent_key)? else {
+        return Err(FinalizeError::NotStaged);
+    };
+
+    if let Some(record) = state
+        .meta
+        .operation_outcome(descriptor.operation)?
+        .filter(|record| record.state.is_terminal())
+    {
+        return Ok(Finalization::Replayed {
+            response: record.response,
+        });
+    }
+
+    let epoch = state.committed_authority_epoch(descriptor.authority).await;
+    if !state.admit_authority_epoch(descriptor.authority, epoch).await {
+        return Err(FinalizeError::Rejected(FinalizeFailure::Fenced));
+    }
+    if descriptor.artifact_sha256 != intent.digest || descriptor.artifact_size != intent.size {
+        return Err(FinalizeError::Rejected(FinalizeFailure::ChecksumMismatch));
+    }
+    if state.meta.get_artifact_placement(&intent.digest)?.is_none() {
+        return Err(FinalizeError::Rejected(FinalizeFailure::MissingPlacement));
+    }
+    if !authorized(state, descriptor) {
+        return Err(FinalizeError::Rejected(FinalizeFailure::Unauthorized));
+    }
+
+    publish(state, intent_key, descriptor, (state.clock)())
+}
+
+/// Whether the descriptor's principal holds write on its index under the index's current ACL. An
+/// unknown index fails closed, since no ACL grants a write there.
+fn authorized(state: &ServingState, descriptor: &FinalizeDescriptor<'_>) -> bool {
+    state
+        .indexes
+        .iter()
+        .find(|index| index.name == descriptor.index_name)
+        .is_some_and(|index| {
+            authorize(
+                descriptor.principal,
+                &index.acl,
+                Some(descriptor.normalized),
+                Action::Write,
+            )
+            .is_ok()
+        })
+}
+
+/// Publish the file through the finalize primitive, committing its quota reservation when the upload is
+/// metered.
+fn publish(
+    state: &ServingState,
+    intent_key: &str,
+    descriptor: &FinalizeDescriptor<'_>,
+    now: i64,
+) -> Result<Finalization, FinalizeError> {
+    let file = PublishedFile {
+        index: descriptor.index_name,
+        normalized: descriptor.normalized,
+        display: descriptor.display,
+        filename: descriptor.filename,
+        artifact_sha256: descriptor.artifact_sha256,
+        artifact_size: descriptor.artifact_size,
+        record: descriptor.record,
+        version: descriptor.version,
+        submitted_at_unix: descriptor.submitted_at_unix,
+        metadata: descriptor.metadata.as_ref().map(reborrow_metadata),
+        provenance: descriptor.provenance.as_ref().map(reborrow_provenance),
+        quota: None,
+    };
+    let write = FinalizedWrite {
+        operation: descriptor.operation,
+        intent_key,
+        response: DURABLE_ACK,
+        expiry_unix: descriptor.expiry_unix,
+        now,
+    };
+    let guard =
+        |existing: Option<&[u8]>| Ok::<_, StoreFail>(if existing.is_some() { Guard::Skip } else { Guard::Commit });
+    // The terminal-outcome replay is decided before publication, so this commit publishes rather than
+    // replays; either way the operation ends published with the same acknowledgement.
+    match descriptor.quota_reservation {
+        Some(reservation) => {
+            state
+                .meta
+                .commit_finalized_write_with_quota(write, reservation, |txn| {
+                    publish_file_in_txn::<StoreFail>(txn, &file, guard)
+                })?;
+        }
+        None => {
+            state.meta.commit_finalized_write(write, |txn| {
+                publish_file_in_txn::<StoreFail>(txn, &file, guard).map(|(_, journal)| journal)
+            })?;
+        }
+    }
+    Ok(Finalization::Published {
+        response: DURABLE_ACK.to_vec(),
+    })
+}
+
+const fn reborrow_metadata<'a>(sibling: &'a MetadataSibling<'a>) -> MetadataSibling<'a> {
+    MetadataSibling {
+        url: sibling.url,
+        metadata_sha256: sibling.metadata_sha256,
+        size: sibling.size,
+        source: sibling.source,
+    }
+}
+
+const fn reborrow_provenance<'a>(sibling: &'a ProvenanceSibling<'a>) -> ProvenanceSibling<'a> {
+    ProvenanceSibling {
+        provenance_sha256: sibling.provenance_sha256,
+        size: sibling.size,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use peryx_storage::meta::{MetaError, QuotaError};
+
+    use super::{FinalizeError, StoreFail};
+
+    fn meta_error() -> MetaError {
+        MetaError::Decode(serde_json::from_str::<serde_json::Value>("x").unwrap_err())
+    }
+
+    #[test]
+    fn test_a_read_fault_maps_to_a_finalize_store_error() {
+        assert!(matches!(FinalizeError::from(meta_error()), FinalizeError::Store(_)));
+    }
+
+    #[test]
+    fn test_a_publish_store_fault_maps_to_a_finalize_store_error() {
+        assert!(matches!(StoreFail::from(meta_error()), StoreFail::Meta(_)));
+        assert!(matches!(
+            FinalizeError::from(StoreFail::from(meta_error())),
+            FinalizeError::Store(_)
+        ));
+    }
+
+    #[test]
+    fn test_a_publish_quota_fault_maps_to_a_finalize_store_error() {
+        let quota = || QuotaError::ReservationUnavailable { id: uuid::Uuid::nil() };
+        assert!(matches!(StoreFail::from(quota()), StoreFail::Quota(_)));
+        assert!(matches!(
+            FinalizeError::from(StoreFail::from(quota())),
+            FinalizeError::Store(_)
+        ));
+    }
+}

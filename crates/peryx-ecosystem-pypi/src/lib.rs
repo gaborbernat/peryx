@@ -72,6 +72,10 @@ pub use search_pypi::PypiIndexer;
 #[cfg(feature = "serving")]
 pub use serving::PypiServing;
 #[cfg(feature = "serving")]
+pub use serving::finalize::{
+    Finalization, FinalizeDescriptor, FinalizeError, FinalizeFailure, finalize_admitted_upload,
+};
+#[cfg(feature = "serving")]
 pub use simple_client::{ACCEPT_SIMPLE, SimpleClientExt, SimpleHead, SimpleResponse, UpstreamProtocol};
 
 pub use changelog::{

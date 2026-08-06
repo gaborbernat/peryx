@@ -130,6 +130,8 @@ and the drain finalizes it; an unacknowledged in-flight write that never became 
 
 ## Related
 
+- The deliberate operator-initiated move of a healthy home:
+  [planned authority transfer](@/core/availability-planned-transfer.md)
 - The failure signal that a home is dead: [node liveness](@/core/availability-liveness.md)
 - The durability each step preserves: [availability contracts](@/core/availability-contracts.md)
 - The single-writer recovery runbook this parallels: [failover and recovery](@/core/availability-failover-recovery.md)

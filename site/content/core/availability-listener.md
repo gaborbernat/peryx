@@ -11,8 +11,8 @@ no socket, timer, or task for it, so the default single-writer deployment pays n
 run.
 
 This page describes the listener's bind, transport, authentication, scopes, request limits, audit trail, and network
-segmentation. It serves a read-only status endpoint and a membership-and-transfer command endpoint, each behind the same
-authenticated gate but gating a different scope.
+segmentation. It serves a read-only status endpoint, a membership-and-transfer command endpoint, and a planned-transfer
+endpoint, each behind the same authenticated gate but gating a different scope.
 
 ## Enabling the listener
 
@@ -164,6 +164,15 @@ ledger.
 
 A `503` from a non-leader node names the current leader in its body when the group knows one, so a client retries
 against it.
+
+## Planned transfers
+
+The `transfer_authority` command above is the unconditional consensus move a failover commits. To move a *healthy* home
+on purpose — a drain, a rebalance, a migration — the listener also serves a planned-transfer surface at
+`POST /availability/v1/transfers` and `DELETE /availability/v1/transfers/{authority}`, behind the same administration
+write scope. A planned transfer waits for the target to catch up before it commits and records who moved the authority
+and why. See [planned authority transfer](@/core/availability-planned-transfer.md) for the request shape, the catch-up
+gate, cancellation, and the audit record.
 
 ## Request limits and audit
 

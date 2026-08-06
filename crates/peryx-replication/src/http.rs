@@ -31,6 +31,31 @@ const USER_AGENT: &str = concat!("peryx-replication/", env!("CARGO_PKG_VERSION")
 /// The largest change page the primary HTTP endpoint accepts.
 pub const DEFAULT_MAX_CHANGE_PAGE_SIZE: usize = 1_000;
 
+/// The most bytes a single change encodes to on the wire.
+///
+/// A change carries a base64 event payload, its metadata mutations, and its blob references. Base64
+/// framing inflates by four bytes per three, so a 32 KiB budget covers a ~24 KiB raw event plus the
+/// JSON keys, kebab-case operation tags, and blob digests around it. This is the protocol-level
+/// per-field bound that lets a follower size the response it buffers without decoding it: without it
+/// event payloads, metadata keys, and values are variable-length and a page's byte size is unbounded
+/// even at a fixed record count.
+const MAX_CHANGE_ENCODED_BYTES: u64 = 32 * 1024;
+
+/// The JSON envelope around the change array: the `version`, `source`, `after`, and `current_serial`
+/// fields plus the object and array punctuation, independent of the changes themselves.
+const CHANGE_PAGE_ENVELOPE_BYTES: u64 = 4 * 1024;
+
+/// The largest encoded change page a follower buffers before decoding it.
+///
+/// [`HttpPrimary::changes`] reads the primary's JSON response into memory before it can validate the
+/// record count, so the byte size must be bounded on its own. A compromised primary, a wrong
+/// endpoint, or a proxy can otherwise return an unbounded fixed-length or chunked body and exhaust
+/// follower memory before validation runs. The bound is [`MAX_CHANGE_ENCODED_BYTES`] across a full
+/// [`DEFAULT_MAX_CHANGE_PAGE_SIZE`] page plus the page's own [`CHANGE_PAGE_ENVELOPE_BYTES`] envelope,
+/// so it always covers a valid page at the maximum record count and per-change size.
+pub const DEFAULT_MAX_CHANGE_PAGE_BYTES: u64 =
+    MAX_CHANGE_ENCODED_BYTES * DEFAULT_MAX_CHANGE_PAGE_SIZE as u64 + CHANGE_PAGE_ENVELOPE_BYTES;
+
 /// The most artifact byte streams the primary serves at once.
 ///
 /// A request that arrives while every slot is held earns a `503`, so a burst of slow, stalled, or
@@ -58,6 +83,8 @@ pub enum HttpPrimaryError {
     Request(#[source] reqwest::Error),
     #[error("decode primary change page: {0}")]
     Decode(#[source] serde_json::Error),
+    #[error("primary change page exceeds {limit} byte limit: {actual}")]
+    ResponseTooLarge { limit: u64, actual: u64 },
 }
 
 /// A bearer-authenticated HTTP implementation of [`Primary`].
@@ -66,6 +93,7 @@ pub struct HttpPrimary {
     http: reqwest::Client,
     changes_url: Url,
     token: String,
+    max_page_bytes: u64,
 }
 
 fn endpoint_url(base: &Url, path: &str) -> Url {
@@ -109,7 +137,14 @@ impl HttpPrimary {
             http,
             changes_url,
             token,
+            max_page_bytes: DEFAULT_MAX_CHANGE_PAGE_BYTES,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn with_max_page_bytes(mut self, max_page_bytes: u64) -> Self {
+        self.max_page_bytes = max_page_bytes;
+        self
     }
 }
 
@@ -132,7 +167,7 @@ impl Primary for HttpPrimary {
         url.query_pairs_mut()
             .append_pair("after", &after.to_string())
             .append_pair("limit", &limit.to_string());
-        let response = self
+        let mut response = self
             .http
             .get(url)
             .bearer_auth(&self.token)
@@ -141,7 +176,28 @@ impl Primary for HttpPrimary {
             .map_err(HttpPrimaryError::Request)?
             .error_for_status()
             .map_err(HttpPrimaryError::Request)?;
-        let bytes = response.bytes().await.map_err(HttpPrimaryError::Request)?;
+        let cap = self.max_page_bytes;
+        // A declared length lets the follower refuse an oversized body before reading a byte; a chunked
+        // body without one is capped as it accumulates, so neither shape can exhaust follower memory.
+        if let Some(length) = response.content_length()
+            && length > cap
+        {
+            return Err(HttpPrimaryError::ResponseTooLarge {
+                limit: cap,
+                actual: length,
+            });
+        }
+        let mut bytes: Vec<u8> = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(HttpPrimaryError::Request)? {
+            let total = bytes.len() as u64 + chunk.len() as u64;
+            if total > cap {
+                return Err(HttpPrimaryError::ResponseTooLarge {
+                    limit: cap,
+                    actual: total,
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         serde_json::from_slice(&bytes).map_err(HttpPrimaryError::Decode)
     }
 }

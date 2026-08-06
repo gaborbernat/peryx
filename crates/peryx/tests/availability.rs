@@ -8,6 +8,7 @@
 
 mod dc_group_readiness;
 mod harness;
+mod oci_failover;
 mod pypi_failover;
 
 use std::time::{Duration, Instant};
@@ -345,6 +346,69 @@ fn test_publishes_a_wheel_and_downloads_it_by_content_address() {
         harness::WHEEL,
         "the download returns the published bytes unchanged"
     );
+}
+
+#[test]
+fn test_with_oci_serves_the_distribution_v2_mutation_surface() {
+    // The opt-in OCI seam: a node built with `with_oci` answers the distribution-spec `/v2/` handshake,
+    // opens a blob upload session, commits a blob, and publishes a manifest — the mutating surface the
+    // OCI-failover tier drives. The PyPI `hosted` index keeps working on the same node, so the seam is
+    // additive.
+    let cluster = Topology::single().with_oci().start().expect("cluster starts");
+    let node = &cluster.nodes()[0];
+
+    let (code, _) = node.oci_v2().expect("v2 reachable");
+    assert_eq!(code, 200, "an OCI node answers the /v2/ version check");
+
+    // Opening a blob upload session is a bare 202 Accepted.
+    let (code, _) = node
+        .oci_mutate(
+            reqwest::Method::POST,
+            &format!("/v2/{}/app/blobs/uploads/", harness::OCI_ROUTE),
+        )
+        .expect("upload session reachable");
+    assert_eq!(code, 202, "opening a blob upload session is accepted");
+
+    // A monolithic blob commit is 201 Created, and the blob then pulls back byte for byte.
+    let blob = b"harness-oci-layer";
+    let (code, digest) = node.oci_push_blob("app", blob).expect("blob push reaches the node");
+    assert_eq!(code, 201, "a committed blob is created");
+    let (code, bytes) = node.oci_pull_blob("app", &digest).expect("blob pull reaches the node");
+    assert_eq!(
+        (code, bytes.as_slice()),
+        (200, blob.as_slice()),
+        "the pulled blob is the pushed bytes",
+    );
+
+    // A manifest PUT under a tag is 201 Created, and the tag lists exactly once.
+    let manifest = br#"{"schemaVersion":2}"#;
+    let (code, _) = node
+        .oci_put_manifest("app", "1.0", manifest, harness::OCI_MANIFEST_TYPE)
+        .expect("manifest put reaches the node");
+    assert_eq!(code, 201, "a published manifest is created");
+    assert_eq!(
+        node.oci_tags("app"),
+        vec!["1.0".to_owned()],
+        "the published tag lists once"
+    );
+
+    // The PyPI hosted index still serves on the same node: the OCI index is additive.
+    let (code, body) = node.publish().expect("publish reaches the node");
+    assert_eq!(
+        (code, body.as_str()),
+        (200, "upload accepted"),
+        "PyPI publish still works"
+    );
+}
+
+#[test]
+fn test_without_oci_serves_no_v2_surface() {
+    // The seam is opt-in: a topology that does not call `with_oci` mounts no OCI driver, so the `/v2/`
+    // catch-all is absent and the version check resolves no index.
+    let cluster = Topology::single().start().expect("cluster starts");
+    let node = &cluster.nodes()[0];
+    let (code, _) = node.oci_v2().expect("the node is reachable");
+    assert_eq!(code, 404, "a node without with_oci serves no /v2/ API");
 }
 
 #[test]

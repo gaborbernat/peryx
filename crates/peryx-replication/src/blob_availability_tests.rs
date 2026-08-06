@@ -7,6 +7,18 @@ fn blob(serial: u64, availability: PlacementAvailability, present_locally: bool)
         digest: format!("digest-{serial}"),
         availability,
         present_locally,
+        served_by_peer: false,
+    }
+}
+
+/// A blob absent locally but placed on a reachable peer, so read-through serves it and it does not gate.
+fn deferred(serial: u64) -> ReferencedBlob {
+    ReferencedBlob {
+        serial,
+        digest: format!("digest-{serial}"),
+        availability: PlacementAvailability::Verified,
+        present_locally: false,
+        served_by_peer: true,
     }
 }
 
@@ -143,6 +155,21 @@ fn test_an_unavailable_first_serial_holds_the_frontier_at_zero() {
         BlobAvailability {
             serial: 0,
             blocking: Some("digest-1".to_owned()),
+        }
+    );
+}
+
+#[test]
+fn test_a_peer_held_blob_does_not_hold_the_frontier() {
+    // The blob is absent locally but a peer datacenter holds it, so read-through serves it and the
+    // frontier passes the whole authority just as a present blob would.
+    let referenced = [blob(1, PlacementAvailability::Verified, true), deferred(2)];
+
+    assert_eq!(
+        blob_availability(2, &referenced),
+        BlobAvailability {
+            serial: 2,
+            blocking: None,
         }
     );
 }

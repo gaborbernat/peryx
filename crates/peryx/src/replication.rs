@@ -8,7 +8,7 @@ mod worker;
 
 pub use drain::AuthorityDrainJob;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fmt::Write as _, sync::Mutex};
@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use peryx_driver::read_through::{DEFAULT_READ_THROUGH_LIMITS, DcTransport, RemotePlacementReader};
+use peryx_driver::read_through::{DEFAULT_READ_THROUGH_LIMITS, DcTransport, ReadThroughLimits, RemotePlacementReader};
 use peryx_driver::state::SEARCH_VIEW;
 use peryx_driver::{AppState, PrometheusSource};
 use peryx_http::handlers::status_authorization;
@@ -481,30 +481,77 @@ pub fn install_read_through(config: &Config, state: &Arc<AppState>) -> anyhow::R
     let (ReplicationConfig::Primary { token, .. } | ReplicationConfig::Replica { token, .. }) = replication;
     let token = token.read().context("read the replication token for read-through")?;
     let limits = config.read_through.unwrap_or(DEFAULT_READ_THROUGH_LIMITS);
+    let built = peer_blob_delegates(membership, &local_dc, &token, limits)?;
+    if built.is_empty() {
+        return Ok(());
+    }
+    let delegates: HashMap<String, DcTransport> = built
+        .into_iter()
+        .map(|(dc, transport)| (dc, Arc::new(transport) as DcTransport))
+        .collect();
+    let dc = DataCenterId::new(local_dc.clone()).with_context(|| format!("local datacenter identity {local_dc}"))?;
+    let reader = RemotePlacementReader::new(dc, delegates, limits, state.serving.clock.clone());
+    state.set_read_through(Arc::new(reader));
+    Ok(())
+}
+
+/// Build a bounded blob transport to every roster member outside `local_dc`, keyed by the peer datacenter
+/// it reaches.
+///
+/// These are the peers a replica defers a blob to and read-through fetches a public miss from; the local
+/// datacenter holds no delegate, since a local miss is exactly the reason to reach a peer. The transfer
+/// bounds come from the read-through limits, so a ranged fetch stays under the same per-fetch ceiling. The
+/// map is empty when the roster has no remote peer.
+///
+/// # Errors
+/// Returns an error when a member address is not a usable HTTP base.
+fn peer_blob_delegates(
+    membership: &DcMembership,
+    local_dc: &str,
+    token: &str,
+    limits: ReadThroughLimits,
+) -> anyhow::Result<HashMap<String, CapacityLimited<HttpBlobTransport>>> {
     let transfer = TransferLimits {
         max_operations: TransferLimits::default().max_operations,
         max_encoded_bytes: limits.per_fetch_bytes,
     };
-    let mut delegates: HashMap<String, DcTransport> = HashMap::new();
+    let mut delegates = HashMap::new();
     for member in &membership.members {
         if member.dc == local_dc {
             continue;
         }
         let base = peer_blob_base(&member.address);
-        let transport = HttpBlobTransport::new(&base, token.clone(), transfer, BLOB_FETCH_TIMEOUT)
+        let transport = HttpBlobTransport::new(&base, token.to_owned(), transfer, BLOB_FETCH_TIMEOUT)
             .with_context(|| format!("build a read-through blob transport for datacenter {}", member.dc))?;
-        delegates.insert(
-            member.dc.clone(),
-            Arc::new(CapacityLimited::new(transport, limits.concurrency)),
-        );
+        delegates.insert(member.dc.clone(), CapacityLimited::new(transport, limits.concurrency));
     }
-    if delegates.is_empty() {
-        return Ok(());
-    }
-    let dc = DataCenterId::new(local_dc.clone()).with_context(|| format!("local datacenter identity {local_dc}"))?;
-    let reader = RemotePlacementReader::new(dc, delegates, limits, state.serving.clock.clone());
-    state.set_read_through(Arc::new(reader));
-    Ok(())
+    Ok(delegates)
+}
+
+/// Resolve a replica's own datacenter and the per-peer blob delegates its pull deferral consults.
+///
+/// A blob the policy places only on one of these reachable peer datacenters is deferred to cross-DC
+/// read-through instead of whole-pulled; the delegate keys are exactly those peers. A replica that has not
+/// resolved its own datacenter — no roster, or a node identity absent from it — resolves no peers and
+/// whole-pulls every blob, the behavior before descriptors named where each blob lives.
+///
+/// The peer addresses were validated building the metadata peer set just before this, so rebuilding a
+/// blob transport over the same address cannot fail.
+fn replica_blob_deferral(
+    config: &Config,
+    token: &str,
+) -> (String, HashMap<String, CapacityLimited<HttpBlobTransport>>) {
+    let local = config
+        .dc_membership
+        .as_ref()
+        .and_then(|membership| local_datacenter(config, membership));
+    let (Some(membership), Some(local_dc)) = (config.dc_membership.as_ref(), local) else {
+        return (String::new(), HashMap::new());
+    };
+    let limits = config.read_through.unwrap_or(DEFAULT_READ_THROUGH_LIMITS);
+    let delegates = peer_blob_delegates(membership, &local_dc, token, limits)
+        .expect("a replica's peer addresses are validated building its metadata peer set");
+    (local_dc, delegates)
 }
 
 /// A peer's blob-serving base URL from its roster address. A bare `host:port` reaches the peer over
@@ -544,6 +591,12 @@ struct ReplicaLoop {
     monitor: Arc<ReplicaMonitor>,
     metrics: Arc<AvailabilityMetrics>,
     transport: CapacityLimited<HttpBlobTransport>,
+    /// This replica's own datacenter, empty until it resolves one, so a blob placed here is held rather
+    /// than deferred.
+    local_dc: String,
+    /// The ranged blob transports to each reachable peer datacenter, keyed by datacenter. Their keys are
+    /// the peers a blob may defer to; empty until the replica resolves its datacenter and peers.
+    delegates: HashMap<String, CapacityLimited<HttpBlobTransport>>,
 }
 
 fn log_replica_page(outcome: SyncOutcome) {
@@ -702,14 +755,15 @@ impl ReplicaLoop {
     }
 
     async fn pull_blobs(&self) -> Result<BlobPlaneReport, SyncError> {
-        // A replica draws every blob whole from its upstream primary until placement descriptors ride in
-        // the replicated page and name the peers that hold each blob; with no delegates every blob is
-        // single-source and takes the whole-blob path.
-        let delegates = HashMap::new();
+        // A blob the policy places only on a reachable peer datacenter is deferred to cross-DC
+        // read-through: the replica leaves it absent and read-through fills a public download from the
+        // peer that holds it. A blob placed here, or one no reachable peer holds, still whole-pulls from
+        // the upstream. With no resolved datacenter and no peers the replica whole-pulls everything.
+        let reachable: BTreeSet<String> = self.delegates.keys().cloned().collect();
         let sources = BlobSources {
             simple: &self.transport,
-            delegates: &delegates,
-            local_dc: "",
+            delegates: &self.delegates,
+            local_dc: &self.local_dc,
         };
         let report = pull_outstanding(
             &sources,
@@ -719,7 +773,7 @@ impl ReplicaLoop {
             BLOB_FETCH_CONCURRENCY,
         )
         .await?;
-        advance_blob_frontier(&self.meta, &self.blobs, self.page_size).await?;
+        advance_blob_frontier(&self.meta, &self.blobs, self.page_size, &self.local_dc, &reachable).await?;
         Ok(report)
     }
 }
@@ -977,6 +1031,7 @@ impl ReplicationRuntime {
                 let token = token.read().context("read the replica replication token")?;
                 let resume = state.meta.current_serial().context("read the replica serial")?;
                 let (metadata, transport) = replica_transports(config, upstream, &token, resume, *page_size)?;
+                let (local_dc, delegates) = replica_blob_deferral(config, &token);
                 let beacon = replica_beacon(config, state, upstream, &token);
                 let follower = follower_router(token, state.serving.meta.clone())
                     .context("build the follower change-feed routes")?;
@@ -1015,6 +1070,8 @@ impl ReplicationRuntime {
                             monitor,
                             metrics,
                             transport,
+                            local_dc,
+                            delegates,
                         },
                         runtime,
                     )),

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use async_trait::async_trait;
@@ -208,16 +208,31 @@ async fn test_advance_holds_below_an_absent_blob_then_moves_past_it_once_present
     seed_local(&blobs, &one, b"blob-one").await;
 
     // `two` is absent, so the frontier holds at serial 1.
-    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 1);
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(10), "", &BTreeSet::new())
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
 
     // Once `two`'s byte lands the next pass advances past it.
     seed_local(&blobs, &two, b"blob-two").await;
-    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 2);
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(10), "", &BTreeSet::new())
+            .await
+            .unwrap(),
+        2
+    );
     assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(2));
 
     // Re-deriving from the same durable journal and blob store is idempotent.
-    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 2);
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(10), "", &BTreeSet::new())
+            .await
+            .unwrap(),
+        2
+    );
     assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(2));
 }
 
@@ -231,9 +246,19 @@ async fn test_advance_is_bounded_by_the_batch() {
     }
 
     // A batch of two examines serials 1 and 2 only, so the frontier reaches 2 this pass, not 3.
-    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(2)).await.unwrap(), 2);
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(2), "", &BTreeSet::new())
+            .await
+            .unwrap(),
+        2
+    );
     // The next pass carries it the rest of the way.
-    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(2)).await.unwrap(), 3);
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(2), "", &BTreeSet::new())
+            .await
+            .unwrap(),
+        3
+    );
 }
 
 #[tokio::test]
@@ -241,7 +266,12 @@ async fn test_advance_lets_a_serial_without_blobs_through() {
     let (_dir, meta, blobs) = stores();
     seed_serial(&meta, 0, &[]);
 
-    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 1);
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(10), "", &BTreeSet::new())
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
 }
 
@@ -251,7 +281,12 @@ async fn test_advance_fails_closed_on_an_unparseable_journal_digest() {
     seed_serial(&meta, 0, &[("not-a-valid-sha256", 4)]);
 
     // The digest cannot be probed, so the blob counts as absent and the frontier holds below serial 1.
-    assert_eq!(advance_blob_frontier(&meta, &blobs, nz(10)).await.unwrap(), 0);
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(10), "", &BTreeSet::new())
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), None);
 }
 
@@ -454,6 +489,114 @@ async fn test_pull_outstanding_takes_the_whole_blob_path_for_a_single_placement(
 
     assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
     assert!(blobs.verify(&digest).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_defers_a_peer_only_blob_to_read_through() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"peer-held";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    // The policy places the blob only in peer dc-b, none in the local dc-a.
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    // Even a whole-blob source that holds the bytes is left untouched: the blob defers to read-through.
+    let simple = loopback(&digest, bytes);
+    let delegates = HashMap::from([("dc-b".to_owned(), empty_source())]);
+    let sources = BlobSources {
+        simple: &simple,
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_whole_pulls_a_peer_blob_no_delegate_reaches() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"unreachable-peer";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    // The only placement is a peer this replica has no delegate for, so it cannot defer and whole-pulls
+    // from its upstream rather than stranding the blob.
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    let simple = loopback(&digest, bytes);
+    let delegates = HashMap::new();
+    let sources = BlobSources {
+        simple: &simple,
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_pulls_a_peer_blob_also_placed_locally() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"home-copy";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    // A verified local placement makes this replica a holder, so a sibling remote copy does not defer it.
+    seed_verified_placement(&meta, &digest, "dc-a", bytes.len() as u64);
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    let simple = loopback(&digest, bytes);
+    // Only the remote peer resolves to a delegate, so the plan is single-source and the whole-blob path
+    // fills the local copy.
+    let delegates = HashMap::from([("dc-b".to_owned(), empty_source())]);
+    let sources = BlobSources {
+        simple: &simple,
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_advance_lets_a_deferred_blob_through() {
+    let (_dir, meta, blobs) = stores();
+    let digest = Digest::of(b"peer-held");
+    seed_serial(&meta, 0, &[(digest.as_str(), 9)]);
+    // Placed only on a reachable peer, absent locally: read-through serves it, so the frontier passes.
+    seed_verified_placement(&meta, &digest, "dc-b", 9);
+    let reachable = BTreeSet::from(["dc-b".to_owned()]);
+
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(10), "dc-a", &reachable)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(1));
+    // The bytes are never pulled local; the frontier advanced on the peer placement alone.
+    assert!(blobs.head(&digest).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_advance_holds_a_peer_blob_with_no_reachable_peer() {
+    let (_dir, meta, blobs) = stores();
+    let digest = Digest::of(b"peer-held");
+    seed_serial(&meta, 0, &[(digest.as_str(), 9)]);
+    seed_verified_placement(&meta, &digest, "dc-b", 9);
+
+    // No reachable peer, so the absent blob cannot be deferred and holds the frontier below its serial.
+    assert_eq!(
+        advance_blob_frontier(&meta, &blobs, nz(10), "dc-a", &BTreeSet::new())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), None);
 }
 
 #[tokio::test]

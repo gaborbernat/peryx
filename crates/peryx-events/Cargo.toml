@@ -29,6 +29,9 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+# Depend on ourselves with `test-util` so benches reach the settle barrier and the daily-snapshot seed
+# the aggregator's own tests use, letting a bench pin a deterministic checkpoint at a chosen cardinality.
+peryx-events = { path = ".", features = ["test-util"] }
 base64.workspace = true
 criterion = { workspace = true, features = ["async_tokio"] }
 rstest.workspace = true

@@ -5127,6 +5127,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "http 1.4.2",
  "peryx-core",
+ "peryx-events",
  "peryx-identity",
  "peryx-replication",
  "peryx-storage",

@@ -586,7 +586,7 @@ pub fn restore_tag(
         let trashed = serde_json::from_slice::<TagTrash>(&raw)?;
         txn.put(&tag_key(index, repo, tag), trashed.digest.as_bytes())?;
         txn.remove(&trash_key)?;
-        txn.remove(&manifest_trash_key(index, repo, &trashed.digest))?;
+        release_trashed_tag(txn, index, repo, &trashed.digest, tag)?;
         let entries = outbox::record(journal, || OciMutation::RestoreTag {
             index: index.to_owned(),
             repo: repo.to_owned(),
@@ -595,6 +595,30 @@ pub fn restore_tag(
         });
         Ok((RestoreTagOutcome::Restored { digest: trashed.digest }, entries))
     })
+}
+
+/// Drop a restored tag from its digest's manifest-trash record. A digest deletion saves every tag it
+/// captured under one shared record; the record has to outlive each single-tag restore so the tags
+/// still trashed keep their parent context, so only the last captured tag's restore clears it. A tag
+/// the record never captured leaves it untouched, so an independent untagged deletion of the same
+/// digest survives.
+fn release_trashed_tag(txn: &mut DriverTxn, index: &str, repo: &str, digest: &str, tag: &str) -> Result<(), MetaError> {
+    let key = manifest_trash_key(index, repo, digest);
+    let Some(raw) = txn.get(&key)? else {
+        return Ok(());
+    };
+    let mut trashed = serde_json::from_slice::<ManifestTrash>(&raw)?;
+    let before = trashed.tags.len();
+    trashed.tags.retain(|captured| captured != tag);
+    if trashed.tags.len() == before {
+        return Ok(());
+    }
+    if trashed.tags.is_empty() {
+        txn.remove(&key)?;
+    } else {
+        txn.put(&key, &serde_json::to_vec(&trashed)?)?;
+    }
+    Ok(())
 }
 
 /// Restore one digest and every captured tag whose live slot remains free. Tags republished with
@@ -1127,6 +1151,80 @@ mod tests {
         assert!(
             trash_records(&meta, "other").unwrap().is_empty(),
             "records scope to the index"
+        );
+    }
+
+    #[test]
+    fn test_restore_tag_reports_a_missing_tag() {
+        let (_dir, meta) = store();
+        assert_eq!(
+            restore_tag(&meta, "hub", "app", "absent", false).unwrap(),
+            RestoreTagOutcome::Missing
+        );
+    }
+
+    #[test]
+    fn test_restore_tag_without_a_manifest_record_restores_the_tag() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
+        put_tag(&meta, "hub", "app", "v1", "sha256:a").unwrap();
+        trash_tag(&meta, "hub", "app", "v1", &info(), false).unwrap();
+
+        assert_eq!(
+            restore_tag(&meta, "hub", "app", "v1", false).unwrap(),
+            RestoreTagOutcome::Restored {
+                digest: "sha256:a".to_owned()
+            }
+        );
+        assert_eq!(get_tag(&meta, "hub", "app", "v1").unwrap(), Some("sha256:a".to_owned()));
+    }
+
+    #[test]
+    fn test_restore_tag_keeps_shared_manifest_trash_until_the_last_tag() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
+        put_tag(&meta, "hub", "app", "v1", "sha256:a").unwrap();
+        put_tag(&meta, "hub", "app", "v2", "sha256:a").unwrap();
+        trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false).unwrap();
+
+        assert_eq!(
+            restore_tag(&meta, "hub", "app", "v1", false).unwrap(),
+            RestoreTagOutcome::Restored {
+                digest: "sha256:a".to_owned()
+            }
+        );
+        // v1 is live again, yet the digest stays trashed because v2's restore still needs the record.
+        assert_eq!(get_tag(&meta, "hub", "app", "v1").unwrap(), Some("sha256:a".to_owned()));
+        assert!(manifest_is_trashed(&meta, "hub", "app", "sha256:a").unwrap());
+        assert_eq!(list_trashed_tags(&meta, "hub", "app").unwrap(), vec!["v2"]);
+
+        assert_eq!(
+            restore_tag(&meta, "hub", "app", "v2", false).unwrap(),
+            RestoreTagOutcome::Restored {
+                digest: "sha256:a".to_owned()
+            }
+        );
+        // Restoring the last captured tag clears the shared record.
+        assert!(!manifest_is_trashed(&meta, "hub", "app", "sha256:a").unwrap());
+        assert!(list_trashed_tags(&meta, "hub", "app").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_restore_tag_leaves_an_independent_untagged_deletion() {
+        let (_dir, meta) = store();
+        record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
+        put_tag(&meta, "hub", "app", "v1", "sha256:a").unwrap();
+        // v1 is trashed on its own, then the still-live untagged digest is trashed separately, so the
+        // manifest record captures no tags.
+        trash_tag(&meta, "hub", "app", "v1", &info(), false).unwrap();
+        trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false).unwrap();
+
+        restore_tag(&meta, "hub", "app", "v1", false).unwrap();
+
+        assert_eq!(get_tag(&meta, "hub", "app", "v1").unwrap(), Some("sha256:a".to_owned()));
+        assert!(
+            manifest_is_trashed(&meta, "hub", "app", "sha256:a").unwrap(),
+            "the untagged digest deletion is not this tag's to undo"
         );
     }
 

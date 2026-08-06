@@ -60,6 +60,7 @@ mod transfer;
 mod upgrade;
 mod versions;
 mod visibility;
+mod visibility_feed;
 mod visibility_mint;
 
 pub use ack::{AckDecision, acknowledge};
@@ -163,6 +164,10 @@ pub use visibility::{
     ApplyEffect, ArtifactId, Frontier as VisibilityFrontier, OpOrder, SnapshotError as VisibilitySnapshotError,
     VISIBILITY_APPLY_SCHEMA, Visibility, VisibilityAction, VisibilityOp, VisibilityState,
 };
+pub use visibility_feed::{
+    ApplyEnvelopeError, OpenError, VISIBILITY_CHANGE_SCHEMA, VisibilityFeedError, VisibilityProjection,
+    VisibilitySnapshotStore, decode_visibility_op, visibility_change, visibility_envelope,
+};
 pub use visibility_mint::{JournalSerials, SerialSource, StaleEpoch, VisibilityMinter};
 
 #[cfg(test)]
@@ -265,6 +270,8 @@ mod transfer_tests;
 mod upgrade_tests;
 #[cfg(test)]
 mod versions_tests;
+#[cfg(test)]
+mod visibility_feed_tests;
 #[cfg(test)]
 mod visibility_mint_tests;
 #[cfg(test)]

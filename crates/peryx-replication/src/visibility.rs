@@ -49,7 +49,8 @@ pub struct ArtifactId {
 
 /// A visibility transition. Trash and restore move an artifact in and out of the trash; revoke and lift
 /// block and unblock its content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum VisibilityAction {
     Trash,
     Restore,
@@ -96,7 +97,7 @@ impl Visibility {
 /// [`compact`](VisibilityState::compact) may release an artifact only once this frontier covers its
 /// operations, because the authority never resends an operation below a serial it has been
 /// acknowledged for everywhere, so a released entry can no longer be re-litigated by a late delivery.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frontier {
     covered: BTreeMap<u64, u64>,
 }
@@ -107,6 +108,13 @@ impl Frontier {
     pub fn acknowledge(&mut self, epoch: u64, serial: u64) {
         let slot = self.covered.entry(epoch).or_default();
         *slot = (*slot).max(serial);
+    }
+
+    /// The highest serial acknowledged for `epoch`, or `None` when the frontier has recorded none. A
+    /// replica reports this per epoch as the operation frontier it has durably applied.
+    #[must_use]
+    pub fn high_water(&self, epoch: u64) -> Option<u64> {
+        self.covered.get(&epoch).copied()
     }
 
     /// Whether `order` sits at or below the durable frontier for its epoch. An epoch this frontier has
@@ -142,7 +150,7 @@ pub enum SnapshotError {
     UnsupportedSchema { expected: u32, found: u32 },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Entry {
     trashed: bool,
     trashed_at: Option<OpOrder>,
@@ -173,7 +181,7 @@ struct VisibilityStateSnapshot {
 
 /// The visibility of every artifact a stream of operations has touched, kept idempotent and monotonic
 /// so replay and reordering cannot resurrect an older state.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct VisibilityState {
     artifacts: HashMap<ArtifactId, Entry>,
 }

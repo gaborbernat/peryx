@@ -143,21 +143,7 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
                 state.clock.clone(),
             )));
         }
-        if let Some(store) = state.blobs.filesystem_store()
-            && let Some(copier) =
-                peryx::availability::CrossDcBlobCopier::from_config(config, store.clone(), state.blobs.backend_id())?
-        {
-            state.set_cross_dc_copier(std::sync::Arc::new(copier));
-        }
-        if let Some(store) = state.blobs.filesystem_store()
-            && let Some(reconciler) =
-                peryx::availability::FilesystemPlacementReconciler::from_config(config, store.clone())?
-        {
-            state.set_placement_reconciler(std::sync::Arc::new(reconciler));
-        }
-        if let Some(reclaimer) = peryx::availability::BlobReclamationSelector::from_config(config)? {
-            state.set_blob_reclaimer(std::sync::Arc::new(reclaimer));
-        }
+        register_availability_services(config, &state)?;
         if !replication.is_replica() {
             for index in &state.indexes {
                 if let peryx_driver::IndexKind::Cached { client, offline: false } = &index.kind {
@@ -245,6 +231,28 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
         }
         anyhow::Ok(())
     })
+}
+
+/// Register the background availability services this node's scheduled jobs drive: the cross-datacenter
+/// blob copier and the filesystem placement reconciler both need the local content store, and the blob
+/// reclamation selector needs only the roster. Each returns `None` when this node does that work nowhere.
+fn register_availability_services(config: &Config, state: &peryx_driver::AppState) -> anyhow::Result<()> {
+    if let Some(store) = state.blobs.filesystem_store() {
+        if let Some(copier) =
+            peryx::availability::CrossDcBlobCopier::from_config(config, store.clone(), state.blobs.backend_id())?
+        {
+            state.set_cross_dc_copier(std::sync::Arc::new(copier));
+        }
+        if let Some(reconciler) =
+            peryx::availability::FilesystemPlacementReconciler::from_config(config, store.clone())?
+        {
+            state.set_placement_reconciler(std::sync::Arc::new(reconciler));
+        }
+    }
+    if let Some(reclaimer) = peryx::availability::BlobReclamationSelector::from_config(config)? {
+        state.set_blob_reclaimer(std::sync::Arc::new(reclaimer));
+    }
+    Ok(())
 }
 
 /// Serve the private availability control listener on its own socket, off the main serve path so a

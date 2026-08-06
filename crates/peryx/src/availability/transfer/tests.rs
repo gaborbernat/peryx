@@ -1,12 +1,17 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use peryx_driver::state::{
     CommandOutcome, CommandReceipt, ControlCommand, ControlError, ControlPlane, MembershipControl,
 };
 use peryx_replication::{AuthorityKey, DatacenterId, TransferPhase, TransferPlan, TransferRequest};
 use peryx_storage::meta::MetaStore;
+use tokio::sync::Notify;
 
-use super::{EpochOracle, FrontierSource, TransferDriveError, commit_transfer, observe_target};
+use super::{
+    EpochOracle, FrontierSource, RosterFrontierSource, TransferCancelError, TransferCoordinator, TransferDriveError,
+    TransferRunError, commit_transfer, observe_target,
+};
 
 const BARRIER: u64 = 5;
 
@@ -239,4 +244,172 @@ async fn test_commit_transfer_replays_a_committed_plan_without_recommitting() {
 
     assert_eq!(first, replay);
     assert_eq!(scripted.submissions.lock().unwrap().len(), 1);
+}
+
+/// A frontier returning one fixed applied serial, signalling every probe so a test can wait for the
+/// coordinator to register and observe before it acts.
+struct GatedFrontier {
+    probed: Arc<Notify>,
+    applied: Option<u64>,
+}
+
+impl GatedFrontier {
+    fn new(applied: Option<u64>) -> (Arc<Self>, Arc<Notify>) {
+        let probed = Arc::new(Notify::new());
+        (
+            Arc::new(Self {
+                probed: probed.clone(),
+                applied,
+            }),
+            probed,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl FrontierSource for GatedFrontier {
+    async fn applied_frontier(&self, _datacenter: &str) -> anyhow::Result<Option<u64>> {
+        self.probed.notify_one();
+        Ok(self.applied)
+    }
+}
+
+#[tokio::test]
+async fn test_coordinator_drives_a_ready_transfer_to_a_sealed_audit() {
+    let (frontier, _probed) = GatedFrontier::new(Some(BARRIER));
+    let coordinator = TransferCoordinator::with_schedule(frontier, Duration::ZERO, 3);
+    let (_dir, store) = meta();
+    let (scripted, plane) = control(Ok(receipt(9)));
+
+    let audit = coordinator
+        .run(request(), &plane, &FixedEpoch(3), &store, Some("k1"))
+        .await
+        .unwrap();
+
+    assert_eq!((audit.epoch.0, audit.commit_index), (3, 9));
+    assert_eq!(scripted.submissions.lock().unwrap().len(), 1);
+    assert_eq!(store.transfer_audits("proj").unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_coordinator_gives_up_when_the_target_never_reaches_the_barrier() {
+    let (frontier, _probed) = GatedFrontier::new(Some(BARRIER - 1));
+    let coordinator = TransferCoordinator::with_schedule(frontier, Duration::ZERO, 3);
+    let (_dir, store) = meta();
+    let (scripted, plane) = control(Ok(receipt(9)));
+
+    let error = coordinator
+        .run(request(), &plane, &FixedEpoch(3), &store, None)
+        .await
+        .unwrap_err();
+
+    // The budget runs out below the barrier, so no move commits and no audit is booked.
+    assert!(matches!(error, TransferRunError::BarrierNotReached));
+    assert!(scripted.submissions.lock().unwrap().is_empty());
+    assert!(store.transfer_audits("proj").unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_coordinator_refuses_a_second_transfer_for_the_same_authority() {
+    let (frontier, probed) = GatedFrontier::new(Some(BARRIER - 1));
+    let coordinator = Arc::new(TransferCoordinator::with_schedule(
+        frontier,
+        Duration::from_secs(30),
+        10,
+    ));
+    let (_dir, store) = meta();
+    let running = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let store = store.clone();
+        async move {
+            let (_scripted, plane) = control(Ok(receipt(9)));
+            coordinator.run(request(), &plane, &FixedEpoch(3), &store, None).await
+        }
+    });
+    probed.notified().await;
+
+    // The first transfer is registered and waiting, so a second for the same authority is refused.
+    let (_scripted, plane) = control(Ok(receipt(9)));
+    let error = coordinator
+        .run(request(), &plane, &FixedEpoch(3), &store, None)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, TransferRunError::Busy(authority) if authority == "proj"));
+    running.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_coordinator_cancel_abandons_an_active_transfer() {
+    let (frontier, probed) = GatedFrontier::new(Some(BARRIER - 1));
+    let coordinator = Arc::new(TransferCoordinator::with_schedule(
+        frontier,
+        Duration::from_secs(30),
+        10,
+    ));
+    let (_dir, store) = meta();
+    let running = tokio::spawn({
+        let coordinator = coordinator.clone();
+        let store = store.clone();
+        async move {
+            let (_scripted, plane) = control(Ok(receipt(9)));
+            coordinator.run(request(), &plane, &FixedEpoch(3), &store, None).await
+        }
+    });
+    probed.notified().await;
+
+    // The transfer waits below its barrier, so a cancel abandons it before it can commit.
+    coordinator.cancel("proj").await.unwrap();
+
+    running.abort();
+}
+
+#[tokio::test]
+async fn test_coordinator_cancel_of_a_committed_transfer_is_refused() {
+    let (frontier, _probed) = GatedFrontier::new(Some(BARRIER));
+    let coordinator = TransferCoordinator::with_schedule(frontier, Duration::ZERO, 3);
+    let (_dir, store) = meta();
+    let (_scripted, plane) = control(Ok(receipt(9)));
+    coordinator
+        .run(request(), &plane, &FixedEpoch(3), &store, None)
+        .await
+        .unwrap();
+
+    // The committed plan stays registered, so a cancel after the move is refused rather than lost.
+    let error = coordinator.cancel("proj").await.unwrap_err();
+
+    assert!(matches!(error, TransferCancelError::AlreadyCommitted(authority) if authority == "proj"));
+}
+
+#[tokio::test]
+async fn test_coordinator_cancel_of_an_unregistered_authority_is_unknown() {
+    let (frontier, _probed) = GatedFrontier::new(Some(BARRIER));
+    let coordinator = TransferCoordinator::with_schedule(frontier, Duration::ZERO, 3);
+
+    let error = coordinator.cancel("ghost").await.unwrap_err();
+
+    assert!(matches!(error, TransferCancelError::Unknown(authority) if authority == "ghost"));
+}
+
+#[tokio::test]
+async fn test_roster_frontier_has_no_frontier_for_an_unknown_datacenter() {
+    let source = RosterFrontierSource::new(vec![("east".to_owned(), "http://east.example/".to_owned())], "token");
+
+    assert_eq!(source.applied_frontier("west").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_roster_frontier_rejects_a_datacenter_with_an_unusable_address() {
+    let source = RosterFrontierSource::new(vec![("west".to_owned(), "not a url".to_owned())], "token");
+
+    assert!(source.applied_frontier("west").await.is_err());
+}
+
+#[tokio::test]
+async fn test_roster_frontier_treats_an_unreachable_datacenter_as_no_frontier() {
+    // Port 1 refuses the connection at once, so the probe fails at the transport and the barrier gate
+    // keeps the move waiting rather than committing to a target it could not read.
+    let source = RosterFrontierSource::new(vec![("west".to_owned(), "http://127.0.0.1:1/".to_owned())], "token");
+
+    assert_eq!(source.applied_frontier("west").await.unwrap(), None);
 }

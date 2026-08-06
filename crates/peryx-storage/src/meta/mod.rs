@@ -20,7 +20,6 @@ mod fault;
 mod frontier;
 mod index;
 mod ingress_intent;
-mod transfer_audit;
 mod job;
 mod job_lease;
 mod journal;
@@ -36,6 +35,7 @@ mod revocation;
 mod role_grant;
 mod scoped_token;
 mod transfer_attempt;
+mod transfer_audit;
 mod upload_session;
 mod user;
 mod visibility;
@@ -60,7 +60,6 @@ pub use ingress_intent::{
     BackpressureState, IntentAdmission, IntentLimits, IntentPhase, IntentStageOutcome, IntentStageResult,
     IntentTransition, IntentUsage, StagedIntent,
 };
-pub use transfer_audit::TransferAudit;
 pub use job::{
     FinishJobRun, JobKind, JobOutcome, JobRunPage, JobRunQuery, JobRunQueryError, JobRunRecord, JobRunStoreError,
     JobState, NewJobRun,
@@ -115,6 +114,7 @@ pub use transfer_attempt::{
     TransferAttemptError, TransferAttemptMetric, TransferAttemptRecord, TransferAttemptState, TransferAttemptStatus,
     TransferPlan,
 };
+pub use transfer_audit::TransferAudit;
 pub use upload_session::UploadRecord;
 pub use user::UserStoreError;
 pub use webhook::{NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus};

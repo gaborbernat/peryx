@@ -50,7 +50,9 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tower::ServiceExt as _;
 
-use crate::availability::{AvailabilityPosture, router as availability_router};
+use crate::availability::{
+    AvailabilityPosture, RosterFrontierSource, TransferCoordinator, router as availability_router,
+};
 use crate::config::{
     AvailabilityConfig, Config, DcMember, DcMembership, DcRole, IndexConfig, IndexKind, ReplicationConfig, SecretSource,
 };
@@ -706,7 +708,11 @@ async fn transfer(state: &Arc<AppState>, auth: &str, key: Option<&str>) -> (Stat
     }
     let body = json!({ "type": "transfer_authority", "authority": "store", "new_home": "west" });
     let posture = AvailabilityPosture::from_config(&AvailabilityConfig::Dc(primary_replication())).expect("dc posture");
-    let response = availability_router(state.clone(), posture)
+    let coordinator = Arc::new(TransferCoordinator::new(Arc::new(RosterFrontierSource::new(
+        Vec::new(),
+        "token",
+    ))));
+    let response = availability_router(state.clone(), posture, coordinator)
         .oneshot(request.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();

@@ -315,7 +315,8 @@ async fn test_out_of_order_chunk_on_patch_is_range_not_satisfiable() {
     )
     .await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
-    assert!(headers.contains_key(header::RANGE));
+    // The session is still empty, so there is no received-byte range to report.
+    assert!(!headers.contains_key(header::RANGE));
     // The 416 hands back the session URL and id so the client can resume rather than restart.
     assert_eq!(headers[header::LOCATION].to_str().unwrap(), location);
     assert!(headers.contains_key("docker-upload-uuid"));
@@ -345,7 +346,32 @@ async fn test_unreadable_content_range_on_patch_is_range_not_satisfiable() {
     )
     .await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
-    assert!(headers.contains_key(header::RANGE));
+    // The session is still empty, so there is no received-byte range to report.
+    assert!(!headers.contains_key(header::RANGE));
+}
+
+#[tokio::test]
+async fn test_empty_session_omits_the_range_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    // Initiating an upload stages no bytes, so the 202 has no received-byte range to report and must
+    // not fall back to `0-<u64::MAX>` from an underflowed `offset - 1`.
+    let (status, headers, _) = send_body(
+        &app,
+        Method::POST,
+        "/v2/store/app/blobs/uploads/",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(!headers.contains_key(header::RANGE));
+
+    // A status read of the still-empty session likewise reports no range.
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+    let (status, headers, _) = send_with(&app, Method::GET, &location, &[("authorization", &auth(TOKEN))]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!headers.contains_key(header::RANGE));
 }
 
 #[tokio::test]

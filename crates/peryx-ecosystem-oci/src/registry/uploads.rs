@@ -8,6 +8,7 @@ use super::*;
 use crate::error::{ErrorCode, error_response};
 use crate::store::{self};
 use axum::body::Body;
+use axum::http::response::Builder;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use peryx_driver::ServingState;
@@ -373,6 +374,16 @@ async fn append_body(
     Ok(())
 }
 
+/// Attach the `Range` of bytes received so far, reported inclusively as `0-<offset-1>`. An empty
+/// session has received no bytes, so it has no range to report and the header is omitted rather than
+/// wrapping `offset - 1` to `u64::MAX` or claiming a byte with `0-0`.
+fn received_range(builder: Builder, offset: u64) -> Builder {
+    match offset.checked_sub(1) {
+        Some(last) => builder.header(header::RANGE, format!("0-{last}")),
+        None => builder,
+    }
+}
+
 /// A `201 Created` carrying a `Location` and the canonical `Docker-Content-Digest`.
 pub(super) fn created(location: &str, digest: &str) -> Response {
     Response::builder()
@@ -385,24 +396,28 @@ pub(super) fn created(location: &str, digest: &str) -> Response {
 
 /// `204 No Content` reporting an open upload session's progress.
 fn upload_status_response(name: &str, session: &str, offset: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .header(header::LOCATION, format!("/v2/{name}/blobs/uploads/{session}"))
-        .header(DOCKER_UPLOAD_UUID, session)
-        .header(header::RANGE, format!("0-{}", offset.saturating_sub(1)))
-        .body(Body::empty())
-        .expect("upload status response builds from validated parts")
+    received_range(
+        Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(header::LOCATION, format!("/v2/{name}/blobs/uploads/{session}"))
+            .header(DOCKER_UPLOAD_UUID, session),
+        offset,
+    )
+    .body(Body::empty())
+    .expect("upload status response builds from validated parts")
 }
 
 /// `202 Accepted` for an open upload session, reporting the bytes received so far.
 fn upload_accepted(name: &str, session: &str, offset: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .header(header::LOCATION, format!("/v2/{name}/blobs/uploads/{session}"))
-        .header(DOCKER_UPLOAD_UUID, session)
-        .header(header::RANGE, format!("0-{}", offset.saturating_sub(1)))
-        .body(Body::empty())
-        .expect("upload response builds from validated parts")
+    received_range(
+        Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, format!("/v2/{name}/blobs/uploads/{session}"))
+            .header(DOCKER_UPLOAD_UUID, session),
+        offset,
+    )
+    .body(Body::empty())
+    .expect("upload response builds from validated parts")
 }
 
 /// Where a chunk says it begins.
@@ -453,13 +468,15 @@ fn chunk_start(headers: &HeaderMap) -> ChunkStart {
 /// carries the session's `Location` and `Docker-Upload-UUID` alongside `Range` so a client that sent
 /// the chunk out of order has the URL and id to resume against instead of restarting the upload.
 fn range_not_satisfiable(name: &str, session: &str, offset: u64) -> Response {
-    Response::builder()
-        .status(StatusCode::RANGE_NOT_SATISFIABLE)
-        .header(header::LOCATION, format!("/v2/{name}/blobs/uploads/{session}"))
-        .header(DOCKER_UPLOAD_UUID, session)
-        .header(header::RANGE, format!("0-{}", offset.saturating_sub(1)))
-        .body(Body::empty())
-        .expect("range response builds from validated parts")
+    received_range(
+        Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::LOCATION, format!("/v2/{name}/blobs/uploads/{session}"))
+            .header(DOCKER_UPLOAD_UUID, session),
+        offset,
+    )
+    .body(Body::empty())
+    .expect("range response builds from validated parts")
 }
 
 #[cfg(test)]

@@ -659,6 +659,37 @@ async fn test_promoting_a_current_voter_is_a_no_op() {
 }
 
 #[tokio::test]
+async fn test_a_membership_receipt_names_the_voter_roster() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(leader_node(&dir).await, DatacenterId("east".to_owned()));
+
+    // A learner does not vote, so the roster stays at the single voter, named on both sides of the
+    // receipt: the audit records the voter set the command left the group at. (A committed voter-set
+    // transition is asserted at the control layer; a real promotion needs a second live node to ack the
+    // new-config quorum, which a single-process test cannot provide.)
+    let added = group
+        .submit(ControlCommand::AddLearner {
+            datacenter: "west".to_owned(),
+            address: "west.internal:4470".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(added.old_voters, ["east"]);
+    assert_eq!(added.new_voters, ["east"]);
+
+    // A no-op promotion of the sole voter commits without a new-config quorum, still naming the roster.
+    let promoted = group
+        .submit(ControlCommand::PromoteVoter {
+            datacenter: "east".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(promoted.outcome, CommandOutcome::NoChange);
+    assert_eq!(promoted.old_voters, ["east"]);
+    assert_eq!(promoted.new_voters, ["east"]);
+}
+
+#[tokio::test]
 async fn test_a_roster_rewrite_of_an_unknown_learner_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     // Promoting a datacenter that was never added as a learner is a real roster change the leader refuses,

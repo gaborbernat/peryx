@@ -114,7 +114,7 @@ impl ControlCommand {
 ///
 /// The term and index of the log entry that carried it, and what the group made of it. A client that
 /// retries an idempotent request reads back this same receipt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandReceipt {
     /// The leadership term of the committed log entry.
     pub term: u64,
@@ -122,6 +122,11 @@ pub struct CommandReceipt {
     pub index: u64,
     /// What the group made of the command.
     pub outcome: CommandOutcome,
+    /// The voter roster, by datacenter name in sorted order, before the command committed. Empty for a
+    /// command that does not touch the voter roster, such as a transfer or epoch command.
+    pub old_voters: Vec<String>,
+    /// The voter roster after the command committed.
+    pub new_voters: Vec<String>,
 }
 
 /// What a committed control command changed.
@@ -228,6 +233,11 @@ pub struct AuditRecord {
     pub term: Option<u64>,
     /// The committed index, present only when the command committed.
     pub index: Option<u64>,
+    /// The voter roster before a committed membership command, so an auditor sees the roster transition.
+    /// Empty for a failed command or one that does not touch the voter roster.
+    pub old_voters: Vec<String>,
+    /// The voter roster after a committed membership command.
+    pub new_voters: Vec<String>,
 }
 
 impl AuditRecord {
@@ -239,6 +249,8 @@ impl AuditRecord {
             result: receipt.outcome.as_str(),
             term: Some(receipt.term),
             index: Some(receipt.index),
+            old_voters: receipt.old_voters.clone(),
+            new_voters: receipt.new_voters.clone(),
         }
     }
 
@@ -257,6 +269,8 @@ impl AuditRecord {
             result: error.kind(),
             term: None,
             index: None,
+            old_voters: Vec::new(),
+            new_voters: Vec::new(),
         }
     }
 
@@ -268,6 +282,8 @@ impl AuditRecord {
             result = self.result,
             term = ?self.term,
             index = ?self.index,
+            old_voters = ?self.old_voters,
+            new_voters = ?self.new_voters,
             "availability control command",
         );
     }
@@ -354,7 +370,7 @@ impl ControlPlane {
         match &result {
             Ok(receipt) => {
                 if let Some(key) = key {
-                    self.remember(key, *receipt);
+                    self.remember(key, receipt.clone());
                 }
                 AuditRecord::committed(actor, &command, receipt).emit();
             }
@@ -385,7 +401,7 @@ impl ControlPlane {
             .receipts
             .iter()
             .find(|(retained, _)| retained == key)
-            .map(|(_, receipt)| *receipt)
+            .map(|(_, receipt)| receipt.clone())
     }
 
     fn remember(&self, key: &str, receipt: CommandReceipt) {
@@ -438,6 +454,8 @@ mod tests {
             term: 1,
             index,
             outcome: CommandOutcome::Committed,
+            old_voters: Vec::new(),
+            new_voters: Vec::new(),
         }
     }
 
@@ -692,9 +710,32 @@ mod tests {
             term: 2,
             index: 8,
             outcome: CommandOutcome::NoChange,
+            old_voters: Vec::new(),
+            new_voters: Vec::new(),
         };
         let record = AuditRecord::committed("alice", &transfer(), &no_change);
         assert_eq!(record.result, "no_change");
+    }
+
+    #[test]
+    fn test_a_committed_membership_receipt_audits_the_old_and_new_voter_sets() {
+        let promote = ControlCommand::PromoteVoter {
+            datacenter: "west".to_owned(),
+        };
+        let receipt = CommandReceipt {
+            term: 3,
+            index: 12,
+            outcome: CommandOutcome::Committed,
+            old_voters: vec!["east".to_owned()],
+            new_voters: vec!["east".to_owned(), "west".to_owned()],
+        };
+        let record = AuditRecord::committed("alice", &promote, &receipt);
+        assert_eq!(record.old_voters, ["east"]);
+        assert_eq!(record.new_voters, ["east", "west"]);
+
+        // A failed command carries no roster transition.
+        let failed = AuditRecord::failed("alice", &promote, &ControlError::NotLeader { leader: None });
+        assert!(failed.old_voters.is_empty() && failed.new_voters.is_empty());
     }
 
     #[test]

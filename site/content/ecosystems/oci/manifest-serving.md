@@ -62,18 +62,21 @@ platform, `linux/amd64`, `linux/arm64`, to the per-platform image manifest for i
 picks the entry for its platform, and pulls that child.
 
 Docker below 17.06 predates the manifest list. It sends an `Accept` naming only the schema-2 image manifest and cannot
-parse an index, so a registry that hands it the index body on a tag pull gives it something it cannot read. peryx now
-negotiates the manifest read against `Accept` the way an upstream registry does: when a tag resolves to an index or
-manifest list and the client's `Accept` names neither list media type, peryx serves the index's `linux/amd64` child
-image manifest, reading it from the store or fetching it by digest through a proxy member, with the child's
-`Content-Type` and `Docker-Content-Digest`. A `HEAD` returns the same headers with an empty body.
+parse an index, so a registry that hands it the index body on a tag pull gives it something it cannot read. peryx
+negotiates the manifest read against `Accept` the way HTTP content negotiation prescribes, the reference the OCI
+distribution spec defers to: it reads every `Accept` field line as one combined media-range list, per RFC 9110, and
+computes the served list type's effective quality. The most specific matching range decides it, an exact type over a
+`type/*` over `*/*`, so `application/*` and `*/*` accept the index while a `q=0` on the matching range rejects it even
+when a broader range would accept. Only when the list type has no positive quality does peryx serve the index's
+`linux/amd64` child image manifest, reading it from the store or fetching it by digest through a proxy member, with the
+child's `Content-Type` and `Docker-Content-Digest`. A `HEAD` returns the same headers with an empty body.
 
-Nothing else changes. An `Accept` that names a list type, that is absent, empty, or a wildcard (`*/*` or `*`, curl's
-default and what many HTTP clients send), still gets the index, as does an index with no `linux/amd64` child; only a
-client that names single-manifest types and no list type gets the substitution. A push stores what it is given. Modern
-docker, podman, containerd, and oras all send `Accept` lists that name the index types, so they receive the index and
-never see the substitution ([#114](https://github.com/tox-dev/peryx/issues/114)). Because the same tag can return the
-index or its child depending on `Accept`, the serve carries `Vary: Accept` so a shared cache keys on it.
+Nothing else changes. An `Accept` that gives a list type positive quality, that is absent, empty, or a wildcard (`*/*`
+or `*`, curl's default and what many HTTP clients send), still gets the index, as does an index with no `linux/amd64`
+child; only a client whose media ranges leave the list type unacceptable gets the substitution. A push stores what it is
+given. Modern docker, podman, containerd, and oras all send `Accept` lists that name the index types, so they receive
+the index and never see the substitution ([#114](https://github.com/tox-dev/peryx/issues/114)). Because the same tag can
+return the index or its child depending on `Accept`, the serve carries `Vary: Accept` so a shared cache keys on it.
 
 ## In practice
 

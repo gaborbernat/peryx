@@ -129,10 +129,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         Ok(response)
     }
 
-    /// Rewrite an index response to its `linux/amd64` child when the client will not accept a list
-    /// media type, the substitution `distribution` makes for legacy Docker (< 17.06) that sends only
-    /// the schema-2 image type. An `Accept` that is absent or lists an index type, a non-index
-    /// response, or an index without a `linux/amd64` child all serve the resolved manifest unchanged.
+    /// Rewrite an index response to its `linux/amd64` child when the served list media type has no
+    /// positive effective quality under the client's `Accept`, the substitution `distribution` makes
+    /// for legacy Docker (< 17.06) that sends only the schema-2 image type. An `Accept` that is absent
+    /// or gives the list type positive quality, a non-index response, or an index without a
+    /// `linux/amd64` child all serve the resolved manifest unchanged.
     async fn negotiate_manifest(
         &self,
         state: &ServingState,
@@ -142,13 +143,17 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         response: Response,
         head: bool,
     ) -> Result<Response, ServeError> {
+        let Some(content_type) = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| is_list_media_type(value))
+            .map(str::to_owned)
+        else {
+            return Ok(response);
+        };
         if response.status() != StatusCode::OK
-            || !accept.is_some_and(accept_excludes_list_types)
-            || !response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(is_list_media_type)
+            || accept.is_none_or(|accept| media_type_acceptable(accept, &content_type))
         {
             return Ok(response);
         }
@@ -463,16 +468,74 @@ fn is_list_media_type(media_type: &str) -> bool {
     let base = media_type_base(media_type);
     base == OCI_INDEX_TYPE || base == DOCKER_MANIFEST_LIST_TYPE
 }
-/// Whether the client's `Accept` names neither a list type nor a wildcard, the signal that it cannot
-/// parse an index and wants the `linux/amd64` child instead — the same explicit-accept test
-/// `distribution` applies. A wildcard (`*/*` or `*`) or an empty `Accept` accepts anything, the index
-/// included, so it does not force the substitution.
-fn accept_excludes_list_types(accept: &str) -> bool {
-    let accept = accept.trim();
-    !accept.is_empty()
-        && !accept
-            .split(',')
-            .any(|entry| is_list_media_type(entry) || matches!(media_type_base(entry), "*/*" | "*"))
+/// One media range from an `Accept` list: a type/subtype pair (either side possibly the `*` wildcard)
+/// and its quality weight.
+struct MediaRange<'a> {
+    kind: &'a str,
+    sub: &'a str,
+    quality: f32,
+}
+
+/// Parse one `Accept` list entry into a media range, or `None` when it is malformed: no `type/subtype`
+/// shape, a concrete subtype under a wildcard type (`*/json`), or a `q` weight outside `0..=1`. A bare
+/// `*` is read as `*/*`, the shorthand legacy clients send. Parameters other than `q` are ignored, so
+/// specificity keys on the type pair alone.
+fn parse_media_range(entry: &str) -> Option<MediaRange<'_>> {
+    let mut parts = entry.split(';');
+    let (kind, sub) = match parts.next()?.trim() {
+        "" => return None,
+        "*" => ("*", "*"),
+        base => base.split_once('/')?,
+    };
+    let (kind, sub) = (kind.trim(), sub.trim());
+    if kind.is_empty() || sub.is_empty() || (kind == "*" && sub != "*") {
+        return None;
+    }
+    let mut quality = 1.0_f32;
+    for param in parts {
+        if let Some((name, value)) = param.split_once('=')
+            && name.trim().eq_ignore_ascii_case("q")
+        {
+            quality = value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|weight| (0.0..=1.0).contains(weight))?;
+        }
+    }
+    Some(MediaRange { kind, sub, quality })
+}
+
+/// Whether `media_type` is acceptable under the combined `Accept` list per RFC 9110: its effective
+/// quality — the weight of the most specific matching range, exact over `type/*` over `*/*` — is
+/// positive. A `q=0` on the most specific match rejects the type even when a broader range would
+/// accept it. An `Accept` with no parseable range expresses no preference and accepts anything.
+fn media_type_acceptable(accept: &str, media_type: &str) -> bool {
+    let (kind, sub) = media_type_base(media_type)
+        .split_once('/')
+        .expect("a list media type carries a type and a subtype");
+    let mut ranges = accept.split(',').filter_map(parse_media_range).peekable();
+    if ranges.peek().is_none() {
+        return true;
+    }
+    let mut best: Option<(u8, f32)> = None;
+    for range in ranges {
+        let specificity = if range.kind.eq_ignore_ascii_case(kind) && range.sub.eq_ignore_ascii_case(sub) {
+            3
+        } else if range.kind.eq_ignore_ascii_case(kind) && range.sub == "*" {
+            2
+        } else if range.kind == "*" && range.sub == "*" {
+            1
+        } else {
+            continue;
+        };
+        best = Some(match best {
+            Some((seen, quality)) if seen > specificity => (seen, quality),
+            Some((seen, quality)) if seen == specificity => (seen, quality.max(range.quality)),
+            _ => (specificity, range.quality),
+        });
+    }
+    best.is_some_and(|(_, quality)| quality > 0.0)
 }
 /// Build the response for a stored manifest, headers-only for a `HEAD`. The content length is set the
 /// same either way, so a `HEAD` reports the size a `GET` would return.

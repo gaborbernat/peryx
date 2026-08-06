@@ -132,16 +132,15 @@ fn archive_query(query: Option<&str>) -> Result<ArchiveQuery, Response> {
 /// Render an archive's member list as JSON.
 async fn archive_listing(filename: &str, lease: BlobLease, containers: Vec<String>) -> Response {
     let filename = filename.to_owned();
-    match tokio::task::spawn_blocking({
+    let task = tokio::task::spawn_blocking({
         let filename = filename.clone();
         move || crate::archive::list_members_nested_path(&filename, lease.path(), &containers)
+    });
+    inspect_response(task, &filename, None, |result| match result {
+        Ok(members) => axum::Json(serde_json::json!({ "filename": &filename, "members": members })).into_response(),
+        Err(err) => archive_error(&err, &filename, None),
     })
     .await
-    .expect("archive listing task panicked")
-    {
-        Ok(members) => axum::Json(serde_json::json!({ "filename": filename, "members": members })).into_response(),
-        Err(err) => archive_error(&err, &filename, None),
-    }
 }
 
 /// Serve one text archive member chunk.
@@ -155,7 +154,7 @@ async fn archive_member(
 ) -> Response {
     let filename = filename.to_owned();
     let member = member.to_owned();
-    match tokio::task::spawn_blocking({
+    let task = tokio::task::spawn_blocking({
         let filename = filename.clone();
         let member = member.clone();
         move || {
@@ -168,10 +167,8 @@ async fn archive_member(
                 limit,
             )
         }
-    })
-    .await
-    .expect("archive member task panicked")
-    {
+    });
+    inspect_response(task, &filename, Some(&member), |result| match result {
         Ok(chunk) => {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -186,6 +183,27 @@ async fn archive_member(
             (headers, chunk.bytes).into_response()
         }
         Err(err) => archive_error(&err, &filename, Some(&member)),
+    })
+    .await
+}
+
+/// Await a spawned archive inspection and shape its outcome into a response, mapping a worker-thread
+/// panic to a `500` rather than letting the join failure abort the request. The archive engine runs
+/// on `spawn_blocking`, so without this a panic there would drop the connection instead of returning
+/// a structured error.
+async fn inspect_response<T: Send + 'static>(
+    task: tokio::task::JoinHandle<T>,
+    filename: &str,
+    member: Option<&str>,
+    on_ready: impl FnOnce(T) -> Response,
+) -> Response {
+    match task.await {
+        Ok(ready) => on_ready(ready),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{}: inspection failed: {err}", archive_target(filename, member)),
+        )
+            .into_response(),
     }
 }
 
@@ -209,9 +227,61 @@ fn archive_error(err: &crate::archive::ArchiveError, filename: &str, member: Opt
         ArchiveError::NestingTooDeep { .. } => StatusCode::BAD_REQUEST,
         ArchiveError::NestedArchiveTooLarge { .. } | ArchiveError::TooManyEntries(_) => StatusCode::PAYLOAD_TOO_LARGE,
     };
-    let target = member.map_or_else(
+    (status, format!("{}: {err}", archive_target(filename, member))).into_response()
+}
+
+/// One-line description of the inspected archive, naming the nested member when the request targeted
+/// one, shared by the archive-error and task-panic responses.
+fn archive_target(filename: &str, member: Option<&str>) -> String {
+    member.map_or_else(
         || format!("archive {filename:?}"),
         |member| format!("member {member:?} in archive {filename:?}"),
-    );
-    (status, format!("{target}: {err}")).into_response()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    async fn body_text(response: Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_inspect_response_shapes_a_ready_value() {
+        let task = tokio::task::spawn_blocking(|| 42_u64);
+        let response = inspect_response(task, "pkg.whl", None, |value| {
+            (StatusCode::OK, value.to_string()).into_response()
+        })
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_text(response).await, "42");
+    }
+
+    #[tokio::test]
+    async fn test_inspect_response_maps_an_archive_panic_to_500() {
+        let task = tokio::task::spawn_blocking(|| -> u64 { panic!("archive worker blew up") });
+        let response = inspect_response(task, "pkg.whl", None, |_| StatusCode::OK.into_response()).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            body_text(response)
+                .await
+                .contains("archive \"pkg.whl\": inspection failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inspect_response_names_the_member_on_a_panic() {
+        let task = tokio::task::spawn_blocking(|| -> u64 { panic!("member worker blew up") });
+        let response = inspect_response(task, "pkg.whl", Some("README.md"), |_| StatusCode::OK.into_response()).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            body_text(response)
+                .await
+                .contains("member \"README.md\" in archive \"pkg.whl\": inspection failed")
+        );
+    }
 }

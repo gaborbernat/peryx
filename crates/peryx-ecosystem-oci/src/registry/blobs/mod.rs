@@ -210,11 +210,8 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         }
         let lease = state.blobs.materialize(&storage).await.map_err(blob_fault)?;
         let selected = layer_query_member(query);
-        Ok(
-            tokio::task::spawn_blocking(move || layer_contents_response(lease.path(), selected))
-                .await
-                .expect("layer inspection task panicked"),
-        )
+        let task = tokio::task::spawn_blocking(move || layer_contents_response(lease.path(), selected));
+        Ok(join_layer_contents(task).await)
     }
 
     /// Fetch a missed blob from the first proxy member that has it, into the store. Called under the
@@ -408,6 +405,15 @@ impl From<BlobError> for DownloadError {
 )]
 pub(super) fn blob_fault(err: BlobError) -> ServeError {
     ServeError::Transport(err.to_string())
+}
+
+/// Await the blocking layer-inspection task, turning a worker-thread panic into a structured gateway
+/// error rather than letting the join failure abort the whole request.
+async fn join_layer_contents(task: tokio::task::JoinHandle<Response>) -> Response {
+    match task.await {
+        Ok(response) => response,
+        Err(err) => gateway_error(&format!("layer inspection failed: {err}")),
+    }
 }
 
 /// Stream an upstream blob into the store, verifying its digest on commit.
@@ -783,6 +789,18 @@ mod tests {
             blob_fault(BlobError::not_found(&Digest::of(b"x"))),
             ServeError::Transport(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_join_layer_contents_returns_the_task_response() {
+        let task = tokio::task::spawn_blocking(|| error_response(ErrorCode::BlobUnknown, "blob unknown"));
+        assert_eq!(join_layer_contents(task).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_join_layer_contents_maps_a_panic_to_a_gateway_error() {
+        let task = tokio::task::spawn_blocking(|| -> Response { panic!("layer worker blew up") });
+        assert_eq!(join_layer_contents(task).await.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]

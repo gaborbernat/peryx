@@ -4,14 +4,35 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
+use url::Url;
 
 use crate::{RangeError, UpstreamClient, UpstreamError};
+
+/// A mirror client paired with its base URL, parsed once when the source is configured so that
+/// artifact resolution joins onto the cached base instead of reparsing it on every request.
+#[derive(Debug, Clone)]
+struct Mirror {
+    client: UpstreamClient,
+    base: Url,
+}
+
+impl Mirror {
+    fn new(client: UpstreamClient) -> Self {
+        let base = client.base().clone();
+        Self { client, base }
+    }
+
+    fn resolve(&self, url: &str) -> Result<Url, UpstreamError> {
+        let advertised = Url::parse(url)?;
+        Ok(self.base.join(advertised.path().trim_start_matches('/'))?)
+    }
+}
 
 /// Artifact client for one metadata source and its optional mirror.
 #[derive(Debug, Clone)]
 pub struct ArtifactClient {
     origin: UpstreamClient,
-    mirror: Option<UpstreamClient>,
+    mirror: Option<Mirror>,
     fallback: bool,
 }
 
@@ -24,17 +45,12 @@ impl ArtifactClient {
         }
     }
 
-    const fn with_mirror(origin: UpstreamClient, mirror: UpstreamClient, fallback: bool) -> Self {
+    fn with_mirror(origin: UpstreamClient, mirror: UpstreamClient, fallback: bool) -> Self {
         Self {
             origin,
-            mirror: Some(mirror),
+            mirror: Some(Mirror::new(mirror)),
             fallback,
         }
-    }
-
-    fn mirror_url(mirror: &UpstreamClient, url: &str) -> Result<url::Url, UpstreamError> {
-        let original = url::Url::parse(url)?;
-        Ok(mirror.base().join(original.path().trim_start_matches('/'))?)
     }
 
     /// Stream an artifact from its mirror, falling back to its advertised URL when configured.
@@ -46,8 +62,8 @@ impl ArtifactClient {
         url: &str,
     ) -> Result<futures_util::stream::BoxStream<'static, Result<Bytes, UpstreamError>>, UpstreamError> {
         if let Some(mirror) = &self.mirror {
-            let mirror_url = Self::mirror_url(mirror, url)?;
-            match mirror.stream_bytes(mirror_url.as_str()).await {
+            let mirror_url = mirror.resolve(url)?;
+            match mirror.client.stream_bytes(mirror_url.as_str()).await {
                 Ok(stream) => return Ok(stream.boxed()),
                 Err(err) if !self.fallback => return Err(err),
                 Err(_) => {}
@@ -59,14 +75,16 @@ impl ArtifactClient {
     /// Whether either eligible artifact source may support byte ranges.
     #[must_use]
     pub fn may_support_ranges(&self) -> bool {
-        self.mirror.as_ref().is_some_and(UpstreamClient::may_support_ranges)
+        self.mirror
+            .as_ref()
+            .is_some_and(|mirror| mirror.client.may_support_ranges())
             || (self.fallback || self.mirror.is_none()) && self.origin.may_support_ranges()
     }
 
     /// Stop range attempts for every eligible artifact source during this process.
     pub fn disable_ranges(&self) {
         if let Some(mirror) = &self.mirror {
-            mirror.disable_ranges();
+            mirror.client.disable_ranges();
         }
         self.origin.disable_ranges();
     }
@@ -77,8 +95,8 @@ impl ArtifactClient {
     /// Returns [`RangeError`] if no eligible source provides usable range metadata.
     pub async fn head_file_for_range(&self, url: &str) -> Result<crate::FileHead, RangeError> {
         if let Some(mirror) = &self.mirror {
-            let mirror_url = Self::mirror_url(mirror, url)?;
-            match mirror.head_file_for_range(mirror_url.as_str()).await {
+            let mirror_url = mirror.resolve(url)?;
+            match mirror.client.head_file_for_range(mirror_url.as_str()).await {
                 Ok(head) => return Ok(head),
                 Err(err) if !self.fallback => return Err(err),
                 Err(_) => {}
@@ -93,8 +111,8 @@ impl ArtifactClient {
     /// Returns [`RangeError`] if no eligible source provides the requested range.
     pub async fn fetch_range(&self, url: &str, start: u64, end: u64) -> Result<Bytes, RangeError> {
         if let Some(mirror) = &self.mirror {
-            let mirror_url = Self::mirror_url(mirror, url)?;
-            match mirror.fetch_range(mirror_url.as_str(), start, end).await {
+            let mirror_url = mirror.resolve(url)?;
+            match mirror.client.fetch_range(mirror_url.as_str(), start, end).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(err) if !self.fallback => return Err(err),
                 Err(_) => {}

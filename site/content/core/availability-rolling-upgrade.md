@@ -11,7 +11,8 @@ becomes safe to issue, and the boundary a downgrade may not cross. That half is 
 half is operational: even a version-clean target is unsafe to roll if draining the next node would drop quorum, leave
 too few members serving, or strand the group so far ahead of its replicas and backup that a failed step cannot be
 undone. This page fixes that half — the go decision before each drain, the order nodes are replaced in, and the recovery
-when a step fails.
+when a step fails. For the operator walkthrough that runs these steps against the live surfaces, see
+[upgrade and roll back an availability cluster](@/core/availability-upgrade-runbook.md).
 
 The roll operates the same single-writer model the [failover and recovery](@/core/availability-failover-recovery.md)
 guide recovers and reuses the [planned transfer](@/core/availability-planned-transfer.md) to move the writer's home when

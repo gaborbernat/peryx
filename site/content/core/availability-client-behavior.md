@@ -91,6 +91,40 @@ on one result rather than publishing twice or racing itself.
 The guarantee holds across a home failure at the response boundary. A write that became durable at the new home but
 whose success never reached the client resolves, on the client's retry, to that original success.
 
+## A worked failover: mutations through a home-datacenter loss
+
+An `ha` group of a home writer and a read replica in each of two other datacenters keeps a quorum of two through the
+home datacenter's death. A real-client test drives PyPI mutations across that failure and fixes what a client observes:
+
+- **The upload is retry-safe and survives the home dying.** A publish to the home writer is accepted as a retry-safe
+  operation keyed by the artifact's digest. The home datacenter can then die and return on its own store without losing
+  the bytes, the committed serial, or the operation identity: the recovered home serves the identical bytes at the same
+  serial and lists the release exactly once.
+- **A retry after recovery resolves to the same operation.** Re-sending the identical upload replays the original
+  operation rather than forking a second, no duplicate release and no new serial, the
+  [one-result guarantee](#a-retry-resolves-to-one-result) holding across the failure.
+- **A replica refuses every mutation, before and after the failover.** A read replica in another datacenter answers an
+  upload, a yank, and a delete with the same `503` and `{"error":"read_only_replica"}` body, and killing the home writer
+  never flips that posture: the failover elects a new leader but promotes no replica into accepting writes, so the group
+  never forks two homes.
+
+An OCI client meets the same shape across the same failover, with the OCI status codes
+[the contract already fixes](#statuses-a-client-retries):
+
+- **A push to a replica is refused before it starts.** An `oras` or `docker push` — a blob
+  `PUT /v2/<name>/blobs/uploads/` or a manifest `PUT /v2/<name>/manifests/<reference>` — reaches a read replica as `503`
+  with the same `{"error":"read_only_replica"}` body, ahead of any handler, so a client routes the push to the home
+  writer exactly as a PyPI client routes its upload.
+- **A push is idempotent by digest, and the retry converges.** Re-pushing the identical layer or manifest resolves to
+  the same success, since an OCI blob and manifest are content-addressed; a different manifest under a tag already taken
+  is a real `409 Conflict` rather than a silent overwrite. A push whose response the home failure swallowed replays to
+  that one result on retry, the same guarantee the PyPI upload holds.
+- **A superseded authority fences with the OCI status, not PyPI's.** After the home moves to a survivor, a manifest or
+  tag mutation the former home still had in flight is refused so it cannot land under an epoch the group advanced past.
+  OCI reports this fence as `503 Service Unavailable` with the error code `UNAVAILABLE` and "the repository authority
+  moved while the request was in flight; retry the request", where PyPI reports the same fence as `409 Conflict`. A
+  retry against the new home resolves the push. A client that publishes to both ecosystems handles both statuses.
+
 ## Watching a write settle
 
 An acknowledgement is synchronous: the mode does not return success until the write is durable to the degree the mode
@@ -124,17 +158,6 @@ These limits are properties of the request surface, identical in `none`, `dc`, a
 - An OCI blob upload larger than the index's configured size limit is refused with the `DENIED` code.
 - A PyPI upload that crosses a repository's configured quota is refused rather than partially stored.
 
-## Not yet documented as working
-
-Two adjacent capabilities are specified but not operable today, so this guide does not describe them as client behavior:
-
-- Rolling upgrade and rollback runbooks depend on the upgrade tooling tracked in
-  [availability observability](@/core/availability-observability.md#not-yet-available); until it ships, the operable
-  path is the operator-driven [manual promotion](@/core/high-availability.md#manual-promotion) and
-  [authority transfer and drain](@/core/availability-authority-transfer.md).
-- A real-client example suite driving `pip`, `twine`, and `oras` against a multi-node cluster is forthcoming. The
-  single-node real-client behavior these examples build on runs against a spawned server today.
-
 ## Related
 
 - The normative meaning of each acknowledgement: [availability contracts](@/core/availability-contracts.md)
@@ -142,4 +165,6 @@ Two adjacent capabilities are specified but not operable today, so this guide do
 - Read the topology, placement, and operations surfaces:
   [availability observability](@/core/availability-observability.md)
 - Move authority off a failed home: [authority transfer and drain](@/core/availability-authority-transfer.md)
+- Walk an operator through an upgrade or rollback:
+  [upgrade and roll back an availability cluster](@/core/availability-upgrade-runbook.md)
 - The `[availability]` configuration keys: [`[availability]`](@/core/configuration.md#availability)

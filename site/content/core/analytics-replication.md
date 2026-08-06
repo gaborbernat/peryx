@@ -72,6 +72,115 @@ Two bounds fail closed on untrusted input. A batch wider than the row limit is r
 retained-identity set cannot grow past its limit: once full, a new interval is refused until compaction past the
 frontier releases room, rather than letting a stalled frontier grow deduplication memory without bound.
 
+## Querying completeness
+
+`GET /+analytics/completeness` reports the accepted totals over a window and whether they cover every producer they
+should. The picture a node answers from is its own converged apply state, read off the durable store per request, so the
+query runs off the pull path and needs no live producer.
+
+### Filters
+
+- `repository`: an index route to confine the totals to, at most 512 bytes; omit for a cross-repository query.
+- `from` and `to`: Unix timestamps, each floored to its UTC day. The end defaults to today and never runs past it; the
+  start defaults to a trailing month and is capped to a bounded span, so one query can never scan an unbounded range.
+- `limit`: day buckets to return, 1 through 100, defaulting to 25.
+- `cursor`: the opaque `next_cursor` from the previous page.
+
+### Completeness semantics
+
+Completeness is measured against the cluster's own **accepted frontier**, the highest sealed day any expected producer
+has been folded through, not the wall clock. Each expected producer is required to reach that frontier, capped at the
+window end, at its own accepted epoch (a higher epoch always orders ahead). The verdict is:
+
+- `complete`: every expected producer has reached the required day.
+- `delayed`: every expected producer has an accepted frontier but at least one trails the required day, so the missing
+  totals should still arrive.
+- `unavailable`: an expected producer has delivered nothing, or no writer is configured at all. This is the fail-closed
+  answer: a picture vouched for against zero producers cannot be told apart from a filter that narrowed to nothing.
+
+Measuring against the frontier rather than the clock means a producer idle for a quiet day still reads as caught up once
+it has reached the frontier; how stale the frontier itself is against today is reported separately as the lag. A
+historical window whose end sits below the frontier requires coverage only through its own end, so a producer still
+catching up to today can still be complete for the past. The expected producer set is the configured topology's writer
+members, so a writer that has never delivered a batch is still expected and still marks the range incomplete.
+
+### Role visibility
+
+The verdict, the resolved interval, the accepted totals, and the day buckets are visible to any caller a repository
+admits. The per-producer frontier list, the cluster frontier, the required day, and the lag are operator-only: a
+repository-scoped caller (a repository reader or a per-index upload token) reads only the verdict and its own totals,
+and never learns which datacenters exist or how they lag. An operator-wide query, with no `repository`, needs operator
+authority; an operator may still narrow to one repository and keep the frontier.
+
+### Partial results
+
+A `delayed` operator response names the producers and where each sits:
+
+```json
+{
+  "completeness": "delayed",
+  "interval": {
+    "from_day": 19722,
+    "to_day": 19752,
+    "retained_from_day": null,
+    "window_clamped_to_retention": false
+  },
+  "totals": {
+    "downloads": 128,
+    "bytes": 64733247
+  },
+  "buckets": [
+    {
+      "day": 19752,
+      "start_unix": 1706572800,
+      "end_unix": 1706659200,
+      "downloads": 12,
+      "bytes": 9000000
+    }
+  ],
+  "next_cursor": null,
+  "frontier_day": 19752,
+  "required_day": 19752,
+  "lag_days": 1,
+  "producers": [
+    {
+      "producer": "east-writer",
+      "dc": "east",
+      "state": "complete",
+      "accepted_epoch": 1,
+      "accepted_day": 19752
+    },
+    {
+      "producer": "west-writer",
+      "dc": "west",
+      "state": "delayed",
+      "accepted_epoch": 1,
+      "accepted_day": 19750
+    }
+  ]
+}
+```
+
+An `unavailable` response carries `accepted_epoch` and `accepted_day` of `null` for a producer that has delivered
+nothing, and a repository-scoped caller sees the same `completeness` verdict without the `producers`, `frontier_day`,
+`required_day`, or `lag_days` fields.
+
+### Pagination, retention, and limits
+
+The day buckets page over the opaque `cursor`; a present `next_cursor` means more buckets follow, and a null one ends
+the series. The window resolves against the same daily-bucket retention the other usage views honor: `retained_from_day`
+is the retention floor and `window_clamped_to_retention` marks a requested start that predated it, so a reader tells an
+empty range apart from data aged out of retention. The window span, the day-bucket cardinality it bounds, and the row
+limit are all capped, so one completeness query stays bounded whatever it is handed.
+
+### Metrics and backup
+
+`frontier_day`, `lag_days`, and each producer's `state` are the low-cardinality health signals the query exposes: the
+lag says how old the newest sealed day is, and the per-producer states say which datacenters agree on it. The
+completeness state, the accepted totals and the per-producer accepted frontier, lives in the replica's durable apply
+snapshot, so it is captured and restored with the metadata store: a restored replica reports the same totals and the
+same verdict it held at the backup's recovery point.
+
 The [`none` availability contract](@/core/high-availability.md) leaves usage node-local, so none of this runs. See
 [Monitor usage and cache health](@/core/monitor.md) for reading a single node's daily usage, and
 [Back up and restore](@/core/backup-restore.md) for the recovery point a replica's state is pinned to.

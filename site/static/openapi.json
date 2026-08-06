@@ -112,6 +112,142 @@
         ]
       }
     },
+    "/+analytics/completeness": {
+      "get": {
+        "description": "Whether the accepted analytics totals over the window cover every expected producer. `completeness` is `complete` when every configured writer has been folded through the cluster frontier, `delayed` when one trails it, and `unavailable` when one has delivered nothing or no writer is configured. The per-producer frontier, the cluster frontier, and the lag are operator-only; a repository-scoped caller reads only the verdict and its own totals.",
+        "parameters": [
+          {
+            "description": "Index route to scope the query to; omit for an operator-wide query, at most 512 bytes",
+            "example": "root/pypi",
+            "in": "query",
+            "name": "repository",
+            "required": false
+          },
+          {
+            "description": "Minimum Unix timestamp, floored to its UTC day",
+            "example": 1703980800,
+            "in": "query",
+            "name": "from",
+            "required": false
+          },
+          {
+            "description": "Maximum Unix timestamp, floored to its UTC day",
+            "example": 1706659200,
+            "in": "query",
+            "name": "to",
+            "required": false
+          },
+          {
+            "description": "Opaque cursor from the prior page's next_cursor",
+            "example": "MjU",
+            "in": "query",
+            "name": "cursor",
+            "required": false
+          },
+          {
+            "description": "Rows to return, from 1 through 100; defaults to 25",
+            "example": 25,
+            "in": "query",
+            "name": "limit",
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "buckets": [
+                    {
+                      "bytes": 9000000,
+                      "day": 19752,
+                      "downloads": 12,
+                      "end_unix": 1706659200,
+                      "start_unix": 1706572800
+                    }
+                  ],
+                  "completeness": "delayed",
+                  "frontier_day": 19752,
+                  "interval": {
+                    "from_day": 19722,
+                    "from_unix": 1703980800,
+                    "retained_from_day": 19387,
+                    "to_day": 19752,
+                    "to_unix": 1706659200,
+                    "window_clamped_to_retention": false
+                  },
+                  "lag_days": 1,
+                  "next_cursor": null,
+                  "producers": [
+                    {
+                      "accepted_day": 19752,
+                      "accepted_epoch": 1,
+                      "dc": "east",
+                      "producer": "east-writer",
+                      "state": "complete"
+                    },
+                    {
+                      "accepted_day": 19750,
+                      "accepted_epoch": 1,
+                      "dc": "west",
+                      "producer": "west-writer",
+                      "state": "delayed"
+                    }
+                  ],
+                  "required_day": 19752,
+                  "totals": {
+                    "bytes": 64733247,
+                    "downloads": 128
+                  }
+                }
+              }
+            },
+            "description": "The completeness verdict, accepted totals, and per-producer frontiers"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "limit must be between 1 and 100"
+                }
+              }
+            },
+            "description": "The limit, cursor, time range, or repository filter is invalid"
+          },
+          "401": {
+            "description": "No valid local user credential or repository token was presented"
+          },
+          "403": {
+            "description": "The credential cannot inspect this view or repository"
+          },
+          "404": {
+            "description": "The repository does not exist or is not visible to the caller"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "analytics service unavailable"
+                }
+              }
+            },
+            "description": "Authentication, authorization, or analytics storage is unavailable"
+          }
+        },
+        "security": [
+          {
+            "uploadToken": []
+          },
+          {
+            "administratorPassword": []
+          }
+        ],
+        "summary": "Distributed analytics completeness",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/+analytics/sources": {
       "get": {
         "description": "Downloads and bytes grouped by the routed upstream a cache miss fetched from; a null source is the local store. The source dimension is operator-scoped, so a repository-only credential cannot inspect this view.",

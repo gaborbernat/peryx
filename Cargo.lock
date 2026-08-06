@@ -5163,6 +5163,7 @@ dependencies = [
  "peryx-index",
  "peryx-policy",
  "peryx-pql",
+ "peryx-replication",
  "peryx-search",
  "peryx-storage",
  "peryx-upstream",

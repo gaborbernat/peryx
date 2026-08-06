@@ -12,6 +12,12 @@ use peryx_driver::openapi::{api_json_response, package_search, text_response};
 fn analytics_paths(paths: PathsBuilder) -> PathsBuilder {
     paths
         .path(
+            "/+analytics/completeness",
+            PathItemBuilder::new()
+                .operation(HttpMethod::Get, analytics_completeness())
+                .build(),
+        )
+        .path(
             "/+analytics/top-packages",
             PathItemBuilder::new()
                 .operation(HttpMethod::Get, analytics_top())
@@ -1171,6 +1177,43 @@ fn analytics_timeline() -> OperationBuilder {
                 ],
                 "interval": analytics_interval(),
                 "next_cursor": null,
+            }),
+        ),
+    )
+}
+
+fn analytics_completeness() -> OperationBuilder {
+    analytics_query(
+        OperationBuilder::new()
+            .summary(Some("Distributed analytics completeness"))
+            .description(Some(
+                "Whether the accepted analytics totals over the window cover every expected producer. \
+                 `completeness` is `complete` when every configured writer has been folded through the \
+                 cluster frontier, `delayed` when one trails it, and `unavailable` when one has delivered \
+                 nothing or no writer is configured. The per-producer frontier, the cluster frontier, and \
+                 the lag are operator-only; a repository-scoped caller reads only the verdict and its own \
+                 totals.",
+            )),
+    )
+    .response(
+        "200",
+        api_json_response(
+            "The completeness verdict, accepted totals, and per-producer frontiers",
+            json!({
+                "completeness": "delayed",
+                "interval": analytics_interval(),
+                "totals": {"downloads": 128, "bytes": 64_733_247},
+                "buckets": [
+                    {"day": 19_752, "start_unix": 1_706_572_800_i64, "end_unix": 1_706_659_200_i64, "downloads": 12, "bytes": 9_000_000}
+                ],
+                "next_cursor": null,
+                "frontier_day": 19_752,
+                "required_day": 19_752,
+                "lag_days": 1,
+                "producers": [
+                    {"producer": "east-writer", "dc": "east", "state": "complete", "accepted_epoch": 1, "accepted_day": 19_752},
+                    {"producer": "west-writer", "dc": "west", "state": "delayed", "accepted_epoch": 1, "accepted_day": 19_750}
+                ]
             }),
         ),
     )

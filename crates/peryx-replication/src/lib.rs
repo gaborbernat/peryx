@@ -24,6 +24,7 @@ mod byte_ack;
 mod channel;
 mod circuit;
 mod completeness;
+mod completeness_query;
 mod dc_ack;
 mod dc_copy;
 mod drain;
@@ -87,6 +88,9 @@ pub use byte_ack::{ByteAckDecision, decide_byte_ack};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
 pub use circuit::{CircuitBreaker, CircuitConfig, DEFAULT_CIRCUIT};
 pub use completeness::{Completeness, ProducerCoverage, assess};
+pub use completeness_query::{
+    CompletenessQuery, CompletenessReport, DayBucket, ExpectedProducer, ProducerReport, assess_completeness,
+};
 pub use dc_ack::{ByteEvidence, DcAck, Deadline, decide_dc_ack};
 pub use dc_copy::{CopyError, copy_blob_to_target};
 pub use drain::{DrainIntent, DrainPlan, plan_drain};
@@ -193,6 +197,8 @@ mod byte_ack_tests;
 mod channel_tests;
 #[cfg(test)]
 mod circuit_tests;
+#[cfg(test)]
+mod completeness_query_tests;
 #[cfg(test)]
 mod completeness_tests;
 #[cfg(test)]

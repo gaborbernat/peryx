@@ -597,6 +597,13 @@ impl Metrics {
             .collect()
     }
 
+    /// Today's UTC day off the query clock, in whole days since the Unix epoch. A completeness query
+    /// reads it to measure how far the accepted analytics frontier lags the present.
+    #[must_use]
+    pub fn current_day(&self) -> i64 {
+        utc_day((self.clock)())
+    }
+
     /// Resolve a usage query's day window from optional Unix-second bounds. The end defaults to today
     /// and never runs ahead of it; the start defaults to a trailing [`DEFAULT_USAGE_WINDOW_DAYS`], is
     /// capped to [`MAX_USAGE_WINDOW_DAYS`], and is raised to the retention floor when one is set.
@@ -1738,6 +1745,12 @@ mod tests {
         let (dir, meta) = store();
         let metrics = Metrics::start_durable(meta.analytics(), retention, clock_on_day(day));
         (dir, meta, metrics)
+    }
+
+    #[test]
+    fn test_current_day_reads_the_query_clock() {
+        let (_dir, _meta, metrics) = durable_on(1_000, None);
+        assert_eq!(metrics.current_day(), 1_000);
     }
 
     #[test]

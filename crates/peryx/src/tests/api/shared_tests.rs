@@ -10,6 +10,7 @@ fn test_openapi_document_covers_every_endpoint() {
     let documented: BTreeSet<&str> = spec["paths"].as_object().unwrap().keys().map(String::as_str).collect();
     let expected = BTreeSet::from([
         "/+acl",
+        "/+analytics/completeness",
         "/+analytics/sources",
         "/+analytics/timeline",
         "/+analytics/top-packages",

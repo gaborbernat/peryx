@@ -454,6 +454,34 @@ fn test_receiver_cursor_tracks_the_highest_day_per_producer() {
 }
 
 #[test]
+fn test_receiver_accepted_frontier_keeps_the_highest_position_and_survives_a_restore() {
+    let mut receiver = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    assert_eq!(receiver.accepted_frontier(&ProducerId("dc-a".to_owned())), None);
+
+    receiver
+        .apply(&batch(interval("dc-a", 1, 7), &[(key(7, "1.0", ""), 1, 10)]))
+        .unwrap();
+    // A duplicate never disturbs the frontier, and a restart under a higher epoch leads it even at a
+    // lower sequence, since the epoch orders ahead of any sequence below it.
+    receiver
+        .apply(&batch(interval("dc-a", 1, 7), &[(key(7, "1.0", ""), 1, 10)]))
+        .unwrap();
+    receiver
+        .apply(&batch(interval("dc-a", 2, 3), &[(key(3, "1.0", ""), 1, 10)]))
+        .unwrap();
+
+    assert_eq!(
+        receiver.accepted_frontier(&ProducerId("dc-a".to_owned())),
+        Some((AuthorityEpoch(2), 3))
+    );
+    let restored = AnalyticsReceiver::restore(&receiver.encode(), DEFAULT_APPLY_LIMITS).unwrap();
+    assert_eq!(
+        restored.accepted_frontier(&ProducerId("dc-a".to_owned())),
+        Some((AuthorityEpoch(2), 3))
+    );
+}
+
+#[test]
 fn test_receiver_converges_under_reordered_delivery() {
     let mut in_order = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
     let mut reordered = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
@@ -529,7 +557,7 @@ fn test_receiver_snapshot_round_trips_state_cursor_and_frontier() {
 
 #[test]
 fn test_receiver_restore_rejects_a_foreign_schema() {
-    let snapshot = br#"{"schema":999,"state":[],"cursors":[],"frontier":[]}"#;
+    let snapshot = br#"{"schema":999,"state":[],"cursors":[],"accepted":[],"frontier":[]}"#;
     let error = AnalyticsReceiver::restore(snapshot, DEFAULT_APPLY_LIMITS).unwrap_err();
     assert!(matches!(
         error,

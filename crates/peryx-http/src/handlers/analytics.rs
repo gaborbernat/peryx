@@ -15,10 +15,15 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Map, Value};
 
+use peryx_core::NodeRole;
 use peryx_driver::authz::{Decision, DenyReason, ScopedDecision};
 use peryx_driver::state::AppState;
 use peryx_events::metrics::UsageInterval;
 use peryx_identity::{Action, Resource, Scope, UserId, parse_basic};
+use peryx_replication::{
+    AnalyticsReceiver, Completeness, CompletenessQuery, CompletenessReport, DEFAULT_APPLY_LIMITS, DayBucket,
+    ExpectedProducer, ProducerId, ProducerReport, assess_completeness,
+};
 
 use crate::response_security::ProtectedCachePolicy;
 
@@ -77,6 +82,13 @@ pub async fn analytics_timeline(state: State<Arc<AppState>>, request: Request<Bo
 async fn respond(State(state): State<Arc<AppState>>, request: Request<Body>, view: UsageView) -> Response {
     let (parts, _) = request.into_parts();
     let mut response = usage_response(&state, &parts.headers, &parts.uri, view).await;
+    ProtectedCachePolicy::NoStore.apply(response.headers_mut());
+    response
+}
+
+pub async fn analytics_completeness(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    let (parts, _) = request.into_parts();
+    let mut response = completeness_response(&state, &parts.headers, &parts.uri).await;
     ProtectedCachePolicy::NoStore.apply(response.headers_mut());
     response
 }
@@ -361,4 +373,197 @@ fn unavailable() -> Response {
         axum::Json(serde_json::json!({"error": "analytics service unavailable"})),
     )
         .into_response()
+}
+
+/// The authorized reach of a completeness query: the repository the totals are confined to (or `None`
+/// for a cross-repository query), and whether the caller holds operator authority, which gates the
+/// per-datacenter producer frontier and the cluster lag from a repository-only reader.
+#[derive(Debug)]
+struct CompletenessScope {
+    repository: Option<String>,
+    operator: bool,
+}
+
+async fn completeness_response(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Response {
+    let identity = match authenticate(state, headers).await {
+        Ok(identity) => identity,
+        Err(rejection) => return rejection.response(),
+    };
+    let Ok(Query(params)) = Query::<UsageParams>::try_from_uri(uri) else {
+        return bad_request("invalid analytics query");
+    };
+    let request = match UsageRequest::parse(&params) {
+        Ok(request) => request,
+        Err(message) => return bad_request(message),
+    };
+    let scope = match authorize_completeness(state, headers, params.repository.as_deref(), &identity) {
+        Ok(scope) => scope,
+        Err(rejection) => return rejection.response(),
+    };
+    let receiver = match load_receiver(state) {
+        Ok(receiver) => receiver,
+        Err(rejection) => return rejection.response(),
+    };
+    let interval = state.metrics.resolve_usage_interval(request.from, request.to);
+    let query = CompletenessQuery {
+        from_day: interval.from_day,
+        to_day: interval.to_day,
+        today: state.metrics.current_day(),
+        repository: scope.repository.clone(),
+    };
+    let report = assess_completeness(&receiver, &expected_producers(state), &query);
+    completeness_page(&report, &interval, request.offset, request.limit, scope.operator)
+}
+
+/// Authorize a completeness query. An operator-wide query (no repository) needs operator authority; a
+/// repository query is admitted for an operator or for a reader of that repository, and only the
+/// operator sees the producer frontier. A repository upload token reads its own repository's totals but
+/// never the producer frontier.
+fn authorize_completeness(
+    state: &AppState,
+    headers: &HeaderMap,
+    repository: Option<&str>,
+    identity: &Identity,
+) -> Result<CompletenessScope, Rejection> {
+    let actor = match identity {
+        Identity::Local(actor) => actor,
+        Identity::LegacyToken => {
+            let route = repository.ok_or(Rejection::Unauthorized)?;
+            let index = super::authorize_legacy_route(state, headers, route, Action::Read)?;
+            return Ok(CompletenessScope {
+                repository: Some(index.route.clone()),
+                operator: false,
+            });
+        }
+    };
+    let Some(route) = repository else {
+        require_operator(state, actor)?;
+        return Ok(CompletenessScope {
+            repository: None,
+            operator: true,
+        });
+    };
+    let index = super::index_by_route(state, route).ok_or(Rejection::NotFound)?;
+    if is_operator(state, actor) {
+        return Ok(CompletenessScope {
+            repository: Some(index.route.clone()),
+            operator: true,
+        });
+    }
+    require_permission(state.authorization.authorize_scoped(
+        actor,
+        Scope::RepositoryRead,
+        &Resource::Repository(index.name.clone()),
+    ))?;
+    Ok(CompletenessScope {
+        repository: Some(index.route.clone()),
+        operator: false,
+    })
+}
+
+fn is_operator(state: &AppState, actor: &UserId) -> bool {
+    matches!(
+        state
+            .authorization
+            .authorize_scoped(actor, Scope::AnalyticsRead, &Resource::Operator)
+            .decision(),
+        Decision::Allow
+    )
+}
+
+/// The producers a completeness query expects: every writer member of the configured topology, keyed by
+/// its stable node identity and labelled with its datacenter. A configured writer that has delivered no
+/// batch is still expected, so a silent datacenter marks the range incomplete rather than vanishing.
+fn expected_producers(state: &AppState) -> Vec<ExpectedProducer> {
+    state
+        .availability_topology()
+        .members
+        .iter()
+        .filter(|member| member.role == NodeRole::Writer)
+        .map(|member| ExpectedProducer {
+            producer: ProducerId(member.node.clone()),
+            dc: member.dc.clone(),
+        })
+        .collect()
+}
+
+/// Read the converged analytics receiver off the durable store, or an empty one before the first pull.
+/// A persisted snapshot this build cannot restore is a server-side fault, reported as unavailable rather
+/// than silently answered against zero totals.
+fn load_receiver(state: &AppState) -> Result<AnalyticsReceiver, Rejection> {
+    match state.meta.analytics().load_apply() {
+        Ok(Some(bytes)) => AnalyticsReceiver::restore(&bytes, DEFAULT_APPLY_LIMITS).map_err(|_| Rejection::Unavailable),
+        Ok(None) => Ok(AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS)),
+        Err(_) => Err(Rejection::Unavailable),
+    }
+}
+
+/// Slice the day buckets at the cursor offset and build the response envelope. The verdict, interval,
+/// totals, and buckets are always present; the frontier, lag, and per-producer coverage are added only
+/// for an operator, so a repository reader never learns which datacenters exist or how they lag.
+fn completeness_page(
+    report: &CompletenessReport,
+    interval: &UsageInterval,
+    offset: usize,
+    limit: usize,
+    operator: bool,
+) -> Response {
+    let mut buckets: Vec<Value> = report.buckets.iter().map(bucket_json).collect();
+    buckets.drain(0..offset.min(buckets.len()));
+    let next_cursor = (buckets.len() > limit).then(|| encode_cursor(offset + limit));
+    buckets.truncate(limit);
+    let mut body = Map::new();
+    body.insert(
+        "completeness".to_owned(),
+        Value::String(completeness_label(report.completeness).to_owned()),
+    );
+    body.insert("interval".to_owned(), interval_json(interval));
+    body.insert(
+        "totals".to_owned(),
+        serde_json::json!({"downloads": report.totals.downloads, "bytes": report.totals.bytes}),
+    );
+    body.insert("buckets".to_owned(), Value::Array(buckets));
+    body.insert("next_cursor".to_owned(), next_cursor.map_or(Value::Null, Value::String));
+    if operator {
+        body.insert("frontier_day".to_owned(), day_json(report.frontier_day));
+        body.insert("required_day".to_owned(), day_json(report.required_day));
+        body.insert("lag_days".to_owned(), day_json(report.lag_days));
+        body.insert(
+            "producers".to_owned(),
+            Value::Array(report.producers.iter().map(producer_json).collect()),
+        );
+    }
+    axum::Json(Value::Object(body)).into_response()
+}
+
+const fn completeness_label(completeness: Completeness) -> &'static str {
+    match completeness {
+        Completeness::Complete => "complete",
+        Completeness::Delayed => "delayed",
+        Completeness::Unavailable => "unavailable",
+    }
+}
+
+fn day_json(day: Option<i64>) -> Value {
+    day.map_or(Value::Null, |day| serde_json::json!(day))
+}
+
+fn bucket_json(bucket: &DayBucket) -> Value {
+    serde_json::json!({
+        "day": bucket.day,
+        "start_unix": bucket.day * SECONDS_PER_DAY,
+        "end_unix": (bucket.day + 1) * SECONDS_PER_DAY,
+        "downloads": bucket.downloads,
+        "bytes": bucket.bytes,
+    })
+}
+
+fn producer_json(producer: &ProducerReport) -> Value {
+    serde_json::json!({
+        "producer": producer.producer.0,
+        "dc": producer.dc,
+        "state": completeness_label(producer.state),
+        "accepted_epoch": producer.accepted.map(|(epoch, _)| epoch.0),
+        "accepted_day": producer.accepted.map(|(_, day)| day),
+    })
 }

@@ -156,6 +156,13 @@ impl PackageSearch {
     /// the in-flight rebuild, so a restart that interrupts one discards the partial index and starts
     /// over rather than serving it.
     ///
+    /// The walk over authoritative metadata that derives every document runs off the writer lock: it
+    /// reads the metadata store, not the index, so a scoped [`update_project`](PackageSearch::update_project)
+    /// or a lazy refresh no longer waits behind the whole eager rebuild. The lock is taken only for the
+    /// writer work that publishes the result. A mutation that advanced the store serial while the walk
+    /// ran could have written a scoped update the off-lock snapshot missed; re-deriving once under the
+    /// lock, where no scoped writer can interleave, keeps a stale full write from clobbering it.
+    ///
     /// `observe` is called before each chunk with the running progress; returning
     /// [`ControlFlow::Break`] cancels the rebuild, leaving the served index untouched.
     ///
@@ -171,11 +178,12 @@ impl PackageSearch {
         chunk: NonZeroUsize,
         observe: &mut dyn FnMut(RebuildProgress) -> ControlFlow<()>,
     ) -> Result<RebuildOutcome, SearchError> {
+        let mut snapshot = self.snapshot(ctx)?;
         let _guard = self.rebuild_lock.lock().expect("search rebuild lock");
-        let epoch = self.epoch.load(Ordering::Relaxed);
-        let frontier = ctx.meta.current_serial()?;
-        let documents = self.indexer.documents(ctx)?;
-        let total = documents.len() as u64;
+        if ctx.meta.current_serial()? != snapshot.frontier {
+            snapshot = self.snapshot(ctx)?;
+        }
+        let total = snapshot.documents.len() as u64;
         self.mark_rebuilding()?;
         let mut writer = self
             .index
@@ -183,7 +191,7 @@ impl PackageSearch {
         writer.delete_all_documents()?;
         let mut indexed = 0_u64;
         let mut commits = 0_u64;
-        for slice in documents.chunks(chunk.get()) {
+        for slice in snapshot.documents.chunks(chunk.get()) {
             if observe(RebuildProgress { indexed, total }).is_break() {
                 return Ok(RebuildOutcome::Aborted { documents: indexed });
             }
@@ -201,11 +209,25 @@ impl PackageSearch {
         let _ = observe(RebuildProgress { indexed, total });
         self.reader.reload()?;
         self.clear_rebuilding();
-        *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
-        ctx.meta.set_view_frontier(SEARCH_VIEW, frontier)?;
+        *self.indexed_epoch.lock().expect("search epoch lock") = Some(snapshot.epoch);
+        ctx.meta.set_view_frontier(SEARCH_VIEW, snapshot.frontier)?;
         Ok(RebuildOutcome::Published {
             documents: indexed,
             commits,
+        })
+    }
+
+    /// Derive the whole document set with the mutation epoch and store serial it reflects, off the
+    /// writer lock. The serial is read before the walk so it never names metadata the walk missed, which
+    /// lets [`rebuild`](PackageSearch::rebuild) detect a snapshot a concurrent mutation raced.
+    fn snapshot(&self, ctx: &IndexerCtx<'_>) -> Result<RebuildSnapshot, SearchError> {
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let frontier = ctx.meta.current_serial()?;
+        let documents = self.indexer.documents(ctx)?;
+        Ok(RebuildSnapshot {
+            epoch,
+            frontier,
+            documents,
         })
     }
 
@@ -483,6 +505,14 @@ impl PackageSearch {
         );
         doc
     }
+}
+
+/// A document set derived off the writer lock, tagged with the mutation epoch and store serial it
+/// reflects so [`rebuild`](PackageSearch::rebuild) can tell whether a concurrent mutation raced it.
+struct RebuildSnapshot {
+    epoch: u64,
+    frontier: u64,
+    documents: Vec<PackageDocument>,
 }
 
 #[derive(Clone, Copy)]

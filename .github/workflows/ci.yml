@@ -58,6 +58,7 @@ jobs:
               - 'Cargo.lock'
               - '.cargo/**'
               - 'rust-toolchain*'
+              - 'hawk.toml'
               - '.github/workflows/ci.yml'
             pypi:
               - 'crates/peryx-ecosystem-pypi/**'
@@ -93,6 +94,23 @@ jobs:
         run: cargo check --workspace --all-targets --all-features
         env:
           RUSTFLAGS: -D dead_code
+      # Hawk flags dead public surface: `pub` items with no use inside or outside their crate. It needs
+      # its own toolchain (0.1.12 builds under 1.97.1) and a prebuilt release binary. hawk.toml carries
+      # the production targets and the allow-list. See issue #1017.
+      - name: Install Hawk
+        run: |
+          curl -fsSL -o /tmp/cargo-hawk.tar.gz \
+            https://github.com/astral-sh/hawk/releases/download/v0.1.12/cargo-hawk-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf /tmp/cargo-hawk.tar.gz -C /tmp
+          chmod +x /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk-driver
+          echo "/tmp/cargo-hawk-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+      - run: rustup toolchain install 1.97.1
+      - name: Run Hawk dead-public
+        env:
+          RUSTUP_TOOLCHAIN: "1.97.1"
+        run: >
+          cargo-hawk check --manifest-path Cargo.toml --only dead-public
+          --deny hawk::dead_public --output-format json
       - name: Cancel remaining jobs on failure
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure

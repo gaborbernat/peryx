@@ -550,8 +550,6 @@ const PLACEMENT_RECONCILE: &str = "placement_reconcile";
 /// Default distinct digests one reconciliation pass classifies per ledger page before it resumes past
 /// its cursor. The pass loops until the ledger is drained, so this bounds one page's read, not the pass.
 pub const DEFAULT_PLACEMENT_RECONCILE_BATCH: usize = 256;
-/// Startup rejects a larger page so one pass reads a bounded slice of the placement ledger at a time.
-pub const MAX_PLACEMENT_RECONCILE_BATCH: usize = 1_000;
 
 /// The bounds one scheduled placement-reconciliation pass runs under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

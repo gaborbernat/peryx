@@ -442,10 +442,13 @@ fn peer_blob_base(address: &str) -> String {
     }
 }
 
-/// This node's own datacenter, read from the roster member its writer identity names. A node with no
-/// configured identity (a replica) has none.
+/// This node's own datacenter, read from the roster member its own identity names. A node names its own
+/// entry through `node_identity`; `writer_identity` is the one writer every node claims and is the same
+/// across the group, so it cannot tell one node's datacenter from another's. Falls back to
+/// `writer_identity` for a single-writer group that configures no distinct node identity, and a node in
+/// neither field has none.
 fn local_datacenter(config: &Config, membership: &DcMembership) -> Option<String> {
-    let identity = config.writer_identity.as_deref()?;
+    let identity = config.node_identity.as_deref().or(config.writer_identity.as_deref())?;
     membership
         .members
         .iter()

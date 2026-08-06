@@ -717,6 +717,34 @@ fn test_from_config_builds_a_copier_for_a_rostered_writer() {
 }
 
 #[test]
+fn test_from_config_resolves_the_local_datacenter_from_the_node_identity() {
+    // writer_identity is the one writer every node claims, the same across the group, so a replica in
+    // another datacenter must place itself by node_identity. Here writer_identity names the east peer
+    // while node_identity names this node's home member; the copier's datacenter must follow the latter.
+    let (_dir, store, backend) = filesystem();
+    let config = Config {
+        writer_identity: Some("peer".to_owned()),
+        node_identity: Some("local".to_owned()),
+        availability: ha(SecretSource::Literal("secret".to_owned())),
+        dc_membership: Some(membership(vec![
+            member("local", "home", "http://local/", DcRole::Writer),
+            member("peer", "east", "http://peer/", DcRole::Replica),
+        ])),
+        ..Config::default()
+    };
+
+    let copier = CrossDcBlobCopier::from_config(&config, store, backend)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        copier.local_dc,
+        dc("home"),
+        "node_identity resolves the local datacenter, not writer_identity"
+    );
+}
+
+#[test]
 fn test_plan_copies_nothing_when_this_node_is_not_rostered() {
     let (_dir, store, backend) = filesystem();
     let group = membership(vec![member("someone-else", "home", "http://x/", DcRole::Writer)]);

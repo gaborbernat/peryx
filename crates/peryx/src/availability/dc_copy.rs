@@ -85,8 +85,13 @@ pub struct CrossDcBlobCopier {
 impl CrossDcBlobCopier {
     /// Build the copier for a filesystem node from its resolved configuration and runtime store.
     ///
-    /// Returns `None` when the node copies nothing: no roster, no writer identity, no replication token,
+    /// Returns `None` when the node copies nothing: no roster, no node identity, no replication token,
     /// this node absent from the roster, or a single-data-center group with no peer to pull from.
+    ///
+    /// The node names its own roster entry through `node_identity`, so the copier resolves its own
+    /// datacenter from that; `writer_identity` is the shared writer every node claims and is the same
+    /// across the group, so it names one datacenter for all and cannot place this node. It falls back to
+    /// `writer_identity` only for a single-writer group that configures no distinct node identity.
     ///
     /// # Errors
     /// Returns an error when the replication token cannot be read or the local data center is not a valid
@@ -94,7 +99,7 @@ impl CrossDcBlobCopier {
     pub fn from_config(config: &Config, store: BlobStore, backend: BackendId) -> anyhow::Result<Option<Self>> {
         let (Some(membership), Some(identity), Some(replication)) = (
             config.dc_membership.as_ref(),
-            config.writer_identity.as_deref(),
+            config.node_identity.as_deref().or(config.writer_identity.as_deref()),
             config.availability.replication(),
         ) else {
             return Ok(None);

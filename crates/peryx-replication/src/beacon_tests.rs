@@ -139,31 +139,24 @@ async fn test_beat_surfaces_a_transport_failure() {
 }
 
 #[tokio::test]
-async fn test_run_beats_the_frontier_until_the_task_is_dropped() {
+async fn test_run_beats_each_interval_until_it_is_dropped() {
     let (address, tracker) = writer().await;
     let dir = tempfile::tempdir().unwrap();
-    let beacon = BeaconSender::new(
-        &address,
-        TOKEN,
-        "replica-a",
-        1,
-        seeded_meta(&dir, 4),
-        Duration::from_mins(1),
-    )
-    .unwrap();
+    let interval = Duration::from_millis(5);
+    let beacon = BeaconSender::new(&address, TOKEN, "replica-a", 1, seeded_meta(&dir, 4), interval).unwrap();
 
-    let handle = tokio::spawn(beacon.run());
-    // The first beat lands before the long inter-beat wait; poll the shared tracker for it, bounded so a
-    // failure never hangs the test.
-    let mut delivered = None;
-    for _ in 0..1000 {
-        delivered = tracker.applied_frontier("replica-a", Instant::now());
-        if delivered.is_some() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    handle.abort();
+    // `run` loops forever, so a timeout bounds it. Driving it directly (not spawned) runs the loop body
+    // in this task, so its beat and inter-beat wait are exercised deterministically rather than racing a
+    // spawned task's scheduling. The first beat fires before any wait, and the loop repeats every
+    // interval, so within the deadline it has beaten more than once, then the timeout drops it.
+    let outcome = tokio::time::timeout(Duration::from_millis(200), beacon.run()).await;
 
-    assert_eq!(delivered, Some(4));
+    assert!(outcome.is_err(), "run loops until dropped, so the timeout elapses");
+    assert_eq!(tracker.applied_frontier("replica-a", Instant::now()), Some(4));
+    let sequence = tracker
+        .summary(Instant::now())
+        .into_iter()
+        .find(|peer| peer.node == "replica-a")
+        .and_then(|peer| peer.sequence);
+    assert!(sequence >= Some(2), "the loop beat more than once: {sequence:?}");
 }

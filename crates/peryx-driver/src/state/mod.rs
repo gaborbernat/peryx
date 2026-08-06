@@ -7,6 +7,7 @@ mod control;
 mod dc_durability;
 mod derived_views;
 mod describe;
+mod operation;
 mod ownership;
 mod registry;
 

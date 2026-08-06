@@ -26,6 +26,7 @@ use peryx_policy::PolicyAction;
 use peryx_storage::blob::{
     BlobError, BlobErrorKind, BlobMetadata, BlobStorage, BlobWrite, Digest, RangeRequest, parse_range,
 };
+use peryx_storage::meta::OperationResult;
 use std::sync::Arc;
 
 impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> {
@@ -540,17 +541,28 @@ pub(super) async fn commit_blob(
         pending.abort().await.map_err(blob_fault)?;
         return Ok(authority_moved());
     }
+    let operation = blob_operation(&index.name, repo, digest);
+    state.claim_admitted_write(&operation);
     match pending.commit(&storage).await {
         Ok(_receipt) => {
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
             state.record_home_placement(storage.as_str(), bytes, fence);
+            state.finalize_admitted_write(&operation, OperationResult::Published, b"");
             Ok(blob_created(name, digest))
         }
         Err(err) => {
             release_reservation(state, reservation)?;
+            state.finalize_admitted_write(&operation, OperationResult::Failed, b"");
             Ok(download_error_response(DownloadError::Blob(err)))
         }
     }
+}
+
+/// The operation id an admitted blob write records under, stable across a client's retries: a re-push of
+/// the same digest to the same repository resolves to one id, so its outcome dedups to a single ledger
+/// record. The id keys only the recording; the commit itself always runs, so a re-push stays retrievable.
+fn blob_operation(index: &str, repo: &str, digest: &str) -> String {
+    format!("oci:{index}:{repo}:{digest}")
 }
 
 /// Publish a session's durable stage under `digest` and record its membership, the resumable
@@ -599,15 +611,19 @@ pub(super) async fn commit_staged_upload(
         release_reservation(state, reservation)?;
         return Ok(authority_moved());
     }
+    let operation = blob_operation(&index.name, repo, digest);
+    state.claim_admitted_write(&operation);
     match state.blobs.finish_upload(session, &storage).await {
         Ok(()) => {
             state.meta.remove_upload(session)?;
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
             state.record_home_placement(storage.as_str(), bytes, fence);
+            state.finalize_admitted_write(&operation, OperationResult::Published, b"");
             Ok(blob_created(name, digest))
         }
         Err(err) => {
             release_reservation(state, reservation)?;
+            state.finalize_admitted_write(&operation, OperationResult::Failed, b"");
             Ok(download_error_response(DownloadError::Blob(err)))
         }
     }

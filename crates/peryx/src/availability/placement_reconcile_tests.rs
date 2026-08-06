@@ -207,6 +207,48 @@ fn test_repair_demotes_and_drops_a_rotted_copy() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn test_repair_warns_when_the_corrupt_bytes_cannot_be_dropped() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_dir, meta) = meta();
+    let (_sdir, store, root, backend) = filesystem();
+    let (blob, artifact) = digests(CONTENT);
+    store.write_verified(CONTENT, &blob).unwrap();
+    // Rot the stored bytes so the copy fails verification, then make the blob's parent directory
+    // read-only so unlinking the demoted file is refused: the demotion still stands, the pass still
+    // counts the change, and the bad bytes stay behind under a logged warning.
+    let path = blob_path(&root, &blob);
+    std::fs::write(&path, b"rotted bytes").unwrap();
+    let parent = path.parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let placement = key(&artifact, &backend, "home", artifact.sha256());
+    seed_verified(&meta, &placement, CONTENT.len() as u64);
+
+    let changed =
+        reconciler("home", store.clone(), &["home", "east"]).repair_if_corrupt(&meta, &clock(), 5, &placement);
+
+    // Restore write permission so the temporary directory can be torn down.
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        changed,
+        "a copy whose bad bytes could not be dropped is still demoted and counted"
+    );
+    assert_eq!(
+        placement_state(&meta, &placement),
+        BlobPlacementState::Failed {
+            class: BlobPlacementFailure::DigestMismatch
+        }
+    );
+    assert_eq!(
+        store.read(&blob).unwrap(),
+        b"rotted bytes",
+        "the bytes remain because their removal was refused"
+    );
+}
+
 #[test]
 fn test_repair_demotes_a_verified_record_over_a_missing_file() {
     let (_dir, meta) = meta();
@@ -334,6 +376,29 @@ fn test_verify_pass_stops_when_cancelled() {
 }
 
 #[test]
+fn test_verify_pass_breaks_within_a_page_when_cancelled() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_dir, meta) = meta();
+    let (_sdir, store, _root, backend) = filesystem();
+    for tag in ["aa", "bb"] {
+        let (_blob, artifact) = digests(tag.as_bytes());
+        seed_verified(&meta, &key(&artifact, &backend, "home", artifact.sha256()), 1); // no file -> corrupt
+    }
+    // The cancellation clears the outer check and the first record, then trips on the second, so the
+    // pass breaks partway through a single page rather than at the page boundary.
+    let calls = AtomicUsize::new(0);
+    let cancelled = || calls.fetch_add(1, Ordering::SeqCst) >= 2;
+
+    let tally = reconciler("home", store, &["home", "east"])
+        .verify_local_placements(&meta, &clock(), 5, 100, &cancelled)
+        .unwrap();
+
+    assert_eq!(tally.scanned, 1, "the second record in the page was left unscanned");
+    assert_eq!(tally.changed, 1);
+}
+
+#[test]
 fn test_verify_pass_surfaces_a_scan_rejection() {
     let (_dir, meta) = meta();
     let (_sdir, store, _root, _backend) = filesystem();
@@ -370,6 +435,23 @@ fn test_retire_revokes_an_out_of_policy_copy_and_leaves_policy_copies() {
         placement_state(&meta, &in_policy).status(),
         BlobPlacementStatus::Verified
     );
+}
+
+#[test]
+fn test_retire_pages_across_the_cursor() {
+    let (_dir, meta) = meta();
+    let (_sdir, store, _root, backend) = filesystem();
+    for tag in ["aa", "bb"] {
+        let (_blob, artifact) = digests(tag.as_bytes());
+        seed_verified(&meta, &key(&artifact, &backend, "old-dc", &format!("old/{tag}")), 1);
+    }
+
+    // A batch of one forces the retire pass to resume past the cursor for the second digest.
+    let tally = reconciler("home", store, &["home", "east"])
+        .retire_out_of_policy(&meta, &clock(), 5, 1, &|| false)
+        .unwrap();
+
+    assert_eq!(tally.changed, 2, "both out-of-policy copies retire across two pages");
 }
 
 #[test]

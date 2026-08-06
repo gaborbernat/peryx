@@ -426,6 +426,9 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         // The availability listener is a per-node network binding, not restorable cluster state, so a
         // backup omits it; a restored node re-reads its listener from configuration, like the roster above.
         availability_listener: _,
+        // Read-through bounds are node-local serving tunables read from configuration, not restorable
+        // cluster state, so a backup omits them, like the listener above.
+        read_through: _,
         jobs,
         blob,
     } = config;

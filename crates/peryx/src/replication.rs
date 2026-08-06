@@ -19,6 +19,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use peryx_driver::read_through::{DEFAULT_READ_THROUGH_LIMITS, DcTransport, RemotePlacementReader};
 use peryx_driver::state::SEARCH_VIEW;
 use peryx_driver::{AppState, PrometheusSource};
 use peryx_http::handlers::status_authorization;
@@ -32,11 +33,11 @@ use peryx_replication::{
     advance_blob_frontier, liveness_router, primary_router, pull_outstanding,
 };
 use peryx_storage::blob::BlobStorage;
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{DataCenterId, MetaStore};
 use peryx_upstream::redact_url;
 use serde_json::{Value, json};
 
-use crate::config::{AvailabilityConfig, Config, DcRole, ReplicationConfig};
+use crate::config::{AvailabilityConfig, Config, DcMembership, DcRole, ReplicationConfig};
 use crate::replication::availability_metrics::AvailabilityMetrics;
 use crate::replication::worker::{AvailabilityRuntime, WorkerShared};
 
@@ -380,6 +381,76 @@ const BLOB_FETCH_CONCURRENCY: std::num::NonZeroUsize = std::num::NonZeroUsize::n
 const BLOB_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 const METADATA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Install the serving read-through capability when this node knows its own datacenter and has peers to
+/// fetch a missed public download from.
+///
+/// A node reaches a peer's blob-serving endpoint with the same replication token its metadata plane
+/// uses, so the capability is available only under `dc`/`ha` with a configured roster. This node's own
+/// datacenter comes from its writer identity; a node that does not carry one (a replica) installs no
+/// capability yet and serves misses through its ecosystem's upstream path. Peers are keyed by the unique
+/// datacenter each roster member runs in, the node's own excluded so it never fetches from itself.
+///
+/// # Errors
+/// Returns an error if the replication token cannot be read or a peer address is not a usable HTTP base.
+pub fn install_read_through(config: &Config, state: &Arc<AppState>) -> anyhow::Result<()> {
+    let (Some(replication), Some(membership)) = (config.availability.replication(), config.dc_membership.as_ref())
+    else {
+        return Ok(());
+    };
+    let Some(local_dc) = local_datacenter(config, membership) else {
+        return Ok(());
+    };
+    let (ReplicationConfig::Primary { token, .. } | ReplicationConfig::Replica { token, .. }) = replication;
+    let token = token.read().context("read the replication token for read-through")?;
+    let limits = config.read_through.unwrap_or(DEFAULT_READ_THROUGH_LIMITS);
+    let transfer = TransferLimits {
+        max_operations: TransferLimits::default().max_operations,
+        max_encoded_bytes: limits.per_fetch_bytes,
+    };
+    let mut delegates: HashMap<String, DcTransport> = HashMap::new();
+    for member in &membership.members {
+        if member.dc == local_dc {
+            continue;
+        }
+        let base = peer_blob_base(&member.address);
+        let transport = HttpBlobTransport::new(&base, token.clone(), transfer, BLOB_FETCH_TIMEOUT)
+            .with_context(|| format!("build a read-through blob transport for datacenter {}", member.dc))?;
+        delegates.insert(
+            member.dc.clone(),
+            Arc::new(CapacityLimited::new(transport, limits.concurrency)),
+        );
+    }
+    if delegates.is_empty() {
+        return Ok(());
+    }
+    let dc = DataCenterId::new(local_dc.clone()).with_context(|| format!("local datacenter identity {local_dc}"))?;
+    let reader = RemotePlacementReader::new(dc, delegates, limits, state.serving.clock.clone());
+    state.set_read_through(Arc::new(reader));
+    Ok(())
+}
+
+/// A peer's blob-serving base URL from its roster address. A bare `host:port` reaches the peer over
+/// plaintext HTTP, the availability plane's default; an operator terminating TLS gives a full
+/// `https://` address, which is used as written.
+fn peer_blob_base(address: &str) -> String {
+    if address.starts_with("http://") || address.starts_with("https://") {
+        address.to_owned()
+    } else {
+        format!("http://{address}")
+    }
+}
+
+/// This node's own datacenter, read from the roster member its writer identity names. A node with no
+/// configured identity (a replica) has none.
+fn local_datacenter(config: &Config, membership: &DcMembership) -> Option<String> {
+    let identity = config.writer_identity.as_deref()?;
+    membership
+        .members
+        .iter()
+        .find(|member| member.node == identity)
+        .map(|member| member.dc.clone())
+}
 
 struct ReplicaLoop {
     app: Arc<AppState>,

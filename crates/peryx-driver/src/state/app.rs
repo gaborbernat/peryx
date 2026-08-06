@@ -142,6 +142,10 @@ pub struct ServingState {
     /// has resolved its roster and replication token. Absent when the process copies nothing — single
     /// node, no roster, or an object-store backend — so the job runs as a no-op.
     pub(super) cross_dc_copier: std::sync::OnceLock<Arc<dyn crate::jobs::CrossDcCopier>>,
+    /// Serves a public download from a verified remote placement when the local content store misses,
+    /// installed by the binary once a data-center roster and replication token are configured. Absent
+    /// under single-node or roster-less modes, so a miss goes straight to the ecosystem's upstream path.
+    pub(super) read_through: std::sync::OnceLock<Arc<crate::read_through::RemotePlacementReader>>,
 }
 
 /// The whole process state: the serving data every handler needs, plus the driver registry only the
@@ -288,6 +292,19 @@ impl ServingState {
     #[must_use]
     pub fn cross_dc_copier(&self) -> Option<&Arc<dyn crate::jobs::CrossDcCopier>> {
         self.cross_dc_copier.get()
+    }
+
+    /// Install the remote-placement read-through capability. Set at most once, before the state is
+    /// served; a later call is ignored.
+    pub fn set_read_through(&self, reader: Arc<crate::read_through::RemotePlacementReader>) {
+        let _ = self.read_through.set(reader);
+    }
+
+    /// The remote-placement read-through, or `None` when this process has no data-center roster to fetch
+    /// a missed public download from.
+    #[must_use]
+    pub fn read_through(&self) -> Option<&crate::read_through::RemotePlacementReader> {
+        self.read_through.get().map(|reader| &**reader)
     }
 
     /// Assign `authority`'s home on its first publish, best effort. A publish path calls this after it

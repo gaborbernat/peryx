@@ -114,6 +114,7 @@ html5ever = { workspace = true, optional = true }
 [dev-dependencies]
 peryx-events = { workspace = true, features = ["test-util"] }
 peryx-http.workspace = true
+peryx-replication.workspace = true
 httpdate.workspace = true
 rstest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -12,6 +12,7 @@ mod membership_tests;
 mod merge_tests;
 mod model_tests;
 mod raw_tests;
+mod read_through_tests;
 mod replication_tests;
 
 pub(super) fn toml_config(text: &str) -> Config {

@@ -21,6 +21,7 @@ mod blob_reassembly;
 mod blob_routing;
 mod byte_ack;
 mod channel;
+mod circuit;
 mod completeness;
 mod dc_ack;
 mod dc_copy;
@@ -73,11 +74,12 @@ pub use blob_placement::{FetchPlan, plan_blob_fetch};
 pub use blob_plane::{
     BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_outstanding, pull_referenced,
 };
-pub use blob_pull::{PullError, pull_ranged, pull_ranged_blob};
+pub use blob_pull::{PullError, chunk_ranges, pull_ranged, pull_ranged_blob};
 pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
 pub use byte_ack::{ByteAckDecision, decide_byte_ack};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
+pub use circuit::{CircuitBreaker, CircuitConfig, DEFAULT_CIRCUIT};
 pub use completeness::{Completeness, ProducerCoverage, assess};
 pub use dc_ack::{ByteEvidence, DcAck, Deadline, decide_dc_ack};
 pub use dc_copy::{CopyError, copy_blob_to_target};
@@ -173,6 +175,8 @@ mod blob_tests;
 mod byte_ack_tests;
 #[cfg(test)]
 mod channel_tests;
+#[cfg(test)]
+mod circuit_tests;
 #[cfg(test)]
 mod completeness_tests;
 #[cfg(test)]

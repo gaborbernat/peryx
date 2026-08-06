@@ -7,6 +7,7 @@ use crate::store::PypiStore as _;
 use bytes::Bytes;
 use peryx_driver::download::{DownloadHandle, DownloadProducer};
 use peryx_driver::rate_limit::UpstreamPermit;
+use peryx_driver::read_through::fill_from_remote_placement;
 use peryx_driver::state::ServingState;
 use peryx_events::metrics::Event;
 use peryx_storage::blob::{BlobLease, BlobMetadata, BlobWrite, Digest};
@@ -41,6 +42,10 @@ pub async fn file_path(
     let gate = flight_gate(&state, digest.as_str());
     let guard = gate.lock_owned().await;
     if state.blobs.head(&digest).await?.is_some() {
+        release_flight(&state, digest.as_str(), guard);
+        return Ok(state.blobs.materialize(&digest).await?);
+    }
+    if fill_remote(&state, &digest).await.is_some() {
         release_flight(&state, digest.as_str(), guard);
         return Ok(state.blobs.materialize(&digest).await?);
     }
@@ -132,6 +137,10 @@ pub async fn stream_file(
         release_flight(&state, digest.as_str(), guard);
         return Ok(FileOutcome::Cached(metadata));
     }
+    if let Some(metadata) = fill_remote(&state, &digest).await {
+        release_flight(&state, digest.as_str(), guard);
+        return Ok(FileOutcome::Cached(metadata));
+    }
     let handle = if let Some(running) = existing_download(&state, &digest) {
         running
     } else {
@@ -139,6 +148,13 @@ pub async fn stream_file(
     };
     release_flight(&state, digest.as_str(), guard);
     Ok(FileOutcome::Live(tail_download(state, digest, handle, route, filename)))
+}
+
+/// Fill the local content store from a verified remote placement before the upstream fetch, returning
+/// the stored metadata when a peer served the file. A single-node process has no read-through installed,
+/// so this is a no-op there.
+async fn fill_remote(state: &ServingState, digest: &Digest) -> Option<BlobMetadata> {
+    fill_from_remote_placement(state.read_through(), &state.meta, &state.blobs, digest).await
 }
 
 /// Connect upstream and spawn the detached pump feeding a new blob transfer.

@@ -583,3 +583,68 @@ async fn test_blob_range_that_is_not_a_range_serves_the_whole_blob() {
     assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 0-9/{}", blob.len()));
     assert_eq!(got, &blob[..]);
 }
+
+/// Seed a verified remote placement of `content` in datacenter `east` and install a read-through whose
+/// only delegate serves those bytes, so a hosted blob whose bytes are absent fills from the peer.
+fn install_remote_placement(state: &std::sync::Arc<peryx_driver::AppState>, content: &[u8]) {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use peryx_driver::read_through::{DEFAULT_READ_THROUGH_LIMITS, DcTransport, MonotonicClock, RemotePlacementReader};
+    use peryx_identity::ArtifactDigest;
+    use peryx_replication::{LoopbackBlobSource, TransferLimits};
+    use peryx_storage::blob::Digest;
+    use peryx_storage::meta::{BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId};
+
+    let digest = Digest::of(content);
+    let artifact = ArtifactDigest::from_sha256(digest.as_str()).unwrap();
+    let key = BlobPlacementKey {
+        digest: artifact.clone(),
+        backend: BackendId::new("filesystem").unwrap(),
+        data_center: DataCenterId::new("east").unwrap(),
+        location: BackendLocation::new("east/a").unwrap(),
+    };
+    state
+        .meta
+        .apply_blob_placement(&key, &BlobPlacementTransition::Stage, 1, 0)
+        .unwrap();
+    state
+        .meta
+        .apply_blob_placement(
+            &key,
+            &BlobPlacementTransition::Verify {
+                observed: artifact,
+                size: content.len() as u64,
+            },
+            1,
+            0,
+        )
+        .unwrap();
+    let blobs = HashMap::from([(digest, bytes::Bytes::copy_from_slice(content))]);
+    let delegate: DcTransport = Arc::new(LoopbackBlobSource::new(blobs, TransferLimits::default()));
+    let clock: MonotonicClock = Arc::new(|| 0);
+    let reader = RemotePlacementReader::new(
+        DataCenterId::new("home").unwrap(),
+        HashMap::from([("east".to_owned(), delegate)]),
+        DEFAULT_READ_THROUGH_LIMITS,
+        clock,
+    );
+    state.set_read_through(Arc::new(reader));
+}
+
+#[tokio::test]
+async fn test_authorized_blob_missing_bytes_serves_from_a_remote_placement() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted(&dir);
+    let blob = b"an oci layer held only by a peer datacenter";
+    let digest = oci_digest(blob);
+    // The manifest replicated ahead of its bytes: the repository authorizes the digest, but the local
+    // store holds none of its content.
+    store::record_blob_membership(&state.meta, "store", "app", &digest).unwrap();
+    install_remote_placement(&state, blob);
+
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
+}

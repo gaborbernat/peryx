@@ -548,6 +548,7 @@ pub(super) async fn commit_blob(
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
             state.record_home_placement(storage.as_str(), bytes, fence);
             state.finalize_admitted_write(&operation, OperationResult::Published, b"");
+            state.record_operation_trace(peryx_driver::state::OperationKind::OciPush, fence);
             Ok(blob_created(name, digest))
         }
         Err(err) => {
@@ -619,6 +620,7 @@ pub(super) async fn commit_staged_upload(
             crate::quota::commit_blob_membership(&state.meta, &index.name, repo, digest, reservation, journal)?;
             state.record_home_placement(storage.as_str(), bytes, fence);
             state.finalize_admitted_write(&operation, OperationResult::Published, b"");
+            state.record_operation_trace(peryx_driver::state::OperationKind::OciPush, fence);
             Ok(blob_created(name, digest))
         }
         Err(err) => {

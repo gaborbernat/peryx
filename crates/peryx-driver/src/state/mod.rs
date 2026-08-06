@@ -10,6 +10,7 @@ mod describe;
 mod operation;
 mod ownership;
 mod registry;
+mod traces;
 
 pub use app::{AppState, Clock, PrometheusSource, ServingState};
 pub use build::{DEFAULT_HOT_CACHE_BYTES, DEFAULT_MAX_STALE_SECS, DEFAULT_TOKEN_TTL_SECS, RuntimeOptions};
@@ -25,3 +26,4 @@ pub use describe::{
 };
 pub use ownership::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, TransferOutcome};
 pub use peryx_index::{Index, IndexKind};
+pub use peryx_replication::OperationKind;

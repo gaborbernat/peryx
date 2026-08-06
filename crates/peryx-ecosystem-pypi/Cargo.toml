@@ -136,6 +136,11 @@ harness = false
 required-features = ["serving"]
 
 [[bench]]
+name = "availability_ack"
+harness = false
+required-features = ["serving"]
+
+[[bench]]
 name = "parse"
 harness = false
 

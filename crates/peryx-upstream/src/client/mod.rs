@@ -375,7 +375,7 @@ impl UpstreamClient {
             let mut stream = response.bytes_stream();
             loop {
                 match stream.try_next().await {
-                    Ok(Some(chunk)) if chunk.len() > limit - bytes.len() => {
+                    Ok(Some(chunk)) if chunk.len() > limit.saturating_sub(bytes.len()) => {
                         return Err(UpstreamError::ResponseTooLarge { limit });
                     }
                     Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),

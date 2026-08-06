@@ -25,13 +25,13 @@ use peryx_ecosystem_oci::LibraryPrefix;
 
 use crate::config::{
     AuthConfig, AvailabilityConfig, BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig,
-    IndexConfig, IndexKind, LdapBindConfig, LdapProviderConfig, LogSink, OidcProviderConfig, ReplicationConfig,
-    S3StorageConfig, SecretSource, TrustedPublisherConfig, UpstreamConfig, UpstreamRoutingConfig, WebhookConfig,
-    WebhookSecret,
+    DcMember, DcMembership, DcRole, IndexConfig, IndexKind, LdapBindConfig, LdapProviderConfig, LogSink,
+    OidcProviderConfig, ReplicationConfig, S3StorageConfig, SecretSource, TrustedPublisherConfig, UpstreamConfig,
+    UpstreamRoutingConfig, WebhookConfig, WebhookSecret,
 };
 use crate::server::{
     build_blob_storage, build_index_settings, build_indexes, build_router, build_state, check_config,
-    recover_job_attempts, router_for, upstream_auth,
+    receipt_endpoint_router, receipt_sources, recover_job_attempts, router_for, upstream_auth,
 };
 
 fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
@@ -1915,4 +1915,131 @@ fn test_build_indexes_overlay_without_local_layer_has_no_upload() {
         panic!("expected virtual index");
     };
     assert_eq!(*upload, None);
+}
+
+fn dc_member(node: &str, dc: &str, address: &str, role: DcRole) -> DcMember {
+    DcMember {
+        node: node.to_owned(),
+        dc: dc.to_owned(),
+        address: address.to_owned(),
+        role,
+    }
+}
+
+fn dc_config(members: Vec<DcMember>, identity: &str, token: SecretSource) -> Config {
+    Config {
+        writer_identity: Some(identity.to_owned()),
+        availability: AvailabilityConfig::Dc(ReplicationConfig::Primary {
+            source: "ingress".to_owned(),
+            token,
+        }),
+        dc_membership: Some(DcMembership {
+            group: "group".to_owned(),
+            members,
+        }),
+        ..Config::default()
+    }
+}
+
+#[test]
+fn test_receipt_sources_are_empty_without_a_roster() {
+    assert!(receipt_sources(&Config::default()).unwrap().is_empty());
+}
+
+#[test]
+fn test_receipt_sources_are_empty_when_the_node_is_absent_from_the_roster() {
+    let config = dc_config(
+        vec![dc_member("peer", "east", "http://peer/", DcRole::Replica)],
+        "ghost",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    assert!(receipt_sources(&config).unwrap().is_empty());
+}
+
+#[test]
+fn test_receipt_sources_cover_same_dc_peers_excluding_self_and_other_datacenters() {
+    let config = dc_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer-1", "east", "http://peer1/", DcRole::Replica),
+            dc_member("peer-2", "east", "http://peer2/", DcRole::Replica),
+            dc_member("far", "west", "http://far/", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    let nodes: std::collections::BTreeSet<String> = receipt_sources(&config)
+        .unwrap()
+        .iter()
+        .map(|source| source.node().to_owned())
+        .collect();
+
+    assert_eq!(
+        nodes,
+        std::collections::BTreeSet::from(["peer-1".to_owned(), "peer-2".to_owned()]),
+        "the local node and a west peer never appear in the same-DC gather",
+    );
+}
+
+#[test]
+fn test_receipt_sources_surface_an_unreadable_token() {
+    let config = dc_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "east", "http://peer/", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::File("/does/not/exist".into()),
+    );
+
+    assert!(receipt_sources(&config).is_err());
+}
+
+#[test]
+fn test_receipt_sources_reject_an_unusable_peer_address() {
+    let config = dc_config(
+        vec![
+            dc_member("local", "east", "http://local/", DcRole::Writer),
+            dc_member("peer", "east", "not a url", DcRole::Replica),
+        ],
+        "local",
+        SecretSource::Literal("t".to_owned()),
+    );
+
+    assert!(receipt_sources(&config).is_err());
+}
+
+#[test]
+fn test_receipt_endpoint_router_is_absent_without_replication() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = peryx_storage::blob::BlobStorage::filesystem(dir.path().join("blobs"));
+
+    assert!(receipt_endpoint_router(&Config::default(), &blobs).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_receipt_endpoint_router_serves_a_held_receipt() {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = peryx_storage::blob::BlobStorage::filesystem(dir.path().join("blobs"));
+    let digest = blobs.put_bytes(b"artifact bytes").await.unwrap();
+    let config = dc_config(
+        vec![dc_member("local", "east", "http://local/", DcRole::Writer)],
+        "local",
+        SecretSource::Literal("secret".to_owned()),
+    );
+    let router = receipt_endpoint_router(&config, &blobs).unwrap().unwrap();
+
+    let response = router
+        .oneshot(
+            Request::get(format!("/+replication/v1/receipts/sha256/{}", digest.as_str()))
+                .header(header::AUTHORIZATION, "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 }

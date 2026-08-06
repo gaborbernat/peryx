@@ -37,6 +37,8 @@ mod multi_peer;
 mod ownership;
 mod peer;
 mod peer_http;
+mod peer_receipt;
+mod peer_receipt_http;
 mod protocol;
 pub mod raft;
 mod readiness;
@@ -109,6 +111,8 @@ pub use peer::{
     PeerTransport, TransferLimits, TransportError, drain_to_frontier,
 };
 pub use peer_http::{HttpPeerError, HttpPeerTransport};
+pub use peer_receipt::{DEFAULT_RECEIPT_POLL, LoopbackReceiptSource, PeerReceipt, ReceiptSource, gather_receipts};
+pub use peer_receipt_http::{HttpReceiptError, HttpReceiptSource, ReceiptReply, receipt_router};
 pub use protocol::{
     BlobReference, Change, ChangePage, MetadataMutation, PROTOCOL_VERSION, PlacementAvailability, PlacementDescriptor,
     Primary,
@@ -199,6 +203,10 @@ mod multi_peer_tests;
 mod ownership_tests;
 #[cfg(test)]
 mod peer_http_tests;
+#[cfg(test)]
+mod peer_receipt_http_tests;
+#[cfg(test)]
+mod peer_receipt_tests;
 #[cfg(test)]
 mod peer_tests;
 #[cfg(test)]

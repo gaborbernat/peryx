@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Read as _;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context as _, bail, ensure};
 use axum::Router;
@@ -18,6 +19,7 @@ use peryx_identity::{
     OidcProviderSettings, SessionSealer, Signer,
 };
 use peryx_policy::{Policy, PolicyDecisionRecorder, PolicyEvaluation};
+use peryx_replication::{HttpReceiptSource, ReceiptSource, receipt_router};
 use peryx_storage::blob::{BlobStorage, S3Config};
 use peryx_storage::meta::{MetaStore, NewPolicyDecision};
 use peryx_upstream::{
@@ -180,7 +182,7 @@ pub fn build_state(config: &Config) -> anyhow::Result<Arc<AppState>> {
     let oidc_logins = oidc_logins(&config.auth.oidc_providers, &state.meta)?;
     state.set_oidc_logins(oidc_logins);
     state.read_only = read_only;
-    configure_availability(&mut state, config, read_only);
+    configure_availability(&mut state, config, read_only)?;
     if let Some(source) = &config.auth.signing_key {
         let key = source.read().context("read the token realm signing key")?;
         if key.trim().is_empty() {
@@ -220,10 +222,84 @@ const fn availability_role(config: &Config) -> peryx_core::NodeRole {
 /// dedicated local node instead.
 /// Install the resolved availability posture on the state: the authority role, the topology snapshot the
 /// process serves, and the write-ack quorum and deadline hosted writes are acknowledged against.
-fn configure_availability(state: &mut AppState, config: &Config, read_only: bool) {
+fn configure_availability(state: &mut AppState, config: &Config, read_only: bool) -> anyhow::Result<()> {
     state.set_availability_role(availability_role(config));
     state.set_availability_topology(availability_topology(config, read_only));
     state.set_write_ack(config.write_ack.policy, config.write_ack.deadline);
+    state.set_receipt_sources(receipt_sources(config)?);
+    Ok(())
+}
+
+/// How long a same-datacenter receipt query waits on one peer before it is treated as a peer that did not
+/// contribute this round. Bounded well under a typical client write deadline so the gather re-polls the
+/// remaining peers within the window.
+const RECEIPT_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The replication bearer token a `dc` or `ha` role carries, which same-datacenter peers accept for
+/// receipt queries — the same credential their blob endpoints accept.
+const fn receipt_token(replication: &ReplicationConfig) -> &SecretSource {
+    match replication {
+        ReplicationConfig::Primary { token, .. } | ReplicationConfig::Replica { token, .. } => token,
+    }
+}
+
+/// The same-datacenter peers an ingress write gathers placement receipts from: every rostered member in
+/// the local node's datacenter other than itself, each behind the shared replication credential.
+///
+/// Yields an empty set when the node gathers from no peer — no membership, no writer identity, no
+/// replication token, this node absent from the roster, or no same-datacenter peer — so a single-node or
+/// single-member-per-DC deployment proves its quorum from the local receipt alone and runs no gather.
+///
+/// # Errors
+/// Returns an error when the replication token cannot be read or a peer address is not a usable base.
+pub(crate) fn receipt_sources(config: &Config) -> anyhow::Result<Vec<Arc<dyn ReceiptSource + Send + Sync>>> {
+    let (Some(membership), Some(identity), Some(replication)) = (
+        config.dc_membership.as_ref(),
+        config.writer_identity.as_deref(),
+        config.availability.replication(),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let Some(local) = membership.members.iter().find(|member| member.node == identity) else {
+        return Ok(Vec::new());
+    };
+    let token = receipt_token(replication)
+        .read()
+        .context("read the replication token for same-datacenter receipt gathering")?;
+    let mut sources: Vec<Arc<dyn ReceiptSource + Send + Sync>> = Vec::new();
+    for member in &membership.members {
+        if member.dc != local.dc || member.node == identity {
+            continue;
+        }
+        let source = HttpReceiptSource::new(
+            &member.address,
+            member.node.clone(),
+            token.clone(),
+            RECEIPT_FETCH_TIMEOUT,
+        )
+        .with_context(|| format!("build receipt transport for same-datacenter peer {}", member.node))?;
+        sources.push(Arc::new(source));
+    }
+    Ok(sources)
+}
+
+/// The peer-receipt endpoint this node serves to its same-datacenter peers.
+///
+/// Returns `None` when the node runs no replication and so has no peer to answer. Rides the token-gated
+/// replication surface alongside the blob endpoint, so a peer reaches it at the same rostered address and
+/// credential.
+///
+/// # Errors
+/// Returns an error when the replication token cannot be read or the endpoint credential is empty.
+pub fn receipt_endpoint_router(config: &Config, blobs: &BlobStorage) -> anyhow::Result<Option<Router>> {
+    let Some(replication) = config.availability.replication() else {
+        return Ok(None);
+    };
+    let token = receipt_token(replication)
+        .read()
+        .context("read the replication token for the peer receipt endpoint")?;
+    let router = receipt_router(token, blobs.clone()).context("build peer receipt routes")?;
+    Ok(Some(router))
 }
 
 fn availability_topology(config: &Config, read_only: bool) -> peryx_core::TopologyConfig {

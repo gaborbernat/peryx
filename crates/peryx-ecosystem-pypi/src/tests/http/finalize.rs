@@ -3,15 +3,13 @@
 use peryx_driver::state::{ClusterStatus, HomeClaim, OwnershipAuthority, OwnershipError, TransferOutcome};
 use peryx_identity::Principal;
 use peryx_storage::meta::{
-    AccountingClass, ArtifactPlacement, ArtifactSource, IntentAdmission, IntentLimits, IntentPhase,
-    NewQuotaReservation, OperationState,
+    ArtifactPlacement, ArtifactSource, IntentAdmission, IntentLimits, IntentPhase, OperationState,
 };
 
 use super::support::*;
 use crate::serving::finalize::{
     Finalization, FinalizeDescriptor, FinalizeError, FinalizeFailure, finalize_admitted_upload,
 };
-use crate::store::{MetadataSibling, ProvenanceSibling};
 
 /// The artifact whose admitted bytes a finalize publishes.
 const ARTIFACT: &[u8] = b"finalized-artifact-bytes";
@@ -77,9 +75,6 @@ fn descriptor<'a>(operation: &'a str, digest: &'a str, principal: &'a Principal)
         record: RECORD,
         version: "1.0",
         submitted_at_unix: 1000,
-        metadata: None,
-        provenance: None,
-        quota_reservation: None,
         expiry_unix: Some(5000),
     }
 }
@@ -310,116 +305,5 @@ async fn test_finalize_fails_closed_for_an_unknown_index() {
         result,
         Err(FinalizeError::Rejected(FinalizeFailure::Unauthorized)),
         "an index no ACL covers grants no write",
-    );
-}
-
-#[tokio::test]
-async fn test_finalize_surfaces_a_missing_quota_reservation_as_a_store_error() {
-    let harness = harness_with(true, true).await;
-    admit(&harness.state.meta);
-    let principal = Principal::Named {
-        subject: "uploader".to_owned(),
-    };
-    let operation = operation();
-    let digest = digest();
-    let mut request = descriptor(&operation, &digest, &principal);
-    request.quota_reservation = Some(uuid::Uuid::nil());
-
-    let result = finalize_admitted_upload(&harness.state, INTENT_KEY, &request).await;
-
-    assert!(
-        matches!(result, Err(FinalizeError::Store(_))),
-        "a reservation the store never issued fails the commit: {result:?}",
-    );
-    assert_eq!(
-        harness.state.meta.current_serial().unwrap(),
-        0,
-        "a failed metered commit publishes nothing"
-    );
-}
-
-#[tokio::test]
-async fn test_finalize_publishes_metadata_and_provenance_siblings() {
-    let harness = harness_with(true, true).await;
-    admit(&harness.state.meta);
-    let principal = Principal::Named {
-        subject: "uploader".to_owned(),
-    };
-    let operation = operation();
-    let digest = digest();
-    let mut request = descriptor(&operation, &digest, &principal);
-    request.metadata = Some(MetadataSibling {
-        url: "https://peryx.test/hosted/files/flask-1.0.whl.metadata",
-        metadata_sha256: "metadatasha",
-        size: 12,
-        source: "hosted",
-    });
-    request.provenance = Some(ProvenanceSibling {
-        provenance_sha256: "provenancesha",
-        size: 34,
-    });
-
-    let outcome = finalize_admitted_upload(&harness.state, INTENT_KEY, &request)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        outcome,
-        Finalization::Published {
-            response: b"upload accepted".to_vec()
-        }
-    );
-    assert_eq!(harness.state.meta.current_serial().unwrap(), 1);
-}
-
-#[tokio::test]
-async fn test_finalize_commits_a_metered_upload_reservation() {
-    let harness = harness_with(true, true).await;
-    admit(&harness.state.meta);
-    let digest = digest();
-    let reservation = harness
-        .state
-        .meta
-        .reserve_project_quota(
-            NewQuotaReservation {
-                repository: "hosted",
-                project: Some("flask"),
-                version: Some("1.0"),
-                digest: &digest,
-                bytes: ARTIFACT.len() as u64,
-                class: AccountingClass::Hosted,
-                created_at_unix: 1000,
-            },
-            ARTIFACT.len() as u64,
-            false,
-        )
-        .unwrap();
-    let principal = Principal::Named {
-        subject: "uploader".to_owned(),
-    };
-    let operation = operation();
-    let mut request = descriptor(&operation, &digest, &principal);
-    request.quota_reservation = Some(reservation.id);
-
-    let outcome = finalize_admitted_upload(&harness.state, INTENT_KEY, &request)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        outcome,
-        Finalization::Published {
-            response: b"upload accepted".to_vec()
-        }
-    );
-    assert_eq!(
-        harness
-            .state
-            .meta
-            .quota_project_usage("hosted", "flask")
-            .unwrap()
-            .file_bytes
-            .committed,
-        ARTIFACT.len() as u64,
-        "the finalize commits the pending reservation",
     );
 }

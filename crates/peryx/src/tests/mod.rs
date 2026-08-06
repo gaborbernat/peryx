@@ -3,6 +3,7 @@ mod app;
 mod availability_listener_tests;
 mod cli;
 mod config;
+mod finalize_home_dc_tests;
 mod identity_availability_tests;
 mod jobs_availability_tests;
 mod logging_tests;

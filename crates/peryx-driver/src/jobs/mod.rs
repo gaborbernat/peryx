@@ -250,6 +250,13 @@ impl NodeJob for MaintenanceJob {
         if ctx.is_cancelled() {
             return Ok(JobReport::default());
         }
+        let finalized = self.driver.finalize_admitted(ctx.state().clone()).await;
+        if finalized > 0 {
+            tracing::info!(ecosystem = %ecosystem, finalized, "admitted uploads finalized at home");
+        }
+        if ctx.is_cancelled() {
+            return Ok(JobReport::default());
+        }
         let sweep = self
             .driver
             .refresh_stale(ctx.state().clone())

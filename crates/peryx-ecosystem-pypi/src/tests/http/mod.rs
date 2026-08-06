@@ -9,6 +9,7 @@ mod discovery;
 mod download;
 mod fallback;
 mod finalize;
+mod finalize_sweep;
 mod frontier;
 mod inspect;
 mod legacy_json;

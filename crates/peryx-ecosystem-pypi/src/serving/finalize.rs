@@ -22,10 +22,9 @@
 
 use peryx_driver::state::ServingState;
 use peryx_identity::{Action, Principal, authorize};
-use peryx_storage::meta::{FinalizedWrite, MetaError, QuotaError};
-use uuid::Uuid;
+use peryx_storage::meta::{FinalizedWrite, MetaError};
 
-use crate::store::{Guard, MetadataSibling, ProvenanceSibling, PublishedFile, publish_file_in_txn};
+use crate::store::{Guard, PublishedFile, publish_file_in_txn};
 
 /// The body a durable finalize stores and replays, matching the acknowledgement a synchronous upload
 /// returns once its write is proven durable.
@@ -61,12 +60,6 @@ pub struct FinalizeDescriptor<'a> {
     pub version: &'a str,
     /// When the upload was submitted, as Unix seconds.
     pub submitted_at_unix: i64,
-    /// The file's PEP 658 metadata sibling, when it has one.
-    pub metadata: Option<MetadataSibling<'a>>,
-    /// The file's PEP 740 provenance sibling, when the upload carried valid attestations.
-    pub provenance: Option<ProvenanceSibling<'a>>,
-    /// The pending quota reservation this file commits, when its upload is metered.
-    pub quota_reservation: Option<Uuid>,
     /// When the stored operation outcome may be pruned, or `None` for no bound.
     pub expiry_unix: Option<i64>,
 }
@@ -111,34 +104,6 @@ pub enum FinalizeError {
 impl From<MetaError> for FinalizeError {
     fn from(err: MetaError) -> Self {
         Self::Store(err.to_string())
-    }
-}
-
-/// A store or quota error raised inside the publish transaction, kept as one channel so both leave the
-/// finalize through [`FinalizeError::Store`].
-enum StoreFail {
-    Meta(MetaError),
-    Quota(QuotaError),
-}
-
-impl From<MetaError> for StoreFail {
-    fn from(err: MetaError) -> Self {
-        Self::Meta(err)
-    }
-}
-
-impl From<QuotaError> for StoreFail {
-    fn from(err: QuotaError) -> Self {
-        Self::Quota(err)
-    }
-}
-
-impl From<StoreFail> for FinalizeError {
-    fn from(err: StoreFail) -> Self {
-        match err {
-            StoreFail::Meta(err) => Self::Store(err.to_string()),
-            StoreFail::Quota(err) => Self::Store(err.to_string()),
-        }
     }
 }
 
@@ -207,8 +172,10 @@ fn authorized(state: &ServingState, descriptor: &FinalizeDescriptor<'_>) -> bool
         })
 }
 
-/// Publish the file through the finalize primitive, committing its quota reservation when the upload is
-/// metered.
+/// Publish the file's release rows, its outbox journal, the operation's terminal outcome, and the
+/// intent's advance in one transaction through the finalize primitive. The upload's bytes were already
+/// stored where it was admitted, so a re-published filename is an idempotent no-op that still commits
+/// the terminal outcome and advances the intent.
 fn publish(
     state: &ServingState,
     intent_key: &str,
@@ -225,8 +192,8 @@ fn publish(
         record: descriptor.record,
         version: descriptor.version,
         submitted_at_unix: descriptor.submitted_at_unix,
-        metadata: descriptor.metadata.as_ref().map(reborrow_metadata),
-        provenance: descriptor.provenance.as_ref().map(reborrow_provenance),
+        metadata: None,
+        provenance: None,
         quota: None,
     };
     let write = FinalizedWrite {
@@ -237,75 +204,26 @@ fn publish(
         now,
     };
     let guard =
-        |existing: Option<&[u8]>| Ok::<_, StoreFail>(if existing.is_some() { Guard::Skip } else { Guard::Commit });
+        |existing: Option<&[u8]>| Ok::<_, MetaError>(if existing.is_some() { Guard::Skip } else { Guard::Commit });
     // The terminal-outcome replay is decided before publication, so this commit publishes rather than
     // replays; either way the operation ends published with the same acknowledgement.
-    match descriptor.quota_reservation {
-        Some(reservation) => {
-            state
-                .meta
-                .commit_finalized_write_with_quota(write, reservation, |txn| {
-                    publish_file_in_txn::<StoreFail>(txn, &file, guard)
-                })?;
-        }
-        None => {
-            state.meta.commit_finalized_write(write, |txn| {
-                publish_file_in_txn::<StoreFail>(txn, &file, guard).map(|(_, journal)| journal)
-            })?;
-        }
-    }
+    state.meta.commit_finalized_write(write, |txn| {
+        publish_file_in_txn::<MetaError>(txn, &file, guard).map(|(_, journal)| journal)
+    })?;
     Ok(Finalization::Published {
         response: DURABLE_ACK.to_vec(),
     })
 }
 
-const fn reborrow_metadata<'a>(sibling: &'a MetadataSibling<'a>) -> MetadataSibling<'a> {
-    MetadataSibling {
-        url: sibling.url,
-        metadata_sha256: sibling.metadata_sha256,
-        size: sibling.size,
-        source: sibling.source,
-    }
-}
-
-const fn reborrow_provenance<'a>(sibling: &'a ProvenanceSibling<'a>) -> ProvenanceSibling<'a> {
-    ProvenanceSibling {
-        provenance_sha256: sibling.provenance_sha256,
-        size: sibling.size,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use peryx_storage::meta::{MetaError, QuotaError};
+    use peryx_storage::meta::MetaError;
 
-    use super::{FinalizeError, StoreFail};
-
-    fn meta_error() -> MetaError {
-        MetaError::Decode(serde_json::from_str::<serde_json::Value>("x").unwrap_err())
-    }
+    use super::FinalizeError;
 
     #[test]
-    fn test_a_read_fault_maps_to_a_finalize_store_error() {
-        assert!(matches!(FinalizeError::from(meta_error()), FinalizeError::Store(_)));
-    }
-
-    #[test]
-    fn test_a_publish_store_fault_maps_to_a_finalize_store_error() {
-        assert!(matches!(StoreFail::from(meta_error()), StoreFail::Meta(_)));
-        assert!(matches!(
-            FinalizeError::from(StoreFail::from(meta_error())),
-            FinalizeError::Store(_)
-        ));
-    }
-
-    #[test]
-    fn test_a_publish_quota_fault_maps_to_a_finalize_store_error() {
-        let quota = || QuotaError::ReservationUnavailable { id: uuid::Uuid::nil() };
-        assert!(matches!(StoreFail::from(quota()), StoreFail::Quota(_)));
-        assert!(matches!(
-            FinalizeError::from(StoreFail::from(quota())),
-            FinalizeError::Store(_)
-        ));
+    fn test_a_store_fault_maps_to_a_finalize_store_error() {
+        let err = MetaError::Decode(serde_json::from_str::<serde_json::Value>("x").unwrap_err());
+        assert!(matches!(FinalizeError::from(err), FinalizeError::Store(_)));
     }
 }

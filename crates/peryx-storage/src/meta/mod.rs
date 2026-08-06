@@ -20,6 +20,7 @@ mod fault;
 mod frontier;
 mod index;
 mod ingress_intent;
+mod transfer_audit;
 mod job;
 mod job_lease;
 mod journal;
@@ -59,6 +60,7 @@ pub use ingress_intent::{
     BackpressureState, IntentAdmission, IntentLimits, IntentPhase, IntentStageOutcome, IntentStageResult,
     IntentTransition, IntentUsage, StagedIntent,
 };
+pub use transfer_audit::TransferAudit;
 pub use job::{
     FinishJobRun, JobKind, JobOutcome, JobRunPage, JobRunQuery, JobRunQueryError, JobRunRecord, JobRunStoreError,
     JobState, NewJobRun,
@@ -128,6 +130,7 @@ const OPERATION_OUTCOME: TableDefinition<&str, &[u8]> = TableDefinition::new("op
 /// The ingress DC's durably staged write intents, keyed by client-scoped identity so a retried
 /// admission is idempotent and a restart recovers the intents a home DC has yet to finalize.
 const INGRESS_INTENT: TableDefinition<&str, &[u8]> = TableDefinition::new("ingress_intent");
+const TRANSFER_AUDIT: TableDefinition<&str, &[u8]> = TableDefinition::new("transfer_audit");
 /// Per-authority retained-usage counters — records and bytes each authority holds — so admission bounds
 /// and prunes a buffer per authority without scanning the whole ledger.
 const INGRESS_INTENT_COUNT: TableDefinition<&str, &[u8]> = TableDefinition::new("ingress_intent_count");
@@ -324,6 +327,7 @@ impl MetaStore {
             txn.open_table(INGRESS_INTENT_COUNT)?;
             txn.open_table(INGRESS_INTENT_ORDER)?;
             txn.open_table(INGRESS_INTENT_SEQ)?;
+            txn.open_table(TRANSFER_AUDIT)?;
             txn.open_table(RECONCILE_BACKLOG)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;

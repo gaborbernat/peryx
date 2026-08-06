@@ -17,7 +17,7 @@ use peryx_events::webhook::{WebhookEvent, WebhookEventKind};
 use peryx_identity::Action;
 use peryx_index::Index;
 use peryx_policy::{PolicyAction, PolicyDenial};
-use peryx_replication::{AckDecision, Deadline};
+use peryx_replication::AckDecision;
 use peryx_storage::meta::{IntentPhase, OperationClaim, OperationResult, OperationState};
 
 use crate::cache::{self, CacheError};
@@ -306,17 +306,24 @@ async fn admit_and_store(
         .meta
         .advance_intent(&intent.intent_key, IntentPhase::Admitted, (state.clock)());
     emit_store_side_effects(state, audit, stored);
-    let ack = acknowledge::decide_dc_ack(&acknowledge::DcAckInputs {
-        policy: state.write_ack_policy(),
-        members: acknowledge::same_dc_members(state.availability_topology()),
-        local_node: acknowledge::local_node_id(state.availability_topology()),
-        digest,
+    let ack = acknowledge::local_ack(
+        state.write_ack_policy(),
+        acknowledge::same_dc_members(state.availability_topology()),
+        acknowledge::local_node_id(state.availability_topology()),
+        digest.clone(),
+    );
+    let outcome = acknowledge::resolve_dc_ack(
+        ack,
         // The metadata write committed to the local journal synchronously; the remote group-readiness
         // source that would downgrade this is deferred with the cross-DC transport.
-        metadata: AckDecision::Acknowledged,
-        deadline: request_deadline(),
-    });
-    let response = acknowledge::ack_response(ack, &intent.operation);
+        AckDecision::Acknowledged,
+        &digest,
+        state.receipt_sources(),
+        state.write_ack_deadline(),
+        &state.dc_durability,
+    )
+    .await;
+    let response = acknowledge::ack_response(outcome, &intent.operation);
     if response.finalize {
         // A finalize fault leaves the operation pending, which a retry re-drives and re-finalizes over the
         // idempotent store, so the terminal result is recorded then rather than failing this proven write.
@@ -349,15 +356,6 @@ fn claim_short_circuit(claim: Result<OperationClaim, peryx_storage::meta::MetaEr
 /// Replay a finalized operation's stored response verbatim, so a retry resolves the original result.
 fn replay_response(body: &[u8]) -> Response {
     (StatusCode::OK, String::from_utf8_lossy(body).into_owned()).into_response()
-}
-
-/// The client's remaining window to prove the write durable. The cross-DC receipt transport that would
-/// let the byte dimension advance within the request is deferred, so a write not already durable on the
-/// local node cannot make progress here: the single evaluation consumes the deadline and a still-short
-/// write is reported retry-safe rather than blocking the request. The awaiting loop that lands with the
-/// transport will bound its wait by the configured [`ServingState::write_ack_deadline`].
-const fn request_deadline() -> Deadline {
-    Deadline::Expired
 }
 
 fn emit_admission_rejection(audit: &UploadAudit<'_>) {
@@ -777,11 +775,5 @@ mod tests {
         let headers = HeaderMap::new();
         let response = upload_store_error_response(&audit(&headers), CacheError::Meta(meta_error()));
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn test_request_deadline_is_expired_until_the_receipt_loop_lands() {
-        // black_box forces a runtime call so the seam is exercised rather than const-folded away.
-        assert_eq!(std::hint::black_box(request_deadline()), Deadline::Expired);
     }
 }

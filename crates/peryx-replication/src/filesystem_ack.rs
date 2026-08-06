@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use peryx_storage::blob::Digest;
 
 use crate::ack::AckDecision;
-use crate::byte_ack::decide_byte_ack;
+use crate::byte_ack::{ByteAckDecision, decide_byte_ack};
 use crate::dc_ack::{ByteEvidence, DcAck, Deadline, decide_dc_ack};
 use crate::readiness::DurabilityPolicy;
 use crate::receipt_quorum::ReceiptAck;
@@ -72,6 +72,28 @@ impl FilesystemAck {
     #[must_use]
     pub const fn independent_receipts(&self) -> usize {
         self.receipts.len()
+    }
+
+    /// Whether a receipt from `node` is already held, so the gather skips re-querying a peer that has
+    /// already proven durability.
+    #[must_use]
+    pub fn holds(&self, node: &str) -> bool {
+        self.receipts.iter().any(|held| held.node == node)
+    }
+
+    /// The current filesystem byte decision from the receipts held so far: acknowledged, or pending with
+    /// how many more independent receipts remain. Exposed so a caller can record the quorum progress
+    /// behind the byte dimension without re-deriving it.
+    #[must_use]
+    pub fn byte_decision(&self) -> ByteAckDecision {
+        decide_byte_ack(&self.digest, &self.receipts, &self.members, self.policy)
+    }
+
+    /// Whether the held receipts already meet the datacenter byte quorum, so the gather can stop before
+    /// the deadline once no further peer is needed.
+    #[must_use]
+    pub fn is_byte_durable(&self) -> bool {
+        self.byte_decision().is_acknowledged()
     }
 
     /// The write's datacenter acknowledgement given its `metadata` decision and `deadline`.

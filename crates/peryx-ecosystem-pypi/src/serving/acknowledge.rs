@@ -15,10 +15,16 @@
 //! a clock or a network.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use peryx_core::TopologyConfig;
-use peryx_replication::{AckDecision, DcAck, Deadline, DurabilityPolicy, FilesystemAck, ReceiptAck};
+use peryx_driver::state::DcDurabilityMetrics;
+use peryx_replication::{
+    AckDecision, DEFAULT_RECEIPT_POLL, DcAck, DurabilityPolicy, FilesystemAck, ReceiptAck, ReceiptSource,
+    gather_receipts,
+};
 use peryx_storage::blob::Digest;
 
 /// The node id attributed to the local placement receipt when no roster names this node.
@@ -50,26 +56,48 @@ pub(super) fn local_node_id(topology: &TopologyConfig) -> String {
         .unwrap_or_else(|| STANDALONE_NODE.to_owned())
 }
 
-/// The evidence the handler feeds the decision, injected whole in a unit test so no clock or transport is
-/// consulted.
-pub(super) struct DcAckInputs {
-    pub policy: DurabilityPolicy,
-    pub members: BTreeSet<String>,
-    pub local_node: String,
-    pub digest: Digest,
-    pub metadata: AckDecision,
-    pub deadline: Deadline,
+/// The write's [`FilesystemAck`] seeded with the ingress node's own placement receipt: an admitted upload
+/// is byte-durable on the local node the moment its bytes commit, which is the first receipt toward the
+/// same-datacenter quorum.
+pub(super) fn local_ack(
+    policy: DurabilityPolicy,
+    members: BTreeSet<String>,
+    local_node: String,
+    digest: Digest,
+) -> FilesystemAck {
+    let mut ack = FilesystemAck::new(digest.clone(), members, policy);
+    ack.record(ReceiptAck {
+        node: local_node,
+        digest,
+    });
+    ack
 }
 
-/// Fold the single local filesystem receipt into a [`FilesystemAck`] over the same-datacenter members and
-/// combine it with the metadata decision under the deadline.
-pub(super) fn decide_dc_ack(inputs: &DcAckInputs) -> DcAck {
-    let mut ack = FilesystemAck::new(inputs.digest.clone(), inputs.members.clone(), inputs.policy);
-    ack.record(ReceiptAck {
-        node: inputs.local_node.clone(),
-        digest: inputs.digest.clone(),
-    });
-    ack.decide(inputs.metadata, inputs.deadline)
+/// Gather same-datacenter peers' placement receipts into `ack`, decide the write's datacenter
+/// acknowledgement, and record it.
+///
+/// The gather runs under the client `budget`, the decision combines the byte quorum with the `metadata`
+/// dimension, and both the outcome and the byte-quorum progress are recorded through the durability
+/// metrics.
+///
+/// The gather bounds its wait by `budget`: quorum before it resolves [`Durable`](DcAck::Durable), the
+/// budget spent short of it resolves retry-safe [`Unknown`](DcAck::Unknown) rather than a definite
+/// failure, since a durable copy may land after the client stops waiting. A quorum the local receipt
+/// already satisfies returns without touching the network. The decision arithmetic stays pure in
+/// [`FilesystemAck`]; this composes the transport and the metrics around it.
+pub(super) async fn resolve_dc_ack(
+    mut ack: FilesystemAck,
+    metadata: AckDecision,
+    digest: &Digest,
+    sources: &[Arc<dyn ReceiptSource + Send + Sync>],
+    budget: Duration,
+    metrics: &DcDurabilityMetrics,
+) -> DcAck {
+    let deadline = gather_receipts(sources, digest, &mut ack, budget, DEFAULT_RECEIPT_POLL).await;
+    let outcome = ack.decide(metadata, deadline);
+    metrics.record_quorum(&ack.byte_decision());
+    metrics.record(outcome);
+    outcome
 }
 
 /// The client-facing outcome of a write's durability decision.
@@ -135,82 +163,122 @@ mod tests {
         }
     }
 
-    fn inputs(policy: DurabilityPolicy, members: &[&str], metadata: AckDecision, deadline: Deadline) -> DcAckInputs {
-        DcAckInputs {
+    fn ack_over(policy: DurabilityPolicy, names: &[&str]) -> FilesystemAck {
+        local_ack(
             policy,
-            members: members.iter().map(|node| (*node).to_owned()).collect(),
-            local_node: "a".to_owned(),
-            digest: digest(),
-            metadata,
-            deadline,
-        }
+            names.iter().map(|node| (*node).to_owned()).collect(),
+            "a".to_owned(),
+            digest(),
+        )
     }
 
-    #[test]
-    fn test_local_receipt_proves_a_local_quorum_durable() {
-        let ack = decide_dc_ack(&inputs(
-            DurabilityPolicy::Local,
-            &["a"],
+    fn sources(list: Vec<peryx_replication::LoopbackReceiptSource>) -> Vec<Arc<dyn ReceiptSource + Send + Sync>> {
+        list.into_iter()
+            .map(|source| Arc::new(source) as Arc<dyn ReceiptSource + Send + Sync>)
+            .collect()
+    }
+
+    fn rendered(metrics: &DcDurabilityMetrics) -> String {
+        use peryx_driver::state::PrometheusSource as _;
+        let mut body = String::new();
+        metrics.write_metrics(&mut body);
+        body
+    }
+
+    const BUDGET: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn test_local_receipt_alone_resolves_durable_and_records_it() {
+        let metrics = DcDurabilityMetrics::default();
+        let ack = resolve_dc_ack(
+            ack_over(DurabilityPolicy::Local, &["a"]),
             AckDecision::Acknowledged,
-            Deadline::Live,
-        ));
+            &digest(),
+            &[],
+            BUDGET,
+            &metrics,
+        )
+        .await;
+
         assert_eq!(
             ack,
             DcAck::Durable {
                 scope: BlobDurability::Filesystem
             }
         );
+        let body = rendered(&metrics);
+        assert!(
+            body.contains("peryx_dc_ack_durable_total{scope=\"filesystem\"} 1\n"),
+            "{body}"
+        );
+        assert!(body.contains("peryx_dc_ack_quorum_acknowledged 1\n"), "{body}");
     }
 
-    #[test]
-    fn test_single_same_dc_member_reaches_majority_from_the_local_receipt() {
-        let ack = decide_dc_ack(&inputs(
-            DurabilityPolicy::Majority,
-            &["a"],
+    #[tokio::test]
+    async fn test_a_peer_receipt_completes_a_majority_quorum() {
+        let metrics = DcDurabilityMetrics::default();
+        let ack = resolve_dc_ack(
+            ack_over(DurabilityPolicy::Majority, &["a", "b", "c"]),
             AckDecision::Acknowledged,
-            Deadline::Live,
-        ));
+            &digest(),
+            &sources(vec![
+                peryx_replication::LoopbackReceiptSource::holding("b", digest(), 4),
+                peryx_replication::LoopbackReceiptSource::absent("c"),
+            ]),
+            BUDGET,
+            &metrics,
+        )
+        .await;
+
         assert!(matches!(ack, DcAck::Durable { .. }));
+        assert!(
+            rendered(&metrics).contains("peryx_dc_ack_quorum_acknowledged 2\n"),
+            "the local node and one peer proved the quorum",
+        );
     }
 
-    #[test]
-    fn test_multi_member_majority_is_pending_while_the_deadline_is_live() {
-        let ack = decide_dc_ack(&inputs(
-            DurabilityPolicy::Majority,
-            &["a", "b", "c"],
+    #[tokio::test(start_paused = true)]
+    async fn test_a_short_gather_resolves_unknown_and_records_it() {
+        let metrics = DcDurabilityMetrics::default();
+        let ack = resolve_dc_ack(
+            ack_over(DurabilityPolicy::Majority, &["a", "b", "c"]),
             AckDecision::Acknowledged,
-            Deadline::Live,
-        ));
-        assert_eq!(ack, DcAck::Pending);
-    }
+            &digest(),
+            &sources(vec![
+                peryx_replication::LoopbackReceiptSource::absent("b"),
+                peryx_replication::LoopbackReceiptSource::absent("c"),
+            ]),
+            BUDGET,
+            &metrics,
+        )
+        .await;
 
-    #[test]
-    fn test_multi_member_majority_is_unknown_once_the_deadline_expires() {
-        let ack = decide_dc_ack(&inputs(
-            DurabilityPolicy::Majority,
-            &["a", "b", "c"],
-            AckDecision::Acknowledged,
-            Deadline::Expired,
-        ));
         assert_eq!(
             ack,
             DcAck::Unknown,
             "a durable completion may land after the client stops waiting"
         );
+        assert!(rendered(&metrics).contains("peryx_dc_ack_unknown_total 1\n"));
     }
 
-    #[test]
-    fn test_unacknowledged_metadata_holds_the_write_pending_despite_byte_quorum() {
-        let ack = decide_dc_ack(&inputs(
-            DurabilityPolicy::Local,
-            &["a"],
+    #[tokio::test]
+    async fn test_unacknowledged_metadata_holds_the_write_pending_despite_byte_quorum() {
+        let metrics = DcDurabilityMetrics::default();
+        let ack = resolve_dc_ack(
+            ack_over(DurabilityPolicy::Local, &["a"]),
             AckDecision::NotYetDurable {
                 target: 5,
                 durable_frontier: 0,
             },
-            Deadline::Live,
-        ));
+            &digest(),
+            &[],
+            BUDGET,
+            &metrics,
+        )
+        .await;
+
         assert_eq!(ack, DcAck::Pending);
+        assert!(rendered(&metrics).contains("peryx_dc_ack_pending_total 1\n"));
     }
 
     #[test]

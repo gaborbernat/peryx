@@ -154,7 +154,12 @@ fn run_server(config: &Config) -> anyhow::Result<()> {
             }
             tokio::spawn(serve_availability_listener(listener_config, listener_router));
         }
-        let router = replication.mount(peryx::server::router_for(state));
+        let mut router = replication.mount(peryx::server::router_for(state.clone()));
+        // Same-datacenter peers query this node for its placement receipts on the token-gated replication
+        // surface, alongside the blob endpoint, so a write elsewhere in the DC can gather it into quorum.
+        if let Some(receipts) = peryx::server::receipt_endpoint_router(config, &state.serving.blobs)? {
+            router = router.merge(receipts);
+        }
         let _replication = replication.start();
         let addr: std::net::SocketAddr = format!("{}:{}", config.host, config.port)
             .parse()

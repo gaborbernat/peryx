@@ -78,6 +78,10 @@ pub struct ServingState {
     /// The deadline the client waits for a write to prove durable before the write is reported
     /// retry-safe-unknown rather than a definite failure.
     pub(super) write_ack_deadline: std::time::Duration,
+    /// The same-datacenter peers a filesystem write gathers placement receipts from to prove its byte
+    /// quorum. Empty on a single-node `none` process and on any deployment whose quorum the local receipt
+    /// alone satisfies, so the gather touches the network only when a larger same-DC quorum needs it.
+    pub(super) receipt_sources: Vec<std::sync::Arc<dyn peryx_replication::ReceiptSource + Send + Sync>>,
     /// Immutable repository-route positions for request dispatch.
     pub(super) route_resolver: RouteResolver,
     pub indexes: Vec<Index>,
@@ -232,6 +236,13 @@ impl ServingState {
     #[must_use]
     pub const fn write_ack_deadline(&self) -> std::time::Duration {
         self.write_ack_deadline
+    }
+
+    /// The same-datacenter peers a filesystem write gathers placement receipts from. Empty when the local
+    /// receipt alone proves the quorum, so the producer runs no network gather.
+    #[must_use]
+    pub fn receipt_sources(&self) -> &[std::sync::Arc<dyn peryx_replication::ReceiptSource + Send + Sync>] {
+        &self.receipt_sources
     }
 
     /// The authority role this node was configured with, from its replication role rather than its

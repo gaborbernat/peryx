@@ -31,7 +31,7 @@ http-body-util.workspace = true
 redb.workspace = true
 stats_alloc.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 tracing-subscriber.workspace = true
 

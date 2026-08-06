@@ -51,6 +51,7 @@ mod remote_durability;
 mod remote_frontier;
 mod remote_frontier_http;
 mod replica;
+mod rollout;
 pub mod sim;
 mod status;
 mod telemetry;
@@ -143,6 +144,7 @@ pub use remote_frontier_http::{
     FrontierReply, HttpRemoteFrontierError, HttpRemoteFrontierSource, MetadataFrontierProvider, frontier_router,
 };
 pub use replica::{AppliedPage, Replica, ReplicaState, SyncOutcome};
+pub use rollout::{RolloutBlocker, RolloutBudget, RolloutPreflight, rollout_preflight, upgrade_order};
 pub use status::{OperationStatus, WriteRecord};
 pub use telemetry::{OperationTelemetry, sampled};
 pub use transfer::{TransferAudit, TransferError, TransferPhase, TransferPlan, TransferRequest};
@@ -243,6 +245,8 @@ mod remote_durability_tests;
 mod remote_frontier_http_tests;
 #[cfg(test)]
 mod remote_frontier_tests;
+#[cfg(test)]
+mod rollout_tests;
 #[cfg(test)]
 mod status_tests;
 #[cfg(test)]

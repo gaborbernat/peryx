@@ -143,11 +143,68 @@ fn manifest_membership(membership: &DcMembership) -> ManifestMembership {
 
 fn write_manifest(path: &Path, manifest: &BackupManifest) -> anyhow::Result<()> {
     let manifest_path = path.join("manifest.json");
-    let mut file = File::create(&manifest_path).context(format!("create {}", manifest_path.display()))?;
+    let mut file = create_private_file(&manifest_path).context(format!("create {}", manifest_path.display()))?;
     serde_json::to_writer_pretty(&mut file, manifest)?;
     writeln!(file)?;
     file.sync_all()?;
     Ok(())
+}
+
+/// Whether a created file may carry secrets. A backup nests every file under an owner-only root, but a
+/// restore writes the configuration snapshot and metadata store straight into a data directory whose
+/// own mode it does not set, so those two files carry their private mode themselves. Blobs are
+/// content-addressed artifacts, not secrets, so they keep the platform default.
+#[derive(Clone, Copy)]
+enum Access {
+    Private,
+    Shared,
+}
+
+/// Create a directory tree only its owner may enter. On Unix every component is created `0700`
+/// regardless of the caller umask; other platforms fall back to the default, matching prior behavior.
+fn create_private_dir_all(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+    };
+    #[cfg(not(unix))]
+    let result = std::fs::create_dir_all(path);
+    result.context(format!("create backup directory {}", path.display()))
+}
+
+/// Strip group and other access from an existing directory so a pre-created backup root cannot leak
+/// its contents. A no-op on platforms without Unix modes.
+fn tighten_private_dir(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .context(format!("tighten backup directory {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// Create a file only its owner may read or write. On Unix it is created `0600` regardless of the
+/// caller umask; other platforms fall back to a plain create.
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn create_file(path: &Path, access: Access) -> std::io::Result<File> {
+    match access {
+        Access::Private => create_private_file(path),
+        Access::Shared => File::create(path),
+    }
 }
 
 fn read_manifest(path: &Path) -> anyhow::Result<BackupManifest> {
@@ -169,11 +226,11 @@ fn hashed_parent(path: &Path) -> anyhow::Result<&Path> {
         .with_context(|| format!("hashed file {} has no parent directory", path.display()))
 }
 
-fn copy_hashed(source: &Path, dest: &Path, manifest_path: &str) -> anyhow::Result<ManifestFile> {
+fn copy_hashed(source: &Path, dest: &Path, manifest_path: &str, access: Access) -> anyhow::Result<ManifestFile> {
     let parent = hashed_parent(dest)?;
     std::fs::create_dir_all(parent).context(format!("create {}", parent.display()))?;
     let mut input = BufReader::with_capacity(BUFFER_BYTES, File::open(source)?);
-    let mut output = BufWriter::with_capacity(BUFFER_BYTES, File::create(dest)?);
+    let mut output = BufWriter::with_capacity(BUFFER_BYTES, create_file(dest, access)?);
     let mut hasher = Sha256::new();
     let mut size_bytes = 0;
     let mut buffer = vec![0; BUFFER_BYTES];
@@ -197,7 +254,7 @@ fn copy_hashed(source: &Path, dest: &Path, manifest_path: &str) -> anyhow::Resul
 fn write_hashed(path: &Path, bytes: &[u8], manifest_path: &str) -> anyhow::Result<ManifestFile> {
     let parent = hashed_parent(path)?;
     std::fs::create_dir_all(parent).context(format!("create {}", parent.display()))?;
-    let mut file = File::create(path)?;
+    let mut file = create_private_file(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(ManifestFile {

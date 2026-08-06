@@ -9,7 +9,7 @@ use peryx_storage::blob::Digest;
 use peryx_storage::meta::MetaStore;
 
 use super::verify::check_backup;
-use super::{BackupManifest, backup_blob_path, copy_hashed, is_empty_dir, read_manifest};
+use super::{Access, BackupManifest, backup_blob_path, copy_hashed, is_empty_dir, read_manifest};
 use crate::config::{self, Config};
 
 /// Restore a backup into a data directory.
@@ -36,12 +36,14 @@ pub fn restore(backup: &Path, data_dir: &Path, force: bool, out: &mut dyn Write)
         &backup.join(&manifest.metadata.path),
         &data_dir.join("peryx.redb"),
         "peryx.redb",
+        Access::Private,
     )
     .context("restore metadata store")?;
     copy_hashed(
         &backup.join(&manifest.config.path),
         &data_dir.join("config.toml"),
         "config.toml",
+        Access::Private,
     )
     .context("restore config snapshot")?;
     for (digest, entry) in check.blobs {
@@ -50,6 +52,7 @@ pub fn restore(backup: &Path, data_dir: &Path, force: bool, out: &mut dyn Write)
             &backup.join(&entry.path),
             &backup_blob_path(data_dir, &digest),
             &entry.path,
+            Access::Shared,
         )
         .context(format!("restore blob {}", digest.as_str()))?;
     }

@@ -35,8 +35,14 @@ it copies it; a blob whose bytes no longer hash to its digest aborts the backup 
 
 The configuration snapshot never contains a secret. It records S3 credentials, upload tokens read from files, and
 webhook secrets sourced from the environment as references (the path or environment variable name), not values. Even so,
-the snapshot names your indexes, upstreams, and routes, so treat a backup directory as sensitive and store it with the
-same care as the node.
+the snapshot names your indexes, upstreams, and routes, and the metadata store carries security-sensitive records, so
+treat a backup directory as sensitive and store it with the same care as the node.
+
+On Unix, `backup create` enforces that itself. It creates the backup root `0700` and the secret-bearing files it writes
+there, the configuration snapshot, the metadata store, and the manifest, `0600`, regardless of the process umask. A
+target directory you pre-create is tightened to `0700` before anything is written, so a `0755` directory left by an
+earlier step never exposes the copy. `restore` applies the same `0600` to the `config.toml` and `peryx.redb` it lays
+down. Other platforms carry no Unix mode bits, so protect the directory with the filesystem's own access controls.
 
 ## Availability state
 

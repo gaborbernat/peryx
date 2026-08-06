@@ -9,7 +9,7 @@ use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{Policy, PolicyConfig};
 use peryx_storage::blob::Digest;
-use peryx_storage::meta::DriverBatch;
+use peryx_storage::meta::{DriverBatch, OperationOutcomeQuery, OperationState};
 use rstest::rstest;
 use tower::ServiceExt as _;
 
@@ -392,6 +392,163 @@ async fn test_monolithic_upload_non_sha256_digest() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(super::body_has_code(&body, "DIGEST_INVALID"), "{body:?}");
+}
+
+/// The operation id a hosted `store/app` push claims, keyed by index, repository, and digest.
+fn blob_operation(digest: &str) -> String {
+    format!("oci:store:app:{digest}")
+}
+
+#[tokio::test]
+async fn test_monolithic_push_records_a_published_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let blob = b"ledger-recorded-layer";
+    let digest = oci_digest(blob);
+    let (status, _, _) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/app/blobs/uploads/?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        blob.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let record = state.meta.operation_outcome(&blob_operation(&digest)).unwrap().unwrap();
+    assert_eq!(record.state, OperationState::Published);
+}
+
+#[tokio::test]
+async fn test_monolithic_repush_keeps_the_blob_retrievable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let blob = b"twice-pushed-layer";
+    let digest = oci_digest(blob);
+    let uri = format!("/v2/store/app/blobs/uploads/?digest={digest}");
+    for _ in 0..2 {
+        let (status, headers, _) = send_body(
+            &app,
+            Method::POST,
+            &uri,
+            &[("authorization", &auth(TOKEN))],
+            blob.to_vec(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(headers["docker-content-digest"], digest);
+    }
+    // The re-push re-commits the content rather than short-circuiting on the recorded claim, so the blob
+    // still serves; the ledger dedups the outcome to one published record.
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
+    let record = state.meta.operation_outcome(&blob_operation(&digest)).unwrap().unwrap();
+    assert_eq!(record.state, OperationState::Published);
+}
+
+#[tokio::test]
+async fn test_monolithic_digest_mismatch_records_a_failed_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    let (status, _, _) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/app/blobs/uploads/?digest={wrong}"),
+        &[("authorization", &auth(TOKEN))],
+        b"mismatched".to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let record = state.meta.operation_outcome(&blob_operation(&wrong)).unwrap().unwrap();
+    assert_eq!(record.state, OperationState::Failed);
+}
+
+#[tokio::test]
+async fn test_session_push_records_an_operation_the_view_reflects() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let blob = b"session-recorded-layer";
+    let digest = oci_digest(blob);
+    let location = stage_one_chunk(&app, blob).await;
+    let (status, _, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let operation = blob_operation(&digest);
+    assert_eq!(
+        state.meta.operation_outcome(&operation).unwrap().unwrap().state,
+        OperationState::Published
+    );
+    // The operations data source the availability view reads reflects the recorded write.
+    let page = state
+        .meta
+        .list_operation_outcomes(&OperationOutcomeQuery::default())
+        .unwrap();
+    assert!(page.rows.iter().any(|row| row.operation == operation));
+}
+
+#[tokio::test]
+async fn test_session_repush_keeps_the_blob_retrievable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let blob = b"session-repush-layer";
+    let digest = oci_digest(blob);
+    // Publish once through a monolithic upload, then re-push the same digest through a session.
+    assert_eq!(
+        send_body(
+            &app,
+            Method::POST,
+            &format!("/v2/store/app/blobs/uploads/?digest={digest}"),
+            &[("authorization", &auth(TOKEN))],
+            blob.to_vec(),
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let location = stage_one_chunk(&app, blob).await;
+    let (status, headers, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(headers["docker-content-digest"], digest);
+    // The session re-push commits over the existing content rather than short-circuiting, so the blob
+    // still serves and the ledger holds one published record.
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
+    let record = state.meta.operation_outcome(&blob_operation(&digest)).unwrap().unwrap();
+    assert_eq!(record.state, OperationState::Published);
+}
+
+#[tokio::test]
+async fn test_session_wrong_digest_records_a_failed_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_writable(&dir, TOKEN);
+    let location = stage_one_chunk(&app, b"the-actual-bytes").await;
+    let wrong = oci_digest(b"different-bytes");
+    let (status, _, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest={wrong}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_ne!(status, StatusCode::CREATED);
+    let record = state.meta.operation_outcome(&blob_operation(&wrong)).unwrap().unwrap();
+    assert_eq!(record.state, OperationState::Failed);
 }
 
 #[tokio::test]

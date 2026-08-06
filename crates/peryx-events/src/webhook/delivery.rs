@@ -71,13 +71,21 @@ async fn delivery_loop<H: WebhookHost>(host: Arc<H>) {
             host.webhooks().notify.notified().await;
             continue;
         };
-        let now = host.now();
-        let sleep_secs = u64::try_from(next - now).unwrap_or(0);
+        let sleep_secs = wait_secs(next, host.now());
         tokio::select! {
             () = tokio::time::sleep(Duration::from_secs(sleep_secs)) => {}
             () = host.webhooks().notify.notified() => {}
         }
     }
+}
+
+/// Seconds to wait before the next scheduling wakeup, clamped to at least one.
+///
+/// A `next` at or behind `now` — clock drift, a stale queue key, or a loop that woke late — must not
+/// collapse into a zero-second sleep, or the loop would busy-poll the store. Saturating subtraction
+/// also keeps a far-future `next` from overflowing the signed delta.
+fn wait_secs(next: i64, now: i64) -> u64 {
+    u64::try_from(next.saturating_sub(now)).unwrap_or(0).max(1)
 }
 
 async fn deliver_due<H: WebhookHost>(host: &Arc<H>) {
@@ -284,6 +292,16 @@ mod tests {
 
     use super::*;
     use crate::webhook::{WebhookEventKind, WebhookRuntime};
+
+    #[rstest]
+    #[case::future(1_100, 1_000, 100)]
+    #[case::equal(1_000, 1_000, 1)]
+    #[case::past(900, 1_000, 1)]
+    #[case::far_past(0, i64::MAX, 1)]
+    #[case::overflow_saturates(i64::MAX, i64::MIN, 9_223_372_036_854_775_807)]
+    fn test_wait_secs_never_yields_a_zero_delay_wakeup(#[case] next: i64, #[case] now: i64, #[case] expected: u64) {
+        assert_eq!(wait_secs(next, now), expected);
+    }
 
     #[test]
     fn test_backoff_caps() {

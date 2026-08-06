@@ -169,6 +169,10 @@ fn test_catalog_schedule_resolves_default_and_explicit_limits() {
     "job = \"dc_copy\"\nconcurrency = 65",
     "cross-datacenter copy `concurrency` exceeds the per-pass limit"
 )]
+#[case::placement_reconcile_fields(
+    "job = \"placement_reconcile\"\nrepository = \"pypi\"",
+    "placement reconcile accepts no job-specific fields"
+)]
 fn test_schedule_rejects_invalid_kind_parameters(#[case] fields: &str, #[case] expected: &str) {
     let partial = config::from_toml(
         PathBuf::from("x.toml"),
@@ -196,6 +200,17 @@ fn test_dc_copy_schedule_resolves_default_and_explicit_concurrency() {
         panic!("expected dc copy");
     };
     assert_eq!(explicit.concurrency.get(), 4);
+}
+
+#[test]
+fn test_placement_reconcile_schedule_resolves_without_job_fields() {
+    let config = toml_config("[[jobs.schedule]]\njob = \"placement_reconcile\"\ninterval_secs = 120\n");
+
+    assert!(matches!(
+        config.jobs.schedules[0].job,
+        ScheduledJob::PlacementReconcile(_)
+    ));
+    assert_eq!(config.jobs.schedules[0].interval, Duration::from_mins(2));
 }
 
 #[rstest]

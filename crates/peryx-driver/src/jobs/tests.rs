@@ -17,8 +17,9 @@ use super::attempts::{JobAttemptControl, JobAttemptError};
 use super::scheduler::{JobLimits, Submit};
 use super::{
     CACHE_MAINTENANCE, CancelJobRun, CatalogSyncParameters, CrossDcCopier, DcCopyJob, DcCopyParameters, JobContext,
-    JobFailure, JobHistoryCleanup, JobReport, JobScheduler, LeaseScope, MaintenanceJob, NodeJob, Schedule,
-    ScheduledJob, SearchRebuildJob, run_schedules, scheduled_job, submit_maintenance,
+    JobFailure, JobHistoryCleanup, JobReport, JobScheduler, LeaseScope, MaintenanceJob, NodeJob, PlacementReconcileJob,
+    PlacementReconcileParameters, PlacementReconciler, Schedule, ScheduledJob, SearchRebuildJob, run_schedules,
+    scheduled_job, submit_maintenance,
 };
 use crate::serving::{EcosystemDriver, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
@@ -1236,6 +1237,112 @@ async fn test_a_dc_copy_schedule_submits_the_registered_copier() {
     await_metric(
         &scheduler,
         "peryx_jobs_finished_total{kind=\"dc_copy\",outcome=\"succeeded\"} 1",
+    )
+    .await;
+
+    cancel.cancel();
+    timer.await.unwrap();
+    scheduler.shutdown().await;
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
+struct StubReconciler {
+    ran: Arc<AtomicUsize>,
+    report: JobReport,
+}
+
+#[async_trait]
+impl PlacementReconciler for StubReconciler {
+    async fn reconcile_pass(
+        &self,
+        _state: &ServingState,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+        _params: PlacementReconcileParameters,
+    ) -> Result<JobReport, JobFailure> {
+        assert!(!cancelled(), "the pass observes the cooperative cancellation signal");
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        Ok(self.report)
+    }
+}
+
+#[test]
+fn test_placement_reconcile_parameters_default_matches_new() {
+    assert_eq!(
+        PlacementReconcileParameters::default(),
+        PlacementReconcileParameters::new()
+    );
+}
+
+#[test]
+fn test_a_placement_reconcile_kind_names_itself() {
+    assert_eq!(
+        ScheduledJob::PlacementReconcile(PlacementReconcileParameters::new()).as_str(),
+        "placement_reconcile"
+    );
+}
+
+#[tokio::test]
+async fn test_placement_reconcile_job_delegates_to_the_registered_reconciler() {
+    let (_dir, state) = serving();
+    let ran = Arc::new(AtomicUsize::new(0));
+    state.set_placement_reconciler(Arc::new(StubReconciler {
+        ran: ran.clone(),
+        report: JobReport {
+            processed: 4,
+            changed: 1,
+        },
+    }));
+    let job = PlacementReconcileJob {
+        parameters: PlacementReconcileParameters::new(),
+    };
+    assert_eq!(job.kind(), "placement_reconcile");
+    assert_eq!(job.scope(), "");
+
+    let report = job.run(&context(state, CancellationToken::new())).await.unwrap();
+
+    assert_eq!(
+        report,
+        JobReport {
+            processed: 4,
+            changed: 1
+        }
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_placement_reconcile_job_is_a_no_op_without_a_registered_reconciler() {
+    let (_dir, state) = serving();
+    let job = PlacementReconcileJob {
+        parameters: PlacementReconcileParameters::new(),
+    };
+
+    let report = job.run(&context(state, CancellationToken::new())).await.unwrap();
+
+    assert_eq!(report, JobReport::default());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_a_placement_reconcile_schedule_submits_the_registered_reconciler() {
+    let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
+    let ran = Arc::new(AtomicUsize::new(0));
+    app.serving.set_placement_reconciler(Arc::new(StubReconciler {
+        ran: ran.clone(),
+        report: JobReport::default(),
+    }));
+    let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
+    let cancel = CancellationToken::new();
+    let plan = vec![Schedule {
+        job: ScheduledJob::PlacementReconcile(PlacementReconcileParameters::new()),
+        interval: Duration::from_mins(1),
+    }];
+    let timer = tokio::spawn(run_schedules(app.clone(), scheduler.clone(), plan, cancel.clone()));
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_mins(1)).await;
+    await_metric(
+        &scheduler,
+        "peryx_jobs_finished_total{kind=\"placement_reconcile\",outcome=\"succeeded\"} 1",
     )
     .await;
 

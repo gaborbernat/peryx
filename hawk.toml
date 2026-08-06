@@ -1,0 +1,26 @@
+# Hawk dead-public configuration. See issue #1017.
+#
+# Hawk builds each feature profile once and reports `pub` items with no use inside or outside their
+# crate. Items that are live only under a cfg the analyzed build compiles out need an explicit
+# allow-list entry with the reason they stay public.
+#
+# The production targets are the shipped binaries; Hawk treats their reachable API as consumed. These
+# match what Hawk auto-detects with no config, restated because a present config replaces detection.
+
+[[production]]
+package = "peryx"
+bin = "peryx"
+reason = "The server binary; its reachable API is the consumed surface."
+
+[[production]]
+package = "peryx-bench"
+bin = "peryx-bench"
+reason = "The benchmark binary, built in the workspace and consuming library API."
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "peryx_web"
+item = "model::login::UiLoginState::from_session"
+kind = "inherent_method"
+level = "allow"
+reason = "Live only in the hydrate (wasm) build, where load_login parses the /_/session document. The all-features host build Hawk analyzes compiles that cfg arm out. It stays pub so dead_code does not fire in the ssr build, where the method is also unused."

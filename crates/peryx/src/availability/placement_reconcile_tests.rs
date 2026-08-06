@@ -410,6 +410,41 @@ fn test_verify_pass_surfaces_a_scan_rejection() {
     assert_eq!(error.code(), "placement_verify_scan");
 }
 
+#[test]
+fn test_verify_pass_surfaces_a_withdrawal_read_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let (_sdir, store, _root, backend) = filesystem();
+    let (_blob, artifact) = digests(CONTENT);
+    let placement = key(&artifact, &backend, "home", artifact.sha256());
+    {
+        let meta = MetaStore::open(&path).unwrap();
+        seed_verified(&meta, &placement, 1);
+    }
+    // Plant a corrupt revocation record for the scanned digest so the withdrawal check fails to read it
+    // while the placement scan still returns the record, forcing the pass to surface the read error.
+    {
+        let db = redb::Database::open(&path).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn
+                .open_table(redb::TableDefinition::<&str, &[u8]>::new("digest_revocation"))
+                .unwrap();
+            table
+                .insert(artifact.canonical().as_str(), b"not json".as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    let meta = MetaStore::open(&path).unwrap();
+
+    let error = reconciler("home", store, &["home", "east"])
+        .verify_local_placements(&meta, &clock(), 5, 100, &|| false)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "placement_withdrawal_read");
+}
+
 // --- retire_out_of_policy ----------------------------------------------------
 
 #[test]

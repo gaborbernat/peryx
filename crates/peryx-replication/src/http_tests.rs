@@ -674,6 +674,75 @@ async fn test_http_primary_reports_an_invalid_change_page() {
     assert!(matches!(result, Err(HttpPrimaryError::Decode(_))));
 }
 
+#[tokio::test]
+async fn test_http_primary_rejects_an_oversized_declared_length() {
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        axum::routing::get(|| async { " ".repeat(128) }),
+    ))
+    .await;
+    let primary = HttpPrimary::new(&server.url, TOKEN).unwrap().with_max_page_bytes(64);
+
+    let result = primary.changes(0, 10).await;
+
+    assert!(matches!(
+        result,
+        Err(HttpPrimaryError::ResponseTooLarge { limit: 64, actual: 128 })
+    ));
+}
+
+#[tokio::test]
+async fn test_http_primary_stops_a_chunked_body_that_crosses_the_limit() {
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        axum::routing::get(|| async {
+            let chunks =
+                futures_util::stream::iter((0..4).map(|_| Ok::<_, std::io::Error>(Bytes::from_static(&[b' '; 32]))));
+            Body::from_stream(chunks)
+        }),
+    ))
+    .await;
+    let primary = HttpPrimary::new(&server.url, TOKEN).unwrap().with_max_page_bytes(64);
+
+    let result = primary.changes(0, 10).await;
+
+    // A streamed body carries no Content-Length, so the cap only trips as the chunks accumulate past it.
+    let Err(HttpPrimaryError::ResponseTooLarge { limit, actual }) = result else {
+        panic!("expected a too-large error, got {result:?}");
+    };
+    assert_eq!(limit, 64);
+    assert!(
+        actual > 64,
+        "the read stops only once the accumulated bytes cross the cap: {actual}"
+    );
+}
+
+#[tokio::test]
+async fn test_http_primary_accepts_a_page_at_the_byte_limit() {
+    let page = ChangePage {
+        version: PROTOCOL_VERSION,
+        source: "primary-a".to_owned(),
+        after: 0,
+        current_serial: 0,
+        changes: Vec::new(),
+    };
+    let encoded = serde_json::to_vec(&page).unwrap();
+    let limit = encoded.len() as u64;
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        axum::routing::get(move || {
+            let encoded = encoded.clone();
+            async move { encoded }
+        }),
+    ))
+    .await;
+    let primary = HttpPrimary::new(&server.url, TOKEN).unwrap().with_max_page_bytes(limit);
+
+    let fetched = primary.changes(0, 10).await.unwrap();
+
+    assert_eq!(fetched, page);
+}
+
 fn authenticated_request(uri: &str, token: &str) -> Request<Body> {
     Request::get(uri)
         .header(header::AUTHORIZATION, format!("Bearer {token}"))

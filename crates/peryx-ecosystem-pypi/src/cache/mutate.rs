@@ -56,11 +56,14 @@ pub async fn store_upload(
     let fence = control_epoch(state, &project).await;
     let publish = upload::stage_publish(&state.blobs, prepared).await?;
     admit_control(state, &project, fence).await?;
-    let stored = upload::commit_publish(&state.meta, name, publish, quota)?;
-    if stored {
+    let published = upload::commit_publish(&state.meta, name, publish, quota)?;
+    for (digest, size) in &published.placements {
+        state.record_home_placement(digest.as_str(), *size, fence);
+    }
+    if published.stored {
         state.invalidate_project(&project);
     }
-    Ok(stored)
+    Ok(published.stored)
 }
 
 /// Whether the hosted target already owns a filename, which makes the immutable upload an

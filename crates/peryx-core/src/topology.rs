@@ -119,6 +119,22 @@ pub struct TopologyConfig {
     pub local_node: Option<String>,
 }
 
+impl TopologyConfig {
+    /// This process's own datacenter, the one holding the roster member it names through
+    /// [`local_node`](Self::local_node). `None` when the process names no local member — a rosterless
+    /// single node, or a replica that carries no roster identity — so a caller supplies its own fallback.
+    /// Every per-node decision that needs the local datacenter resolves it here, so the roster lookup lives
+    /// in one place rather than being re-derived at each call site.
+    #[must_use]
+    pub fn local_datacenter(&self) -> Option<&str> {
+        let local = self.local_node.as_deref()?;
+        self.members
+            .iter()
+            .find(|member| member.node == local)
+            .map(|member| member.dc.as_str())
+    }
+}
+
 /// The most nodes a snapshot serializes, so one request cannot return an unbounded roster. A larger
 /// group still reports its full [`TopologySnapshot::node_count`], so truncation stays visible.
 pub const MAX_TOPOLOGY_NODES: usize = 128;
@@ -336,6 +352,29 @@ mod tests {
         assert!(snapshot.nodes.is_empty());
         assert_eq!(snapshot.local.role, NodeRole::Replica);
         assert_eq!(snapshot.local.liveness, Some(NodeLiveness::Unready));
+    }
+
+    #[test]
+    fn test_local_datacenter_reads_the_local_roster_members_dc() {
+        assert_eq!(writer_group().local_datacenter(), Some("east-1"));
+    }
+
+    #[test]
+    fn test_local_datacenter_is_none_without_a_named_local_member() {
+        assert_eq!(
+            TopologyConfig::default().local_datacenter(),
+            None,
+            "a rosterless node names none"
+        );
+        let unlisted = TopologyConfig {
+            local_node: Some("ghost".to_owned()),
+            ..writer_group()
+        };
+        assert_eq!(
+            unlisted.local_datacenter(),
+            None,
+            "a local id absent from the roster resolves nothing"
+        );
     }
 
     #[test]

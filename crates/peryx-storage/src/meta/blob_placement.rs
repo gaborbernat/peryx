@@ -438,6 +438,51 @@ impl MetaStore {
             .transpose()?)
     }
 
+    /// Record this node's own datacenter as a verified holder of `digest`, once its bytes have committed
+    /// and verified at their content address on publish. A peer that replicates the ledger reads this row
+    /// as a `verified_remote` source and routes a cross-datacenter read-through fetch to this node, the
+    /// producer half of that path: without it a home publish leaves no placement for a sibling to pull.
+    ///
+    /// The transfer machinery models a copy as [`Stage`](BlobPlacementTransition::Stage) then
+    /// [`Verify`](BlobPlacementTransition::Verify); a home publish already holds the verified bytes, so
+    /// this drives both under the publish's own `fence` epoch. A digest already verified here is left as
+    /// is, so a re-push is a no-op rather than an illegal transition.
+    ///
+    /// # Errors
+    /// Returns a [`BlobPlacementError`] when the ledger cannot be read or written, the fence is stale, or
+    /// the digest already holds the maximum number of placements.
+    pub fn record_local_placement(
+        &self,
+        backend: &BackendId,
+        data_center: &DataCenterId,
+        digest: &ArtifactDigest,
+        size: u64,
+        fence: u64,
+        now: i64,
+    ) -> Result<BlobPlacementOutcome, BlobPlacementError> {
+        let key = BlobPlacementKey {
+            digest: digest.clone(),
+            backend: backend.clone(),
+            data_center: data_center.clone(),
+            location: BackendLocation::for_digest(digest),
+        };
+        if let Some(record) = self.blob_placement(&key)?
+            && matches!(record.state, BlobPlacementState::Verified { .. })
+        {
+            return Ok(BlobPlacementOutcome::Unchanged(record));
+        }
+        self.apply_blob_placement(&key, &BlobPlacementTransition::Stage, fence, now)?;
+        self.apply_blob_placement(
+            &key,
+            &BlobPlacementTransition::Verify {
+                observed: digest.clone(),
+                size,
+            },
+            fence,
+            now,
+        )
+    }
+
     /// List every placement for one digest in canonical key order.
     ///
     /// # Errors

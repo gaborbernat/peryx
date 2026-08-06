@@ -107,6 +107,61 @@ fn test_store_prepared_blocking_stages_and_records_the_provenance_bundle() {
 }
 
 #[tokio::test]
+async fn test_commit_publish_reports_the_content_and_metadata_placements() {
+    let wheel = wheel_metadata("Flask", "1.0");
+    let (_staged_dir, staged) = super::support::staged_upload(&wheel);
+    let prepared = prepare(staged_form(&wheel), staged, "root/hosted", 1000).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+
+    let publish = stage_publish(&blobs, prepared).await.unwrap();
+    let published = commit_publish(&meta, "hosted", publish, None).unwrap();
+
+    assert!(published.stored);
+    assert_eq!(
+        published.placements.len(),
+        2,
+        "a publish without attestations places the content artifact and its metadata sibling",
+    );
+    let content = Digest::of(&wheel);
+    assert!(
+        published.placements.iter().any(|(digest, _)| digest == &content),
+        "the committed content is placed",
+    );
+    assert!(
+        published.placements.iter().all(|(_, size)| *size > 0),
+        "each placement carries the blob's byte length",
+    );
+}
+
+#[tokio::test]
+async fn test_commit_publish_adds_the_provenance_placement() {
+    let wheel = wheel_metadata("Flask", "1.0");
+    let (_staged_dir, staged) = super::support::staged_upload(&wheel);
+    let sha = staged.blob.digest().as_str().to_owned();
+    let mut form = staged_form(&wheel);
+    form.attestations = Some(attestations_field(FILENAME, &sha));
+    let prepared = prepare(form, staged, "root/hosted", 1000).unwrap();
+    assert!(
+        prepared.provenance.is_some(),
+        "attestations produce a provenance object"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+
+    let publish = stage_publish(&blobs, prepared).await.unwrap();
+    let published = commit_publish(&meta, "hosted", publish, None).unwrap();
+
+    assert_eq!(
+        published.placements.len(),
+        3,
+        "an attested publish also places the provenance blob alongside the content and metadata",
+    );
+}
+
+#[tokio::test]
 async fn test_store_prepared_quota_releases_after_blob_storage_fails() {
     let wheel = wheel_metadata("Flask", "1.0");
     let (_staged_dir, staged) = super::support::staged_upload(&wheel);

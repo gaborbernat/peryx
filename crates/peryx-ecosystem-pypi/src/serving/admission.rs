@@ -177,10 +177,8 @@ fn intent_key(tenant: &str, authority: &str, filename: &str) -> String {
 /// stages under [`STANDALONE_DC`].
 pub(super) fn ingress_dc(topology: &TopologyConfig) -> String {
     topology
-        .local_node
-        .as_deref()
-        .and_then(|node| topology.members.iter().find(|member| member.node == node))
-        .map_or_else(|| STANDALONE_DC.to_owned(), |member| member.dc.clone())
+        .local_datacenter()
+        .map_or_else(|| STANDALONE_DC.to_owned(), ToOwned::to_owned)
 }
 
 /// A different-content resend of a taken filename is refused with the response publication already

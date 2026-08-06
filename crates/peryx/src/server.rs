@@ -246,16 +246,21 @@ const fn receipt_token(replication: &ReplicationConfig) -> &SecretSource {
 /// The same-datacenter peers an ingress write gathers placement receipts from: every rostered member in
 /// the local node's datacenter other than itself, each behind the shared replication credential.
 ///
-/// Yields an empty set when the node gathers from no peer — no membership, no writer identity, no
+/// Yields an empty set when the node gathers from no peer — no membership, no node identity, no
 /// replication token, this node absent from the roster, or no same-datacenter peer — so a single-node or
 /// single-member-per-DC deployment proves its quorum from the local receipt alone and runs no gather.
+///
+/// The local datacenter is the one holding the roster member this node names through `node_identity`;
+/// `writer_identity` is the shared writer every node claims and is the same across the group, so it
+/// cannot single out this node's datacenter. It falls back to `writer_identity` for a single-writer
+/// group that configures no distinct node identity.
 ///
 /// # Errors
 /// Returns an error when the replication token cannot be read or a peer address is not a usable base.
 pub(crate) fn receipt_sources(config: &Config) -> anyhow::Result<Vec<Arc<dyn ReceiptSource + Send + Sync>>> {
     let (Some(membership), Some(identity), Some(replication)) = (
         config.dc_membership.as_ref(),
-        config.writer_identity.as_deref(),
+        config.node_identity.as_deref().or(config.writer_identity.as_deref()),
         config.availability.replication(),
     ) else {
         return Ok(Vec::new());

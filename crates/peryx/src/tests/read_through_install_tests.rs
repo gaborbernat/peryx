@@ -129,3 +129,24 @@ fn test_no_reader_when_the_roster_has_no_remote_peer() {
 
     assert!(state.read_through().is_none());
 }
+
+#[test]
+fn test_the_reader_resolves_the_local_datacenter_from_the_node_identity() {
+    // writer_identity is the one writer every node claims, so a replica must place itself by
+    // node_identity. Here writer_identity names a node absent from the roster while node_identity names
+    // this replica's own dc-2 member; the reader installs only because node_identity resolves the local
+    // datacenter, leaving dc-3 as the remote peer to reach.
+    let (_dir, state) = state();
+    let membership = roster(vec![
+        member("node-b", "dc-2", "10.0.0.2:8080", DcRole::Replica),
+        member("node-c", "dc-3", "10.0.0.3:8080", DcRole::Replica),
+    ]);
+    let config = Config {
+        node_identity: Some("node-b".to_owned()),
+        ..config(dc_primary(), Some(membership), Some("node-a"))
+    };
+
+    install_read_through(&config, &state).unwrap();
+
+    assert!(state.read_through().is_some());
+}

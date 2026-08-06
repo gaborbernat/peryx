@@ -1984,6 +1984,37 @@ fn test_receipt_sources_cover_same_dc_peers_excluding_self_and_other_datacenters
 }
 
 #[test]
+fn test_receipt_sources_resolve_the_local_datacenter_from_the_node_identity() {
+    // writer_identity is the shared writer every node claims, so a west replica must find its same-DC
+    // peers through node_identity. writer_identity names the east writer here; resolving the gather from
+    // it would wrongly return east peers, so the west member set proves node_identity wins.
+    let config = Config {
+        node_identity: Some("west-1".to_owned()),
+        ..dc_config(
+            vec![
+                dc_member("east-writer", "east", "http://east/", DcRole::Writer),
+                dc_member("west-1", "west", "http://west1/", DcRole::Replica),
+                dc_member("west-2", "west", "http://west2/", DcRole::Replica),
+            ],
+            "east-writer",
+            SecretSource::Literal("t".to_owned()),
+        )
+    };
+
+    let nodes: std::collections::BTreeSet<String> = receipt_sources(&config)
+        .unwrap()
+        .iter()
+        .map(|source| source.node().to_owned())
+        .collect();
+
+    assert_eq!(
+        nodes,
+        std::collections::BTreeSet::from(["west-2".to_owned()]),
+        "the node_identity datacenter (west) sets the same-DC gather, not the writer's (east)",
+    );
+}
+
+#[test]
 fn test_receipt_sources_surface_an_unreadable_token() {
     let config = dc_config(
         vec![

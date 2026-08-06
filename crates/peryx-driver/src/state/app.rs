@@ -300,6 +300,14 @@ impl ServingState {
         crate::state::ownership::admit_authority_epoch(self.ownership.get(), authority, presented).await
     }
 
+    /// The ownership group's monotonic term, the fence a cluster-singleton background job leases under so
+    /// a partitioned former holder mints a stale term and loses its claim. `0` when this process runs no
+    /// consensus group, which a lone node claims every singleton under without contention.
+    #[must_use]
+    pub fn cluster_term(&self) -> u64 {
+        self.ownership.get().map_or(0, |group| group.cluster_status().term)
+    }
+
     /// Move `authority`'s home to `new_home` on the control quorum, minting the epoch that fences the old
     /// home. Reports the committed [`TransferOutcome`](crate::state::TransferOutcome), or `None` when this
     /// process runs no group or the move was a no-op. A control minority surfaces as

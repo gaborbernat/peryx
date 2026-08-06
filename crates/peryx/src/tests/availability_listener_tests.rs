@@ -640,12 +640,27 @@ async fn post_transfer(
     auth: Option<&str>,
     body: Value,
 ) -> (StatusCode, Value) {
+    post_keyed_transfer(state, coordinator, auth, None, body).await
+}
+
+/// Post a transfer carrying an optional `Idempotency-Key`, so a replay across a retry collapses to the
+/// one committed move the first request booked.
+async fn post_keyed_transfer(
+    state: &Arc<AppState>,
+    coordinator: Arc<TransferCoordinator>,
+    auth: Option<&str>,
+    key: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/availability/v1/transfers")
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(value) = auth {
         builder = builder.header(header::AUTHORIZATION, value);
+    }
+    if let Some(value) = key {
+        builder = builder.header("idempotency-key", value);
     }
     let response = router(state.clone(), dc_writer(), coordinator)
         .oneshot(builder.body(Body::from(body.to_string())).unwrap())
@@ -702,6 +717,33 @@ async fn test_a_transfer_drives_through_the_change_feed_to_a_sealed_audit() {
     assert_eq!(body["epoch"], 0);
     // The committed move sealed a durable audit under the authority.
     assert_eq!(state.meta.transfer_audits("proj").unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_a_repeated_transfer_idempotency_key_commits_one_move() {
+    let (_dir, state) = app().await;
+    state.set_ownership_authority(Arc::new(FixedGroup));
+    let control = with_control(&state, Ok(committed(9)));
+    let feed = ChangeFeed::start(5).await;
+    let coordinator = coordinator_for(&feed.url);
+    let auth = basic(ADMIN, PASSWORD);
+
+    let (first, _) = post_keyed_transfer(
+        &state,
+        coordinator.clone(),
+        Some(&auth),
+        Some("k1"),
+        transfer_request_body(),
+    )
+    .await;
+    let (second, _) = post_keyed_transfer(&state, coordinator, Some(&auth), Some("k1"), transfer_request_body()).await;
+
+    assert_eq!((first, second), (StatusCode::OK, StatusCode::OK));
+    assert_eq!(
+        *control.calls.lock().unwrap(),
+        1,
+        "the replay never reached the consensus group"
+    );
 }
 
 #[tokio::test]

@@ -47,6 +47,7 @@ mod replica;
 pub mod sim;
 mod status;
 mod telemetry;
+mod upgrade;
 mod versions;
 mod visibility;
 mod visibility_mint;
@@ -125,6 +126,7 @@ pub use remote_durability::{MetadataOperation, RemoteAck, RemoteDurability, asse
 pub use replica::{AppliedPage, Replica, ReplicaState, SyncOutcome};
 pub use status::{OperationStatus, WriteRecord};
 pub use telemetry::{OperationTelemetry, sampled};
+pub use upgrade::{Preflight, PreflightBlocker, UpgradeTarget, upgrade_preflight};
 pub use versions::{
     AvailabilityVersions, Incompatibility, Negotiation, Version, VersionRange, WireKind, accepts_operation_kind,
     feature_activated, negotiate, snapshot_compatible,
@@ -213,6 +215,8 @@ mod remote_durability_tests;
 mod status_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upgrade_tests;
 #[cfg(test)]
 mod versions_tests;
 #[cfg(test)]

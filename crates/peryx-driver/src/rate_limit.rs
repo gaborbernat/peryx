@@ -378,6 +378,9 @@ impl UpstreamLimits {
             Ok(Some(permit))
         } else {
             limit.denied.fetch_add(1, Ordering::Relaxed);
+            // Retry after the full wait horizon we just spent, not a flat second: a client that retries
+            // immediately only re-saturates a limiter that is already at its cap.
+            let retry_after = UPSTREAM_WAIT_TIMEOUT.as_secs();
             tracing::info!(
                 target: "peryx::security",
                 security_event = true,
@@ -385,10 +388,10 @@ impl UpstreamLimits {
                 action = "upstream_fetch",
                 result = "denied",
                 index = name,
-                retry_after = 1_u64,
+                retry_after,
                 "upstream concurrency wait timed out"
             );
-            Err(UpstreamLimited { retry_after: 1 })
+            Err(UpstreamLimited { retry_after })
         }
     }
 

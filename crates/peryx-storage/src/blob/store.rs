@@ -35,6 +35,18 @@ fn absent_or_io(err: std::io::Error, digest: &Digest) -> BlobError {
     err.into()
 }
 
+/// Name the directory a content-addressed blob hangs under. Such paths always nest under the store
+/// root, so a parent exists in practice; a path handed in without one surfaces a recoverable error
+/// rather than crashing the write.
+fn blob_parent(dest: &Path) -> Result<&Path, BlobError> {
+    dest.parent().ok_or_else(|| {
+        BlobError::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("blob path {} has no parent directory", dest.display()),
+        ))
+    })
+}
+
 /// Drop an abandoned stage so a reader tailing it never faults on a half-deleted name.
 ///
 /// On Windows an unlink only flags the file for deletion while any handle stays open — a follower
@@ -375,7 +387,8 @@ impl BlobStore {
     /// [`BlobError::NotFound`] when no stage exists, or [`BlobError::Io`] on a filesystem failure.
     ///
     /// # Panics
-    /// Never in practice: blob paths always sit inside the store root, so a parent exists.
+    /// Never in practice: the actual digest is re-derived from the bytes just hashed, so it is
+    /// always valid sha-256 hex.
     pub fn finish_upload(&self, session: &str, expected: &Digest) -> Result<(), BlobError> {
         let stage = self.upload_dir().join(session);
         let mut file = match std::fs::File::open(&stage) {
@@ -407,7 +420,7 @@ impl BlobStore {
             std::fs::remove_file(&stage)?;
             return Ok(());
         }
-        std::fs::create_dir_all(dest.parent().expect("blob paths always have a parent"))?;
+        std::fs::create_dir_all(blob_parent(&dest)?)?;
         commit_placement(std::fs::rename(&stage, &dest), &dest)
     }
 
@@ -523,9 +536,6 @@ impl BlobStore {
     ///
     /// # Errors
     /// Returns [`BlobError::Io`] on a filesystem failure.
-    ///
-    /// # Panics
-    /// Never in practice: blob paths always sit inside the store root, so a parent exists.
     pub fn commit_staged(&self, staged: StagedBlob) -> Result<PlacementReceipt, BlobError> {
         let receipt = PlacementReceipt {
             digest: staged.digest.clone(),
@@ -536,7 +546,7 @@ impl BlobStore {
         if dest.is_file() {
             return Ok(receipt);
         }
-        std::fs::create_dir_all(dest.parent().expect("blob paths always have a parent"))?;
+        std::fs::create_dir_all(blob_parent(&dest)?)?;
         commit_placement(staged.path.persist_noclobber(&dest).map_err(|err| err.error), &dest)?;
         Ok(receipt)
     }
@@ -646,6 +656,29 @@ impl StagedBlob {
 
     pub(crate) fn abort(self) -> Result<(), BlobError> {
         discard_stage(self.path)
+    }
+}
+
+#[cfg(test)]
+mod parent_tests {
+    use std::path::Path;
+
+    use super::blob_parent;
+
+    #[test]
+    fn test_blob_parent_names_the_enclosing_directory() {
+        assert_eq!(
+            blob_parent(Path::new("/store/sha256/ab/cd/abcd")).unwrap(),
+            Path::new("/store/sha256/ab/cd")
+        );
+    }
+
+    #[test]
+    fn test_blob_parent_reports_a_rootless_path_as_io() {
+        assert_eq!(
+            blob_parent(Path::new("/")).unwrap_err().kind(),
+            crate::blob::BlobErrorKind::Io
+        );
     }
 }
 

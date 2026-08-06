@@ -10,10 +10,13 @@
 
 use crate::authority::{Admission, AuthorityFence, AuthorityKey, CommitOutcome};
 use crate::envelope::AuthorityEpoch;
-use crate::ownership::{DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipState};
+use crate::ownership::{AppliedMeta, AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipState};
 
 /// The reserved unassigned sentinel the fence fails closed on.
 const RESERVED: AuthorityEpoch = AuthorityEpoch(0);
+
+/// A stand-in committed log position for a command whose exact position these tests do not assert.
+const META: AppliedMeta = AppliedMeta { term: 1, index: 1 };
 
 fn key(name: &str) -> AuthorityKey {
     AuthorityKey(name.to_owned())
@@ -23,6 +26,7 @@ fn assign(authority: &str, home: &str) -> OwnershipCommand {
     OwnershipCommand::AssignHome {
         authority: key(authority),
         home: DatacenterId(home.to_owned()),
+        cause: AssignmentCause::FirstPublish,
     }
 }
 
@@ -63,7 +67,7 @@ fn test_the_producer_reserves_zero_for_an_unassigned_authority() {
 fn test_the_producer_mints_the_first_real_epoch_one_past_the_reserved_sentinel() {
     let mut state = OwnershipState::new();
 
-    let effect = state.apply(&assign("proj", "east"));
+    let effect = state.apply(&assign("proj", "east"), META);
 
     // A first publish mints epoch one, not zero: the reserved sentinel is skipped, so a real authority
     // always carries a nonzero epoch.
@@ -86,7 +90,7 @@ fn test_the_producer_never_mints_the_reserved_epoch_across_a_command_sequence() 
     ];
 
     for command in &commands {
-        let effect = state.apply(command);
+        let effect = state.apply(command, META);
         assert_ne!(
             minted(&effect),
             Some(RESERVED),
@@ -116,7 +120,7 @@ fn test_the_fence_admits_every_epoch_the_producer_mints_and_fences_the_reserved_
 
     // Every epoch the producer mints is nonzero, so the fence commits it and admits work under it.
     for command in [assign("proj", "east"), advance("proj"), transfer("proj", "west")] {
-        let epoch = minted(&state.apply(&command)).expect("each command mints an epoch");
+        let epoch = minted(&state.apply(&command, META)).expect("each command mints an epoch");
         assert_eq!(fence.commit(&authority, epoch), CommitOutcome::Committed);
         assert_eq!(fence.admit(&authority, epoch), Admission::Admit);
     }

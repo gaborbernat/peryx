@@ -2,7 +2,7 @@
 
 use std::time::{Duration, UNIX_EPOCH};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, header};
 use rstest::rstest;
 
 use crate::conditional::{applicable_range, http_date, if_modified_since, if_none_match, last_modified};
@@ -66,6 +66,25 @@ fn test_applicable_range_drops_the_range_a_stale_if_range_asks_for(#[case] field
 #[test]
 fn test_applicable_range_ignores_an_if_range_without_a_range() {
     assert_eq!(applicable_range(&headers(&[("if-range", "\"other\"")]), ETAG), None);
+}
+
+#[test]
+fn test_applicable_range_drops_repeated_range_lines_as_a_multi_range() {
+    let mut map = HeaderMap::new();
+    map.append(header::RANGE, HeaderValue::from_static("bytes=0-1"));
+    map.append(header::RANGE, HeaderValue::from_static("bytes=4-5"));
+
+    assert_eq!(applicable_range(&map, ETAG), None);
+}
+
+#[test]
+fn test_applicable_range_drops_the_range_when_if_range_repeats() {
+    let mut map = HeaderMap::new();
+    map.append(header::RANGE, HeaderValue::from_static("bytes=0-3"));
+    map.append(header::IF_RANGE, HeaderValue::from_str(ETAG).unwrap());
+    map.append(header::IF_RANGE, HeaderValue::from_str(ETAG).unwrap());
+
+    assert_eq!(applicable_range(&map, ETAG), None);
 }
 
 #[test]

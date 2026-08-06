@@ -364,9 +364,16 @@ const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 ///
 /// A digest this index has never cached matches all the same: the URL names the bytes, so a client
 /// holding them holds the current representation whether or not the store does.
+///
+/// `If-None-Match` is a list, so every field line has its say: a match in a later line answers the
+/// request even when an earlier one named other bytes.
 fn not_modified(headers: &HeaderMap, etag: &str) -> Option<Response> {
-    let field = headers.get(header::IF_NONE_MATCH)?.to_str().ok()?;
-    if_none_match(field, etag).then(|| unchanged(etag, None))
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|field| field.to_str().ok())
+        .any(|field| if_none_match(field, etag))
+        .then(|| unchanged(etag, None))
 }
 
 /// The `If-Modified-Since` date this request leaves any say in, if it sent one.
@@ -374,11 +381,20 @@ fn not_modified(headers: &HeaderMap, etag: &str) -> Option<Response> {
 /// RFC 9110 s13.1.3: an `If-None-Match` supersedes it, matched or not. A client that sent both asked
 /// to be judged on the exact validator, and answering the date after the tag has already refused would
 /// serve a `304` for bytes the client just said it does not hold.
+///
+/// The field carries one HTTP-date, not a list, so a second field line is malformed; the condition is
+/// dropped rather than judged on an arbitrary line, since a `304` off a contradictory pair could
+/// withhold bytes the client lacks.
 fn conditional_date(headers: &HeaderMap) -> Option<&str> {
     if headers.contains_key(header::IF_NONE_MATCH) {
         return None;
     }
-    headers.get(header::IF_MODIFIED_SINCE)?.to_str().ok()
+    let mut dates = headers.get_all(header::IF_MODIFIED_SINCE).iter();
+    let date = dates.next()?;
+    if dates.next().is_some() {
+        return None;
+    }
+    date.to_str().ok()
 }
 
 /// The bodyless `304`: the metadata a `200` would have carried, minus the body.

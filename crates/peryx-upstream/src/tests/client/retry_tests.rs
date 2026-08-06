@@ -217,7 +217,7 @@ async fn test_fetch_bytes_limited_reports_exhausted_body_errors() {
 
 #[tokio::test]
 async fn test_fetch_bytes_limited_rejects_chunked_body_over_limit() {
-    let base = chunked_server();
+    let base = chunked_server(&[b"wheel", b"bytes"]);
     let client = UpstreamClient::new(&base).unwrap();
 
     let err = client
@@ -226,6 +226,19 @@ async fn test_fetch_bytes_limited_rejects_chunked_body_over_limit() {
         .unwrap_err();
 
     assert_eq!(err.user_message(), "upstream response exceeds the 9-byte limit");
+}
+
+#[tokio::test]
+async fn test_fetch_bytes_limited_rejects_chunk_past_exact_limit() {
+    let base = chunked_server(&[b"wheelbytes", b"x"]);
+    let client = UpstreamClient::new(&base).unwrap();
+
+    let err = client
+        .fetch_bytes_limited(&format!("{base}pkg.whl"), 10)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.user_message(), "upstream response exceeds the 10-byte limit");
 }
 
 fn truncated_then_ok_server(body: &'static [u8], content_type: Option<&'static str>) -> String {
@@ -284,7 +297,7 @@ fn write_response(mut socket: std::net::TcpStream, body: &[u8], content_length: 
     socket.write_all(body).unwrap();
 }
 
-fn chunked_server() -> String {
+fn chunked_server(chunks: &'static [&'static [u8]]) -> String {
     use std::io::{Read as _, Write as _};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -293,11 +306,14 @@ fn chunked_server() -> String {
         let mut socket = listener.accept().unwrap().0;
         let mut buffer = [0; 1024];
         let _ = socket.read(&mut buffer);
-        socket
-            .write_all(
-                b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n5\r\nwheel\r\n5\r\nbytes\r\n0\r\n\r\n",
-            )
-            .unwrap();
+        let mut body = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n".to_vec();
+        for chunk in chunks {
+            body.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            body.extend_from_slice(chunk);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+        socket.write_all(&body).unwrap();
     });
     format!("http://{addr}/simple/")
 }

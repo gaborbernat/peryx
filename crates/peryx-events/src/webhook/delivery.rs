@@ -138,6 +138,20 @@ async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRec
         Ok(response) if response.status().is_success() => {
             record_success(host.as_ref(), &delivery, now, response.status().as_u16());
         }
+        Ok(response) if response.status().is_redirection() => {
+            // The client never follows a redirect, so re-POSTing the signed payload to the Location the
+            // target picks cannot happen; a 3xx that would move delivery off the operator-approved origin
+            // is a terminal failure, not a transient one to retry against the same endpoint.
+            let status = response.status().as_u16();
+            record_failure(
+                host.as_ref(),
+                &delivery,
+                now,
+                Some(status),
+                &format!("webhook target returned redirect {status}; redirects are not followed"),
+                false,
+            );
+        }
         Ok(response) => {
             let status = response.status().as_u16();
             record_failure(

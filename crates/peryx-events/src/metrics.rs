@@ -351,6 +351,25 @@ struct DailySnapshot {
     buckets: Vec<DailyUsage>,
 }
 
+/// Encode daily-usage buckets into the durable snapshot bytes [`AnalyticsHandle::save_daily`] persists.
+///
+/// A test seeds a producer's sealed-day aggregate directly into its store before the node boots, writing
+/// the same schema-tagged snapshot [`Metrics::start_durable`] restores, so the seed folds back through
+/// the same path a live download would have written. Gated to `test-util` and this crate's own tests:
+/// production writes this snapshot only from the aggregator thread, never from a caller.
+///
+/// # Panics
+/// Panics if the buckets cannot be serialized to JSON.
+#[cfg(any(test, feature = "test-util"))]
+#[must_use]
+pub fn encode_daily_snapshot(buckets: Vec<DailyUsage>) -> Vec<u8> {
+    serde_json::to_vec(&DailySnapshot {
+        schema: DAILY_SCHEMA,
+        buckets,
+    })
+    .expect("serialize daily usage snapshot")
+}
+
 /// The UTC day a Unix-seconds instant falls on, flooring toward the epoch so pre-epoch instants (only
 /// a misconfigured clock reaches them) still map to a stable day rather than rounding across zero.
 const fn utc_day(unix_secs: i64) -> i64 {
@@ -1202,7 +1221,7 @@ mod tests {
     use super::{
         Clock, DailyBuckets, DailyKey, DailySnapshot, DailyTotals, DailyUsage, DownloadSnapshot, Event, Message,
         Metrics, PackageUsage, SECONDS_PER_DAY, SourceUsage, StatsTree, TimelineBucket, UnusedPackage, UsageInterval,
-        VersionUsage, aggregate, apply_daily_batch, daily_rows,
+        VersionUsage, aggregate, apply_daily_batch, daily_rows, encode_daily_snapshot,
     };
 
     fn store() -> (tempfile::TempDir, MetaStore) {
@@ -1258,6 +1277,27 @@ mod tests {
             source: source.map(Into::into),
             bytes,
         }
+    }
+
+    #[test]
+    fn test_encode_daily_snapshot_seeds_a_producer_offline() {
+        let (_dir, meta) = store();
+        let seeded = DailyUsage {
+            day: 19_000,
+            repository: "hosted".to_owned(),
+            project: "veloxdemo".to_owned(),
+            version: "1.0.0".to_owned(),
+            source: String::new(),
+            downloads: 7,
+            bytes: 4096,
+        };
+        meta.analytics()
+            .save_daily(&encode_daily_snapshot(vec![seeded.clone()]))
+            .unwrap();
+        // A durable aggregator restores the seeded bucket on boot through the same path a live download
+        // would have written, so an offline seed becomes an exportable sealed day.
+        let metrics = Metrics::start_durable(meta.analytics(), None, clock_on_day(seeded.day + 1));
+        assert_eq!(metrics.daily_usage(), [seeded]);
     }
 
     #[test]

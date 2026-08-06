@@ -6,6 +6,7 @@
 
 #![cfg(feature = "availability-e2e")]
 
+mod analytics_replication;
 mod dc_group_readiness;
 mod harness;
 mod pypi_failover;

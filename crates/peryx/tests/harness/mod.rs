@@ -66,6 +66,22 @@ pub fn wheel_digest() -> String {
     Digest::of(WHEEL).as_str().to_owned()
 }
 
+/// The route of the hosted OCI index [`Topology::with_oci`] adds. The distribution API mounts at the
+/// root `/v2/`, carrying the index route as a prefix on the repository name, so a test addresses an
+/// image `app` as `/v2/{OCI_ROUTE}/app/...` on the public port.
+pub const OCI_ROUTE: &str = "oci";
+
+/// The OCI image-manifest media type [`Node::oci_put_manifest`] declares and [`Node::oci_get_manifest`]
+/// accepts.
+pub const OCI_MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
+/// The `sha256:<hex>` OCI content digest of `bytes`, the form the distribution API addresses blobs and
+/// manifests by. The bare-hex [`wheel_digest`] is the same value without the algorithm prefix.
+#[must_use]
+pub fn oci_digest(bytes: &[u8]) -> String {
+    format!("sha256:{}", Digest::of(bytes).as_str())
+}
+
 /// A harness failure, distinct from a node's own error, so a self-test can assert why the harness gave
 /// up rather than only that it did.
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +183,7 @@ pub struct Topology {
     token: String,
     members: Vec<MemberSpec>,
     bootstrap_admin: bool,
+    oci: bool,
 }
 
 impl Topology {
@@ -179,6 +196,7 @@ impl Topology {
             token: "harness-token".to_owned(),
             members: vec![MemberSpec::new("node-a", "local", Role::Writer)],
             bootstrap_admin: false,
+            oci: false,
         }
     }
 
@@ -191,6 +209,7 @@ impl Topology {
             token: "harness-token".to_owned(),
             members,
             bootstrap_admin: false,
+            oci: false,
         }
     }
 
@@ -203,6 +222,7 @@ impl Topology {
             token: "harness-token".to_owned(),
             members,
             bootstrap_admin: false,
+            oci: false,
         }
     }
 
@@ -212,6 +232,16 @@ impl Topology {
     #[must_use]
     pub const fn with_admin(mut self) -> Self {
         self.bootstrap_admin = true;
+        self
+    }
+
+    /// Add a hosted OCI index at route [`OCI_ROUTE`] to every node, alongside the `PyPI` `hosted` index,
+    /// so a test drives the distribution-spec `/v2/` surface: a `GET /v2/` handshake, a blob push, and a
+    /// manifest publish. Opt-in and additive — the `PyPI` publish helpers keep working unchanged, and a
+    /// topology that does not call this serves no `/v2/` API at all.
+    #[must_use]
+    pub const fn with_oci(mut self) -> Self {
+        self.oci = true;
         self
     }
 
@@ -759,6 +789,127 @@ impl Node {
         self.download(&format!("/hosted/files/{}/{WHEEL_FILENAME}", wheel_digest()))
     }
 
+    /// The OCI registry version check on the public port: `GET /v2/`, the distribution-spec handshake a
+    /// client makes before any pull or push. `Some((200, _))` on a node serving an OCI index (a topology
+    /// built with [`Topology::with_oci`]), `Some((404, _))` on one without, or `None` when unreachable.
+    #[must_use]
+    pub fn oci_v2(&self) -> Option<(u16, String)> {
+        self.http_get("/v2/")
+    }
+
+    /// Push `blob` to `repo` under the hosted OCI index by a monolithic upload, authenticating with
+    /// [`UPLOAD_TOKEN`]. Returns the commit status and the blob's `sha256:<hex>` digest (`201` on
+    /// success), or `None` when unreachable. Content-addressed, so re-pushing identical bytes is
+    /// idempotent and commits under the same digest.
+    #[must_use]
+    pub fn oci_push_blob(&self, repo: &str, blob: &[u8]) -> Option<(u16, String)> {
+        let digest = oci_digest(blob);
+        let response = self
+            .http
+            .post(format!(
+                "http://127.0.0.1:{}/v2/{OCI_ROUTE}/{repo}/blobs/uploads/?digest={digest}",
+                self.port,
+            ))
+            .basic_auth("_", Some(UPLOAD_TOKEN))
+            .body(blob.to_vec())
+            .send()
+            .ok()?;
+        Some((response.status().as_u16(), digest))
+    }
+
+    /// Pull the blob addressed by `digest` from `repo`: `GET /v2/{OCI_ROUTE}/{repo}/blobs/{digest}`.
+    /// Returns the status and the raw bytes (`200` and the bytes on a hit, `404` on a miss), or `None`
+    /// when unreachable.
+    #[must_use]
+    pub fn oci_pull_blob(&self, repo: &str, digest: &str) -> Option<(u16, Vec<u8>)> {
+        self.download(&format!("/v2/{OCI_ROUTE}/{repo}/blobs/{digest}"))
+    }
+
+    /// Publish `manifest` to `repo` under `reference` (a tag or digest):
+    /// `PUT /v2/{OCI_ROUTE}/{repo}/manifests/{reference}` with `media_type` and the upload credential.
+    /// Returns the status and the manifest's own `sha256:<hex>` digest (`201` on success), or `None` when
+    /// unreachable. Idempotent under the same tag and bytes.
+    #[must_use]
+    pub fn oci_put_manifest(
+        &self,
+        repo: &str,
+        reference: &str,
+        manifest: &[u8],
+        media_type: &str,
+    ) -> Option<(u16, String)> {
+        let response = self
+            .http
+            .put(format!(
+                "http://127.0.0.1:{}/v2/{OCI_ROUTE}/{repo}/manifests/{reference}",
+                self.port,
+            ))
+            .basic_auth("_", Some(UPLOAD_TOKEN))
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .body(manifest.to_vec())
+            .send()
+            .ok()?;
+        Some((response.status().as_u16(), oci_digest(manifest)))
+    }
+
+    /// Resolve `reference` (a tag or digest) in `repo`: `GET /v2/{OCI_ROUTE}/{repo}/manifests/{reference}`.
+    /// Returns the status, the `Docker-Content-Digest` the registry resolves it to, and the manifest
+    /// bytes, or `None` when unreachable. A test names the tag it published and proves the tag still
+    /// resolves to the same manifest digest across a failover.
+    #[must_use]
+    pub fn oci_get_manifest(&self, repo: &str, reference: &str) -> Option<(u16, Option<String>, Vec<u8>)> {
+        let response = self
+            .http
+            .get(format!(
+                "http://127.0.0.1:{}/v2/{OCI_ROUTE}/{repo}/manifests/{reference}",
+                self.port,
+            ))
+            .header(reqwest::header::ACCEPT, OCI_MANIFEST_TYPE)
+            .send()
+            .ok()?;
+        let code = response.status().as_u16();
+        let digest = response
+            .headers()
+            .get("docker-content-digest")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Some((code, digest, response.bytes().ok()?.to_vec()))
+    }
+
+    /// The tags `repo` lists under the hosted OCI index: `GET /v2/{OCI_ROUTE}/{repo}/tags/list`, parsed to
+    /// the `tags` array. Empty when the node is unreachable or lists none, so a test proves an idempotent
+    /// retry left exactly one tag rather than a duplicate.
+    #[must_use]
+    pub fn oci_tags(&self, repo: &str) -> Vec<String> {
+        let Some((200, body)) = self.http_get(&format!("/v2/{OCI_ROUTE}/{repo}/tags/list")) else {
+            return Vec::new();
+        };
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("tags")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|tags| tags.iter().filter_map(|tag| tag.as_str().map(str::to_owned)).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Send a raw OCI mutation (`method` `path`) with the upload credential to the public port, for a verb
+    /// the typed helpers do not name (a blob or manifest `DELETE`) or to observe the body a rejection
+    /// carries. Returns the status and body, or `None` when unreachable. A read-only replica rejects it by
+    /// method before routing reaches the OCI driver, so the credential only matters where a writer honors it.
+    #[must_use]
+    pub fn oci_mutate(&self, method: reqwest::Method, path: &str) -> Option<(u16, String)> {
+        let response = self
+            .http
+            .request(method, format!("http://127.0.0.1:{}{path}", self.port))
+            .basic_auth("_", Some(UPLOAD_TOKEN))
+            .send()
+            .ok()?;
+        let code = response.status().as_u16();
+        Some((code, response.text().unwrap_or_default()))
+    }
+
     /// `GET {path}` against this node's private availability control listener with admin Basic
     /// credentials, returning the status code and body, or `None` when unreachable.
     ///
@@ -911,6 +1062,19 @@ fn node_config(
         config,
         "[[index.access_token]]\nname = \"uploader\"\nsecret = \"{UPLOAD_TOKEN}\"\nprojects = [\"*\"]\nactions = [\"write\", \"delete\"]\n\n",
     );
+    if topology.oci {
+        // A hosted OCI index at OCI_ROUTE, so the node answers the distribution-spec `/v2/` API and a test
+        // can push a blob and a manifest. Its own credential mirrors the PyPI index's: a `[[index.access_token]]`
+        // binds to the `[[index]]` it follows, so each hosted index carries its own upload token.
+        let _ = write!(
+            config,
+            "[[index]]\nname = \"{OCI_ROUTE}\"\necosystem = \"oci\"\nhosted = true\nvolatile = true\n\n",
+        );
+        let _ = write!(
+            config,
+            "[[index.access_token]]\nname = \"oci-uploader\"\nsecret = \"{UPLOAD_TOKEN}\"\nprojects = [\"*\"]\nactions = [\"write\", \"delete\"]\n\n",
+        );
+    }
     if let Some(writer) = writer {
         config.push_str(roster);
         if matches!(member.role, Role::Writer) {

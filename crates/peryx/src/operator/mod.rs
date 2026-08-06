@@ -20,6 +20,10 @@ mod snapshot;
 mod verify;
 mod writer;
 
+#[cfg(test)]
+#[path = "parent_tests.rs"]
+mod parent_tests;
+
 pub use backup::backup_create;
 pub use import::import_dir;
 pub use restore::restore;
@@ -157,8 +161,16 @@ fn read_manifest(path: &Path) -> anyhow::Result<BackupManifest> {
     Ok(manifest)
 }
 
+/// Name the directory a hashed file is written below. Backup and restore targets always nest under a
+/// backup root, so a parent exists in practice; a path handed in without one surfaces a structured
+/// error rather than crashing the operator flow.
+fn hashed_parent(path: &Path) -> anyhow::Result<&Path> {
+    path.parent()
+        .with_context(|| format!("hashed file {} has no parent directory", path.display()))
+}
+
 fn copy_hashed(source: &Path, dest: &Path, manifest_path: &str) -> anyhow::Result<ManifestFile> {
-    let parent = dest.parent().expect("hashed files are written below a directory");
+    let parent = hashed_parent(dest)?;
     std::fs::create_dir_all(parent).context(format!("create {}", parent.display()))?;
     let mut input = BufReader::with_capacity(BUFFER_BYTES, File::open(source)?);
     let mut output = BufWriter::with_capacity(BUFFER_BYTES, File::create(dest)?);
@@ -183,7 +195,7 @@ fn copy_hashed(source: &Path, dest: &Path, manifest_path: &str) -> anyhow::Resul
 }
 
 fn write_hashed(path: &Path, bytes: &[u8], manifest_path: &str) -> anyhow::Result<ManifestFile> {
-    let parent = path.parent().expect("hashed files are written below a directory");
+    let parent = hashed_parent(path)?;
     std::fs::create_dir_all(parent).context(format!("create {}", parent.display()))?;
     let mut file = File::create(path)?;
     file.write_all(bytes)?;

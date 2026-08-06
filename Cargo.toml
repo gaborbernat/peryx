@@ -17,6 +17,9 @@ nursery = { level = "warn", priority = -1 }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+dead_code = "warn"
+unused_variables = "warn"
+unused_imports = "warn"
 
 [workspace.dependencies]
 peryx-core = { path = "crates/peryx-core" }

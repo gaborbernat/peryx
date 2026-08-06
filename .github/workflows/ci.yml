@@ -89,6 +89,10 @@ jobs:
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Deny dead code
+        run: cargo check --workspace --all-targets --all-features
+        env:
+          RUSTFLAGS: -D dead_code
       - name: Cancel remaining jobs on failure
         if: failure() && !cancelled()
         uses: ./.github/actions/cancel-on-failure

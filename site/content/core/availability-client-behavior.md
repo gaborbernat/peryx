@@ -67,9 +67,11 @@ publishes to both should handle both:
   moved while the request was in flight; retry the request".
 - PyPI answers `409 Conflict` with the message "the project's authority advanced to a newer epoch; retry this control".
 
-**Ingress backpressure sheds load.** When a `dc`/`ha` ingress node has staged its bounded backlog of un-finalized
-uploads, a further PyPI upload is refused with `503 Service Unavailable` and "ingress admission backlog is full". Retry
-with backoff; the backlog drains as the home finalizes.
+**Ingress backpressure sheds load.** A `dc`/`ha` ingress node bounds the un-finalized uploads it retains per authority.
+Once an authority reaches its record or byte ceiling, a further PyPI upload is refused with `503 Service Unavailable`,
+"ingress admission retention is full", and a `Retry-After` the client honors; the retained backlog drains as the home
+finalizes. An upload that crosses the soft threshold ahead of the ceiling is still admitted, so backpressure is a logged
+operator signal, not yet a client-visible refusal.
 
 A retry of any of these repeats the original request unchanged. Because every authoritative mutation is idempotent (see
 below), a client can retry without reasoning about whether the first attempt half-applied.

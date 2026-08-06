@@ -20,14 +20,15 @@ datacenter, and an operation id. Admission succeeds only once both the bytes and
 datacenter, so an accepted upload survives a restart near the client. Publication, home-datacenter assignment, and
 cross-datacenter replication run after admission and are not part of it.
 
-| Situation                                           | Status | Result                                                                          |
-| --------------------------------------------------- | ------ | ------------------------------------------------------------------------------- |
-| A new upload is streamed and staged                 | `200`  | One intent is recorded, bound to the identity above                             |
-| The same filename and content is resent             | `200`  | The resend resolves the same intent; no bytes are staged twice                  |
-| The same filename is resent with different content  | `400`  | `File already exists: "<name>" has different content; use a different filename` |
-| The declared digest does not match the bytes        | `400`  | `<field> mismatch`, before an intent is recorded                                |
-| The backend cannot prove same-datacenter durability | `503`  | `same-datacenter durability unavailable: <guarantee>`                           |
-| The un-finalized admission backlog is full          | `503`  | `ingress admission backlog is full`                                             |
+| Situation                                           | Status | Result                                                                                          |
+| --------------------------------------------------- | ------ | ----------------------------------------------------------------------------------------------- |
+| A new upload is streamed and staged                 | `200`  | One intent is recorded, bound to the identity above                                             |
+| The same filename and content is resent             | `200`  | The resend resolves the same intent; no bytes are staged twice                                  |
+| The same filename is resent with different content  | `400`  | `File already exists: "<name>" has different content; use a different filename`                 |
+| The declared digest does not match the bytes        | `400`  | `<field> mismatch`, before an intent is recorded                                                |
+| The backend cannot prove same-datacenter durability | `503`  | `same-datacenter durability unavailable: <guarantee>`                                           |
+| The authority is at its retention record ceiling    | `503`  | `ingress admission retention is full: authority is at its record ceiling`, with a `Retry-After` |
+| The next intent would cross the byte ceiling        | `503`  | `ingress admission retention is full: authority is at its byte ceiling`, with a `Retry-After`   |
 
 **Idempotency.** The intent is keyed by the upload's file identity within its tenant and authority, so a retried upload
 resolves one intent rather than staging its bytes a second time. A client that loses the response and resends the same
@@ -44,9 +45,27 @@ corrupted write is rejected rather than acknowledged. A local filesystem proves 
 when its endpoint honors conditional writes and checksum validation; one that cannot is refused at admission rather than
 acknowledging an upload it cannot make durable.
 
-**Limits.** Each ingress node bounds the number of un-finalized intents it holds, so a stalled downstream cannot let
-staged uploads grow without limit. When the backlog is full, further uploads shed load with `503` until finalized
-intents drain.
+**Retention limits and backpressure.** The retention buffer is bounded per authority, not globally: each authority
+stages up to a record ceiling and a byte ceiling, so one busy project cannot starve the ledger of every other while a
+home outage holds writes un-finalized. A new intent is refused once its authority holds its record ceiling, or once
+admitting it would cross its byte ceiling. Admission trips backpressure at a soft fraction of either ceiling — 80% — one
+shed signal ahead of the hard bound: an upload that crosses the soft threshold is still admitted, and the node logs the
+authority's retained records and bytes so an operator sees capacity pressure building before writes are refused. When an
+authority reaches a hard ceiling, a further upload is shed with `503` and a
+[`Retry-After`](https://www.rfc-editor.org/rfc/rfc9110.html#field.retry-after) so the client backs off and retries
+rather than losing the write; the buffer drains as the home finalizes the retained intents.
+
+**Order, retention, and expiry.** Every admission takes the next value of a durable, never-reused sequence, and the
+pending set is keyed by it, so a restart resumes the drain in the exact order writes were admitted — interleaved
+authorities preserved — rather than in key order. A pending intent is never reaped: its write may still finalize, so a
+stalled home sheds new load through admission rather than by dropping work in flight. A finalized intent, or one that
+expired without finalizing, is pruned once the retention window has passed since its last transition, which returns its
+slot to the authority's ceiling.
+
+**Partition behavior.** Admission may retain bytes and intent state during a home outage, but it never publishes
+metadata or changes home authority: those run downstream once the home is reachable. A datacenter in a control-plane
+minority therefore keeps admitting and retaining eligible uploads durably near the client, and the retained intents
+drain at the new home once [authority transfers](@/core/availability-authority-transfer.md) to a survivor.
 
 ## Project size quota
 

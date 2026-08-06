@@ -267,7 +267,7 @@ async fn admit_and_store(
     let intent = match admission::admit(
         &state.meta,
         state.blobs.durability(),
-        admission::MAX_STAGED_INTENTS,
+        admission::STAGING_LIMITS,
         &request,
         now,
     ) {

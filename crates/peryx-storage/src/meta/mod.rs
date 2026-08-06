@@ -55,7 +55,10 @@ pub use cross_dc_copy::{
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use external_identity::ExternalIdentityStoreError;
 pub use index::DriverTxn;
-pub use ingress_intent::{IntentPhase, IntentStageOutcome, IntentTransition, StagedIntent};
+pub use ingress_intent::{
+    BackpressureState, IntentAdmission, IntentLimits, IntentPhase, IntentStageOutcome, IntentStageResult,
+    IntentTransition, IntentUsage, StagedIntent,
+};
 pub use job::{
     FinishJobRun, JobKind, JobOutcome, JobRunPage, JobRunQuery, JobRunQueryError, JobRunRecord, JobRunStoreError,
     JobState, NewJobRun,
@@ -124,6 +127,16 @@ const OPERATION_OUTCOME: TableDefinition<&str, &[u8]> = TableDefinition::new("op
 /// The ingress DC's durably staged write intents, keyed by client-scoped identity so a retried
 /// admission is idempotent and a restart recovers the intents a home DC has yet to finalize.
 const INGRESS_INTENT: TableDefinition<&str, &[u8]> = TableDefinition::new("ingress_intent");
+/// Per-authority retained-usage counters — records and bytes each authority holds — so admission bounds
+/// and prunes a buffer per authority without scanning the whole ledger.
+const INGRESS_INTENT_COUNT: TableDefinition<&str, &[u8]> = TableDefinition::new("ingress_intent_count");
+/// The pending set keyed by durable admission sequence, so a restart resumes the drain in the exact order
+/// writes were admitted rather than in key order.
+const INGRESS_INTENT_ORDER: TableDefinition<u64, &str> = TableDefinition::new("ingress_intent_order");
+/// The single-row, never-reused admission sequence every staged intent draws its order key from.
+const INGRESS_INTENT_SEQ: TableDefinition<&str, u64> = TableDefinition::new("ingress_intent_seq");
+/// The sole key into [`INGRESS_INTENT_SEQ`], holding the next admission sequence to hand out.
+const INGRESS_SEQ_KEY: &str = "next";
 const RECONCILE_BACKLOG: TableDefinition<&str, &[u8]> = TableDefinition::new("reconcile_backlog");
 const POLICY_DECISION: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_decision");
 const POLICY_DECISION_CURRENT: TableDefinition<&str, &str> = TableDefinition::new("policy_decision_current");
@@ -307,6 +320,9 @@ impl MetaStore {
             txn.open_table(RECLAMATION_TOMBSTONE)?;
             txn.open_table(OPERATION_OUTCOME)?;
             txn.open_table(INGRESS_INTENT)?;
+            txn.open_table(INGRESS_INTENT_COUNT)?;
+            txn.open_table(INGRESS_INTENT_ORDER)?;
+            txn.open_table(INGRESS_INTENT_SEQ)?;
             txn.open_table(RECONCILE_BACKLOG)?;
             txn.open_table(REPOSITORY)?;
             txn.open_table(REPOSITORY_ROUTE)?;

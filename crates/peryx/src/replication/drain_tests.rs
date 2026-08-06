@@ -18,7 +18,19 @@ fn store() -> (tempfile::TempDir, MetaStore) {
 }
 
 fn stage(store: &MetaStore, key: &str) {
-    store.stage_intent(key, "digest", 1, b"payload", 100, 1).unwrap();
+    let limits = peryx_storage::meta::IntentLimits {
+        max_records: 100,
+        max_bytes: 1 << 20,
+        backpressure_percent: 80,
+    };
+    let admission = peryx_storage::meta::IntentAdmission {
+        authority: "auth",
+        key,
+        digest: "digest",
+        size: 1,
+        payload: b"payload",
+    };
+    store.stage_intent(admission, limits, 1).unwrap();
 }
 
 fn batch(size: usize) -> NonZeroUsize {

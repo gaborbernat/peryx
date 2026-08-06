@@ -37,6 +37,8 @@ enum Scenario {
     DeleteError,
     Multipart,
     AbortMissing,
+    CompleteEmbeddedError,
+    CompleteAbortFails,
     PutMissingStage,
     MultipartMissingStage,
     BeginError,
@@ -81,6 +83,8 @@ impl Scenario {
             Self::DeleteError => "delete_error",
             Self::Multipart => "multipart",
             Self::AbortMissing => "abort_missing",
+            Self::CompleteEmbeddedError => "complete_embedded_error",
+            Self::CompleteAbortFails => "complete_abort_fails",
             Self::PutMissingStage => "put_missing_stage",
             Self::MultipartMissingStage => "multipart_missing_stage",
             Self::BeginError => "begin_error",
@@ -250,6 +254,31 @@ async fn mount_scenario(server: &MockServer, scenario: Scenario) {
                 .mount(server)
                 .await;
         }
+        Scenario::CompleteEmbeddedError => {
+            Mock::given(method("POST"))
+                .and(query_param("uploadId", "upload-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(
+                    "<Error><Code>InternalError</Code><Message>completion failed</Message></Error>",
+                    "application/xml",
+                ))
+                .with_priority(1)
+                .mount(server)
+                .await;
+        }
+        Scenario::CompleteAbortFails => {
+            Mock::given(method("POST"))
+                .and(query_param("uploadId", "upload-1"))
+                .respond_with(service_error(500, "InternalError"))
+                .with_priority(1)
+                .mount(server)
+                .await;
+            Mock::given(method("DELETE"))
+                .and(query_param("uploadId", "upload-1"))
+                .respond_with(service_error(500, "InternalError"))
+                .with_priority(1)
+                .mount(server)
+                .await;
+        }
         _ => {}
     }
 }
@@ -276,6 +305,8 @@ async fn mount_scenario(server: &MockServer, scenario: Scenario) {
 #[case::delete_error(Scenario::DeleteError)]
 #[case::multipart(Scenario::Multipart)]
 #[case::abort_missing(Scenario::AbortMissing)]
+#[case::complete_embedded_error(Scenario::CompleteEmbeddedError)]
+#[case::complete_abort_fails(Scenario::CompleteAbortFails)]
 #[case::put_missing_stage(Scenario::PutMissingStage)]
 #[case::multipart_missing_stage(Scenario::MultipartMissingStage)]
 #[case::begin_error(Scenario::BeginError)]
@@ -325,6 +356,20 @@ async fn test_s3_public_surface_in_the_unit_binary(#[case] scenario: Scenario) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    if matches!(
+        scenario,
+        Scenario::AbortMissing | Scenario::CompleteEmbeddedError | Scenario::CompleteAbortFails
+    ) {
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests.iter().any(|request| request.method == http::Method::DELETE
+                && request
+                    .url
+                    .query_pairs()
+                    .any(|(key, value)| key == "uploadId" && value == "upload-1")),
+            "a failed multipart completion must abort its upload"
+        );
+    }
 }
 
 #[tokio::test]
@@ -361,6 +406,8 @@ async fn run_child_scenario(storage: &BlobStorage, scenario: &str) {
         | "delete_head_error"
         | "delete_error"
         | "abort_missing"
+        | "complete_embedded_error"
+        | "complete_abort_fails"
         | "put_missing_stage"
         | "multipart_missing_stage"
         | "begin_error" => run_error_scenario(storage, scenario).await,
@@ -455,10 +502,19 @@ async fn run_error_scenario(storage: &BlobStorage, scenario: &str) {
         "delete_head_error" | "delete_error" => {
             assert_eq!(storage.delete(&digest).await.unwrap_err().kind(), BlobErrorKind::Io);
         }
-        "abort_missing" => assert_eq!(
+        "abort_missing" | "complete_embedded_error" => assert_eq!(
             storage.put_bytes(&vec![7; (5 << 20) + 1]).await.unwrap_err().kind(),
             BlobErrorKind::Io
         ),
+        "complete_abort_fails" => {
+            let error = storage.put_bytes(&vec![7; (5 << 20) + 1]).await.unwrap_err();
+            assert_eq!(error.kind(), BlobErrorKind::Io);
+            let source = std::error::Error::source(&error).unwrap().to_string();
+            assert!(
+                source.contains("abort of multipart upload upload-1 failed"),
+                "the completion error must survive an abort failure: {source}"
+            );
+        }
         "put_missing_stage" => {
             let staged = stage(storage, b"package").await;
             staged.with_materialized(|path| std::fs::remove_file(path).unwrap());

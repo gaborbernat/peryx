@@ -464,8 +464,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let authenticated = headers.contains_key(header::AUTHORIZATION);
         let result = match route {
             OciRoute::Manifest { name, reference } if read => {
-                let accept = headers.get(header::ACCEPT).and_then(|value| value.to_str().ok());
-                self.serve_manifest(&state, &name, &reference, head, accept).await
+                let accept = combined_accept(headers);
+                self.serve_manifest(&state, &name, &reference, head, accept.as_deref())
+                    .await
             }
             OciRoute::Manifest { name, reference } if method == Method::PUT => {
                 put_manifest(&state, headers, body, &name, &reference, self.journal_outbox).await
@@ -836,6 +837,18 @@ fn query_params(query: &str) -> std::collections::HashMap<String, String> {
 /// A bare `202 Accepted` for a completed delete.
 fn accepted() -> Response {
     (StatusCode::ACCEPTED, Body::empty()).into_response()
+}
+/// Combine every `Accept` field line into the one comma-separated media-range list RFC 9110 says
+/// repeated field lines form, so a list media type named on a later line still negotiates. `None`
+/// when the client sent no parseable `Accept`, its way of expressing no preference.
+fn combined_accept(headers: &HeaderMap) -> Option<String> {
+    let joined = headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (!joined.is_empty()).then_some(joined)
 }
 /// Whether something fetched at `fetched_at` may still answer while the upstream cannot confirm it.
 ///

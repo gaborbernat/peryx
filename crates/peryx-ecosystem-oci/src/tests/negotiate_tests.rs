@@ -87,6 +87,117 @@ async fn test_get_with_a_wildcard_or_empty_accept_serves_the_index(#[case] accep
     assert_eq!(body, index);
 }
 
+#[rstest]
+#[case::type_wildcard("application/*")]
+#[case::exact_with_positive_quality("application/vnd.oci.image.index.v1+json;q=0.5")]
+#[case::higher_quality_duplicate_wins("application/*;q=0.7, application/*;q=0")]
+#[case::non_quality_parameters_ignored("application/*;charset=utf-8;profile")]
+#[tokio::test]
+async fn test_get_serves_the_index_when_a_media_range_covers_it(#[case] accept: &str) {
+    let (_dir, app, child_digest) = hosted_index().await;
+    let index = amd64_index(&child_digest);
+    let (status, headers, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/multi",
+        &[("accept", accept)],
+    )
+    .await;
+    // RFC 9110 wildcard and quality matching, not an exact media-type name, decides that the index is
+    // acceptable, so the list is served unchanged.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], oci_digest(&index));
+    assert_eq!(headers[header::CONTENT_TYPE], INDEX_TYPE);
+    assert_eq!(body, index);
+}
+
+#[rstest]
+#[case::explicit_zero("application/vnd.oci.image.index.v1+json;q=0")]
+#[case::exclusion_outranks_wildcard("application/vnd.oci.image.index.v1+json;q=0, */*")]
+#[tokio::test]
+async fn test_get_serves_the_child_when_a_media_range_rejects_the_index(#[case] accept: &str) {
+    let (_dir, app, child_digest) = hosted_index().await;
+    let (status, headers, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/multi",
+        &[("accept", accept)],
+    )
+    .await;
+    // A q=0 on the most specific matching range rejects the index even when a broader */* would take
+    // it, so the linux/amd64 child is substituted.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], child_digest);
+    assert_eq!(headers[header::CONTENT_TYPE], MANIFEST_TYPE);
+    assert_eq!(body, CHILD);
+}
+
+#[rstest]
+#[case::missing_subtype("application")]
+#[case::missing_type("/json")]
+#[case::empty_subtype("application/")]
+#[case::concrete_subtype_under_wildcard_type("*/json")]
+#[case::unparseable_quality("application/*;q=high")]
+#[case::out_of_range_quality("application/*;q=2")]
+#[case::only_separators(",,")]
+#[tokio::test]
+async fn test_get_serves_the_index_when_every_media_range_is_malformed(#[case] accept: &str) {
+    let (_dir, app, child_digest) = hosted_index().await;
+    let index = amd64_index(&child_digest);
+    let (status, headers, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/multi",
+        &[("accept", accept)],
+    )
+    .await;
+    // No parseable range leaves no preference to honor, so the full index is served rather than
+    // narrowed to a child.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], oci_digest(&index));
+    assert_eq!(body, index);
+}
+
+#[tokio::test]
+async fn test_get_honors_a_list_type_named_on_a_later_accept_field_line() {
+    let (_dir, app, child_digest) = hosted_index().await;
+    let index = amd64_index(&child_digest);
+    let (status, headers, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/multi",
+        &[("accept", IMAGE_ACCEPT), ("accept", INDEX_TYPE)],
+    )
+    .await;
+    // Repeated Accept field lines are one combined list, so the index type on the second line accepts
+    // the index the first line alone would have excluded.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], oci_digest(&index));
+    assert_eq!(headers[header::CONTENT_TYPE], INDEX_TYPE);
+    assert_eq!(body, index);
+}
+
+#[tokio::test]
+async fn test_get_combines_an_exclusion_on_a_later_accept_field_line() {
+    let (_dir, app, child_digest) = hosted_index().await;
+    let (status, headers, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/multi",
+        &[
+            ("accept", "*/*"),
+            ("accept", "application/vnd.oci.image.index.v1+json;q=0"),
+        ],
+    )
+    .await;
+    // The exclusion on the later field line joins the same list and, as the more specific range, wins
+    // over the first line's */*, so the child is served.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], child_digest);
+    assert_eq!(headers[header::CONTENT_TYPE], MANIFEST_TYPE);
+    assert_eq!(body, CHILD);
+}
+
 #[tokio::test]
 async fn test_get_by_digest_serves_the_amd64_child() {
     let (_dir, app, child_digest) = hosted_index().await;

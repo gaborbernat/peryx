@@ -363,7 +363,7 @@ async fn test_replica_runtime_drains_available_pages() {
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config(&server.url, 1)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert!(runtime.is_replica());
     let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
@@ -393,6 +393,93 @@ async fn test_replica_runtime_drains_available_pages() {
 }
 
 #[tokio::test]
+async fn test_a_replica_serves_the_change_feed_it_has_applied() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    primary_meta
+        .commit_driver_txn(|_| Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"one".to_vec(), b"two".to_vec()])))
+        .unwrap();
+    let server = TestServer::start(primary_router("writer-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
+    let state = build_state(&config).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+
+    // The replica now mounts a follower change-feed. Pull it and confirm it relays the writer's stream.
+    let router = runtime.mount(Router::new());
+    let request = Request::get("/+replication/v1/changes?after=0&limit=10")
+        .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let page = serde_json::from_slice::<ChangePage>(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    // The replica stamps the writer's authoritative source, not its own identity, and serves only up to
+    // what it durably applied.
+    assert_eq!(page.source, "writer-a");
+    assert_eq!(page.current_serial, 2);
+    assert_eq!(
+        page.changes.iter().map(|change| change.serial).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[tokio::test]
+async fn test_a_replica_reports_the_pass_done_when_no_metadata_peer_answers() {
+    // No server is listening, so the sole configured peer refuses and no peer answers the round. The
+    // cycle reports the loss for a retry rather than advancing.
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config("http://127.0.0.1:1/", 10)));
+    let state = build_state(&config).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+    drop(guard);
+
+    assert_eq!(state.meta.current_serial().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn test_a_replica_cycle_records_an_apply_failure_when_the_store_refuses_the_write() {
+    let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
+    primary_meta
+        .commit_driver_txn(|_| Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"one".to_vec()])))
+        .unwrap();
+    let server = TestServer::start(primary_router("primary-a", TOKEN, primary_meta, primary_blobs).unwrap()).await;
+    // A read-only replica store answers every read the cycle makes yet refuses the apply write, the one
+    // path where a page arrives and validates but committing it fails, so pull_round surfaces the apply
+    // error rather than a transport loss.
+    let replica_dir = tempfile::tempdir().unwrap();
+    let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
+    let meta = MetaStore::open_existing_read_only(replica_dir.path().join("peryx.redb")).unwrap();
+    let state = std::sync::Arc::new(AppState::new(
+        meta,
+        BlobStore::new(replica_dir.path().join("blobs")),
+        60,
+        Vec::new(),
+    ));
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
+
+    let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    // The cycle records the apply failure and reports the pass done: re-fetching the same cursor at the
+    // poll cadence is the recovery, not a backoff.
+    assert_eq!(runtime.sync_cycle().await, Some(true));
+    drop(guard);
+
+    // The refused write left the journal at zero, and the metadata error is on the metrics.
+    assert_eq!(state.meta.current_serial().unwrap(), 0);
+    let router = runtime.mount(router_for(state.clone()));
+    let (_, body) = get(&router, "/metrics").await;
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.contains("peryx_replication_sync_errors_total 1\n"), "{body}");
+}
+
+#[tokio::test]
 async fn test_replica_runtime_copies_primary_metadata() {
     let (_primary_dir, primary_meta, primary_blobs) = primary_stores();
     primary_meta
@@ -405,7 +492,7 @@ async fn test_replica_runtime_copies_primary_metadata() {
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
     assert_eq!(
@@ -432,7 +519,7 @@ async fn test_replica_dispatches_applied_keys_to_ecosystem_drivers() {
     state
         .cache
         .store_hot(hot.clone(), axum::body::Bytes::from_static(b"x"), i64::MAX);
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
 
@@ -579,7 +666,7 @@ async fn test_replica_runtime_copies_primary_blobs() {
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
     assert_eq!(state.blobs.read_bytes(&digest, 8).await.unwrap(), b"artifact");
@@ -599,7 +686,7 @@ async fn test_dual_replica_advances_both_planes_when_the_blob_is_available() {
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
 
@@ -624,7 +711,7 @@ async fn test_dual_replica_reports_blob_fetch_counts_to_operators() {
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
     let router = runtime.mount(router_for(state));
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
@@ -653,7 +740,7 @@ async fn test_dual_replica_advances_metadata_while_a_missing_blob_holds_the_blob
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
     let guard = tracing::subscriber::set_default(subscriber);
@@ -686,7 +773,7 @@ async fn test_dual_replica_heals_the_blob_frontier_after_the_blob_arrives() {
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config(&server.url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
     let guard = tracing::subscriber::set_default(subscriber);
@@ -719,7 +806,7 @@ async fn test_dual_replica_retries_after_a_metadata_sync_error() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, Some(replica_config(&url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
     let guard = tracing::subscriber::set_default(subscriber);
@@ -824,7 +911,7 @@ async fn test_replica_readiness_reports_a_sync_error() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, Some(replica_config(&url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
     let router = runtime.mount(router_for(state));
@@ -852,7 +939,7 @@ async fn test_replica_readiness_reports_an_incompatible_schema() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, Some(replica_config(&primary.url, 10)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert_eq!(runtime.sync_cycle().await, Some(true));
     let router = runtime.mount(router_for(state));
@@ -884,7 +971,7 @@ async fn test_replica_readiness_recovers_and_reports_serials_to_operators() {
     let config = config(&dir, Some(replica_config(&server.url, 2)));
     let state = build_state(&config).unwrap();
     let operator = credential(&state, "Olivia", Role::Operator).await;
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
     let router = runtime.mount(router_for(state));
 
     assert_eq!(runtime.sync_cycle().await, Some(false));
@@ -1000,7 +1087,7 @@ async fn test_disabled_runtime_mounts_no_routes_or_task() {
     let dir = tempfile::tempdir().unwrap();
     let config = config(&dir, None);
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     assert!(!runtime.is_replica());
     assert_eq!(runtime.sync_cycle().await, None);
@@ -1122,7 +1209,7 @@ fn test_replication_runtime_rejects_an_invalid_upstream_url() {
     };
 
     assert!(
-        error.to_string().contains("build replica metadata transport"),
+        error.to_string().contains("build the replica metadata peer set"),
         "{error}"
     );
 }
@@ -1203,7 +1290,7 @@ async fn test_replica_cycle_records_a_transport_loss_and_reports_the_pass_done()
     let replica_dir = tempfile::tempdir().unwrap();
     let config = config(&replica_dir, Some(replica_config("http://127.0.0.1:1/", 1)));
     let state = build_state(&config).unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
     let guard = tracing::subscriber::set_default(subscriber);
@@ -1229,7 +1316,7 @@ async fn test_replica_cycle_reports_a_local_cursor_mismatch() {
         .meta
         .commit_driver_txn(|_| Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"stray".to_vec()])))
         .unwrap();
-    let runtime = ReplicationRuntime::new(&config, &state).unwrap();
+    let mut runtime = ReplicationRuntime::new(&config, &state).unwrap();
 
     let subscriber = tracing_subscriber::fmt().with_writer(std::io::sink).finish();
     let guard = tracing::subscriber::set_default(subscriber);

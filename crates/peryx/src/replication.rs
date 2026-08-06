@@ -27,10 +27,11 @@ use peryx_http::response_security::{
     ClassifiedField, FieldClassification, ProtectedCachePolicy, ResponseAuthorization, filter_fields,
 };
 use peryx_replication::{
-    BatchRequest, BlobPlaneReport, BlobSources, CapacityLimited, DEFAULT_DEAD_AFTER, DEFAULT_RECONNECT_POLICY,
-    DEFAULT_SUSPECT_AFTER, DEFAULT_TRANSFER_LIMITS, HttpBlobTransport, HttpPeerTransport, LivenessTracker,
-    PeerTransport, ReconnectPolicy, Replica, Retry, SyncError, SyncOutcome, TransferLimits, TransportError,
-    advance_blob_frontier, liveness_router, primary_router, pull_outstanding,
+    BlobPlaneReport, BlobSources, CapacityLimited, ChangePage, DEFAULT_DEAD_AFTER, DEFAULT_RECONNECT_POLICY,
+    DEFAULT_SET_LIMITS, DEFAULT_SUSPECT_AFTER, DEFAULT_TRANSFER_LIMITS, HttpBlobTransport, HttpPeerTransport,
+    LivenessTracker, PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, Retry, SetLimits, SyncError, SyncOutcome,
+    TransferLimits, TransportError, advance_blob_frontier, follower_router, liveness_router, primary_router,
+    pull_outstanding, pull_round,
 };
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::{DataCenterId, MetaStore};
@@ -454,7 +455,8 @@ fn local_datacenter(config: &Config, membership: &DcMembership) -> Option<String
 
 struct ReplicaLoop {
     app: Arc<AppState>,
-    metadata: HttpPeerTransport,
+    metadata: PeerSet<HttpPeerTransport>,
+    clock_origin: Instant,
     policy: ReconnectPolicy,
     meta: MetaStore,
     blobs: BlobStorage,
@@ -535,7 +537,7 @@ pub(crate) fn schedule_delay(
 }
 
 impl ReplicaLoop {
-    async fn run(self) {
+    async fn run(mut self) {
         let mut attempt: u32 = 0;
         loop {
             let result = self.cycle().await;
@@ -553,30 +555,49 @@ impl ReplicaLoop {
     /// Returns `Ok(caught_up)` after a page applies, or `Err` on a retryable metadata transport loss so
     /// the run loop backs off. A page that fails validation or commit records the failure and returns
     /// `Ok(true)`, since re-fetching the same cursor at the poll cadence is the recovery, not a backoff.
-    async fn cycle(&self) -> Result<bool, TransportError> {
+    async fn cycle(&mut self) -> Result<bool, TransportError> {
         let started = Instant::now();
-        let replica = Replica::new(&self.meta, self.page_size);
-        let after = match replica.state() {
-            Ok(state) => state.map_or(0, |state| state.serial),
+        let now = self.clock_origin.elapsed();
+        let state = match Replica::new(&self.meta, self.page_size).state() {
+            Ok(state) => state,
             Err(error) => return Ok(self.record_metadata_error(&error, started.elapsed())),
         };
-        let request = BatchRequest {
-            after,
-            max_operations: self.page_size,
+        let after = state.as_ref().map_or(0, |state| state.serial);
+        // The authoritative source the replica has committed, if any; the driver falls back to what a
+        // peer advertised this round so a fresh replica's first apply still pins to the writer's identity.
+        let committed = state.map(|state| state.source);
+
+        let app = &self.app;
+        let meta = &self.meta;
+        let page_size = self.page_size;
+        let apply = move |page: ChangePage| -> Result<u64, SyncError> {
+            let (outcome, changed, _referenced) = Replica::new(meta, page_size).apply_page(page)?;
+            apply_replicated_page(app, outcome, &changed);
+            Ok(outcome.serial)
         };
-        let frame = match self.metadata.fetch_batch(request).await {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.record_metadata_error(&SyncError::primary(error.clone()), started.elapsed());
-                return Err(error);
-            }
-        };
-        let (outcome, changed_keys) = match replica.apply_page(frame.into_page()) {
-            Ok((outcome, changed_keys, _referenced)) => (outcome, changed_keys),
+        let round = match pull_round(&mut self.metadata, now, after, committed.as_deref(), apply).await {
+            Ok(round) => round,
             Err(error) => return Ok(self.record_metadata_error(&error, started.elapsed())),
         };
         let elapsed = started.elapsed();
-        apply_replicated_page(&self.app, outcome, &changed_keys);
+        if let Some(actual) = round.incompatible {
+            let error = SyncError::UnsupportedVersion {
+                actual,
+                expected: PROTOCOL_VERSION,
+            };
+            return Ok(self.record_metadata_error(&error, elapsed));
+        }
+        if !round.answered {
+            let loss = TransportError::Disconnected;
+            self.record_metadata_error(&SyncError::primary(loss.clone()), elapsed);
+            return Err(loss);
+        }
+
+        let outcome = SyncOutcome {
+            changes: round.applied,
+            serial: round.serial,
+            primary_serial: round.head.max(round.serial),
+        };
         match self.pull_blobs().await {
             Ok(report) => self.monitor.record_blobs(report),
             Err(error) => {
@@ -589,7 +610,7 @@ impl ReplicaLoop {
         let readable = self.app.readable_frontier().map_or(0, |frontier| frontier.serial);
         self.monitor.record_readable(readable);
         self.metrics.record_cycle(outcome, elapsed);
-        Ok(outcome.caught_up())
+        Ok(round.caught_up)
     }
 
     /// Record a metadata-plane failure on the monitor and the metrics, and report the pass as done so
@@ -622,6 +643,82 @@ impl ReplicaLoop {
         advance_blob_frontier(&self.meta, &self.blobs, self.page_size).await?;
         Ok(report)
     }
+}
+
+/// The join key for the single configured upstream, distinct from any roster member's node name.
+const UPSTREAM_SOURCE: &str = "upstream";
+
+/// Build the multi-peer metadata puller: every roster member that serves the change-feed — the writer
+/// and every other follower replica — minus this node, plus the configured `upstream`, each resuming at
+/// the replica's durably applied `resume` serial. A deployment with no roster still pulls from its lone
+/// writer, so the set is never empty.
+///
+/// # Errors
+/// Returns an error when a member address is not a usable peer URL.
+fn metadata_peers(
+    membership: Option<&DcMembership>,
+    this: Option<&str>,
+    upstream: &str,
+    token: &str,
+    resume: u64,
+    page_size: std::num::NonZeroUsize,
+) -> anyhow::Result<PeerSet<HttpPeerTransport>> {
+    // Fetch at the replica's configured page size, not the set default, so an operator's page bound
+    // still governs how much each peer serves per round.
+    let limits = SetLimits {
+        request_size: page_size,
+        ..DEFAULT_SET_LIMITS
+    };
+    let mut set = PeerSet::new(limits, DEFAULT_RECONNECT_POLICY);
+    let mut joined = std::collections::BTreeSet::new();
+    if let Some(membership) = membership {
+        for member in &membership.members {
+            if Some(member.node.as_str()) == this || !joined.insert(member.address.clone()) {
+                continue;
+            }
+            let transport =
+                HttpPeerTransport::new(&member.address, token, DEFAULT_TRANSFER_LIMITS, METADATA_FETCH_TIMEOUT)
+                    .with_context(|| format!("build the metadata peer transport for {}", member.node))?;
+            set.join(member.node.clone(), transport, resume);
+        }
+    }
+    if joined.insert(upstream.to_owned()) {
+        let transport = HttpPeerTransport::new(upstream, token, DEFAULT_TRANSFER_LIMITS, METADATA_FETCH_TIMEOUT)
+            .context("build the upstream metadata transport")?;
+        set.join(UPSTREAM_SOURCE, transport, resume);
+    }
+    Ok(set)
+}
+
+/// Build a replica's two data planes: the multi-peer metadata puller over the roster and the bounded
+/// blob transport to its upstream.
+///
+/// # Errors
+/// Returns an error when a peer address or the upstream URL is not a usable base.
+fn replica_transports(
+    config: &Config,
+    upstream: &str,
+    token: &str,
+    resume: u64,
+    page_size: std::num::NonZeroUsize,
+) -> anyhow::Result<(PeerSet<HttpPeerTransport>, CapacityLimited<HttpBlobTransport>)> {
+    let metadata = metadata_peers(
+        config.dc_membership.as_ref(),
+        config.node_identity.as_deref(),
+        upstream,
+        token,
+        resume,
+        page_size,
+    )
+    .context("build the replica metadata peer set")?;
+    let blob_transport = HttpBlobTransport::new(
+        upstream,
+        token.to_owned(),
+        TransferLimits::default(),
+        BLOB_FETCH_TIMEOUT,
+    )
+    .context("build replica blob transport")?;
+    Ok((metadata, CapacityLimited::new(blob_transport, BLOB_FETCH_CONCURRENCY)))
 }
 
 /// Track the configured replica members so the writer can age their beacons into routing hints. A
@@ -763,16 +860,11 @@ impl ReplicationRuntime {
                 page_size,
             }) => {
                 let token = token.read().context("read the replica replication token")?;
-                let metadata =
-                    HttpPeerTransport::new(upstream, token.clone(), DEFAULT_TRANSFER_LIMITS, METADATA_FETCH_TIMEOUT)
-                        .context("build replica metadata transport")?;
-                let blob_transport =
-                    HttpBlobTransport::new(upstream, token, TransferLimits::default(), BLOB_FETCH_TIMEOUT)
-                        .context("build replica blob transport")?;
-                let transport = CapacityLimited::new(blob_transport, BLOB_FETCH_CONCURRENCY);
-                let monitor = Arc::new(ReplicaMonitor::new(
-                    state.meta.current_serial().context("read the replica serial")?,
-                ));
+                let resume = state.meta.current_serial().context("read the replica serial")?;
+                let (metadata, transport) = replica_transports(config, upstream, &token, resume, *page_size)?;
+                let follower = follower_router(token, state.serving.meta.clone())
+                    .context("build the follower change-feed routes")?;
+                let monitor = Arc::new(ReplicaMonitor::new(resume));
                 let metrics = Arc::new(AvailabilityMetrics::default());
                 let workers = Arc::new(WorkerShared::for_replica());
                 state.register_prometheus(monitor.clone());
@@ -792,11 +884,12 @@ impl ReplicationRuntime {
                     workers: Some(workers),
                 };
                 (
-                    None,
+                    Some(follower),
                     Some((
                         ReplicaLoop {
                             app: state.clone(),
                             metadata,
+                            clock_origin: Instant::now(),
                             policy: DEFAULT_RECONNECT_POLICY,
                             meta: state.serving.meta.clone(),
                             blobs: state.serving.blobs.clone(),
@@ -889,8 +982,8 @@ impl ReplicationRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) async fn sync_cycle(&self) -> Option<bool> {
-        match &self.replica {
+    pub(crate) async fn sync_cycle(&mut self) -> Option<bool> {
+        match &mut self.replica {
             Some((replica, _)) => Some(replica.cycle().await.unwrap_or(true)),
             None => None,
         }
@@ -932,5 +1025,83 @@ mod tests {
         monitor.write_metrics(&mut body);
         assert!(body.contains("peryx_replication_blobs_fetched_total 3\n"), "{body}");
         assert!(body.contains("peryx_replication_blobs_pending 0\n"), "{body}");
+    }
+
+    fn member(node: &str, address: &str, role: crate::config::DcRole) -> crate::config::DcMember {
+        crate::config::DcMember {
+            node: node.to_owned(),
+            dc: format!("dc-{node}"),
+            address: address.to_owned(),
+            role,
+        }
+    }
+
+    #[test]
+    fn test_metadata_peers_enumerates_the_roster_minus_this_node() {
+        use crate::config::{DcMembership, DcRole};
+
+        let membership = DcMembership {
+            group: "group".to_owned(),
+            members: vec![
+                member("writer", "https://writer.example/", DcRole::Writer),
+                member("replica-b", "https://replica-b.example/", DcRole::Replica),
+                member("replica-c", "https://replica-c.example/", DcRole::Replica),
+                // A duplicate address is joined once; a second member on it is skipped.
+                member("replica-c-alias", "https://replica-c.example/", DcRole::Replica),
+            ],
+        };
+
+        let set = super::metadata_peers(
+            Some(&membership),
+            Some("replica-b"),
+            "https://writer.example/",
+            "tok",
+            7,
+            std::num::NonZeroUsize::new(256).unwrap(),
+        )
+        .unwrap();
+
+        // This node is excluded, the writer's address matches the upstream so it is joined once, and the
+        // duplicate address is not rejoined. Every peer resumes at the replica's durable serial.
+        let mut sources = set.sources();
+        sources.sort();
+        assert_eq!(sources, vec!["replica-c".to_owned(), "writer".to_owned()]);
+        assert_eq!(set.frontier("writer"), Some(7));
+        assert_eq!(set.frontier("replica-c"), Some(7));
+    }
+
+    #[test]
+    fn test_metadata_peers_falls_back_to_the_upstream_without_a_roster() {
+        let set = super::metadata_peers(
+            None,
+            None,
+            "https://writer.example/",
+            "tok",
+            0,
+            std::num::NonZeroUsize::new(256).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(set.sources(), vec![super::UPSTREAM_SOURCE.to_owned()]);
+    }
+
+    #[test]
+    fn test_metadata_peers_rejects_an_unusable_member_address() {
+        use crate::config::{DcMembership, DcRole};
+
+        let membership = DcMembership {
+            group: "group".to_owned(),
+            members: vec![member("bad", "not a url", DcRole::Replica)],
+        };
+
+        let built = super::metadata_peers(
+            Some(&membership),
+            Some("self"),
+            "https://writer.example/",
+            "tok",
+            0,
+            std::num::NonZeroUsize::new(256).unwrap(),
+        );
+
+        assert!(built.is_err());
     }
 }

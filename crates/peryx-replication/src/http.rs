@@ -20,6 +20,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::io::ReaderStream;
 
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION, Primary};
+use crate::replica::Replica;
+
+/// A page limit for reading the replica's own durable state, where no page is fetched.
+const ONE: NonZeroUsize = NonZeroUsize::new(1).expect("1 is non-zero");
 
 const CHANGES_PATH: &str = "+replication/v1/changes";
 const USER_AGENT: &str = concat!("peryx-replication/", env!("CARGO_PKG_VERSION"));
@@ -211,13 +215,66 @@ async fn serve_changes(
     if !authorized(&headers, &state.token) {
         return unauthorized();
     }
+    serve_change_page(&state.meta, &state.source, &query)
+}
+
+/// The state a follower-serving replica mounts to relay the change-feed. It carries no source of its own:
+/// a replica serves the authoritative writer's stream, read from its durable [`ReplicaState`] at request
+/// time, so a peer pulling from a replica or from the writer sees the same source and its apply path never
+/// trips the single-source guard.
+#[derive(Clone)]
+struct FollowerHttpState {
+    token: String,
+    meta: MetaStore,
+}
+
+/// Build the authenticated change-feed route a read replica serves in follower mode.
+///
+/// The replica relays the writer's stream up to its own durably applied serial: its journal holds no
+/// record past what it committed, so the page is bounded by construction, and each page carries the
+/// authoritative source the replica mirrors rather than the replica's own identity.
+///
+/// # Errors
+/// Returns an error when the bearer token is empty.
+pub fn follower_router(token: impl Into<String>, meta: MetaStore) -> Result<Router, PrimaryHttpConfigError> {
+    let token = token.into();
+    if token.is_empty() {
+        return Err(PrimaryHttpConfigError::EmptyToken);
+    }
+    Ok(Router::new()
+        .route("/+replication/v1/changes", get(serve_follower_changes))
+        .with_state(FollowerHttpState { token, meta }))
+}
+
+async fn serve_follower_changes(
+    State(state): State<FollowerHttpState>,
+    headers: HeaderMap,
+    Query(query): Query<ChangesQuery>,
+) -> Response {
+    if !authorized(&headers, &state.token) {
+        return unauthorized();
+    }
+    let source = match Replica::new(&state.meta, ONE).state() {
+        Ok(Some(applied)) => applied.source,
+        // A replica that has applied nothing yet knows no authoritative source and has no change to
+        // relay; report it unavailable so a puller fails over to the writer or a caught-up peer.
+        Ok(None) => return (StatusCode::SERVICE_UNAVAILABLE, "replica has not synced a source yet").into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    serve_change_page(&state.meta, &source, &query)
+}
+
+/// Serve one change page from `meta` after the requested serial, stamped with `source`. A replica's
+/// journal reaches only its applied serial, so this is bounded by the replica's durable frontier without
+/// a separate clamp; the writer's journal reaches its head.
+fn serve_change_page(meta: &MetaStore, source: &str, query: &ChangesQuery) -> Response {
     if query.limit == 0 || query.limit > DEFAULT_MAX_CHANGE_PAGE_SIZE {
         return (StatusCode::BAD_REQUEST, "change page limit is out of range").into_response();
     }
-    match state.meta.journal_page_after(query.after, query.limit) {
+    match meta.journal_page_after(query.after, query.limit) {
         Ok((current_serial, records)) => Json(ChangePage {
             version: PROTOCOL_VERSION,
-            source: state.source,
+            source: source.to_owned(),
             after: query.after,
             current_serial,
             changes: records

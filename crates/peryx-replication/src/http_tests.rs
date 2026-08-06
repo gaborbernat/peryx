@@ -12,12 +12,137 @@ use peryx_storage::meta::MetaStore;
 use tokio::sync::Semaphore;
 use tower::ServiceExt as _;
 
+use crate::protocol::Change;
+use crate::replica::Replica;
 use crate::{
     ChangePage, DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PROTOCOL_VERSION, Primary,
-    PrimaryHttpConfigError, primary_router, primary_router_with_stream_limit,
+    PrimaryHttpConfigError, follower_router, primary_router, primary_router_with_stream_limit,
 };
 
 const TOKEN: &str = "replica-secret";
+
+/// Apply a page of `count` changes stamped with `source`, seeding the replica state a follower relays and
+/// the journal it serves from.
+fn seed_applied(meta: &MetaStore, source: &str, count: u64) {
+    let changes = (1..=count)
+        .map(|serial| Change {
+            serial,
+            event: format!("event-{serial}").into_bytes(),
+            metadata: Vec::new(),
+            blobs: Vec::new(),
+        })
+        .collect();
+    let page = ChangePage {
+        version: PROTOCOL_VERSION,
+        source: source.to_owned(),
+        after: 0,
+        current_serial: count,
+        changes,
+    };
+    Replica::new(meta, NonZeroUsize::new(10).unwrap())
+        .apply_page(page)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_follower_serves_the_authoritative_source_up_to_its_applied_serial() {
+    let stores = TestStores::new();
+    seed_applied(&stores.meta, "writer-a", 3);
+
+    let response = follower_router(TOKEN, stores.meta.clone())
+        .unwrap()
+        .oneshot(authenticated_request(
+            "/+replication/v1/changes?after=0&limit=10",
+            TOKEN,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let page = serde_json::from_slice::<ChangePage>(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    // The follower relays the writer's identity, not its own, and serves only up to what it applied.
+    assert_eq!(page.source, "writer-a");
+    assert_eq!(page.current_serial, 3);
+    assert_eq!(
+        page.changes.iter().map(|change| change.serial).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
+#[tokio::test]
+async fn test_follower_reports_unavailable_before_it_syncs_a_source() {
+    let stores = TestStores::new();
+
+    let response = follower_router(TOKEN, stores.meta.clone())
+        .unwrap()
+        .oneshot(authenticated_request(
+            "/+replication/v1/changes?after=0&limit=10",
+            TOKEN,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_follower_requires_its_bearer_token() {
+    let stores = TestStores::new();
+    seed_applied(&stores.meta, "writer-a", 1);
+
+    let response = follower_router(TOKEN, stores.meta.clone())
+        .unwrap()
+        .oneshot(authenticated_request(
+            "/+replication/v1/changes?after=0&limit=10",
+            "wrong",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_follower_rejects_a_bad_limit() {
+    let stores = TestStores::new();
+    seed_applied(&stores.meta, "writer-a", 1);
+
+    let response = follower_router(TOKEN, stores.meta.clone())
+        .unwrap()
+        .oneshot(authenticated_request("/+replication/v1/changes?after=0&limit=0", TOKEN))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn test_follower_router_rejects_an_empty_token() {
+    let stores = TestStores::new();
+    assert_eq!(
+        follower_router("", stores.meta).unwrap_err(),
+        PrimaryHttpConfigError::EmptyToken
+    );
+}
+
+#[tokio::test]
+async fn test_follower_reports_a_replica_state_read_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.redb");
+    drop(redb::Database::create(&path).unwrap());
+
+    let response = follower_router(TOKEN, MetaStore::open_existing(path).unwrap())
+        .unwrap()
+        .oneshot(authenticated_request(
+            "/+replication/v1/changes?after=0&limit=10",
+            TOKEN,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
 
 fn a_permit() -> tokio::sync::OwnedSemaphorePermit {
     Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap()

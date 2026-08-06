@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    MetaError, MetaStore, QUOTA_BLOB, QUOTA_PENDING, QUOTA_PROJECT, QUOTA_RESERVATION, QUOTA_USAGE, QUOTA_VERSION,
+    MetaError, MetaStore, QUOTA_ALLOCATION, QUOTA_BLOB, QUOTA_PENDING, QUOTA_PROJECT, QUOTA_RESERVATION, QUOTA_USAGE,
+    QUOTA_VERSION,
 };
 
 const MAX_IDENTITY_BYTES: usize = 512;
@@ -103,6 +104,16 @@ pub struct QuotaReservationRecord {
     pub violations: Vec<QuotaLimit>,
     #[serde(default)]
     pub project_file_bytes: bool,
+}
+
+/// The identity of a committed allocation, so a driver object's deletion can locate and release the
+/// counters its publication committed. It mirrors the fields a [`NewQuotaReservation`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaAllocation<'a> {
+    pub repository: &'a str,
+    pub project: Option<&'a str>,
+    pub version: Option<&'a str>,
+    pub digest: &'a str,
 }
 
 /// Progress from one bounded restart repair pass.
@@ -338,6 +349,37 @@ impl MetaStore {
         let released = release(&txn, id, ReleaseScope::Any)?;
         txn.commit().map_err(MetaError::from)?;
         Ok(released)
+    }
+
+    /// Commit driver metadata and, when `release_allocation` accepts the result, release the committed
+    /// allocation identified by `allocation` in the same transaction, so deleting a driver object cannot
+    /// leave its counters charged after a crash. A missing allocation — an unmetered publication, or a
+    /// second deletion — releases nothing.
+    ///
+    /// # Errors
+    /// Returns the body's error or a store error. Peryx rolls back the driver rows and the counter
+    /// release together when either step fails.
+    pub fn commit_driver_txn_release_allocation<T, E>(
+        &self,
+        allocation: QuotaAllocation<'_>,
+        release_allocation: impl FnOnce(&T) -> bool,
+        body: impl FnOnce(&mut super::DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
+    ) -> Result<T, E>
+    where
+        E: From<MetaError> + From<QuotaError>,
+    {
+        self.commit_driver_txn_at(
+            None,
+            None,
+            true,
+            move |txn, value| {
+                if release_allocation(value) {
+                    release_committed_allocation(txn, &allocation)?;
+                }
+                Ok(())
+            },
+            body,
+        )
     }
 
     /// Release at most `limit` abandoned pending reservations after restart.
@@ -726,6 +768,9 @@ fn release(txn: &redb::WriteTransaction, id: Uuid, scope: ReleaseScope) -> Resul
         return Ok(false);
     }
     transition(txn, &reservation, false)?;
+    if reservation.state == QuotaReservationState::Committed {
+        forget_allocation(txn, &reservation)?;
+    }
     txn.open_table(QUOTA_RESERVATION)
         .map_err(MetaError::from)?
         .remove(key.as_str())
@@ -751,11 +796,54 @@ fn commit_reservation(txn: &redb::WriteTransaction, id: Uuid) -> Result<bool, Qu
     transition(txn, &reservation, true)?;
     reservation.state = QuotaReservationState::Committed;
     write_record(txn, QUOTA_RESERVATION, &key, &reservation)?;
+    write_record(txn, QUOTA_ALLOCATION, &allocation_key(&reservation)?, &id)?;
     txn.open_table(QUOTA_PENDING)
         .map_err(MetaError::from)?
         .remove(id.as_u128())
         .map_err(MetaError::from)?;
     Ok(true)
+}
+
+/// Look up the committed allocation `allocation` names and release its counters, returning whether one
+/// was found. Its own [`release`] drops the index entry, so a second call releases nothing.
+fn release_committed_allocation(
+    txn: &redb::WriteTransaction,
+    allocation: &QuotaAllocation<'_>,
+) -> Result<bool, QuotaError> {
+    let key = identity_key((
+        allocation.repository,
+        allocation.project,
+        allocation.version,
+        allocation.digest,
+    ))
+    .map_err(MetaError::from)?;
+    let Some(id): Option<Uuid> = ({
+        let table = txn.open_table(QUOTA_ALLOCATION).map_err(MetaError::from)?;
+        read_record(&table, &key)?
+    }) else {
+        return Ok(false);
+    };
+    release(txn, id, ReleaseScope::Any)
+}
+
+/// Drop `reservation`'s allocation index entry, but only while it still points at this reservation, so
+/// a later duplicate that overwrote the entry keeps its own way back.
+fn forget_allocation(txn: &redb::WriteTransaction, reservation: &QuotaReservationRecord) -> Result<(), QuotaError> {
+    let key = allocation_key(reservation)?;
+    let mut table = txn.open_table(QUOTA_ALLOCATION).map_err(MetaError::from)?;
+    if read_record::<Uuid>(&table, &key)? == Some(reservation.id) {
+        table.remove(key.as_str()).map_err(MetaError::from)?;
+    }
+    Ok(())
+}
+
+fn allocation_key(reservation: &QuotaReservationRecord) -> Result<String, MetaError> {
+    Ok(identity_key((
+        reservation.repository.as_str(),
+        reservation.project.as_deref(),
+        reservation.version.as_deref(),
+        reservation.digest.as_str(),
+    ))?)
 }
 
 fn validate_request(request: &NewQuotaReservation<'_>) -> Result<(), QuotaError> {

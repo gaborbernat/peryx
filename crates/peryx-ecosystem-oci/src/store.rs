@@ -243,12 +243,6 @@ pub fn blob_is_member(meta: &MetaStore, index: &str, repo: &str, digest: &str) -
         .is_some())
 }
 
-/// # Errors
-/// Returns a store error if the write fails.
-pub fn delete_blob_membership(meta: &MetaStore, index: &str, repo: &str, digest: &str) -> Result<bool, MetaError> {
-    meta.delete_driver_value(&blob_membership_key(index, repo, digest))
-}
-
 pub fn blob_membership_key(index: &str, repo: &str, digest: &str) -> String {
     format!("{BLOB_MEMBERSHIP_PREFIX}{index}\u{0}{repo}\u{0}{digest}")
 }
@@ -1008,19 +1002,6 @@ mod tests {
             (
                 blob_is_member(&meta, "store", "app", &digest).unwrap(),
                 blob_is_member(&meta, "store", "other", &digest).unwrap(),
-            ),
-            (true, false)
-        );
-    }
-
-    #[test]
-    fn test_blob_membership_delete_reports_presence() {
-        let (_dir, meta, digest) = blob_member();
-
-        assert_eq!(
-            (
-                delete_blob_membership(&meta, "store", "app", &digest).unwrap(),
-                delete_blob_membership(&meta, "store", "app", &digest).unwrap(),
             ),
             (true, false)
         );

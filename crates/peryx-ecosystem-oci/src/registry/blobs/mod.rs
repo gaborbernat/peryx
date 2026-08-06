@@ -299,7 +299,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let deleted = {
             let mut memberships = self.blob_memberships.write();
             memberships.remove(&membership);
-            let deleted = store::delete_blob_membership(&state.meta, &index.name, &repo, digest)?;
+            let deleted = crate::quota::release_blob_membership(&state.meta, &index.name, &repo, digest)?;
             drop(memberships);
             deleted
         };

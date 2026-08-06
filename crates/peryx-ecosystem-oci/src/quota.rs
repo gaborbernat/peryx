@@ -12,7 +12,7 @@ use peryx_events::metrics::{Event, MetricFamily};
 use peryx_index::Index;
 use peryx_policy::Policy;
 use peryx_storage::meta::{
-    AccountingClass, DriverTxn, MetaStore, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits,
+    AccountingClass, DriverTxn, MetaStore, NewQuotaReservation, QuotaAllocation, QuotaError, QuotaLimit, QuotaLimits,
     QuotaReservationRecord,
 };
 
@@ -186,6 +186,29 @@ pub fn commit_blob_membership(
         });
         Ok(((), entries))
     })
+}
+
+/// Delete a blob's `(index, repo)` membership and release the committed quota allocation its push
+/// charged, in one metadata transaction so a crash cannot leave the repository billed for content it
+/// no longer serves. An unmetered blob has no allocation to release. Reports whether the membership
+/// existed.
+pub fn release_blob_membership(meta: &MetaStore, index: &str, repo: &str, digest: &str) -> Result<bool, ServeError> {
+    let allocation = QuotaAllocation {
+        repository: index,
+        project: Some(repo),
+        version: None,
+        digest,
+    };
+    meta.commit_driver_txn_release_allocation(
+        allocation,
+        |deleted| *deleted,
+        |txn| {
+            Ok((
+                txn.remove(&store::blob_membership_key(index, repo, digest))?,
+                Vec::new(),
+            ))
+        },
+    )
 }
 
 /// Publish a manifest by digest and optional tag, committing a quota reservation with it when the

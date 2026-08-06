@@ -1,8 +1,8 @@
 use std::sync::{Arc, Barrier};
 
 use crate::meta::{
-    AccountingClass, MetaStore, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage,
-    QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
+    AccountingClass, MetaStore, NewQuotaReservation, QuotaAllocation, QuotaError, QuotaLimit, QuotaLimits,
+    QuotaProjectUsage, QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
 };
 
 use super::store;
@@ -901,6 +901,202 @@ fn test_quota_tables_initialize_in_an_existing_database() {
         .unwrap();
 
     assert_eq!(meta.quota_usage("private").unwrap().accounted_bytes.reserved, 7);
+}
+
+#[test]
+fn test_quota_release_by_allocation_frees_committed_counters() {
+    let (_dir, meta) = store();
+    let reservation = meta
+        .reserve_quota(request("package", "1.0", "sha256:first", 7), QuotaLimits::default())
+        .unwrap();
+    meta.commit_driver_txn_with_quota(reservation.id, |txn| {
+        txn.put_local("blob/first", b"member")?;
+        Ok::<_, QuotaError>(((), Vec::new()))
+    })
+    .unwrap();
+
+    let removed = meta
+        .commit_driver_txn_release_allocation(
+            QuotaAllocation {
+                repository: "private",
+                project: Some("package"),
+                version: Some("1.0"),
+                digest: "sha256:first",
+            },
+            |removed| *removed,
+            |txn| Ok::<_, QuotaError>((txn.remove("blob/first")?, Vec::new())),
+        )
+        .unwrap();
+
+    assert_eq!(
+        (
+            removed,
+            meta.get_driver_value("blob/first").unwrap(),
+            meta.quota_usage("private").unwrap(),
+            meta.quota_reservation(reservation.id).unwrap(),
+        ),
+        (true, None, QuotaUsage::default(), None)
+    );
+}
+
+#[test]
+fn test_quota_release_by_allocation_skips_when_the_row_is_absent() {
+    let (_dir, meta) = store();
+    let reservation = meta
+        .reserve_quota(request("package", "1.0", "sha256:first", 7), QuotaLimits::default())
+        .unwrap();
+    meta.commit_driver_txn_with_quota(reservation.id, |txn| {
+        txn.put_local("blob/first", b"member")?;
+        Ok::<_, QuotaError>(((), Vec::new()))
+    })
+    .unwrap();
+
+    let removed = meta
+        .commit_driver_txn_release_allocation(
+            QuotaAllocation {
+                repository: "private",
+                project: Some("package"),
+                version: Some("1.0"),
+                digest: "sha256:first",
+            },
+            |removed| *removed,
+            |txn| Ok::<_, QuotaError>((txn.remove("blob/absent")?, Vec::new())),
+        )
+        .unwrap();
+
+    // A deletion that removed no row releases nothing, so the committed allocation survives intact.
+    assert_eq!(
+        (
+            removed,
+            meta.quota_reservation(reservation.id)
+                .unwrap()
+                .map(|record| record.state),
+            meta.quota_usage("private").unwrap().accounted_bytes,
+        ),
+        (
+            false,
+            Some(QuotaReservationState::Committed),
+            QuotaValue {
+                committed: 7,
+                reserved: 0,
+            },
+        )
+    );
+}
+
+#[test]
+fn test_quota_release_by_allocation_of_an_unmetered_row_changes_no_counters() {
+    let (_dir, meta) = store();
+    // A row published without a quota reservation indexes no allocation, so its deletion finds none.
+    meta.commit_driver_txn(|txn| {
+        txn.put_local("blob/first", b"member")?;
+        Ok::<_, QuotaError>(((), Vec::new()))
+    })
+    .unwrap();
+
+    let removed = meta
+        .commit_driver_txn_release_allocation(
+            QuotaAllocation {
+                repository: "private",
+                project: Some("package"),
+                version: Some("1.0"),
+                digest: "sha256:first",
+            },
+            |removed| *removed,
+            |txn| Ok::<_, QuotaError>((txn.remove("blob/first")?, Vec::new())),
+        )
+        .unwrap();
+
+    assert_eq!(
+        (
+            removed,
+            meta.get_driver_value("blob/first").unwrap(),
+            meta.quota_usage("private").unwrap(),
+        ),
+        (true, None, QuotaUsage::default())
+    );
+}
+
+#[test]
+fn test_quota_release_of_a_shared_digest_frees_bytes_only_after_the_last_reference() {
+    let (_dir, meta) = store();
+    let first = meta
+        .reserve_quota(request("app", "1.0", "sha256:shared", 7), QuotaLimits::default())
+        .unwrap();
+    let second = meta
+        .reserve_quota(request("api", "1.0", "sha256:shared", 7), QuotaLimits::default())
+        .unwrap();
+    for (id, key) in [(first.id, "blob/app"), (second.id, "blob/api")] {
+        meta.commit_driver_txn_with_quota(id, |txn| {
+            txn.put_local(key, b"member")?;
+            Ok::<_, QuotaError>(((), Vec::new()))
+        })
+        .unwrap();
+    }
+
+    let release = |project: &'static str, key: &'static str| {
+        meta.commit_driver_txn_release_allocation(
+            QuotaAllocation {
+                repository: "private",
+                project: Some(project),
+                version: Some("1.0"),
+                digest: "sha256:shared",
+            },
+            |removed| *removed,
+            move |txn| Ok::<_, QuotaError>((txn.remove(key)?, Vec::new())),
+        )
+        .unwrap()
+    };
+
+    // One project still serves the shared digest, so its single accounted copy stays charged.
+    assert!(release("app", "blob/app"));
+    assert_eq!(
+        meta.quota_usage("private").unwrap().accounted_bytes,
+        QuotaValue {
+            committed: 7,
+            reserved: 0,
+        }
+    );
+
+    // The last reference has left; the deduplicated bytes are finally freed.
+    assert!(release("api", "blob/api"));
+    assert_eq!(meta.quota_usage("private").unwrap(), QuotaUsage::default());
+}
+
+#[test]
+fn test_quota_release_keeps_a_duplicate_allocations_own_index_entry() {
+    let (_dir, meta) = store();
+    let first = meta
+        .reserve_quota(request("package", "1.0", "sha256:shared", 7), QuotaLimits::default())
+        .unwrap();
+    let second = meta
+        .reserve_quota(request("package", "1.0", "sha256:shared", 7), QuotaLimits::default())
+        .unwrap();
+    meta.commit_quota_reservation(first.id).unwrap();
+    meta.commit_quota_reservation(second.id).unwrap();
+
+    // Releasing the shadowed duplicate must not clobber the index entry the survivor overwrote it with,
+    // so a later delete still locates the surviving allocation and frees its last reference.
+    meta.release_quota_reservation(first.id).unwrap();
+    meta.commit_driver_txn_release_allocation(
+        QuotaAllocation {
+            repository: "private",
+            project: Some("package"),
+            version: Some("1.0"),
+            digest: "sha256:shared",
+        },
+        |()| true,
+        |_txn| Ok::<_, QuotaError>(((), Vec::new())),
+    )
+    .unwrap();
+
+    assert_eq!(
+        (
+            meta.quota_reservation(second.id).unwrap(),
+            meta.quota_usage("private").unwrap(),
+        ),
+        (None, QuotaUsage::default())
+    );
 }
 
 fn request<'a>(project: &'a str, version: &'a str, digest: &'a str, bytes: u64) -> NewQuotaReservation<'a> {

@@ -87,8 +87,8 @@ pub use policy_decision::{
     PolicyDecisionRecord, PolicyDecisionStoreError, PolicyInputGeneration,
 };
 pub use quota::{
-    AccountingClass, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage, QuotaRepairReport,
-    QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
+    AccountingClass, NewQuotaReservation, QuotaAllocation, QuotaError, QuotaLimit, QuotaLimits, QuotaProjectUsage,
+    QuotaRepairReport, QuotaReservationRecord, QuotaReservationState, QuotaUsage, QuotaValue,
 };
 pub use reclamation::{
     ObservedFrontier, ReadyOutcome, ReclamationError, ReclamationProgress, ReclamationState, ReclamationStatus,
@@ -155,6 +155,7 @@ const QUOTA_PROJECT: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_
 const QUOTA_VERSION: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_version");
 const QUOTA_BLOB: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_blob");
 const QUOTA_RESERVATION: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_reservation");
+const QUOTA_ALLOCATION: TableDefinition<&str, &[u8]> = TableDefinition::new("quota_allocation");
 const QUOTA_PENDING: TableDefinition<u128, u8> = TableDefinition::new("quota_pending");
 const JOURNAL: TableDefinition<u64, &[u8]> = TableDefinition::new("journal");
 const WRITER: TableDefinition<&str, &str> = TableDefinition::new("writer");
@@ -303,6 +304,7 @@ impl MetaStore {
             txn.open_table(QUOTA_VERSION)?;
             txn.open_table(QUOTA_BLOB)?;
             txn.open_table(QUOTA_RESERVATION)?;
+            txn.open_table(QUOTA_ALLOCATION)?;
             txn.open_table(QUOTA_PENDING)?;
             txn.open_table(JOURNAL)?;
             txn.open_table(WRITER)?;

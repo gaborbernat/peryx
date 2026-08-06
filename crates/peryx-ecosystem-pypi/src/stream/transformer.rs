@@ -16,7 +16,7 @@ use crate::{CoreMetadata, File, parse_meta};
 /// real project pages (botocore and friends) sit in the low single-digit MiB; a page an order of
 /// magnitude past that is pathological, and parsing it unbounded is the memory-exhaustion vector this
 /// guards against.
-const MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_PAGE_BYTES: usize = 64 * 1024 * 1024;
 /// The most file entries peryx will transform from one upstream Simple page. Bytes alone do not bound
 /// per-element work: a page of many tiny file objects stays small yet still forces a parse, a policy
 /// check, and a registration each, so the element count is capped on its own.

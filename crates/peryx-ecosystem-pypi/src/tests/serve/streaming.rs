@@ -1,7 +1,22 @@
 //! The live page-stream tee and its materialize path.
 
 use super::support::*;
+use crate::stream::MAX_PAGE_BYTES;
 use peryx_identity::IndexAcl;
+
+/// A `files`-before-`meta` page padded to exactly `len` bytes with insignificant whitespace between
+/// the `files` array and `meta`, where JSON allows it. It lets a test place the whole-page buffer on
+/// the shared byte cap or one byte past it.
+fn padded_files_before_meta_page(file_url: &str, digest: &str, len: usize) -> String {
+    let head = format!(
+        "{{\"name\":\"flask\",\"versions\":[\"1.0\"],\
+         \"files\":[{{\"filename\":\"flask-1.0-py3-none-any.whl\",\"url\":\"{file_url}\",\
+         \"hashes\":{{\"sha256\":\"{digest}\"}}}}]"
+    );
+    let tail = r#","meta":{"api-version":"1.4"}}"#;
+    let pad = len - head.len() - tail.len();
+    format!("{head}{pad}{tail}", pad = " ".repeat(pad))
+}
 
 fn files_before_meta_page(file_url: &str, digest: &str, meta: &str) -> String {
     format!(
@@ -305,6 +320,43 @@ async fn test_live_stream_forwards_a_broken_upstream_transfer() {
     assert!(items.last().is_some_and(Result::is_err));
 }
 #[tokio::test]
+async fn test_buffered_files_before_meta_surfaces_a_broken_transfer() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // `files` opens before `meta`, so the page buffers whole; the socket then closes short of the
+    // declared length mid-buffer, so the drain must surface the upstream error rather than persist.
+    std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+        if let Ok((mut socket, _)) = listener.accept() {
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer);
+            let _ = socket.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/vnd.pypi.simple.v1+json\r\n\
+                  content-length: 500\r\n\r\n{\"name\":\"flask\",\"files\":[{\"filename\":\"a\",",
+            );
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, &format!("http://{addr}/simple/"), |client| {
+        vec![Index {
+            name: "pypi".to_owned(),
+            route: "pypi".to_owned(),
+            ecosystem: peryx_core::Ecosystem::Pypi,
+            kind: IndexKind::Cached { client, offline: false },
+            policy: peryx_policy::Policy::default(),
+            acl: IndexAcl::default(),
+        }]
+    });
+    let outcome = cache::stream_detail(state.serving.clone(), 0, "flask".to_owned()).await;
+    assert!(outcome.is_err());
+    assert!(state.meta.get_index("pypi/flask").unwrap().is_none());
+    drop(
+        cache::flight_gate(&state.serving, "pypi/flask")
+            .try_lock_owned()
+            .unwrap(),
+    );
+}
+#[tokio::test]
 async fn test_live_stream_buffers_quarantined_files_before_meta() {
     let h = harness().await;
     let page = files_before_meta_page(
@@ -325,6 +377,52 @@ async fn test_live_stream_buffers_quarantined_files_before_meta() {
     let detail = crate::parse_detail(&bytes).unwrap();
     assert_eq!(detail.meta.status(), crate::ProjectStatus::Quarantined);
     assert!(detail.files.is_empty());
+}
+#[tokio::test]
+async fn test_live_stream_buffers_files_before_meta_exactly_at_the_byte_cap() {
+    let h = harness().await;
+    let digest = Digest::of(b"wheel");
+    let page = padded_files_before_meta_page(
+        &format!("{}/files/flask.whl", h.server.uri()),
+        digest.as_str(),
+        MAX_PAGE_BYTES,
+    );
+    assert_eq!(page.len(), MAX_PAGE_BYTES);
+    mount_json_page(&h.server, &page).await;
+
+    // A `files`-before-`meta` page sitting exactly on the shared cap still buffers, transforms, and
+    // persists: the bound rejects only what passes the cap.
+    let outcome = cache::stream_detail(h.state.serving.clone(), 0, "flask".to_owned())
+        .await
+        .unwrap();
+    let PageOutcome::Ready(bytes, _) = outcome else {
+        panic!("expected a ready outcome, got {}", matches_name(&outcome));
+    };
+    let detail = crate::parse_detail(&bytes).unwrap();
+    assert_eq!(detail.files.len(), 1);
+    assert!(h.state.meta.get_index("pypi/flask").unwrap().is_some());
+}
+#[tokio::test]
+async fn test_live_stream_rejects_files_before_meta_past_the_byte_cap() {
+    let h = harness().await;
+    let page = padded_files_before_meta_page(
+        &format!("{}/files/flask.whl", h.server.uri()),
+        Digest::of(b"wheel").as_str(),
+        MAX_PAGE_BYTES + 1024,
+    );
+    mount_json_page(&h.server, &page).await;
+
+    // The upstream chunks a `files`-before-`meta` body that crosses the cap after preflight. The
+    // whole-page buffer stops at the limit instead of holding the oversized body, fails, and leaves
+    // the page unpersisted with the flight released.
+    let outcome = cache::stream_detail(h.state.serving.clone(), 0, "flask".to_owned()).await;
+    assert!(matches!(outcome, Err(cache::CacheError::Unavailable)));
+    assert!(h.state.meta.get_index("pypi/flask").unwrap().is_none());
+    drop(
+        cache::flight_gate(&h.state.serving, "pypi/flask")
+            .try_lock_owned()
+            .unwrap(),
+    );
 }
 #[tokio::test]
 async fn test_live_stream_withholds_quarantined_files_when_versions_outrun_the_preflight_cap() {

@@ -7,6 +7,7 @@ use super::{
     transform_error,
 };
 use crate::cache::fetch::canonical_json;
+use crate::stream::{MAX_PAGE_BYTES, TransformError};
 
 pub(super) struct FreshJsonStream {
     pub(super) state: Arc<ServingState>,
@@ -151,8 +152,15 @@ async fn buffer_whole_page(
     context: crate::stream::PageContext,
 ) -> Result<(Vec<u8>, Vec<u8>, PageSummary), CacheError> {
     use futures_util::StreamExt as _;
+    // Bound the buffer as the transformer does: a `files`-before-`meta` page whose whole body would
+    // pass `MAX_PAGE_BYTES` must fail here, before `raw` grows unbounded, rather than after the second
+    // transformer pass allocates a matching output vector from the oversized input.
     while let Some(chunk) = body.next().await {
-        raw.extend_from_slice(&chunk?);
+        let chunk = chunk?;
+        if raw.len().saturating_add(chunk.len()) > MAX_PAGE_BYTES {
+            return Err(transform_error(TransformError::TooLarge));
+        }
+        raw.extend_from_slice(&chunk);
     }
     let status = crate::parse_detail(&raw)
         .map_err(CacheError::Simple)?

@@ -366,6 +366,20 @@ async fn test_if_range_without_a_range_is_ignored() {
     assert!(!headers.contains_key(header::CONTENT_RANGE));
     assert_eq!(got, LAYER);
 }
+// Two single ranges on separate field lines combine into a multi-range this server does not serve, so
+// it drops the Range and answers the whole layer rather than honoring only the first line.
+#[tokio::test]
+async fn test_repeated_range_lines_serve_the_whole_layer_as_a_multi_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, uri) = stored_layer(&dir);
+
+    let repeated = [("range", "bytes=0-1"), ("range", "bytes=4-5")];
+    let (status, headers, got) = send_with(&app, Method::GET, &uri, &repeated).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key(header::CONTENT_RANGE));
+    assert_eq!(got, LAYER);
+}
 #[tokio::test]
 async fn test_blob_missing_on_hosted_is_unknown() {
     let dir = tempfile::tempdir().unwrap();

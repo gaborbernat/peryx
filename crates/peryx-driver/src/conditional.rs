@@ -37,11 +37,22 @@ pub fn if_none_match(field: &str, etag: &str) -> bool {
 /// Only an exact strong match lets the range through, which is a byte comparison against a tag the
 /// caller already holds: no allocation on the artifact hot path. An `If-Range` on a request without a
 /// `Range` conditions nothing, so it is ignored.
+///
+/// A `Range` value is a range-set, so repeated field lines combine into a multi-range request this
+/// server does not serve; it drops the `Range` and answers the whole representation, as one comma-joined
+/// multi-range already does. An `If-Range` carries a single validator, not a list: a second field line
+/// is malformed, so the range is not honored rather than trusting an arbitrary line of a contradictory
+/// pair.
 #[must_use]
 pub fn applicable_range<'h>(headers: &'h HeaderMap, etag: &str) -> Option<&'h str> {
-    let range = headers.get(header::RANGE)?.to_str().ok()?;
-    headers.get(header::IF_RANGE).map_or(Some(range), |field| {
-        field.to_str().is_ok_and(|field| field == etag).then_some(range)
+    let mut ranges = headers.get_all(header::RANGE).iter();
+    let range = ranges.next()?.to_str().ok()?;
+    if ranges.next().is_some() {
+        return None;
+    }
+    let mut if_range = headers.get_all(header::IF_RANGE).iter();
+    if_range.next().map_or(Some(range), |field| {
+        (if_range.next().is_none() && field.to_str().is_ok_and(|field| field == etag)).then_some(range)
     })
 }
 

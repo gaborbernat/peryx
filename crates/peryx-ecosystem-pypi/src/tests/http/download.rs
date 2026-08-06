@@ -476,6 +476,43 @@ async fn test_range_is_served_when_if_none_match_holds_other_bytes() {
     assert_eq!(body, &WHEEL[2..=5]);
 }
 #[tokio::test]
+async fn test_matching_if_none_match_in_a_later_field_line_is_not_modified() {
+    let h = harness().await;
+    let uri = cached_wheel_uri(&h);
+
+    let repeated = [("if-none-match", "\"0000\""), ("if-none-match", &*wheel_etag())];
+    let (status, headers, body) = get_bytes_with_headers(&h.state, &uri, &repeated).await;
+
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert_eq!(headers[header::ETAG], wheel_etag());
+    assert!(body.is_empty());
+}
+#[tokio::test]
+async fn test_repeated_range_lines_serve_the_whole_wheel_as_a_multi_range() {
+    let h = harness().await;
+    let uri = cached_wheel_uri(&h);
+
+    let repeated = [("range", "bytes=0-1"), ("range", "bytes=4-5")];
+    let (status, headers, body) = get_bytes_with_headers(&h.state, &uri, &repeated).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key(header::CONTENT_RANGE));
+    assert_eq!(body, WHEEL);
+}
+#[tokio::test]
+async fn test_repeated_if_modified_since_lines_serve_the_whole_wheel() {
+    let h = harness().await;
+    let uri = cached_wheel_uri(&h);
+    let dated = wheel_last_modified(&h, &uri).await;
+
+    let repeated = [("if-modified-since", &*dated), ("if-modified-since", &*dated)];
+    let (status, headers, body) = get_bytes_with_headers(&h.state, &uri, &repeated).await;
+
+    assert_eq!(status, StatusCode::OK, "a repeated singleton field states no condition");
+    assert!(headers.contains_key(header::LAST_MODIFIED));
+    assert_eq!(body, WHEEL);
+}
+#[tokio::test]
 async fn test_matching_if_none_match_never_fetches_an_uncached_artifact() {
     let h = harness().await;
     let digest = Digest::of(WHEEL);

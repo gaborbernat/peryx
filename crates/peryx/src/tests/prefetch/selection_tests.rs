@@ -455,3 +455,62 @@ async fn test_mirror_plan_skips_malformed_include_directives() {
     .await;
     assert!(text.contains("page\tpypi\tflask"), "missing flask in:\n{text}");
 }
+
+#[tokio::test]
+async fn test_mirror_requirements_join_continuations_and_strip_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    std::fs::write(
+        dir.path().join("requirements.txt"),
+        "flask==2.3 \\\n    --hash=sha256:aaa \\\n    --hash=sha256:bbb\n\
+         requests[security]==2.31\t# optional marker\n\
+           # indented comment\n\
+         # trailing slash comment \\\n   \nbar==1 \\\n",
+    )
+    .unwrap();
+    for name in ["flask-2.3", "requests-2.31", "bar-1"] {
+        let (project, _) = name.split_once('-').unwrap();
+        Mock::given(method("GET"))
+            .and(path(format!("/simple/{project}/")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                detail_page(
+                    project,
+                    vec![file_entry(
+                        &format!("{name}.tar.gz"),
+                        Digest::of(name.as_bytes()).as_str(),
+                        4,
+                    )],
+                ),
+                "application/vnd.pypi.simple.v1+json",
+            ))
+            .mount(&server)
+            .await;
+    }
+    let mut options = command_options(dir.path(), Vec::new());
+    options.requirements.push(dir.path().join("requirements.txt"));
+
+    let text = run_ok(
+        &mirror(&dir, &server),
+        &PrefetchCommand::Plan(PrefetchPlanArgs { options }),
+    )
+    .await;
+    assert!(text.contains("page\tpypi\tflask"), "{text}");
+    assert!(text.contains("page\tpypi\trequests"), "{text}");
+    assert!(text.contains("page\tpypi\tbar"), "{text}");
+}
+
+#[tokio::test]
+async fn test_mirror_requirements_keep_hash_glued_to_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let requirements = dir.path().join("requirements.txt");
+    std::fs::write(&requirements, "numpy#notacomment\n").unwrap();
+    let mut options = command_options(dir.path(), Vec::new());
+    options.requirements.push(requirements);
+    let (_text, err) = run_err(
+        &mirror(&dir, &server),
+        &PrefetchCommand::Plan(PrefetchPlanArgs { options }),
+    )
+    .await;
+    assert!(err.to_string().contains("numpy#notacomment"), "{err}");
+}

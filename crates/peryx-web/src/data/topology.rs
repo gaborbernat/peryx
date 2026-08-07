@@ -15,6 +15,12 @@ const TOPOLOGY_STREAM_URL: &str = "/+availability/topology/stream";
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 const TOPOLOGY_STREAM_EVENT: &str = "topology";
 
+/// How long a dropped connection may stay live before the badge admits it is reconnecting. The browser
+/// retries within its own window, so a routine reconnect that delivers a fresh event inside this grace
+/// period never flickers the badge; only a reconnect that outlasts it surfaces as `Reconnecting`.
+#[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+const RECONNECT_GRACE_MS: i32 = 400;
+
 /// The availability topology snapshot, projected to the caller's class.
 ///
 /// The server reads and projects `AppState`; the hydrated browser fetches `/+availability/topology`,
@@ -95,7 +101,55 @@ pub fn subscribe_topology(
     let source = web_sys::EventSource::new(TOPOLOGY_STREAM_URL).ok()?;
     let on_status: std::rc::Rc<dyn Fn(StreamStatus)> = std::rc::Rc::new(on_status);
 
-    let snapshot_status = std::rc::Rc::clone(&on_status);
+    // Defer the `Reconnecting` badge behind a grace window so a routine, quickly-recovered drop never
+    // flickers it; a definite status (live, stale, offline) cancels any deferred flip and applies at once.
+    let window = web_sys::window()?;
+    let pending = std::rc::Rc::new(std::cell::RefCell::new(None::<i32>));
+
+    let cancel = {
+        let window = window.clone();
+        let pending = std::rc::Rc::clone(&pending);
+        std::rc::Rc::new(move || {
+            if let Some(handle) = pending.borrow_mut().take() {
+                window.clear_timeout_with_handle(handle);
+            }
+        })
+    };
+
+    let apply: std::rc::Rc<dyn Fn(StreamStatus)> = {
+        let cancel = std::rc::Rc::clone(&cancel);
+        let on_status = std::rc::Rc::clone(&on_status);
+        std::rc::Rc::new(move |status| {
+            cancel();
+            on_status(status);
+        })
+    };
+
+    let fire_connecting = {
+        let on_status = std::rc::Rc::clone(&on_status);
+        let pending = std::rc::Rc::clone(&pending);
+        Closure::<dyn FnMut()>::new(move || {
+            *pending.borrow_mut() = None;
+            on_status(StreamStatus::Connecting);
+        })
+    };
+
+    let defer_connecting: std::rc::Rc<dyn Fn()> = {
+        let cancel = std::rc::Rc::clone(&cancel);
+        let window = window.clone();
+        let pending = std::rc::Rc::clone(&pending);
+        std::rc::Rc::new(move || {
+            cancel();
+            if let Ok(handle) = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                fire_connecting.as_ref().unchecked_ref(),
+                RECONNECT_GRACE_MS,
+            ) {
+                *pending.borrow_mut() = Some(handle);
+            }
+        })
+    };
+
+    let snapshot_apply = std::rc::Rc::clone(&apply);
     let on_snapshot = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
         let Some(data) = event.data().as_string() else {
             return;
@@ -105,30 +159,31 @@ pub fn subscribe_topology(
             // not fired yet; a body that will not decode marks the render stale rather than dropping it
             // silently, so a protocol error can never freeze under a live badge.
             Ok(snapshot) => {
-                snapshot_status(StreamStatus::Live);
+                snapshot_apply(StreamStatus::Live);
                 on_snapshot(snapshot);
             }
-            Err(_) => snapshot_status(StreamStatus::Stale),
+            Err(_) => snapshot_apply(StreamStatus::Stale),
         }
     });
     source
         .add_event_listener_with_callback(TOPOLOGY_STREAM_EVENT, on_snapshot.as_ref().unchecked_ref())
         .ok()?;
 
-    let opened = std::rc::Rc::clone(&on_status);
-    let on_open = Closure::<dyn FnMut()>::new(move || opened(StreamStatus::Live));
+    let open_apply = std::rc::Rc::clone(&apply);
+    let on_open = Closure::<dyn FnMut()>::new(move || open_apply(StreamStatus::Live));
     source.set_onopen(Some(on_open.as_ref().unchecked_ref()));
 
     let errored_source = source.clone();
-    let error_status = std::rc::Rc::clone(&on_status);
+    let error_apply = std::rc::Rc::clone(&apply);
     let on_error = Closure::<dyn FnMut()>::new(move || {
-        // `CLOSED` means the browser stopped retrying, so the feed is frozen; any other state is a
-        // transient drop it is already reconnecting through.
-        error_status(if errored_source.ready_state() == web_sys::EventSource::CLOSED {
-            StreamStatus::Offline
+        // `CLOSED` means the browser stopped retrying, so the feed is frozen and reported at once; any
+        // other state is a transient drop it is already reconnecting through, so hold the badge and flip
+        // to `Reconnecting` only if the grace window passes without a recovered event.
+        if errored_source.ready_state() == web_sys::EventSource::CLOSED {
+            error_apply(StreamStatus::Offline);
         } else {
-            StreamStatus::Connecting
-        });
+            defer_connecting();
+        }
     });
     source.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 

@@ -57,6 +57,7 @@ web-sys = { workspace = true, optional = true, features = [
     "Location",
     "MessageEvent",
     "ProgressEvent",
+    "Window",
     "XmlHttpRequest",
     "XmlHttpRequestEventTarget",
     "XmlHttpRequestUpload",

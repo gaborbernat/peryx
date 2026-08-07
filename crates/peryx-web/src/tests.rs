@@ -258,26 +258,86 @@ fn test_search_page_from_json() {
             "display_name": "Flask",
             "normalized_name": "flask",
             "route": "root/pypi",
-                        "type": "override",
+            "index": "root/pypi",
+            "ecosystem": "pypi",
+            "type_label": "package",
+            "type": "override",
             "available": true,
             "summary": "web framework",
         }, {
             "display_name": "Django",
             "normalized_name": "django",
             "route": "root/pypi",
+            "index": "root/pypi",
+            "ecosystem": "pypi",
+            "type_label": "package",
             "type": "cached",
-            "summary": "web framework",
+            "available": false,
         }],
     });
-    let page = UiSearchPage::from_search(&value);
+    let page = UiSearchPage::from_search(&value).expect("well-formed response parses");
     assert_eq!(page.query, "flask");
     assert_eq!(page.availability, "local");
     assert_eq!(page.page, 2);
     assert_eq!(page.results[0].source_label(), "Override");
     assert!(page.results[0].available);
     assert_eq!(page.results[0].summary.as_deref(), Some("web framework"));
-    // A result missing the flag reads as not locally available rather than failing to parse.
+    // The optional summary is the only result field that may be absent.
+    assert_eq!(page.results[1].summary, None);
     assert!(!page.results[1].available);
+}
+
+#[test]
+fn test_search_page_accepts_empty_results() {
+    let value = serde_json::json!({
+        "query": "",
+        "type": "all",
+        "availability": "all",
+        "page": 1,
+        "page_size": 25,
+        "total": 0,
+        "results": [],
+    });
+    let page = UiSearchPage::from_search(&value).expect("a valid empty response parses");
+    assert_eq!(page.total, 0);
+    assert!(page.results.is_empty());
+}
+
+#[rstest]
+#[case::empty_object(serde_json::json!({}))]
+#[case::missing_pagination(serde_json::json!({
+    "query": "flask",
+    "type": "all",
+    "availability": "all",
+    "total": 0,
+    "results": [],
+}))]
+#[case::wrong_scalar_type(serde_json::json!({
+    "query": "flask",
+    "type": "all",
+    "availability": "all",
+    "page": "2",
+    "page_size": 25,
+    "total": 0,
+    "results": [],
+}))]
+#[case::malformed_result(serde_json::json!({
+    "query": "flask",
+    "type": "all",
+    "availability": "all",
+    "page": 1,
+    "page_size": 25,
+    "total": 1,
+    "results": [{
+        "display_name": "Flask",
+        "normalized_name": "flask",
+        "route": "root/pypi",
+        "type": "cached",
+    }],
+}))]
+fn test_search_page_rejects_malformed(#[case] value: serde_json::Value) {
+    let error = UiSearchPage::from_search(&value).expect_err("malformed response is rejected");
+    assert!(error.starts_with("malformed search response:"), "{error}");
 }
 
 #[rstest]

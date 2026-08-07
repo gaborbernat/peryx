@@ -77,6 +77,26 @@ fn test_apply_sums_rows_across_distinct_intervals() {
 }
 
 #[test]
+fn test_total_sums_a_dimension_across_producers() {
+    let mut state = ApplyState::new(ApplyLimits::default());
+    let dimension = key(20_000, "3.0", "pypi-org");
+    state
+        .apply(&batch(interval("east", 1, 1), &[(dimension.clone(), 2, 50)]))
+        .unwrap();
+    state
+        .apply(&batch(interval("west", 1, 1), &[(dimension.clone(), 3, 70)]))
+        .unwrap();
+
+    assert_eq!(
+        state.total(&dimension),
+        AggregateDelta {
+            downloads: 5,
+            bytes: 120
+        }
+    );
+}
+
+#[test]
 fn test_apply_rejects_a_duplicate_interval_without_changing_totals() {
     let mut state = ApplyState::new(ApplyLimits::default());
     let dimension = key(20_000, "3.0", "pypi-org");
@@ -382,13 +402,13 @@ fn test_restore_rejects_an_unknown_schema() {
     assert!(matches!(
         error,
         SnapshotError::UnsupportedSchema {
-            expected: 1,
+            expected: 2,
             found: 999
         }
     ));
     assert_eq!(
         error.to_string(),
-        "analytics apply snapshot schema 999 is not the 1 this build restores"
+        "analytics apply snapshot schema 999 is not the 2 this build restores"
     );
 }
 
@@ -562,7 +582,7 @@ fn test_receiver_restore_rejects_a_foreign_schema() {
     assert!(matches!(
         error,
         SnapshotError::UnsupportedSchema {
-            expected: 1,
+            expected: 2,
             found: 999
         }
     ));

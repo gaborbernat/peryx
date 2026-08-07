@@ -201,6 +201,13 @@ fn test_an_empty_expected_set_is_unavailable() {
     assert_eq!(report.required_day, None);
     assert_eq!(report.lag_days, None);
     assert!(report.producers.is_empty());
+    assert_eq!(
+        report.totals,
+        AggregateDelta {
+            downloads: 3,
+            bytes: 30
+        }
+    );
 }
 
 #[test]
@@ -312,6 +319,77 @@ fn test_a_restart_under_a_higher_epoch_leads_the_frontier() {
 
     assert_eq!(report.producers[0].accepted, Some((AuthorityEpoch(2), 4)));
     assert_eq!(report.completeness, Completeness::Complete);
+}
+
+#[test]
+fn test_an_unexpected_producer_is_left_out_of_the_totals() {
+    let batches = [
+        batch("east", 1, 10, &[("pypi", "flask", 10, 100)]),
+        batch("rogue", 1, 10, &[("pypi", "flask", 1_000, 10_000)]),
+    ];
+    let report = assess_completeness(
+        &receiver(&batches),
+        &expected(&[("east", "east-dc")]),
+        &query(0, 10, 11, None),
+    );
+
+    assert_eq!(report.completeness, Completeness::Complete);
+    assert_eq!(
+        report.totals,
+        AggregateDelta {
+            downloads: 10,
+            bytes: 100
+        }
+    );
+    assert_eq!(
+        report.buckets,
+        vec![DayBucket {
+            day: 10,
+            downloads: 10,
+            bytes: 100
+        }]
+    );
+    assert_eq!(
+        producer_states(&report),
+        vec![("east".to_owned(), Completeness::Complete)]
+    );
+}
+
+#[test]
+fn test_a_duplicate_delivery_folds_the_totals_once() {
+    let delivery = batch("east", 1, 10, &[("pypi", "flask", 3, 30)]);
+    let mut receiver = AnalyticsReceiver::new(DEFAULT_APPLY_LIMITS);
+    receiver.apply(&delivery).unwrap();
+    receiver.apply(&delivery).unwrap();
+
+    let report = assess_completeness(&receiver, &expected(&[("east", "east-dc")]), &query(0, 10, 11, None));
+
+    assert_eq!(
+        report.totals,
+        AggregateDelta {
+            downloads: 3,
+            bytes: 30
+        }
+    );
+}
+
+#[test]
+fn test_a_restored_receiver_still_excludes_an_unexpected_producer() {
+    let batches = [
+        batch("east", 1, 10, &[("pypi", "flask", 10, 100)]),
+        batch("rogue", 1, 10, &[("pypi", "flask", 1_000, 10_000)]),
+    ];
+    let members = expected(&[("east", "east-dc")]);
+    let query = query(0, 10, 11, None);
+    let restored = AnalyticsReceiver::restore(&receiver(&batches).encode(), DEFAULT_APPLY_LIMITS).unwrap();
+
+    assert_eq!(
+        assess_completeness(&restored, &members, &query).totals,
+        AggregateDelta {
+            downloads: 10,
+            bytes: 100
+        }
+    );
 }
 
 #[test]

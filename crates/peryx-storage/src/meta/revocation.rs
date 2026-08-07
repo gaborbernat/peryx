@@ -122,6 +122,34 @@ pub enum DigestRevocationQueryError {
     InvalidLimit,
 }
 
+/// Recompute the derived active count from the records table so a store migrated from before the
+/// index existed, or one whose count drifted, reflects its rows before the first read.
+///
+/// The count is bounded by the row count, so a fresh sum cannot overflow the way an externally
+/// supplied count can.
+///
+/// # Errors
+/// Returns a store error when the tables cannot be opened, read, decoded, or written.
+pub(super) fn backfill_digest_revocation_state(txn: &redb::WriteTransaction) -> Result<(), MetaError> {
+    let active = {
+        let records = txn.open_table(DIGEST_REVOCATION)?;
+        let mut active: u64 = 0;
+        for entry in records.iter()? {
+            let (_key, value) = entry?;
+            let record: DigestRevocation = serde_json::from_slice(value.value())?;
+            if record.state == DigestRevocationState::Active {
+                active += 1;
+            }
+        }
+        active
+    };
+    let mut state = txn.open_table(DIGEST_REVOCATION_STATE)?;
+    if state.get(ACTIVE_COUNT_KEY)?.map_or(0, |count| count.value()) != active {
+        state.insert(ACTIVE_COUNT_KEY, active)?;
+    }
+    Ok(())
+}
+
 impl MetaStore {
     /// Create, retry, or reopen the revocation for one digest in one transaction.
     ///

@@ -345,6 +345,7 @@ impl MetaStore {
             txn.open_table(SCOPED_TOKEN_REACH)?;
             txn.open_table(SCOPED_TOKEN_VERIFIER)?;
         }
+        revocation::backfill_digest_revocation_state(&txn)?;
         txn.commit()?;
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadWrite(db)),

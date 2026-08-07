@@ -4,7 +4,7 @@ use peryx_identity::{ArtifactDigest, RevocationReason, UserId};
 use rstest::rstest;
 
 use crate::meta::{
-    DigestRevocationQuery, DigestRevocationQueryError, DigestRevocationState, DigestRevocationStatus,
+    DigestRevocation, DigestRevocationQuery, DigestRevocationQueryError, DigestRevocationState, DigestRevocationStatus,
     LiftRevocationOutcome, MetaStore, PutRevocationError, PutRevocationOutcome,
 };
 
@@ -317,4 +317,102 @@ fn test_digest_revocation_active_count_fails_closed_on_an_incomplete_index(
         Err(crate::meta::MetaError::DriverPrecondition(message))
             if message == "digest revocation index is incomplete"
     ));
+}
+
+fn write_raw_revocation_rows(path: &std::path::Path, records: &[DigestRevocation]) {
+    let database = redb::Database::create(path).unwrap();
+    let txn = database.begin_write().unwrap();
+    {
+        let mut table = txn
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new("digest_revocation"))
+            .unwrap();
+        for record in records {
+            table
+                .insert(
+                    record.digest.canonical().as_str(),
+                    serde_json::to_vec(record).unwrap().as_slice(),
+                )
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+    drop(database);
+}
+
+fn revocation(suffix: u8, state: DigestRevocationState) -> DigestRevocation {
+    DigestRevocation {
+        digest: digest(suffix),
+        reason: reason("incident"),
+        created_by: UserId::random(),
+        created_at_unix: 10,
+        state,
+        revision: 1,
+    }
+}
+
+#[test]
+fn test_digest_revocation_open_backfills_active_count_for_pre_index_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let actor = UserId::random();
+    write_raw_revocation_rows(
+        &path,
+        &[
+            revocation(1, DigestRevocationState::Active),
+            revocation(2, DigestRevocationState::Active),
+            revocation(
+                3,
+                DigestRevocationState::Lifted {
+                    lifted_by: actor,
+                    lifted_at_unix: 20,
+                },
+            ),
+        ],
+    );
+
+    let store = MetaStore::open(&path).unwrap();
+
+    assert!(store.has_active_digest_revocation().unwrap());
+    store.lift_digest_revocation(&digest(1), &UserId::random(), 30).unwrap();
+    assert!(store.has_active_digest_revocation().unwrap());
+    store.lift_digest_revocation(&digest(2), &UserId::random(), 31).unwrap();
+    assert!(!store.has_active_digest_revocation().unwrap());
+}
+
+#[test]
+fn test_digest_revocation_open_leaves_a_consistent_count_untouched() {
+    let (dir, store) = store();
+    store
+        .put_digest_revocation(&digest(1), &reason("incident"), &UserId::random(), 10)
+        .unwrap();
+    drop(store);
+
+    let store = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    assert!(store.has_active_digest_revocation().unwrap());
+    store.lift_digest_revocation(&digest(1), &UserId::random(), 11).unwrap();
+    assert!(!store.has_active_digest_revocation().unwrap());
+}
+
+#[test]
+fn test_digest_revocation_open_reconciles_a_drifted_active_count() {
+    let (dir, store) = store();
+    let path = dir.path().join("peryx.redb");
+    store
+        .put_digest_revocation(&digest(1), &reason("incident"), &UserId::random(), 10)
+        .unwrap();
+    drop(store);
+    let database = redb::Database::open(&path).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.open_table(redb::TableDefinition::<&str, u64>::new("digest_revocation_state"))
+        .unwrap()
+        .insert("active_count", 5)
+        .unwrap();
+    txn.commit().unwrap();
+    drop(database);
+
+    let store = MetaStore::open(&path).unwrap();
+
+    assert!(store.has_active_digest_revocation().unwrap());
+    store.lift_digest_revocation(&digest(1), &UserId::random(), 11).unwrap();
+    assert!(!store.has_active_digest_revocation().unwrap());
 }

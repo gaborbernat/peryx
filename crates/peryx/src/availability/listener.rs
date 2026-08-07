@@ -207,11 +207,12 @@ async fn command(
 }
 
 /// Map a control failure to its HTTP response: a leadership or reachability failure is retryable `503`, an
-/// invalid transition is a `409`, and a saturated concurrency bound is `429`.
+/// invalid transition or an idempotency key reused for a different command is a `409`, and a saturated
+/// concurrency bound is `429`.
 fn command_error(error: &ControlError) -> Response {
     let status = match error {
         ControlError::NotLeader { .. } | ControlError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-        ControlError::Invalid(_) => StatusCode::CONFLICT,
+        ControlError::Invalid(_) | ControlError::KeyReuse => StatusCode::CONFLICT,
         ControlError::Overloaded => StatusCode::TOO_MANY_REQUESTS,
     };
     (status, error.to_string()).into_response()

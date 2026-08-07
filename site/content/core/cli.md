@@ -243,8 +243,7 @@ file copies with hash checks. It refuses an existing non-empty backup directory.
 
 `config.toml` is an effective config snapshot. Treat the backup directory as sensitive when the config contains upload
 tokens or upstream credentials. On Unix, `backup create` creates the root `0700` and the config snapshot, metadata
-store, and manifest `0600` regardless of umask, and `restore` writes the restored `config.toml` and `peryx.redb`
-`0600`.
+store, and manifest `0600` regardless of umask, and `restore` writes the restored `config.toml` and `peryx.redb` `0600`.
 
 `backup verify` rehashes the config snapshot, blob index, and each blob. It also opens the copied metadata store and
 checks that every referenced digest appears in `blobs.tsv`. It prints `ok` on success; on failure it prints `problem`

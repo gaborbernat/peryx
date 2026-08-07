@@ -40,7 +40,9 @@ fn TopologyBody(snapshot: TopologySnapshot) -> impl IntoView {
     let node_roles = snapshot.nodes.iter().map(|node| node.role).collect::<Vec<_>>();
 
     let live = RwSignal::new(snapshot);
-    let status = RwSignal::new(StreamStatus::Live);
+    // A feed claim is only true once the stream opens or delivers a valid event, so the badge starts
+    // connecting and turns live from `subscribe_topology`, never on the strength of a pending connection.
+    let status = RwSignal::new(StreamStatus::Connecting);
     // The static render carries no feed badge: a claim about the live connection is meaningful only once
     // the browser opens the stream, so the badge appears after hydration rather than on the server render.
     let streaming = RwSignal::new(false);

@@ -589,23 +589,19 @@ fn trusted_publishing(config: &Config, signer: Signer) -> anyhow::Result<Option<
         .auth
         .trusted_publishers
         .iter()
-        .filter_map(|publisher| {
-            // `Config::validate` rejects a publisher whose repository is not a configured writable index, so
-            // the lookup is present here; skipping a stray publisher keeps this construction total instead of
-            // reintroducing the panic that indexing the map by an unknown name would cause.
-            repositories
-                .get(publisher.repository.as_str())
-                .map(|repository| peryx_identity::PublisherBinding {
-                    id: publisher.id.clone(),
-                    repository: repository.route.clone(),
-                    publisher: peryx_identity::TrustedPublisher {
-                        issuer: publisher.issuer.clone(),
-                        audience: config.auth.oidc_audience.clone(),
-                        subject: peryx_identity::Glob::new(&publisher.subject),
-                        claims: publisher.claims.clone(),
-                        projects: publisher.projects.iter().map(peryx_identity::Glob::new).collect(),
-                    },
-                })
+        .map(|publisher| {
+            let repository = repositories[publisher.repository.as_str()];
+            peryx_identity::PublisherBinding {
+                id: publisher.id.clone(),
+                repository: repository.route.clone(),
+                publisher: peryx_identity::TrustedPublisher {
+                    issuer: publisher.issuer.clone(),
+                    audience: config.auth.oidc_audience.clone(),
+                    subject: peryx_identity::Glob::new(&publisher.subject),
+                    claims: publisher.claims.clone(),
+                    projects: publisher.projects.iter().map(peryx_identity::Glob::new).collect(),
+                },
+            }
         })
         .collect();
     peryx_identity::OidcRuntime::new(bindings, signer, config.auth.token_ttl_secs)

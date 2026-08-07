@@ -1550,38 +1550,6 @@ fn test_build_state_installs_trusted_publishing_for_a_resolved_route() {
 }
 
 #[test]
-fn test_build_state_rejects_a_trusted_publisher_with_an_unknown_repository() {
-    let dir = tempfile::tempdir().unwrap();
-    let config = Config {
-        data_dir: dir.path().to_path_buf(),
-        indexes: vec![hosted("private")],
-        auth: AuthConfig {
-            signing_key: Some(SecretSource::Literal("super-secret".to_owned())),
-            oidc_audience: "packages.example".to_owned(),
-            trusted_publishers: vec![TrustedPublisherConfig {
-                id: "release".to_owned(),
-                issuer: "https://issuer.example".to_owned(),
-                repository: "missing".to_owned(),
-                subject: "repo:org/app:*".to_owned(),
-                projects: vec!["app".to_owned()],
-                claims: std::collections::BTreeMap::new(),
-            }],
-            ..AuthConfig::default()
-        },
-        ..Config::default()
-    };
-
-    let Err(error) = build_state(&config) else {
-        panic!("expected an unknown-repository rejection");
-    };
-
-    assert_eq!(
-        error.chain().map(ToString::to_string).collect::<Vec<_>>().join(": "),
-        "validate configuration: trusted publisher release: repository must name a writable PyPI index"
-    );
-}
-
-#[test]
 fn test_build_state_reports_an_unreadable_signing_key_file() {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {

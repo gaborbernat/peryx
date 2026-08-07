@@ -534,3 +534,134 @@ fn test_discard_upload_surfaces_a_filesystem_fault() {
 
     assert_eq!(error.kind(), crate::blob::BlobErrorKind::Io);
 }
+
+#[test]
+fn test_write_repairs_a_truncated_resident_blob() {
+    let (_dir, store) = store();
+    let digest = store.write(b"payload").unwrap();
+    // A prior crash or bit-rot leaves a short file where the blob belongs; a bare existence check
+    // would accept it and block self-repair.
+    std::fs::write(store.path_for(&digest), b"pay").unwrap();
+
+    assert_eq!(store.write(b"payload").unwrap(), digest);
+    assert_eq!(store.read(&digest).unwrap(), b"payload");
+}
+
+#[test]
+fn test_write_repairs_same_length_corruption() {
+    let (_dir, store) = store();
+    let digest = store.write(b"payload").unwrap();
+    // Same length, different bytes: only a stream-hash, not a size check, catches this.
+    std::fs::write(store.path_for(&digest), b"PAYLOAD").unwrap();
+
+    store.write(b"payload").unwrap();
+    assert!(store.verify(&digest).unwrap());
+}
+
+#[test]
+fn test_write_leaves_a_valid_resident_blob_untouched() {
+    let (_dir, store) = store();
+    let digest = store.write(b"payload").unwrap();
+    let before = std::fs::metadata(store.path_for(&digest)).unwrap().modified().unwrap();
+
+    store.write(b"payload").unwrap();
+
+    let after = std::fs::metadata(store.path_for(&digest)).unwrap().modified().unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn test_commit_staged_repairs_a_truncated_resident_blob() {
+    let (_dir, store) = store();
+    let digest = store.write(b"streamed content").unwrap();
+    std::fs::write(store.path_for(&digest), b"strea").unwrap();
+    let mut pending = store.begin().unwrap();
+    pending.write(b"streamed content").unwrap();
+
+    store.commit_staged(pending.finish().unwrap()).unwrap();
+
+    assert_eq!(store.read(&digest).unwrap(), b"streamed content");
+    assert!(store.verify(&digest).unwrap());
+}
+
+#[test]
+fn test_commit_staged_repairs_same_length_corruption() {
+    let (_dir, store) = store();
+    let digest = store.write(b"streamed content").unwrap();
+    std::fs::write(store.path_for(&digest), b"STREAMED CONTENT").unwrap();
+    let mut pending = store.begin().unwrap();
+    pending.write(b"streamed content").unwrap();
+
+    store.commit_staged(pending.finish().unwrap()).unwrap();
+
+    assert_eq!(store.read(&digest).unwrap(), b"streamed content");
+}
+
+#[test]
+fn test_commit_over_a_directory_at_the_digest_path_is_an_io_error() {
+    let (_dir, store) = store();
+    let digest = Digest::of(b"blocked");
+    // A directory squatting the blob path fails the move for a reason that is not a lost race, so the
+    // commit must surface it rather than treat the occupant as a stored blob.
+    std::fs::create_dir_all(store.path_for(&digest)).unwrap();
+    let mut pending = store.begin().unwrap();
+    pending.write(b"blocked").unwrap();
+
+    let error = store.commit_staged(pending.finish().unwrap()).unwrap_err();
+
+    assert_eq!(error.kind(), crate::blob::BlobErrorKind::Io);
+}
+
+#[test]
+fn test_finish_upload_repairs_a_truncated_resident_blob() {
+    let (_dir, store) = store();
+    let digest = store.write(b"streamed content").unwrap();
+    std::fs::write(store.path_for(&digest), b"stream").unwrap();
+    store.stage_upload_chunk("sess-1", 0, b"streamed content").unwrap();
+
+    store.finish_upload("sess-1", &digest).unwrap();
+
+    assert_eq!(store.read(&digest).unwrap(), b"streamed content");
+    assert_eq!(store.staged_upload_len("sess-1").unwrap(), None);
+}
+
+#[test]
+fn test_finish_upload_repairs_same_length_corruption() {
+    let (_dir, store) = store();
+    let digest = store.write(b"streamed content").unwrap();
+    std::fs::write(store.path_for(&digest), b"STREAMED CONTENT").unwrap();
+    store.stage_upload_chunk("sess-1", 0, b"streamed content").unwrap();
+
+    store.finish_upload("sess-1", &digest).unwrap();
+
+    assert!(store.verify(&digest).unwrap());
+    assert_eq!(store.staged_upload_len("sess-1").unwrap(), None);
+}
+
+#[test]
+fn test_concurrent_commits_repair_a_corrupt_destination() {
+    let (_dir, store) = store();
+    let digest = Digest::of(b"contended");
+    // Seed same-length corruption so both writers must repair the destination, not merely deduplicate.
+    let dest = store.path_for(&digest);
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(&dest, b"CONTENDED").unwrap();
+
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let store = store.clone();
+            let digest = digest.clone();
+            std::thread::spawn(move || {
+                let mut pending = store.begin().unwrap();
+                pending.write(b"contended").unwrap();
+                store.commit_staged(pending.finish().unwrap()).unwrap();
+                assert!(store.verify(&digest).unwrap());
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    assert_eq!(store.read(&digest).unwrap(), b"contended");
+}

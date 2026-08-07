@@ -9,21 +9,76 @@ use sha2::{Digest as _, Sha256};
 use super::error::{BlobError, BlobScanError};
 use super::{BlobMetadata, Digest, DurabilityCapabilities, PlacementReceipt, sync_parent, to_hex};
 
-/// Settle a no-clobber move of a freshly written temp blob into its content-addressed `dest`.
+/// Move a verified `source` into its content-addressed `dest`, guaranteeing the published file's bytes
+/// hash to `digest`. `source` was hashed into `digest` as it was written, so it is the trusted copy.
 ///
-/// A no-clobber rename fails when `dest` already exists on every platform (a plain rename overwrites on
-/// Unix but errors on Windows, so two racing writers of the same digest would diverge). Since the bytes
-/// are identical for a given digest, a `dest` that already holds it means the blob is stored, so a lost
-/// race is success. Any other failure is a real io error.
-fn commit_placement(persisted: Result<(), std::io::Error>, dest: &Path) -> Result<(), BlobError> {
-    match persisted {
+/// A no-clobber move that finds `dest` free settles the durability boundary and returns. A move that
+/// loses to an occupied `dest` proves nothing about the resident file: the digest path may hold a
+/// truncated or corrupted blob that a plain existence check would wrongly accept, blocking self-repair.
+/// The occupant is therefore verified and, when it fails, replaced from `source`. Any other move
+/// failure is a real io error.
+fn publish(dest: &Path, source: tempfile::TempPath, digest: &Digest, len: u64) -> Result<(), BlobError> {
+    match source.persist_noclobber(dest) {
         Ok(()) => {
             sync_parent(dest);
             Ok(())
         }
-        Err(_) if dest.is_file() => Ok(()),
-        Err(err) => Err(err.into()),
+        Err(err) if dest.is_file() => reconcile(dest, err.path, digest, len),
+        Err(err) => Err(err.error.into()),
     }
+}
+
+/// Reconcile a commit whose content-addressed `dest` is already occupied. Under a per-digest lock,
+/// stream-hash the resident file: a matching size and hash means the blob is already durable, so the
+/// redundant `source` is discarded. A mismatch means a corrupt blob squats the digest path — replace it
+/// atomically with the verified `source` so a later read returns the blob rather than the damage. The
+/// lock keeps a second writer of the same digest from racing the replacement, and the correct `source`
+/// is never dropped until the resident file has been validated.
+fn reconcile(dest: &Path, source: tempfile::TempPath, digest: &Digest, len: u64) -> Result<(), BlobError> {
+    let _guard = digest_lock(digest);
+    if resident_matches(dest, digest, len)? {
+        return discard_stage(source);
+    }
+    source.persist(dest).map_err(|err| err.error)?;
+    sync_parent(dest);
+    Ok(())
+}
+
+/// Whether the file at `dest` is exactly the blob `digest` names: it must be `len` bytes and stream-hash
+/// to `digest`. The length check is a cheap truncation reject before the full re-hash.
+fn resident_matches(dest: &Path, digest: &Digest, len: u64) -> Result<bool, BlobError> {
+    let mut file = std::fs::File::open(dest)?;
+    if file.metadata()?.len() != len {
+        return Ok(false);
+    }
+    Ok(hash_file(&mut file)? == digest.as_str())
+}
+
+/// Stream `file` through SHA-256, returning its hex digest. Buffered so a large blob issues a handful of
+/// big reads instead of one syscall per block.
+fn hash_file(file: &mut std::fs::File) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 1024 * 1024].into_boxed_slice();
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(to_hex(&hasher.finalize()))
+}
+
+/// A striped lock serializing repairs of the same digest. Two writers publishing identical bytes never
+/// interleave a verify-then-replace, so a corrupt resident file is replaced once rather than in a race.
+fn digest_lock(digest: &Digest) -> std::sync::MutexGuard<'static, ()> {
+    static LOCKS: [std::sync::Mutex<()>; 64] = [const { std::sync::Mutex::new(()) }; 64];
+    let shard = digest
+        .as_str()
+        .bytes()
+        .fold(0usize, |acc, byte| acc.wrapping_add(usize::from(byte)))
+        % LOCKS.len();
+    LOCKS[shard].lock().expect("blob digest lock is never poisoned")
 }
 
 /// Name the blob a failed open was looking for. Opening already reports absence, so asking the
@@ -193,7 +248,8 @@ impl BlobStore {
         Ok(())
     }
 
-    /// Write `bytes`, returning their digest. Idempotent: an existing blob is left untouched.
+    /// Write `bytes`, returning their digest. Idempotent: an existing blob that still matches the digest
+    /// is left untouched; one that has been truncated or corrupted is repaired from `bytes`.
     ///
     /// # Errors
     /// Returns [`BlobError::Io`] if the directory cannot be created or the file cannot be written.
@@ -202,14 +258,14 @@ impl BlobStore {
         let hex = digest.as_str();
         let parent = self.root.join("sha256").join(&hex[0..2]).join(&hex[2..4]);
         let dest = parent.join(hex);
-        if dest.is_file() {
+        if dest.is_file() && resident_matches(&dest, &digest, bytes.len() as u64)? {
             return Ok(digest);
         }
         std::fs::create_dir_all(&parent)?;
         let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
         tmp.write_all(bytes)?;
         tmp.as_file().sync_all()?;
-        commit_placement(tmp.persist_noclobber(&dest).map(drop).map_err(|err| err.error), &dest)?;
+        publish(&dest, tmp.into_temp_path(), &digest, bytes.len() as u64)?;
         Ok(digest)
     }
 
@@ -311,16 +367,7 @@ impl BlobStore {
     /// failure.
     pub fn verify(&self, digest: &Digest) -> Result<bool, BlobError> {
         let mut file = std::fs::File::open(self.path_for(digest)).map_err(|err| absent_or_io(err, digest))?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0; 1024 * 1024].into_boxed_slice();
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        Ok(to_hex(&hasher.finalize()) == digest.as_str())
+        Ok(hash_file(&mut file)? == digest.as_str())
     }
 
     /// The directory holding durable per-session upload stages, one file per in-progress session.
@@ -388,27 +435,16 @@ impl BlobStore {
             }
             Err(err) => return Err(absent_or_io(err, expected)),
         };
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0; 1024 * 1024].into_boxed_slice();
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let actual_hex = to_hex(&hasher.finalize());
+        let len = file.metadata()?.len();
+        let actual_hex = hash_file(&mut file)?;
         if actual_hex != expected.as_str() {
             let actual = Digest::from_hex(&actual_hex).expect("a sha-256 hex digest is valid");
             return Err(BlobError::digest_mismatch(expected, &actual));
         }
+        drop(file);
         let dest = self.path_for(expected);
-        if dest.is_file() {
-            std::fs::remove_file(&stage)?;
-            return Ok(());
-        }
         std::fs::create_dir_all(dest.parent().expect("blob paths always have a parent"))?;
-        commit_placement(std::fs::rename(&stage, &dest), &dest)
+        publish(&dest, tempfile::TempPath::try_from_path(&stage)?, expected, len)
     }
 
     /// Discard `session`'s durable stage, tolerating one that is already gone.
@@ -518,8 +554,8 @@ impl BlobStore {
     ///
     /// The staged file was already synced when it was finished; this crosses the rest of the durability
     /// boundary by atomically renaming it into its content-addressed path and syncing the parent
-    /// directory. An already-present blob is durable too, so the idempotent early return still yields a
-    /// receipt.
+    /// directory. An already-present blob that still matches the digest is durable too and yields a
+    /// receipt without a rewrite; a corrupt one squatting the path is repaired from the stage.
     ///
     /// # Errors
     /// Returns [`BlobError::Io`] on a filesystem failure.
@@ -533,11 +569,8 @@ impl BlobStore {
             durability: DurabilityCapabilities::FILESYSTEM,
         };
         let dest = self.path_for(&staged.digest);
-        if dest.is_file() {
-            return Ok(receipt);
-        }
         std::fs::create_dir_all(dest.parent().expect("blob paths always have a parent"))?;
-        commit_placement(staged.path.persist_noclobber(&dest).map_err(|err| err.error), &dest)?;
+        publish(&dest, staged.path, &staged.digest, staged.len)?;
         Ok(receipt)
     }
 
@@ -646,38 +679,6 @@ impl StagedBlob {
 
     pub(crate) fn abort(self) -> Result<(), BlobError> {
         discard_stage(self.path)
-    }
-}
-
-#[cfg(test)]
-mod placement_tests {
-    use super::commit_placement;
-    #[test]
-    fn test_commit_placement_succeeds_on_a_clean_move() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("blob");
-        std::fs::write(&dest, b"bytes").unwrap();
-        assert!(commit_placement(Ok(()), &dest).is_ok());
-    }
-
-    #[test]
-    fn test_commit_placement_treats_a_lost_race_as_success() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("blob");
-        std::fs::write(&dest, b"bytes").unwrap();
-        let clash = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
-        assert!(commit_placement(Err(clash), &dest).is_ok());
-    }
-
-    #[test]
-    fn test_commit_placement_reports_a_real_io_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let absent = dir.path().join("nothing-here");
-        let failure = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        assert_eq!(
-            commit_placement(Err(failure), &absent).unwrap_err().kind(),
-            crate::blob::BlobErrorKind::Io
-        );
     }
 }
 

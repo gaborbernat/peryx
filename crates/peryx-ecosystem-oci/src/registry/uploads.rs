@@ -66,7 +66,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     release_reservation(state, reservation)?;
                     return Ok(authority_moved());
                 }
-                crate::quota::commit_blob_membership(
+                let committed = crate::quota::commit_blob_membership(
                     &state.meta,
                     &index.name,
                     &repo,
@@ -74,7 +74,8 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     reservation,
                     None,
                     journal,
-                )?;
+                );
+                committed?;
                 return Ok(blob_created(name, mount));
             }
         }
@@ -438,14 +439,12 @@ async fn append_body(
     Ok(())
 }
 
-/// Attach the `Range` of bytes received so far, reported inclusively as `0-<offset-1>`. An empty
-/// session has received no bytes, so it has no range to report and the header is omitted rather than
-/// wrapping `offset - 1` to `u64::MAX` or claiming a byte with `0-0`.
+/// Attach the `Range` of bytes received so far, reported inclusively as `0-<offset-1>`. A fresh
+/// session that has received no bytes reports `0-0`, the value the OCI distribution spec and its
+/// conformance suite require on an upload response; omitting the header fails conformance because a
+/// client reads the absent header as an empty range with no `0-` prefix.
 fn received_range(builder: Builder, offset: u64) -> Builder {
-    match offset.checked_sub(1) {
-        Some(last) => builder.header(header::RANGE, format!("0-{last}")),
-        None => builder,
-    }
+    builder.header(header::RANGE, format!("0-{}", offset.saturating_sub(1)))
 }
 
 /// A `201 Created` carrying a `Location` and the canonical `Docker-Content-Digest`.

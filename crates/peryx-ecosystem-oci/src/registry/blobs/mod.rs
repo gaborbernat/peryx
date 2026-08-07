@@ -622,7 +622,7 @@ pub(super) async fn commit_staged_upload(
     state.claim_admitted_write(&operation);
     match state.blobs.finish_upload(session, &storage).await {
         Ok(()) => {
-            crate::quota::commit_blob_membership(
+            let committed = crate::quota::commit_blob_membership(
                 &state.meta,
                 &index.name,
                 repo,
@@ -630,7 +630,8 @@ pub(super) async fn commit_staged_upload(
                 reservation,
                 Some(session),
                 journal,
-            )?;
+            );
+            committed?;
             state.record_home_placement(storage.as_str(), bytes, fence);
             state.finalize_admitted_write(&operation, OperationResult::Published, b"");
             state.record_operation_trace(peryx_driver::state::OperationKind::OciPush, fence);

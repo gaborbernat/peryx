@@ -247,9 +247,19 @@ fn test_killing_the_writer_stops_writes_and_preserves_the_durable_frontier() {
     // Kill the writer, the sole source of serials, so no new write can be issued. A write to the
     // surviving replica is refused read-only, and the dead writer answers nothing.
     cluster.nodes_mut()[writer].kill();
-    let (code, body) = cluster.nodes()[replica]
-        .publish()
-        .expect("the publish reaches the replica");
+    // The replica may still be detecting the writer's death, and a request in flight while the writer
+    // dies can fail to land, so poll the publish until the replica answers its read-only refusal.
+    let deadline = Instant::now() + CONVERGE;
+    let (code, body) = loop {
+        if let Some(refusal @ (503, _)) = cluster.nodes()[replica].publish() {
+            break refusal;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the replica never refused a write read-only after the writer died",
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert_eq!(code, 503);
     assert!(
         body.contains("read_only_replica"),

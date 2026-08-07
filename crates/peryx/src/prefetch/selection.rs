@@ -179,9 +179,6 @@ fn read_requirements(path: &Path, selectors: &mut Vec<String>, seen: &mut BTreeS
     let text = std::fs::read_to_string(&path).context(format!("read requirements {}", path.display()))?;
     for logical in logical_lines(&text) {
         let line = requirement_line(&logical);
-        if line.is_empty() {
-            continue;
-        }
         if let Some(nested) = include_target(line) {
             let fallback_parent = Path::new(".");
             let nested = path.parent().unwrap_or(fallback_parent).join(nested);

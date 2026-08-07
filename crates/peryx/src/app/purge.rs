@@ -104,13 +104,13 @@ fn reclaim_guarded(
         blobs.blocking().delete(&candidate.digest)?;
         meta.disarm_blob_reclaim_guard(candidate.digest.as_str())
             .context("release orphan-deletion guard")?;
-        writeln!(
-            out,
+        let row = format!(
             "removed\torphaned-blob\t{}\t{}\t{}",
             candidate.digest.as_str(),
             candidate.bytes,
             candidate.path.display()
-        )?;
+        );
+        writeln!(out, "{row}")?;
     }
     writeln!(out, "summary\tremoved\torphaned-blobs\t{}\t{bytes}", armed.len())?;
     Ok(())

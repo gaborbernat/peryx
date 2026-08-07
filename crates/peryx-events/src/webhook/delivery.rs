@@ -330,8 +330,6 @@ mod tests {
 
     use peryx_storage::meta::MetaStore;
     use rstest::rstest;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::net::TcpListener;
 
     use super::*;
     use crate::webhook::{WebhookEventKind, WebhookRuntime, WebhookTargetConfig};
@@ -493,15 +491,18 @@ mod tests {
     }
 
     async fn wait_for_status(host: &Arc<TestHost>, id: &str, status: WebhookDeliveryStatus) -> WebhookDeliveryRecord {
-        for _ in 0..200 {
-            if let Some(record) = host.meta().get_webhook_delivery(id).unwrap()
-                && record.status == status
-            {
-                return record;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(record) = host.meta().get_webhook_delivery(id).unwrap()
+                    && record.status == status
+                {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("delivery {id} never reached {status:?}");
+        })
+        .await
+        .expect("webhook delivery never reached the expected status")
     }
 
     /// A server that accepts connections and never answers, counting how many it holds open at once.
@@ -511,46 +512,54 @@ mod tests {
     }
 
     impl HangingServer {
-        async fn start() -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // A blocking std listener on its own thread accepts and holds each connection. Running the accept
+        // loop as ordinary thread code, rather than a spawned future, keeps its body on lines the x86
+        // line-coverage gate attributes; an async task body only executes inside the runtime's poll and
+        // is left uncovered.
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/hook", listener.local_addr().unwrap());
             let accepted = Arc::new(AtomicUsize::new(0));
-            let counter = accepted.clone();
-            tokio::spawn(async move {
-                while let Ok((socket, _)) = listener.accept().await {
+            let counter = Arc::clone(&accepted);
+            std::thread::spawn(move || {
+                // The vec is never read; its only job is to keep each accepted socket alive so the server
+                // holds the connection open and never answers.
+                #[allow(
+                    clippy::collection_is_never_read,
+                    reason = "the vec exists only to hold sockets open"
+                )]
+                let mut held = Vec::new();
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { break };
                     counter.fetch_add(1, Ordering::SeqCst);
-                    tokio::spawn(async move {
-                        let _held = socket;
-                        std::future::pending::<()>().await;
-                    });
+                    held.push(stream);
                 }
             });
             Self { url, accepted }
         }
 
         async fn wait_for_accepted(&self, count: usize) {
-            for _ in 0..200 {
-                if self.accepted.load(Ordering::SeqCst) >= count {
-                    return;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.accepted.load(Ordering::SeqCst) < count {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!("hanging server never accepted {count} connections");
+            })
+            .await
+            .expect("hanging server never accepted enough connections");
         }
     }
 
-    async fn healthy_server() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    fn healthy_server() -> String {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/hook", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = [0_u8; 1024];
-                    let _ = socket.read(&mut buf).await;
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                        .await;
-                });
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
             }
         });
         url
@@ -558,8 +567,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_slow_target_does_not_block_a_healthy_one() {
-        let slow = HangingServer::start().await;
-        let healthy_url = healthy_server().await;
+        let slow = HangingServer::start();
+        let healthy_url = healthy_server();
         let dir = tempfile::tempdir().unwrap();
         let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
         for created_at in 10..13 {
@@ -596,7 +605,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_in_flight_requests_stay_within_the_global_bound() {
-        let slow = HangingServer::start().await;
+        let slow = HangingServer::start();
         let dir = tempfile::tempdir().unwrap();
         let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
         let mut configs = Vec::new();

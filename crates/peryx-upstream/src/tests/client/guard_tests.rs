@@ -289,6 +289,13 @@ async fn test_redirect_to_same_host_is_followed() {
     assert_eq!(&bytes[..], b"payload");
 }
 
+#[test]
+fn test_outbound_guard_debug_names_itself_and_keeps_its_trust_list() {
+    let rendered = format!("{:?}", guard("http://host.example/", &["mirror.example"]));
+    assert!(rendered.contains("OutboundGuard"), "{rendered}");
+    assert!(rendered.contains("mirror.example"), "{rendered}");
+}
+
 #[tokio::test]
 async fn test_redirect_loop_stops_at_limit() {
     let server = MockServer::start().await;
@@ -302,5 +309,23 @@ async fn test_redirect_loop_stops_at_limit() {
 
     let error = client.fetch_bytes(&format!("{}/loop", server.uri())).await.unwrap_err();
 
-    assert!(matches!(error, UpstreamError::Http(err) if err.is_redirect()));
+    let UpstreamError::Http(err) = &error else {
+        panic!("expected an HTTP redirect error, got {error:?}");
+    };
+    assert!(err.is_redirect());
+    // A redirect-policy failure carries no HTTP status and is not a timeout, connect, or decode error,
+    // so it renders through the generic Http fallback rather than a specific class.
+    assert_eq!(error.user_message(), "upstream request failed");
+    // The custom policy surfaces its own reason as the error source; rendering the chain exercises the
+    // limit error's Display and proves the reason a client sees is the redirect bound, not a generic fault.
+    let mut reasons = Vec::new();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        reasons.push(cause.to_string());
+        source = cause.source();
+    }
+    assert!(
+        reasons.iter().any(|reason| reason == "too many redirects"),
+        "{reasons:?}"
+    );
 }

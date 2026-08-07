@@ -107,14 +107,14 @@ fn link_base(dom: &tl::VDom<'_>, base: &Url) -> Url {
 
 fn anchor_to_project(tag: &HTMLTag, base: &Url, parser: &tl::Parser<'_>) -> Option<ProjectListEntry> {
     let href = attr_value(tag, "href").filter(|href| !href.is_empty())?;
-    let name = decode_entities(tag.inner_text(parser).trim()).into_owned();
+    let name = decode_entities(tag.inner_text(parser).trim(), Context::Text).into_owned();
     if !name.is_empty() {
         return Some(ProjectListEntry { name });
     }
     // Only an anchor with no text needs its target resolved to name the project, and PEP 503 says
     // the text is the name. Resolving every anchor's href parses a URL per project on a page that
     // lists every project there is.
-    let resolved = base.join(&decode_entities(&href)).ok()?;
+    let resolved = base.join(&decode_entities(&href, Context::Attribute)).ok()?;
     Some(ProjectListEntry {
         name: project_from_url(&resolved)?,
     })
@@ -189,7 +189,7 @@ fn is_tag(tag: &HTMLTag, name: &[u8]) -> bool {
 }
 
 fn attr_string(tag: &HTMLTag, name: &str) -> Option<String> {
-    attr_value(tag, name).map(|value| decode_entities(&value).into_owned())
+    attr_value(tag, name).map(|value| decode_entities(&value, Context::Attribute).into_owned())
 }
 
 fn attr_value<'tag>(tag: &'tag HTMLTag, name: &'tag str) -> Option<Cow<'tag, str>> {
@@ -254,14 +254,27 @@ fn parse_gpg_sig(tag: &HTMLTag) -> Option<bool> {
     }
 }
 
+/// Whether a character reference sits in element text or in an attribute value.
+///
+/// The HTML tokenizer treats the two contexts differently: a named reference not ending in `;` is
+/// left untouched inside an attribute when the next character is `=` or alphanumeric, because URLs
+/// carry query strings such as `?a=1&copy=2` where `&copy` must stay literal.
+#[derive(Clone, Copy)]
+enum Context {
+    Text,
+    Attribute,
+}
+
 /// Decode the HTML character references a Simple page may carry, allocating only when one is present.
 ///
 /// A reference begins with `&`, and almost no attribute or anchor text on a Simple page contains one,
-/// so the common case borrows. Named references cover the five HTML predefined entities plus `&apos;`;
-/// numeric references (`&#46;`, `&#x2e;`) decode to their Unicode scalar. Anything unterminated,
-/// unknown, or resolving to a control character or non-scalar value is left as written, so malformed
-/// upstream markup round-trips instead of turning into a stray character.
-fn decode_entities(text: &str) -> Cow<'_, str> {
+/// so the common case borrows. Named references resolve against the full HTML5 table (`&amp;`,
+/// `&period;`, `&sol;`, the two-code-point `&fjlig;`, and the semicolon-less legacy forms);
+/// numeric references (`&#46;`, `&#x2e;`) decode to their scalar with the tokenizer's replacements
+/// for the C1 range and out-of-range or surrogate values. Anything that is not a well-formed
+/// reference is left as written, so malformed upstream markup round-trips instead of turning into a
+/// stray character.
+fn decode_entities(text: &str, context: Context) -> Cow<'_, str> {
     if !text.contains('&') {
         return Cow::Borrowed(text);
     }
@@ -270,8 +283,8 @@ fn decode_entities(text: &str) -> Cow<'_, str> {
     while let Some(start) = rest.find('&') {
         out.push_str(&rest[..start]);
         let reference = &rest[start..];
-        if let Some((decoded, consumed)) = decode_reference(reference) {
-            out.push(decoded);
+        if let Some((decoded, count, consumed)) = decode_reference(reference, context) {
+            out.extend(&decoded[..count]);
             rest = &reference[consumed..];
         } else {
             out.push('&');
@@ -282,29 +295,92 @@ fn decode_entities(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Decode one HTML character reference at the start of `text` (which begins with `&`), returning the
-/// decoded character and the byte length it spans, or `None` when the reference is not well-formed.
-fn decode_reference(text: &str) -> Option<(char, usize)> {
-    let end = text.find(';')?;
-    let body = &text[1..end];
-    let decoded = match body.strip_prefix('#') {
-        Some(digits) => {
-            let code = match digits.strip_prefix(['x', 'X']) {
-                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-                None => digits.parse().ok()?,
-            };
-            char::from_u32(code).filter(|character| !character.is_control())?
-        }
-        None => match body {
-            "lt" => '<',
-            "gt" => '>',
-            "quot" => '"',
-            "apos" => '\'',
-            "amp" => '&',
-            _ => return None,
-        },
+/// Decode one HTML character reference at the start of `text` (which begins with `&`), returning its
+/// one or two code points, how many are valid, and the byte length the reference spans. `None` means
+/// `&` does not begin a reference, so the caller emits a literal `&` and rescans from the next byte.
+fn decode_reference(text: &str, context: Context) -> Option<([char; 2], usize, usize)> {
+    let body = &text[1..];
+    let (chars, count, consumed) = match body.as_bytes().first()? {
+        b'#' => decode_numeric(body)?,
+        byte if byte.is_ascii_alphanumeric() => decode_named(body, context)?,
+        _ => return None,
     };
-    Some((decoded, end + 1))
+    Some((chars, count, consumed + 1))
+}
+
+/// Decode a numeric reference body (the text after `&`, starting with `#`), spanning the digits and an
+/// optional trailing `;`. `None` means no digit followed `#`, so it is not a reference.
+fn decode_numeric(body: &str) -> Option<([char; 2], usize, usize)> {
+    let digits = &body[1..];
+    let (radix, digits, prefix) = digits
+        .strip_prefix(['x', 'X'])
+        .map_or((10, digits, 1), |hex| (16, hex, 2));
+    let mut num: u32 = 0;
+    let mut too_big = false;
+    let mut span = 0;
+    for character in digits.chars() {
+        let Some(value) = character.to_digit(radix) else {
+            break;
+        };
+        num = num.wrapping_mul(radix);
+        too_big |= num > 0x10_FFFF;
+        num = num.wrapping_add(value);
+        span += 1;
+    }
+    if span == 0 {
+        return None;
+    }
+    let mut consumed = prefix + span;
+    if body[consumed..].starts_with(';') {
+        consumed += 1;
+    }
+    Some(([numeric_char(num, too_big), '\0'], 1, consumed))
+}
+
+/// Map a numeric reference value to a character with the tokenizer's replacements: out-of-range,
+/// surrogate, and null values become U+FFFD, and the C1 controls map to their Windows-1252 glyphs.
+fn numeric_char(num: u32, too_big: bool) -> char {
+    match num {
+        _ if too_big || num > 0x10_FFFF => '\u{FFFD}',
+        0x00 | 0xD800..=0xDFFF => '\u{FFFD}',
+        0x80..=0x9F => web_atoms::C1_REPLACEMENTS[(num - 0x80) as usize]
+            .unwrap_or_else(|| char::from_u32(num).expect("C1 code point is a valid scalar")),
+        _ => char::from_u32(num).expect("non-surrogate scalar value in range"),
+    }
+}
+
+/// Decode a named reference body (the text after `&`, starting alphanumeric) by the longest match in
+/// the HTML5 table. `None` means no name matched, so the whole `&name` is literal.
+fn decode_named(body: &str, context: Context) -> Option<([char; 2], usize, usize)> {
+    let mut best: Option<(u32, u32)> = None;
+    let mut best_len = 0;
+    let mut span = 0;
+    for character in body.chars() {
+        span += character.len_utf8();
+        match web_atoms::NAMED_ENTITIES.get(&body[..span]) {
+            Some(&(first, second)) if first != 0 => {
+                best = Some((first, second));
+                best_len = span;
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    let (first, second) = best?;
+    let ambiguous = matches!(context, Context::Attribute)
+        && !body[..best_len].ends_with(';')
+        && body[best_len..]
+            .chars()
+            .next()
+            .is_some_and(|character| character == '=' || character.is_ascii_alphanumeric());
+    if ambiguous {
+        return None;
+    }
+    let chars = [
+        char::from_u32(first).expect("named reference code point is a valid scalar"),
+        char::from_u32(second).unwrap_or('\0'),
+    ];
+    Some((chars, if second == 0 { 1 } else { 2 }, best_len))
 }
 
 fn percent_decode(text: &str) -> String {

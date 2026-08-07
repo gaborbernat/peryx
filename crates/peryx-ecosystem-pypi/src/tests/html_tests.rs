@@ -250,15 +250,35 @@ fn test_parse_html_decodes_named_and_numeric_character_references() {
 }
 
 #[test]
-fn test_parse_html_leaves_malformed_character_references_literal() {
+fn test_parse_html_leaves_non_references_literal() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="a/">z&#zz;z</a>
+        <a href="b/">z&#xzz;z</a>
+        <a href="c/">z&bogus;z</a>
+        <a href="d/">z & z</a>
+        <a href="e/">trailing&</a>
+        </body></html>"#;
+    let parsed = parse_index_html(html, &Url::parse("https://pypi.org/simple/").unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z&#zz;z", "z&#xzz;z", "z&bogus;z", "z & z", "trailing&"],
+    );
+}
+
+#[test]
+fn test_parse_html_replaces_invalid_numeric_references() {
     let html = r#"<!DOCTYPE html><html><body>
         <a href="a/">z&#0;z</a>
         <a href="b/">z&#xD800;z</a>
         <a href="c/">z&#4294967296;z</a>
-        <a href="d/">z&#zz;z</a>
-        <a href="e/">z&#xzz;z</a>
-        <a href="f/">z&bogus;z</a>
-        <a href="g/">z&amp z</a>
+        <a href="d/">z&#1114112;z</a>
+        <a href="e/">z&#x80;z</a>
+        <a href="f/">z&#x81;z</a>
+        <a href="g/">z&#46 z</a>
         </body></html>"#;
     let parsed = parse_index_html(html, &Url::parse("https://pypi.org/simple/").unwrap()).unwrap();
     assert_eq!(
@@ -268,13 +288,96 @@ fn test_parse_html_leaves_malformed_character_references_literal() {
             .map(|project| project.name.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "z&#0;z",
-            "z&#xD800;z",
-            "z&#4294967296;z",
-            "z&#zz;z",
-            "z&#xzz;z",
-            "z&bogus;z",
-            "z&amp z",
+            "z\u{FFFD}z",
+            "z\u{FFFD}z",
+            "z\u{FFFD}z",
+            "z\u{FFFD}z",
+            "z\u{20AC}z",
+            "z\u{81}z",
+            "z. z",
+        ],
+    );
+}
+
+#[test]
+fn test_parse_index_html_decodes_html5_named_references_in_project_names() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="a/">foo&period;bar</a>
+        <a href="b/">foo&lowbar;bar</a>
+        <a href="c/">a&sol;b</a>
+        <a href="d/">x&fjlig;y</a>
+        </body></html>"#;
+    let parsed = parse_index_html(html, &Url::parse("https://pypi.org/simple/").unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["foo.bar", "foo_bar", "a/b", "xfjy"],
+    );
+}
+
+#[test]
+fn test_parse_index_html_decodes_semicolonless_named_references_in_text() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="a/">a&amp b</a>
+        <a href="b/">c&copy d</a>
+        </body></html>"#;
+    let parsed = parse_index_html(html, &Url::parse("https://pypi.org/simple/").unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .projects
+            .iter()
+            .map(|project| project.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a& b", "c\u{A9} d"],
+    );
+}
+
+#[test]
+fn test_parse_detail_html_decodes_named_references_in_links_and_attributes() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="pkg&sol;dist&lowbar;1&period;0.tar.gz#sha256=deadbeef"
+           data-requires-python="&gt;=3.8" data-yanked="see&period;notes">file</a>
+        </body></html>"#;
+    let parsed = parse_detail_html("flask", html, &base()).unwrap();
+    let file = &parsed.files[0];
+    assert_eq!(file.filename, "dist_1.0.tar.gz");
+    assert_eq!(file.url, "https://pypi.org/simple/flask/pkg/dist_1.0.tar.gz");
+    assert_eq!(
+        file.hashes,
+        BTreeMap::from([("sha256".to_owned(), "deadbeef".to_owned())]),
+    );
+    assert_eq!(file.requires_python.as_deref(), Some(">=3.8"));
+    assert_eq!(file.yanked, Yanked::Reason("see.notes".to_owned()));
+}
+
+#[test]
+fn test_parse_detail_html_keeps_ambiguous_ampersand_literal_in_attribute() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="pkg/file.whl?a=1&copy=2#sha256=ab">file</a>
+        </body></html>"#;
+    let parsed = parse_detail_html("flask", html, &base()).unwrap();
+    let file = &parsed.files[0];
+    assert_eq!(file.filename, "file.whl");
+    assert_eq!(file.url, "https://pypi.org/simple/flask/pkg/file.whl?a=1&copy=2");
+}
+
+#[test]
+fn test_parse_detail_html_applies_attribute_context_to_semicolonless_references() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <a href="a/f.whl" data-yanked="x&amp y">a</a>
+        <a href="b/f.whl" data-yanked="x&amp=y">b</a>
+        <a href="c/f.whl" data-yanked="x&ampyz">c</a>
+        </body></html>"#;
+    let parsed = parse_detail_html("flask", html, &base()).unwrap();
+    assert_eq!(
+        parsed.files.iter().map(|file| &file.yanked).collect::<Vec<_>>(),
+        vec![
+            &Yanked::Reason("x& y".to_owned()),
+            &Yanked::Reason("x&amp=y".to_owned()),
+            &Yanked::Reason("x&ampyz".to_owned()),
         ],
     );
 }

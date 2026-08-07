@@ -11,6 +11,7 @@ use axum::body::Body;
 use axum::http::response::Builder;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
+use http_body::Body as _;
 use peryx_driver::ServingState;
 use peryx_storage::meta::UploadRecord;
 
@@ -261,10 +262,11 @@ async fn append_session_chunk(
     let Some(record) = session_record(state, &index.name, name, session)? else {
         return Ok(Err(error_response(ErrorCode::BlobUploadUnknown, "upload unknown")));
     };
-    // A chunk whose `Content-Range` does not start where the last one ended is out of order, and one
-    // whose `Content-Range` cannot be read makes a claim that cannot be honoured. Both answer 416, and the
-    // session keeps its bytes so the client can resend; the read still counts as activity.
-    if !chunk_start(headers).continues_at(record.offset) {
+    // A chunk whose `Content-Range` does not begin where the last one ended is out of order; one whose
+    // range is unreadable, reversed, or spans a byte count the body does not carry makes a claim that
+    // cannot be honoured. All answer 416, and the session keeps its bytes so the client can resend; the
+    // read still counts as activity.
+    if !chunk_range(headers).admits(record.offset, body.size_hint().exact()) {
         state.meta.advance_upload(session, record.offset, (state.clock)())?;
         return Ok(Err(range_not_satisfiable(name, session, record.offset)));
     }
@@ -428,48 +430,61 @@ fn upload_accepted(name: &str, session: &str, offset: u64) -> Response {
     .expect("upload response builds from validated parts")
 }
 
-/// Where a chunk says it begins.
+/// What a chunk's `Content-Range` claims about the bytes it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChunkStart {
+enum ChunkRange {
     /// No `Content-Range`, so the client makes no claim and the chunk appends where the last ended.
     Absent,
-    /// A `Content-Range` that is not a range. The client believes it is resuming somewhere; it cannot
-    /// be told it succeeded, because nothing checked where its bytes actually landed.
+    /// A `Content-Range` that is not a well-formed inclusive range: unreadable text, a missing or
+    /// non-numeric bound, or an end that precedes its start. The client believes it is resuming
+    /// somewhere; it cannot be told it succeeded, because nothing checked where its bytes actually
+    /// landed.
     Malformed,
-    /// The offset the client says this chunk continues from.
-    At(u64),
+    /// A well-formed inclusive `<start>-<end>`: the chunk continues from `start` and carries `len`
+    /// bytes, where `len == end - start + 1`.
+    Bytes { start: u64, len: u64 },
 }
 
-impl ChunkStart {
-    /// Whether a chunk may be appended at `offset`: it claimed that offset, or claimed nothing.
-    const fn continues_at(self, offset: u64) -> bool {
+impl ChunkRange {
+    /// Whether a chunk may be appended at `offset`: it claimed nothing, or it claimed an inclusive
+    /// range that begins at `offset` and whose `len` matches the body's `size`. A range spanning bytes
+    /// the body does not carry (`size` absent or unequal) is refused, so a one-byte `PATCH` cannot
+    /// advance the session past its bytes by declaring a wide range.
+    fn admits(self, offset: u64, size: Option<u64>) -> bool {
         match self {
             Self::Absent => true,
-            Self::At(start) => start == offset,
             Self::Malformed => false,
+            Self::Bytes { start, len } => start == offset && size == Some(len),
         }
     }
 }
 
 /// Read a chunk's `Content-Range: <start>-<end>` header, tolerating the `bytes ` prefix some clients
-/// send.
+/// send. Both bounds are parsed and the span is computed with checked arithmetic, so a reversed range
+/// or one whose width overflows `u64` reads as `Malformed` rather than a bogus length.
 ///
 /// Parsing failures used to be indistinguishable from an absent header, which skipped the contiguity
-/// check entirely: a chunk claiming to resume at 500 was appended wherever the session happened to be.
-/// The final digest check caught the result, but only after the whole upload.
-fn chunk_start(headers: &HeaderMap) -> ChunkStart {
+/// check entirely: a chunk claiming to resume at 500 was appended wherever the session happened to be,
+/// and the end bound went unread so a wide range advanced the session past the bytes it carried. The
+/// final digest check caught the result, but only after the whole upload.
+fn chunk_range(headers: &HeaderMap) -> ChunkRange {
     let Some(value) = headers.get(header::CONTENT_RANGE) else {
-        return ChunkStart::Absent;
+        return ChunkRange::Absent;
     };
     let Ok(text) = value.to_str() else {
-        return ChunkStart::Malformed;
+        return ChunkRange::Malformed;
     };
     let trimmed = text.trim();
     let spec = trimmed.strip_prefix("bytes ").unwrap_or(trimmed);
-    let Some((start, _)) = spec.split_once('-') else {
-        return ChunkStart::Malformed;
+    let Some((start, end)) = spec.split_once('-') else {
+        return ChunkRange::Malformed;
     };
-    start.trim().parse().map_or(ChunkStart::Malformed, ChunkStart::At)
+    let (Ok(start), Ok(end)) = (start.trim().parse::<u64>(), end.trim().parse::<u64>()) else {
+        return ChunkRange::Malformed;
+    };
+    end.checked_sub(start)
+        .and_then(|span| span.checked_add(1))
+        .map_or(ChunkRange::Malformed, |len| ChunkRange::Bytes { start, len })
 }
 
 /// `416 Range Not Satisfiable` for an out-of-order chunk, reporting the bytes already received. It
@@ -491,7 +506,7 @@ fn range_not_satisfiable(name: &str, session: &str, offset: u64) -> Response {
 mod tests {
     use axum::http::HeaderValue;
 
-    use super::{ChunkStart, chunk_start};
+    use super::{ChunkRange, chunk_range};
 
     fn headers(value: HeaderValue) -> axum::http::HeaderMap {
         let mut headers = axum::http::HeaderMap::new();
@@ -499,31 +514,83 @@ mod tests {
         headers
     }
 
-    #[test]
-    fn test_chunk_start_reads_an_offset_with_or_without_the_bytes_prefix() {
-        assert_eq!(
-            chunk_start(&headers(HeaderValue::from_static("5-9"))),
-            ChunkStart::At(5)
-        );
-        assert_eq!(
-            chunk_start(&headers(HeaderValue::from_static("bytes 5-9"))),
-            ChunkStart::At(5)
-        );
+    fn range(spec: &'static str) -> ChunkRange {
+        chunk_range(&headers(HeaderValue::from_static(spec)))
     }
 
     #[test]
-    fn test_chunk_start_rejects_a_header_that_is_not_a_range() {
+    fn test_chunk_range_reads_both_bounds_with_or_without_the_bytes_prefix() {
+        assert_eq!(range("5-9"), ChunkRange::Bytes { start: 5, len: 5 });
+        assert_eq!(range("bytes 5-9"), ChunkRange::Bytes { start: 5, len: 5 });
+    }
+
+    #[test]
+    fn test_chunk_range_reads_a_single_byte_range() {
+        assert_eq!(range("0-0"), ChunkRange::Bytes { start: 0, len: 1 });
+    }
+
+    #[test]
+    fn test_chunk_range_rejects_bytes_that_are_not_text() {
         // A `Content-Range` whose bytes are not text at all: the client made a claim nothing can read.
         let opaque = HeaderValue::from_bytes(&[0xff, 0xfe]).expect("bytes are a valid header value");
-        assert_eq!(chunk_start(&headers(opaque)), ChunkStart::Malformed);
-        assert_eq!(
-            chunk_start(&headers(HeaderValue::from_static("nowhere"))),
-            ChunkStart::Malformed
-        );
+        assert_eq!(chunk_range(&headers(opaque)), ChunkRange::Malformed);
     }
 
     #[test]
-    fn test_chunk_start_is_absent_without_the_header() {
-        assert_eq!(chunk_start(&axum::http::HeaderMap::new()), ChunkStart::Absent);
+    fn test_chunk_range_rejects_a_header_without_a_dash() {
+        assert_eq!(range("nowhere"), ChunkRange::Malformed);
+    }
+
+    #[test]
+    fn test_chunk_range_rejects_a_nonnumeric_bound() {
+        assert_eq!(range("0-x"), ChunkRange::Malformed);
+        assert_eq!(range("x-9"), ChunkRange::Malformed);
+    }
+
+    #[test]
+    fn test_chunk_range_rejects_an_end_before_its_start() {
+        assert_eq!(range("9-5"), ChunkRange::Malformed);
+    }
+
+    #[test]
+    fn test_chunk_range_rejects_a_span_that_overflows() {
+        // `end - start + 1` overflows `u64`: the width cannot be represented, so it is no valid length.
+        assert_eq!(range("0-18446744073709551615"), ChunkRange::Malformed);
+    }
+
+    #[test]
+    fn test_chunk_range_is_absent_without_the_header() {
+        assert_eq!(chunk_range(&axum::http::HeaderMap::new()), ChunkRange::Absent);
+    }
+
+    #[test]
+    fn test_absent_range_admits_any_body_at_any_offset() {
+        assert!(ChunkRange::Absent.admits(7, Some(3)));
+        assert!(ChunkRange::Absent.admits(0, None));
+    }
+
+    #[test]
+    fn test_malformed_range_is_never_admitted() {
+        assert!(!ChunkRange::Malformed.admits(0, Some(5)));
+    }
+
+    #[test]
+    fn test_range_admits_a_contiguous_chunk_whose_length_matches() {
+        assert!(ChunkRange::Bytes { start: 5, len: 5 }.admits(5, Some(5)));
+    }
+
+    #[test]
+    fn test_range_refuses_a_chunk_that_does_not_continue_the_session() {
+        assert!(!ChunkRange::Bytes { start: 5, len: 5 }.admits(0, Some(5)));
+    }
+
+    #[test]
+    fn test_range_refuses_a_length_the_body_does_not_carry() {
+        // The `Content-Range: 0-999` one-byte `PATCH`: the declared width dwarfs the body it ships.
+        assert!(!ChunkRange::Bytes { start: 0, len: 1000 }.admits(0, Some(1)));
+        // An empty body carries no bytes for the inclusive range it claims.
+        assert!(!ChunkRange::Bytes { start: 0, len: 5 }.admits(0, Some(0)));
+        // A streamed body of unknown length cannot be checked against the claim.
+        assert!(!ChunkRange::Bytes { start: 0, len: 5 }.admits(0, None));
     }
 }

@@ -229,6 +229,31 @@ async fn test_manifest_by_digest_mismatch_is_rejected() {
     assert!(body_has_code(&body, "MANIFEST_INVALID"), "{body:?}");
 }
 #[tokio::test]
+async fn test_manifest_by_digest_mismatch_does_not_cache_the_bytes() {
+    let server = MockServer::start().await;
+    let wrong = format!("sha256:{}", "b".repeat(64));
+    let returned = b"different";
+    let canonical = oci_digest(returned);
+    // Upstream answers a request for `wrong` with bytes that hash to `canonical` instead, and has no
+    // route for `canonical` itself: a later read of it can only be served from the cache.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{wrong}")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(returned.to_vec(), MANIFEST_TYPE))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, _, _) = send(&app, Method::GET, &format!("/v2/hub/app/manifests/{wrong}")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // The rejected pull left nothing behind: no manifest, no repository membership under the canonical
+    // digest, so a read of it is unknown rather than served from a poisoned cache.
+    assert!(store::get_manifest(&state.meta, &canonical).unwrap().is_none());
+    assert!(!store::manifest_is_member(&state.meta, "hub", "app", &canonical).unwrap());
+    let (status, _, body) = send(&app, Method::GET, &format!("/v2/hub/app/manifests/{canonical}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&body, "MANIFEST_UNKNOWN"), "{body:?}");
+}
+#[tokio::test]
 async fn test_manifest_by_tag_accepts_a_non_sha256_advertised_digest() {
     let server = MockServer::start().await;
     let body = br#"{"schemaVersion":2,"config":{}}"#;

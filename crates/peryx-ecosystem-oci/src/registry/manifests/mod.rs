@@ -241,20 +241,16 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             Err(UpstreamError::Status(status)) if absent_upstream(status) => return Ok(None),
             Err(err) => return Ok(Some(upstream_manifest_error(&err))),
         };
-        let Some((manifest, canonical)) = store_manifest(state, index, repo, None, response).await? else {
-            return Ok(Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown")));
-        };
-        // A pull by sha256 digest must hash to it, or the upstream bytes are corrupt. A digest in
-        // another algorithm the spec permits content-addresses upstream and peryx cannot recompute it,
-        // so the bytes are served under the requested digest rather than rejected as a mismatch.
-        Ok(Some(if digest.starts_with("sha256:") && canonical != digest {
-            error_response(
-                ErrorCode::ManifestInvalid,
-                &format!("upstream digest {canonical} does not match requested {digest}"),
-            )
-        } else {
-            manifest_response(manifest, digest, head)
-        }))
+        Ok(Some(
+            match store_manifest(state, index, repo, None, Some(digest), response).await? {
+                StoredManifest::Stored(manifest, _) => manifest_response(manifest, digest, head),
+                StoredManifest::Revoked => error_response(ErrorCode::ManifestUnknown, "manifest unknown"),
+                StoredManifest::Mismatch(canonical) => error_response(
+                    ErrorCode::ManifestInvalid,
+                    &format!("upstream digest {canonical} does not match requested {digest}"),
+                ),
+            },
+        ))
     }
 
     /// Try one member for a manifest by tag. A hosted member reads its cached tag; an online proxy
@@ -334,9 +330,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             .await
         {
             Ok(response) => Ok(Some(
-                match store_manifest(state, index, repo, Some(tag), response).await? {
-                    Some((manifest, canonical)) => manifest_response(manifest, &canonical, head),
-                    None => error_response(ErrorCode::ManifestUnknown, "manifest unknown"),
+                match store_manifest(state, index, repo, Some(tag), None, response).await? {
+                    StoredManifest::Stored(manifest, canonical) => manifest_response(manifest, &canonical, head),
+                    StoredManifest::Revoked | StoredManifest::Mismatch(_) => {
+                        error_response(ErrorCode::ManifestUnknown, "manifest unknown")
+                    }
                 },
             )),
             // A `404` is upstream saying the tag is gone, which is an answer. Everything else is a
@@ -401,15 +399,29 @@ fn stale_tag(
     Ok(store::get_manifest(&state.meta, &digest)?.map(|manifest| manifest_response(manifest, &digest, head)))
 }
 
+/// The outcome of reading an upstream manifest response, before or without committing it.
+enum StoredManifest {
+    /// The bytes were recorded under `canonical` (carried alongside the manifest).
+    Stored(Manifest, String),
+    /// The canonical digest is revoked, so nothing was recorded.
+    Revoked,
+    /// A by-digest pull's bytes hashed to `canonical`, not the requested digest, so nothing was
+    /// recorded.
+    Mismatch(String),
+}
+
 /// Read an upstream manifest response into storage, keyed by the sha256 of its exact bytes, updating
-/// the tag mapping when the pull was by tag. Returns the stored manifest and its canonical digest.
+/// the tag mapping when the pull was by tag. `expected` is the requested sha256 digest on a by-digest
+/// pull: the bytes must hash to it, or nothing is recorded and [`StoredManifest::Mismatch`] is
+/// returned, so a faulty or hostile upstream cannot poison the cache under a digest peryx rejects.
 async fn store_manifest(
     state: &ServingState,
     index: &str,
     repo: &str,
     tag: Option<&str>,
+    expected: Option<&str>,
     response: reqwest::Response,
-) -> Result<Option<(Manifest, String)>, ServeError> {
+) -> Result<StoredManifest, ServeError> {
     let media_type = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -435,8 +447,18 @@ async fn store_manifest(
             "upstream digest {advertised} does not match manifest content {canonical}"
         )));
     }
+    // A by-sha256-digest pull must hash to the requested digest before anything is committed: storing
+    // first and rejecting after would leave the mismatched bytes and their repository membership cached
+    // under `canonical`. A non-sha256 request content-addresses upstream and peryx cannot recompute it,
+    // so it is served under the requested digest rather than rejected here.
+    if let Some(expected) = expected
+        && expected.starts_with("sha256:")
+        && canonical != expected
+    {
+        return Ok(StoredManifest::Mismatch(canonical));
+    }
     if digest_decision(state, &canonical)? == DigestDecision::Revoked {
-        return Ok(None);
+        return Ok(StoredManifest::Revoked);
     }
     let manifest = Manifest {
         media_type,
@@ -449,7 +471,7 @@ async fn store_manifest(
         }
         store::set_tag_freshness(&state.meta, index, repo, tag, &canonical, (state.clock)())?;
     }
-    Ok(Some((manifest, canonical)))
+    Ok(StoredManifest::Stored(manifest, canonical))
 }
 
 /// The OCI image index media type.

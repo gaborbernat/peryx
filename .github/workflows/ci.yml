@@ -100,7 +100,7 @@ jobs:
       - name: Install Hawk
         run: |
           curl -fsSL -o /tmp/cargo-hawk.tar.gz \
-            https://github.com/astral-sh/hawk/releases/download/v0.1.12/cargo-hawk-x86_64-unknown-linux-gnu.tar.gz
+            https://github.com/astral-sh/hawk/releases/download/0.1.12/cargo-hawk-x86_64-unknown-linux-gnu.tar.gz
           tar -xzf /tmp/cargo-hawk.tar.gz -C /tmp
           chmod +x /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk-driver
           echo "/tmp/cargo-hawk-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"

@@ -540,3 +540,153 @@ async fn test_referrers_do_not_fall_back_on_a_non_404_upstream_error() {
     let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(doc["manifests"].as_array().unwrap().is_empty());
 }
+#[tokio::test]
+async fn test_manifest_by_digest_does_not_cross_repositories_on_one_proxy() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2,"config":{}}"#;
+    let digest = oci_digest(body);
+    // Upstream serves the digest under `alpha` and `gamma`, but has no route for it under `beta`.
+    for repo in ["alpha", "gamma"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/{repo}/manifests/{digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_vec(), MANIFEST_TYPE))
+            .mount(&server)
+            .await;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    // Warm the shared content store under `alpha`.
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/hub/alpha/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &body[..]);
+
+    // `beta` shares the dedup'd byte record but never fetched the digest, and its own upstream path is
+    // absent: the cache hit must not leak `alpha`'s bytes under `beta`, and it records no membership.
+    let (status, _, denied) = send(&app, Method::GET, &format!("/v2/hub/beta/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&denied, "MANIFEST_UNKNOWN"), "{denied:?}");
+    assert!(!store::manifest_is_member(&state.meta, "hub", "beta", &digest).unwrap());
+    let (head, ..) = send(&app, Method::HEAD, &format!("/v2/hub/beta/manifests/{digest}")).await;
+    assert_eq!(head, StatusCode::NOT_FOUND);
+
+    // `gamma`'s own upstream confirms the digest, so it is served and recorded under `gamma`.
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/hub/gamma/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &body[..]);
+    assert!(store::manifest_is_member(&state.meta, "hub", "gamma", &digest).unwrap());
+}
+#[tokio::test]
+async fn test_manifest_by_digest_does_not_cross_indexes() {
+    let server_a = MockServer::start().await;
+    let server_b = MockServer::start().await;
+    let body = br#"{"schemaVersion":2,"config":{}}"#;
+    let digest = oci_digest(body);
+    // Only index `hub`'s upstream serves the digest; `vault`'s does not.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_vec(), MANIFEST_TYPE))
+        .mount(&server_a)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy_pair(&dir, &format!("{}/", server_a.uri()), &format!("{}/", server_b.uri()));
+
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/hub/app/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &body[..]);
+
+    // `vault` shares the one content pool but its own upstream has no such digest: unknown, not leaked.
+    let (status, _, denied) = send(&app, Method::GET, &format!("/v2/vault/app/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&denied, "MANIFEST_UNKNOWN"), "{denied:?}");
+    assert!(!store::manifest_is_member(&state.meta, "vault", "app", &digest).unwrap());
+}
+#[tokio::test]
+async fn test_concurrent_by_digest_misses_across_indexes_do_not_leak() {
+    let server_a = MockServer::start().await;
+    let server_b = MockServer::start().await;
+    let body = br#"{"schemaVersion":2,"config":{}}"#;
+    let digest = oci_digest(body);
+    // The by-digest single-flight gate keys on the digest alone, so the two indexes' concurrent misses
+    // serialize through one gate. `hub`'s upstream serves the digest; `vault`'s does not. Whichever
+    // leads, the follower must authorize against its own upstream rather than the byte record the
+    // leader may have populated.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(body.to_vec(), MANIFEST_TYPE)
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .mount(&server_a)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy_pair(&dir, &format!("{}/", server_a.uri()), &format!("{}/", server_b.uri()));
+    let uri_a = format!("/v2/hub/app/manifests/{digest}");
+    let uri_b = format!("/v2/vault/app/manifests/{digest}");
+    let (from_a, from_b) = tokio::join!(send(&app, Method::GET, &uri_a), send(&app, Method::GET, &uri_b));
+    assert_eq!(from_a.0, StatusCode::OK);
+    assert_eq!(from_a.2, &body[..]);
+    assert_eq!(from_b.0, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&from_b.2, "MANIFEST_UNKNOWN"), "{:?}", from_b.2);
+    assert!(!store::manifest_is_member(&state.meta, "vault", "app", &digest).unwrap());
+}
+#[tokio::test]
+async fn test_concurrent_by_digest_misses_share_one_upstream_fetch() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2,"config":{}}"#;
+    let digest = oci_digest(body);
+    // A delayed response holds the first fetch open long enough for the second same-repo request to
+    // park on the gate; `expect(1)` proves the follower re-read the store and served the cached bytes
+    // its own repository now holds, skipping the upstream round trip.
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(body.to_vec(), MANIFEST_TYPE)
+                .set_delay(std::time::Duration::from_millis(200)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let uri = format!("/v2/hub/app/manifests/{digest}");
+    let (first, second) = tokio::join!(send(&app, Method::GET, &uri), send(&app, Method::GET, &uri));
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(second.0, StatusCode::OK);
+    assert_eq!(first.2, &body[..]);
+    assert_eq!(second.2, &body[..]);
+}
+#[tokio::test]
+async fn test_by_digest_member_with_evicted_bytes_refetches() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2,"config":{}}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_vec(), MANIFEST_TYPE))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    // `hub/app` holds the digest, but the shared byte record was evicted: membership without bytes must
+    // re-fetch from the repository's own upstream rather than serve nothing.
+    store::record_manifest(
+        &state.meta,
+        "hub",
+        "app",
+        &digest,
+        &Manifest {
+            media_type: MANIFEST_TYPE.to_owned(),
+            bytes: body.to_vec(),
+        },
+    )
+    .unwrap();
+    assert!(store::delete_manifest(&state.meta, &digest).unwrap());
+
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/hub/app/manifests/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &body[..]);
+}

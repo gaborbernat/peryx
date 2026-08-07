@@ -187,6 +187,22 @@ fn proxy(dir: &TempDir, upstream: &str, offline: bool) -> (Arc<AppState>, axum::
     app_with(dir, oci_index("hub", "hub", IndexKind::Cached { client, offline }))
 }
 
+/// Two caching proxies, `hub` of `up_a` and `vault` of `up_b`, over one pair of stores: the manifest
+/// bytes dedup into a single content pool, but each proxy authorizes against its own upstream.
+fn proxy_pair(dir: &TempDir, up_a: &str, up_b: &str) -> (Arc<AppState>, axum::Router) {
+    let cached = |upstream: &str| IndexKind::Cached {
+        client: UpstreamClient::new(upstream).unwrap(),
+        offline: false,
+    };
+    app_with_indexes(
+        dir,
+        vec![
+            oci_index("hub", "hub", cached(up_a)),
+            oci_index("vault", "vault", cached(up_b)),
+        ],
+    )
+}
+
 /// A caching proxy of `upstream` at route `hub`, under the OCI settings an operator configured for it.
 fn proxy_with_settings(dir: &TempDir, upstream: &str, settings: IndexSettings) -> (Arc<AppState>, axum::Router) {
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();

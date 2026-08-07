@@ -206,7 +206,13 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let gate_key = format!("oci\u{0}manifest\u{0}{digest}");
         let gate = flight_gate(state, &gate_key);
         let _guard = gate.lock().await;
-        if let Some(manifest) = store::get_manifest(&state.meta, digest)? {
+        // A by-digest read authorizes against the requesting repository, not the content-addressed
+        // store every index shares for dedup. The gate keys on the digest alone, so a concurrent pull
+        // for another repository may have populated the byte record while this one waited: re-check
+        // membership here, or a cache hit would serve one repository's private bytes under another.
+        if store::manifest_is_member(&state.meta, index, repo, digest)?
+            && let Some(manifest) = store::get_manifest(&state.meta, digest)?
+        {
             return Ok(Some(manifest_response(manifest, digest, head)));
         }
         let fetched = self

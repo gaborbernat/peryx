@@ -288,33 +288,40 @@ struct TraceparentParts<'a> {
     flags: &'a str,
 }
 
-/// Parse `value` into its fields when it is a well-formed W3C traceparent. Beyond the field shapes this
-/// enforces the three values the spec singles out as invalid: an all-zero trace-id, an all-zero
-/// parent-id, and the reserved version `ff`. The version is a hex byte, so `0xff` is reserved whichever
-/// case its two digits use; the guard compares case-insensitively so an uppercase `FF` cannot slip
-/// past. An unrecognized non-`ff` version stays valid for forward compatibility.
+/// Every field is `HEXDIGLC`: lowercase hex only, so an uppercase `A`-`F` is not a valid digit.
+fn is_hex_lower(field: &str) -> bool {
+    field.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Parse `value` into its fields when it is a well-formed W3C traceparent. Beyond the lowercase-hex field
+/// shapes this enforces the three values the spec singles out as invalid: an all-zero trace-id, an
+/// all-zero parent-id, and the reserved version `ff`. The version is a hex byte, so `0xff` is reserved
+/// whichever case its two digits use; the guard compares case-insensitively so an uppercase `FF` cannot
+/// slip past the lowercase-hex check on a technicality. Version `00` must end after trace-flags, but a
+/// later version may append a non-empty `-`-delimited extension after the 55-character base form and
+/// stays valid, so a peer speaking a newer trace-context version still interoperates.
 fn parse_traceparent(value: &str) -> Option<TraceparentParts<'_>> {
-    let mut fields = value.split('-');
-    let (Some(version), Some(trace_id), Some(parent_id), Some(flags), None) = (
-        fields.next(),
-        fields.next(),
-        fields.next(),
-        fields.next(),
-        fields.next(),
-    ) else {
+    let mut fields = value.splitn(5, '-');
+    let (Some(version), Some(trace_id), Some(parent_id), Some(flags)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
         return None;
     };
-    (version.len() == 2
+    let base_valid = version.len() == 2
         && !version.eq_ignore_ascii_case("ff")
         && trace_id.len() == 32
         && parent_id.len() == 16
         && flags.len() == 2
-        && [version, trace_id, parent_id, flags]
-            .iter()
-            .all(|field| field.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && is_hex_lower(version)
+        && is_hex_lower(trace_id)
+        && is_hex_lower(parent_id)
+        && is_hex_lower(flags)
         && trace_id.bytes().any(|byte| byte != b'0')
-        && parent_id.bytes().any(|byte| byte != b'0'))
-    .then_some(TraceparentParts {
+        && parent_id.bytes().any(|byte| byte != b'0');
+    let extension_valid = fields
+        .next()
+        .is_none_or(|extension| version != "00" && !extension.is_empty());
+    (base_valid && extension_valid).then_some(TraceparentParts {
         version,
         trace_id,
         flags,

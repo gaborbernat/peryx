@@ -203,15 +203,28 @@ fn test_envelope_decode_accepts_an_unrecognized_non_ff_version() {
 }
 
 #[test]
+fn test_envelope_decode_accepts_a_later_version_with_an_extension() {
+    let traceparent = "fe-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-what-comes-next";
+    let original = traced(traceparent);
+    let decoded = OperationEnvelope::decode(&original.encode(), DecodeLimits::default()).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
 fn test_envelope_decode_rejects_each_malformed_traceparent() {
     let cases = [
         "too-few-parts",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
+        "fe-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-",
         "0-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         "00-4bf92f3577b34da6-00f067aa0ba902b7-01",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa-01",
         "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1",
         "0g-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "0A-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00F067AA0BA902B7-01",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0A",
         "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         "FF-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         "fF-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",

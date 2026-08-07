@@ -20,6 +20,8 @@ pub enum MetaError {
     ReplicaSerialConflict { expected: u64, actual: u64 },
     #[error("driver precondition failed: {0}")]
     DriverPrecondition(String),
+    #[error("blob {digest} is being reclaimed; publish the reference again once its deletion finishes")]
+    BlobReclaiming { digest: String },
 }
 
 /// A rejected writer-identity claim or promotion.

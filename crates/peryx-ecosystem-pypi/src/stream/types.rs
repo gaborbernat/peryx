@@ -68,6 +68,8 @@ pub enum TransformError {
     Truncated,
     #[error("upstream page carries data after the document root")]
     Trailing,
+    #[error("upstream page is not a valid JSON project-detail object")]
+    Malformed,
     #[error("upstream page exceeds the size or file-count limit")]
     TooLarge,
 }

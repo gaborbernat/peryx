@@ -10,6 +10,7 @@
 mod context;
 mod transformer;
 mod types;
+mod validator;
 
 pub use context::page_context;
 pub(crate) use context::{hidden_override, yanked_override};

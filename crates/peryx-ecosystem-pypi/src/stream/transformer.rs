@@ -7,6 +7,7 @@ use peryx_policy::PolicyAction;
 use peryx_policy::RemoteMetadataMode;
 use serde::Serialize;
 
+use super::validator::JsonValidator;
 use super::{PageContext, PageSummary, Registration, TransformError};
 use crate::policy::PypiPolicy;
 use crate::simple::absolutize;
@@ -91,6 +92,9 @@ pub struct PageTransformer {
     consumed: usize,
     /// Upstream file elements captured so far, checked against [`MAX_PAGE_FILES`].
     files_seen: usize,
+    /// The full-grammar guard: the structural lexer copies unrecognized bytes through untouched, so
+    /// this independently enforces RFC 8259 and the PEP 691 object root over every raw byte.
+    validator: JsonValidator,
 }
 
 impl PageTransformer {
@@ -121,6 +125,7 @@ impl PageTransformer {
             files_seen: 0,
             project_status: None,
             project_status_reason: None,
+            validator: JsonValidator::new(),
         }
     }
 
@@ -181,6 +186,7 @@ impl PageTransformer {
         }
         out.reserve(chunk.len());
         for &byte in chunk {
+            self.validator.feed(byte);
             self.step(byte, out)?;
         }
         Ok(())
@@ -189,8 +195,9 @@ impl PageTransformer {
     /// Finish the stream, validating that the document closed cleanly.
     ///
     /// # Errors
-    /// Returns [`TransformError::Truncated`] when the document ended inside a token, or
-    /// [`TransformError::Trailing`] when bytes followed the document root.
+    /// Returns [`TransformError::Truncated`] when the document ended inside a token,
+    /// [`TransformError::Trailing`] when bytes followed the document root, or
+    /// [`TransformError::Malformed`] when the bytes were not a single well-formed JSON object.
     pub fn finish(self) -> Result<PageSummary, TransformError> {
         if self.depth != 0 || self.in_string || self.mode != Mode::Passthrough {
             return Err(TransformError::Truncated);
@@ -198,6 +205,7 @@ impl PageTransformer {
         if self.trailing {
             return Err(TransformError::Trailing);
         }
+        self.validator.result()?;
         Ok(PageSummary {
             registrations: self.registrations,
             name: String::from_utf8(self.name).ok().filter(|name| !name.is_empty()),

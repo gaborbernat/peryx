@@ -1,5 +1,6 @@
 use std::io::Write as _;
 
+use super::temp_archive;
 use crate::archive::{ArchiveError, validate_wheel_path};
 
 #[test]
@@ -16,4 +17,69 @@ fn test_validate_wheel_path_rejects_non_wheel_filename_before_zip_read() {
         validate_wheel_path("pkg-1.0.tar.gz", file.path()),
         Err(ArchiveError::Invalid(message)) if message == "invalid wheel: \"pkg-1.0.tar.gz\" is not a wheel filename"
     ));
+}
+
+#[test]
+fn test_validate_wheel_path_rejects_too_many_entries() {
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for index in 0..100_001 {
+            zip.start_file(format!("flask-1.0.dist-info/empty-{index}.txt"), options)
+                .unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    let file = temp_archive(&buf);
+
+    assert!(matches!(
+        validate_wheel_path("Flask-1.0-py3-none-any.whl", file.path()),
+        Err(ArchiveError::Invalid(message)) if message == "invalid wheel: archive has more than 100000 entries"
+    ));
+}
+
+#[test]
+fn test_validate_wheel_path_rejects_member_expanding_past_ratio() {
+    let mut bytes = stored_zip(&[("Flask/data.bin", b"payload")]);
+    set_declared_uncompressed_size(&mut bytes, "Flask/data.bin", 8_000_000);
+    let file = temp_archive(&bytes);
+
+    assert!(matches!(
+        validate_wheel_path("Flask-1.0-py3-none-any.whl", file.path()),
+        Err(ArchiveError::Invalid(message)) if message.contains("above the 1000:1 expansion limit")
+    ));
+}
+
+fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (path, data) in entries {
+            zip.start_file(*path, options).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    buf
+}
+
+/// Overwrite the uncompressed size a zip's central-directory record declares for `target`, so the
+/// member claims to expand far past the bytes it stores without inflating the test archive.
+fn set_declared_uncompressed_size(bytes: &mut [u8], target: &str, declared: u32) {
+    const CENTRAL_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
+    let target = target.as_bytes();
+    for index in 0..bytes.len().saturating_sub(46) {
+        if bytes[index..index + 4] != CENTRAL_SIGNATURE {
+            continue;
+        }
+        let name_length = u16::from_le_bytes([bytes[index + 28], bytes[index + 29]]) as usize;
+        let name_start = index + 46;
+        if name_start + name_length <= bytes.len() && bytes[name_start..name_start + name_length] == *target {
+            bytes[index + 24..index + 28].copy_from_slice(&declared.to_le_bytes());
+            return;
+        }
+    }
+    panic!("no central-directory record for {target:?}");
 }

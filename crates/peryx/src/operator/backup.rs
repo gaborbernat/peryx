@@ -19,9 +19,10 @@ use crate::config::Config;
 /// Create a full offline backup of a data directory.
 ///
 /// # Errors
-/// Returns an error if the backup target is not empty, metadata cannot be read, or a referenced
-/// blob is missing or mismatched while it is copied.
+/// Returns an error if the repository uses an object-store blob backend, the backup target is not
+/// empty, metadata cannot be read, or a referenced blob is missing or mismatched while it is copied.
 pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    crate::app::reject_object_store_blob(config, "creating an offline backup")?;
     prepare_new_backup_dir(path)?;
     let config_info = write_hashed(
         &path.join("config.toml"),

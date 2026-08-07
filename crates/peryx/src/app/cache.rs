@@ -7,19 +7,21 @@ use anyhow::Context as _;
 
 use super::fsck::fsck_cache;
 use super::purge::{purge_orphaned_blobs, purge_project};
-use super::{CacheStores, index_names};
+use super::{CacheStores, index_names, reject_object_store_blob};
 use crate::cli::{CacheCommand, CacheListArgs, CachePurgeCommand};
 use crate::config::Config;
 
 /// Run a cache inspection or maintenance command.
 ///
 /// # Errors
-/// Returns an error if the metadata store or blob store cannot be read, or if output fails.
+/// Returns an error if the repository uses an object-store blob backend, the metadata store or blob
+/// store cannot be read, or if output fails.
 pub fn cache(config: &Config, command: &CacheCommand, out: &mut dyn Write) -> anyhow::Result<()> {
     cache_at(config, command, unix_now(), out)
 }
 
 fn cache_at(config: &Config, command: &CacheCommand, now: i64, out: &mut dyn Write) -> anyhow::Result<()> {
+    reject_object_store_blob(config, "cache maintenance")?;
     let stores = CacheStores::open(config)?;
     match command {
         CacheCommand::List(args) => list_cache(config, &stores, args, now, out),

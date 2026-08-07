@@ -183,6 +183,22 @@ fn test_cache_size_counts_uploads_and_overrides() {
 
 const CACHE_LIST_HEADER: &str = "kind\tindex\tproject\tdigest\tage_secs\tfresh_secs\tstale\tsize_bytes\tkey\n";
 
+#[test]
+fn test_cache_rejects_the_s3_blob_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        blob: crate::tests::s3_blob_backend(),
+        ..Config::default()
+    };
+
+    let error = app::cache(&config, &cache_list_command(), &mut Vec::new()).unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("S3"), "{message}");
+    assert!(message.contains("filesystem-backed repository"), "{message}");
+}
+
 fn cache_list_command() -> CacheCommand {
     CacheCommand::List(CacheListArgs {
         runtime: runtime_args(),

@@ -132,6 +132,66 @@ fn test_search_folds_case_for_non_ascii_text() {
     }
 }
 
+/// Two documents whose text shares every 12-gram of a 13-character query: one holds the overlapping
+/// grams in separate spans without the whole substring, the other holds the substring intact. The
+/// n-gram prefilter accepts both, so the response proves only the true substring survives verification.
+struct SubstringDocs;
+
+impl PackageIndexer for SubstringDocs {
+    fn documents(&self, _ctx: &IndexerCtx<'_>) -> Result<Vec<PackageDocument>, SearchError> {
+        Ok([
+            ("separated", "abcdefghijkl xx bcdefghijklm"),
+            ("whole", "zzabcdefghijklmzz"),
+        ]
+        .into_iter()
+        .map(|(name, text)| PackageDocument {
+            display_name: name.to_owned(),
+            normalized_name: name.to_owned(),
+            route: "root".to_owned(),
+            index: "root".to_owned(),
+            ecosystem: "pypi".to_owned(),
+            source: PackageSource::Cached,
+            available_locally: false,
+            summary: None,
+            text: text.to_owned(),
+        })
+        .collect())
+    }
+}
+
+#[test]
+fn test_long_query_verifies_the_full_substring_after_the_ngram_prefilter() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(SubstringDocs));
+
+    let response = search
+        .search(
+            &stores.ctx(&lexicons),
+            SearchParams {
+                query: "abcdefghijklm".to_owned(),
+                ..SearchParams::default()
+            },
+        )
+        .unwrap();
+
+    // The separated document satisfies both 12-grams yet lacks the 13-character substring, so only the
+    // whole document matches, and the total counts it alone.
+    assert_eq!(
+        (
+            response.total,
+            response
+                .results
+                .iter()
+                .map(|result| result.display_name.as_str())
+                .collect::<Vec<_>>()
+        ),
+        (1, vec!["whole"])
+    );
+}
+
 #[test]
 fn test_authorized_search_filters_before_counting_and_pagination() {
     let dir = tempfile::tempdir().unwrap();

@@ -357,7 +357,15 @@ impl EcosystemDriver for PypiServing {
         now: Option<i64>,
         emit: &mut dyn FnMut(peryx_policy::RetentionDecision) -> Result<(), String>,
     ) -> Result<Option<peryx_policy::RetentionSummary>, String> {
-        crate::retention::evaluate_retention(meta, index, policy, now, emit).map(Some)
+        crate::retention::evaluate_retention(
+            meta,
+            index,
+            policy,
+            now,
+            crate::retention::RETENTION_PROJECT_BUDGET_BYTES,
+            emit,
+        )
+        .map(Some)
     }
 
     fn purge_project(

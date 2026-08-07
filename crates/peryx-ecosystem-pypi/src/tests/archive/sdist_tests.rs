@@ -86,6 +86,72 @@ fn sdist_with_too_many_entries() -> Vec<u8> {
     tarball
 }
 
+/// A gzip tar whose only member is a regular-file header declaring `size` bytes but carrying no body,
+/// so a validator that rejects from the declared size stops before it inflates the body it names.
+fn sdist_with_oversized_member(path: &str, size: u64) -> Vec<u8> {
+    let mut tarball = Vec::new();
+    {
+        let mut encoder = flate2::write::GzEncoder::new(&mut tarball, flate2::Compression::fast());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(size);
+        header.set_mode(0o644);
+        header.set_cksum();
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.finish().unwrap();
+    }
+    tarball
+}
+
+/// A gzip tar with a small member whose body is present, followed by an oversized header-only member,
+/// so the running expanded sum is already non-zero when the second member's declared size crosses the
+/// budget, and the reader reaches the second header without inflating an oversized body.
+fn sdist_with_leading_member_then_oversized(first: (&str, &[u8]), second: (&str, u64)) -> Vec<u8> {
+    let mut tarball = Vec::new();
+    {
+        let mut encoder = flate2::write::GzEncoder::new(&mut tarball, flate2::Compression::fast());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(first.0).unwrap();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(first.1.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.write_all(first.1).unwrap();
+        let padding = (512 - first.1.len() % 512) % 512;
+        encoder.write_all(&vec![0; padding]).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_path(second.0).unwrap();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(second.1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        encoder.write_all(header.as_bytes()).unwrap();
+        encoder.finish().unwrap();
+    }
+    tarball
+}
+
+/// Overwrite the uncompressed size a zip's central-directory record declares for `target`, so the
+/// member claims to expand far past the bytes it stores without inflating the test archive.
+fn set_declared_uncompressed_size(bytes: &mut [u8], target: &str, declared: u32) {
+    const CENTRAL_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x01, 0x02];
+    let target = target.as_bytes();
+    for index in 0..bytes.len().saturating_sub(46) {
+        if bytes[index..index + 4] != CENTRAL_SIGNATURE {
+            continue;
+        }
+        let name_length = u16::from_le_bytes([bytes[index + 28], bytes[index + 29]]) as usize;
+        let name_start = index + 46;
+        if name_start + name_length <= bytes.len() && bytes[name_start..name_start + name_length] == *target {
+            bytes[index + 24..index + 28].copy_from_slice(&declared.to_le_bytes());
+            return;
+        }
+    }
+    panic!("no central-directory record for {target:?}");
+}
+
 fn sdist_with_link(path: &str, target: &str) -> Vec<u8> {
     sdist_with_link_type(path, target, tar::EntryType::symlink())
 }
@@ -385,6 +451,46 @@ fn test_validate_sdist_path_rejects_too_many_entries() {
     assert!(matches!(
         validate_sdist_path("pkg-1.0.tar.gz", file.path()),
         Err(ArchiveError::Invalid(message)) if message == "invalid sdist: archive has more than 100000 entries"
+    ));
+}
+
+#[test]
+fn test_validate_sdist_path_rejects_member_expanding_past_budget_before_body() {
+    let file = temp_archive(&sdist_with_oversized_member(
+        "pkg-1.0/data.bin",
+        8 * 1024 * 1024 * 1024 + 1,
+    ));
+
+    assert!(matches!(
+        validate_sdist_path("pkg-1.0.tar.gz", file.path()),
+        Err(ArchiveError::Invalid(message))
+            if message == "invalid sdist: archive members expand to more than the upload validation limit of 8589934592 bytes"
+    ));
+}
+
+#[test]
+fn test_validate_sdist_path_rejects_leading_members_summing_past_budget() {
+    let file = temp_archive(&sdist_with_leading_member_then_oversized(
+        ("pkg-1.0/module.py", b"x = 1\n"),
+        ("pkg-1.0/data.bin", 8 * 1024 * 1024 * 1024),
+    ));
+
+    assert!(matches!(
+        validate_sdist_path("pkg-1.0.tar.gz", file.path()),
+        Err(ArchiveError::Invalid(message))
+            if message == "invalid sdist: archive members expand to more than the upload validation limit of 8589934592 bytes"
+    ));
+}
+
+#[test]
+fn test_validate_zip_sdist_path_rejects_member_expanding_past_ratio() {
+    let mut bytes = valid_zip_sdist(&[("pkg-1.0/data.bin", b"payload")]);
+    set_declared_uncompressed_size(&mut bytes, "pkg-1.0/data.bin", 8_000_000);
+    let file = temp_archive(&bytes);
+
+    assert!(matches!(
+        validate_zip_sdist_path("pkg-1.0.zip", file.path()),
+        Err(ArchiveError::Invalid(message)) if message.contains("above the 1000:1 expansion limit")
     ));
 }
 

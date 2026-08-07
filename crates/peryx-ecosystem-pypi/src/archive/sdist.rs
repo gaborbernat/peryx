@@ -14,6 +14,17 @@ use crate::{DistributionKind, parse_distribution_filename};
 const MAX_SDIST_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SDIST_ENTRIES: usize = 100_000;
 
+/// Most bytes validation will inflate across an sdist's members. Walking a gzip tar inflates each
+/// member's body to reach the next header, so the expanded total, not the compressed upload, bounds
+/// that work; a member's declared size is folded into this budget before its body is consumed.
+const MAX_SDIST_EXPANDED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Largest expansion a single zip sdist member may declare, uncompressed over compressed. DEFLATE
+/// tops out near 1032:1, so a member claiming more stored a far smaller stream than it declares and
+/// is a decompression bomb rather than ordinary content. A gzip tar carries no per-member compressed
+/// size, so only the zip path can enforce this before summing declared sizes into the budget.
+const MAX_SDIST_COMPRESSION_RATIO: u64 = 1000;
+
 /// Wrap an sdist-validation failure as [`ArchiveError::Invalid`] with the `invalid sdist:` prefix.
 fn invalid_sdist(message: impl std::fmt::Display) -> ArchiveError {
     ArchiveError::Invalid(format!("invalid sdist: {message}"))
@@ -57,6 +68,7 @@ fn validate_sdist_reader(filename: &str, reader: impl Read) -> Result<ValidatedA
     let root = expected_sdist_root(filename, DistributionKind::SdistTarGz, ".tar.gz")?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(reader));
     let mut members = SdistMembers::new(root);
+    let mut expanded = 0;
     for entry in archive.entries().map_err(read_error)? {
         let mut entry = entry.map_err(read_error)?;
         let entry_type = entry.header().entry_type();
@@ -80,6 +92,7 @@ fn validate_sdist_reader(filename: &str, reader: impl Read) -> Result<ValidatedA
         }
         if entry_type.is_file() {
             let size = entry.size();
+            expanded = account_sdist_expansion(expanded, size)?;
             if path == members.pkg_info_path() {
                 let metadata = read_sdist_member_limited(&mut entry, &path, size, MAX_SDIST_METADATA_BYTES)?;
                 members.set_metadata(metadata)?;
@@ -99,6 +112,7 @@ fn validate_zip_sdist_reader(filename: &str, reader: impl Read + Seek) -> Result
     let mut archive = zip::ZipArchive::new(reader).map_err(read_error)?;
     let mut members = SdistMembers::new(root);
     let pkg_info_path = members.pkg_info_path();
+    let mut expanded = 0;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(read_error)?;
         let is_dir = entry.is_dir();
@@ -117,10 +131,13 @@ fn validate_zip_sdist_reader(filename: &str, reader: impl Read + Seek) -> Result
             tar::EntryType::Regular
         };
         validate_sdist_member_path(&members.root, &path, entry_type)?;
-        if entry.is_file() && path == pkg_info_path {
+        if entry.is_file() {
             let size = entry.size();
-            let metadata = read_sdist_member_limited(&mut entry, &path, size, MAX_SDIST_METADATA_BYTES)?;
-            members.set_metadata(metadata)?;
+            expanded = account_zip_sdist_expansion(expanded, &path, size, entry.compressed_size())?;
+            if path == pkg_info_path {
+                let metadata = read_sdist_member_limited(&mut entry, &path, size, MAX_SDIST_METADATA_BYTES)?;
+                members.set_metadata(metadata)?;
+            }
         }
         members.record(path, entry_type)?;
     }
@@ -298,6 +315,34 @@ fn read_sdist_member_limited(
     Ok(bytes)
 }
 
+/// Fold one member's declared uncompressed size into the running expanded total, rejecting an archive
+/// whose members sum past [`MAX_SDIST_EXPANDED_BYTES`]. The sum is checked, so a member declaring a
+/// size near [`u64::MAX`] fails the budget rather than wrapping it, and a member declaring more than
+/// the whole budget on its own is refused before the tar walk inflates its body to reach the next
+/// header.
+fn account_sdist_expansion(running: u64, size: u64) -> Result<u64, ArchiveError> {
+    running
+        .checked_add(size)
+        .filter(|total| *total <= MAX_SDIST_EXPANDED_BYTES)
+        .ok_or_else(|| {
+            invalid_sdist(format!(
+                "archive members expand to more than the upload validation limit of {MAX_SDIST_EXPANDED_BYTES} bytes"
+            ))
+        })
+}
+
+/// Fold a zip sdist member into the expanded budget, first rejecting one that declares more than
+/// [`MAX_SDIST_COMPRESSION_RATIO`] uncompressed bytes per compressed byte. A zip records both sizes,
+/// so a decompression bomb is caught from central-directory metadata before its body is read.
+fn account_zip_sdist_expansion(running: u64, path: &str, size: u64, compressed: u64) -> Result<u64, ArchiveError> {
+    if size > compressed.saturating_mul(MAX_SDIST_COMPRESSION_RATIO) {
+        return Err(invalid_sdist(format!(
+            "member {path} declares {size} bytes from {compressed} compressed, above the {MAX_SDIST_COMPRESSION_RATIO}:1 expansion limit"
+        )));
+    }
+    account_sdist_expansion(running, size)
+}
+
 fn safe_sdist_member_name(path: &str) -> Result<String, ArchiveError> {
     let path = safe_member_name(path)?;
     if is_windows_absolute(&path) {
@@ -329,4 +374,46 @@ fn parse_metadata_version(value: &str) -> Result<(u64, u64), ArchiveError> {
 
 const fn metadata_version_at_least(actual: (u64, u64), required: (u64, u64)) -> bool {
     actual.0 > required.0 || (actual.0 == required.0 && actual.1 >= required.1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_account_sdist_expansion_sums_within_budget() {
+        assert_eq!(account_sdist_expansion(10, 5).unwrap(), 15);
+    }
+
+    #[test]
+    fn test_account_sdist_expansion_rejects_members_crossing_budget() {
+        let message = account_sdist_expansion(MAX_SDIST_EXPANDED_BYTES, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("expand to more than"), "{message}");
+    }
+
+    // A gzip tar cannot carry a member whose declared size overflows the running sum: the tar reader
+    // guards its own size arithmetic first, so the checked add is exercised at its boundary here.
+    #[test]
+    fn test_account_sdist_expansion_rejects_size_sum_overflow() {
+        let message = account_sdist_expansion(1, u64::MAX).unwrap_err().to_string();
+        assert!(message.contains("expand to more than"), "{message}");
+    }
+
+    #[test]
+    fn test_account_zip_sdist_expansion_allows_max_ratio() {
+        assert_eq!(
+            account_zip_sdist_expansion(0, "pkg-1.0/data.bin", MAX_SDIST_COMPRESSION_RATIO, 1).unwrap(),
+            MAX_SDIST_COMPRESSION_RATIO
+        );
+    }
+
+    #[test]
+    fn test_account_zip_sdist_expansion_rejects_zero_compressed_with_content() {
+        let message = account_zip_sdist_expansion(0, "pkg-1.0/bomb.bin", 1, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("expansion limit"), "{message}");
+    }
 }

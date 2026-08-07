@@ -15,7 +15,7 @@ use peryx_identity::{GrantScope, ProviderId, Role};
 use peryx_storage::meta::{JobKind, JobState, MetaStore, NewJobRun, PolicyDecisionQuery};
 use peryx_upstream::Auth;
 #[cfg(unix)]
-use peryx_upstream::{CredentialError, CredentialFailure, ExecCredentialConfig};
+use peryx_upstream::{CredentialFailure, ExecCredentialConfig};
 use rstest::rstest;
 use tower::ServiceExt as _;
 use wiremock::matchers::{header as match_header, header_regex, method, path};
@@ -31,8 +31,8 @@ use crate::config::{
 };
 use crate::server::{
     build_blob_storage, build_index_settings, build_indexes, build_router, build_state, check_config,
-    frontier_endpoint_router, join_secret_resolution, receipt_endpoint_router, receipt_sources, recover_job_attempts,
-    remote_frontier_sources, router_for, upstream_auth,
+    frontier_endpoint_router, receipt_endpoint_router, receipt_sources, recover_job_attempts, remote_frontier_sources,
+    router_for, upstream_auth,
 };
 
 fn s3_blob_config(dir: &tempfile::TempDir) -> Config {
@@ -2328,46 +2328,4 @@ async fn test_frontier_endpoint_router_serves_a_frontier() {
     let reply: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(reply.get("applied_frontier").is_some(), "{reply}");
     assert!(reply.get("epoch").is_some(), "{reply}");
-}
-
-#[tokio::test]
-async fn test_join_secret_resolution_passes_through_resolved_auth() {
-    let resolved = join_secret_resolution("pypi", Ok(Ok(Auth::Bearer("token".to_owned()))));
-
-    assert_eq!(resolved, Ok(Auth::Bearer("token".to_owned())));
-}
-
-#[tokio::test]
-async fn test_join_secret_resolution_passes_through_an_inner_error() {
-    let resolved = join_secret_resolution("pypi", Ok(Err(CredentialError::new("index pypi: unreadable"))));
-
-    assert_eq!(resolved, Err(CredentialError::new("index pypi: unreadable")));
-}
-
-#[tokio::test]
-async fn test_join_secret_resolution_reports_a_panicked_task() {
-    let error = tokio::task::spawn_blocking(|| -> Result<Auth, CredentialError> { panic!("secret boom") })
-        .await
-        .unwrap_err();
-
-    let message = join_secret_resolution("pypi", Err(error)).unwrap_err().to_string();
-
-    assert!(
-        message.starts_with("index pypi: secret resolution task failed:") && message.contains("panic"),
-        "{message}"
-    );
-}
-
-#[tokio::test]
-async fn test_join_secret_resolution_reports_an_aborted_task() {
-    let handle = tokio::task::spawn(async { std::future::pending::<Result<Auth, CredentialError>>().await });
-    handle.abort();
-    let error = handle.await.unwrap_err();
-
-    let message = join_secret_resolution("pypi", Err(error)).unwrap_err().to_string();
-
-    assert!(
-        message.starts_with("index pypi: secret resolution task failed:") && message.contains("cancel"),
-        "{message}"
-    );
 }

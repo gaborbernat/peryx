@@ -12,6 +12,12 @@
 //! [`OwnershipState::restore`] rebuilds from them, so the same one-based, zero-reserved epoch invariant
 //! the state enforces survives a snapshot install. The state lives behind an `Arc<Mutex<_>>` so the
 //! snapshot builder shares one view with the applier.
+//!
+//! A machine built with [`with_snapshot_store`](OwnershipStateMachine::with_snapshot_store) persists every
+//! snapshot it builds or installs into the durable [`RaftLogStore`] and reloads the latest one on startup,
+//! so a restart after log compaction recovers the ownership map, epochs, membership, and `last_applied`
+//! from the stored snapshot rather than the purged log. A machine built with [`Default`] keeps its
+//! snapshot in memory only, which the `openraft` conformance suite and the pure-logic tests exercise.
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -21,9 +27,10 @@ use openraft::{
     AnyError, Entry, EntryPayload, LogId, OptionalSend, RaftSnapshotBuilder, Snapshot, SnapshotMeta, StorageError,
     StorageIOError, StoredMembership,
 };
+use peryx_storage::raft::{RaftLogError, RaftLogStore};
 use tokio::sync::Mutex;
 
-use crate::ownership::{AppliedMeta, DatacenterId, OwnershipState};
+use crate::ownership::{AppliedMeta, DatacenterId, OwnershipError, OwnershipState};
 use crate::raft::{OwnershipResponse, PeryxNode, TypeConfig};
 use crate::{Admission, AuthorityEpoch, AuthorityFence, AuthorityKey};
 
@@ -48,6 +55,9 @@ struct Inner {
     last_membership: StoredMembership<NodeId, PeryxNode>,
     snapshots_built: u64,
     current_snapshot: Option<StoredSnapshot>,
+    /// The durable store to persist snapshots into and reload them from, or `None` for an in-memory-only
+    /// machine. Shared through the same redb database the log adapter writes, so a node keeps one store.
+    snapshot_store: Option<RaftLogStore>,
 }
 
 /// The most recent snapshot this machine built or installed, kept so
@@ -58,7 +68,73 @@ struct StoredSnapshot {
     data: Vec<u8>,
 }
 
+/// A rejected durable snapshot operation before it is mapped into `openraft`'s storage error: the store
+/// failed, a persisted blob would not decode, or a restored state broke the ownership invariant.
+#[derive(Debug, thiserror::Error)]
+enum SnapshotStoreError {
+    #[error(transparent)]
+    Store(#[from] RaftLogError),
+    #[error(transparent)]
+    Codec(#[from] serde_json::Error),
+    #[error(transparent)]
+    Restore(#[from] OwnershipError),
+}
+
+impl From<SnapshotStoreError> for StorageError<NodeId> {
+    fn from(error: SnapshotStoreError) -> Self {
+        // `openraft` folds every `StorageError` into `Fatal` and shuts the node down; the subject and
+        // signature are diagnostic, never a retry-vs-shutdown signal. So each fallible snapshot store
+        // operation maps through this one conversion, keeping the sole error-formatting path tested while
+        // the underlying redb, serde, or ownership error rides along.
+        StorageIOError::read_snapshot(None, AnyError::new(&error)).into()
+    }
+}
+
+impl Inner {
+    /// Reopen `store` and fold its persisted snapshot, if any, back into a fresh machine's applied state so
+    /// a restart recovers the ownership map, epochs, membership, and `last_applied` from the stored
+    /// snapshot rather than the compacted log.
+    fn load(store: RaftLogStore) -> Result<Self, SnapshotStoreError> {
+        let mut inner = Self::default();
+        if let Some(stored) = store.read_snapshot()? {
+            let meta: SnapshotMeta<NodeId, PeryxNode> = serde_json::from_slice(&stored.meta)?;
+            inner.state = OwnershipState::restore(&stored.data)?;
+            inner.last_applied = meta.last_log_id;
+            inner.last_membership = meta.last_membership.clone();
+            inner.current_snapshot = Some(StoredSnapshot {
+                meta,
+                data: stored.data,
+            });
+        }
+        inner.snapshot_store = Some(store);
+        Ok(inner)
+    }
+
+    /// Persist `meta` and `data` as the current durable snapshot, a no-op on an in-memory-only machine.
+    fn persist_snapshot(&self, meta: &SnapshotMeta<NodeId, PeryxNode>, data: &[u8]) -> Result<(), SnapshotStoreError> {
+        if let Some(store) = &self.snapshot_store {
+            let meta = serde_json::to_vec(meta).expect("a snapshot meta always serializes to JSON");
+            store.save_snapshot(&meta, data)?;
+        }
+        Ok(())
+    }
+}
+
 impl OwnershipStateMachine {
+    /// Build a machine backed by the durable `store`, reloading the persisted snapshot so its applied
+    /// state survives a process restart after log compaction.
+    ///
+    /// # Errors
+    /// A [`StorageError`] when the store cannot be read or its persisted snapshot will not decode into a
+    /// valid ownership state. Boxed because `openraft`'s storage error is large and this is the one
+    /// caller-facing (non-trait) result that returns it.
+    pub fn with_snapshot_store(store: RaftLogStore) -> Result<Self, Box<StorageError<NodeId>>> {
+        let inner = Inner::load(store).map_err(|error| Box::new(StorageError::from(error)))?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(inner)),
+        })
+    }
+
     /// The datacenter that homes `authority` in this node's applied ownership state, or `None` when no
     /// committed command has homed it.
     ///
@@ -105,6 +181,7 @@ impl RaftSnapshotBuilder<TypeConfig> for OwnershipStateMachine {
             last_membership: inner.last_membership.clone(),
             snapshot_id,
         };
+        inner.persist_snapshot(&meta, &data)?;
         inner.current_snapshot = Some(StoredSnapshot {
             meta: meta.clone(),
             data: data.clone(),
@@ -171,6 +248,7 @@ impl RaftStateMachine<TypeConfig> for OwnershipStateMachine {
         let state = OwnershipState::restore(&data)
             .map_err(|error| StorageIOError::read_snapshot(Some(meta.signature()), AnyError::new(&error)))?;
         let mut inner = self.inner.lock().await;
+        inner.persist_snapshot(meta, &data)?;
         inner.state = state;
         inner.last_applied = meta.last_log_id;
         inner.last_membership = meta.last_membership.clone();

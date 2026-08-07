@@ -351,6 +351,38 @@ async fn test_unreadable_content_range_on_patch_is_range_not_satisfiable() {
 }
 
 #[tokio::test]
+async fn test_content_range_wider_than_the_body_is_range_not_satisfiable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let (_status, headers, _) = send_body(
+        &app,
+        Method::POST,
+        "/v2/store/app/blobs/uploads/",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+    // A one-byte chunk that declares a thousand-byte range. Accepting it would advance the session past
+    // the byte it carries; the range spans bytes the body does not ship, so it is refused.
+    let (status, headers, _) = send_body(
+        &app,
+        Method::PATCH,
+        &location,
+        &[("authorization", &auth(TOKEN)), ("content-range", "0-999")],
+        b"x".to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    // The session kept its bytes: still empty, so it reports no received-byte range and stays resumable.
+    assert!(!headers.contains_key(header::RANGE));
+    assert_eq!(headers[header::LOCATION].to_str().unwrap(), location);
+    let (status, headers, _) = send_with(&app, Method::GET, &location, &[("authorization", &auth(TOKEN))]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(!headers.contains_key(header::RANGE));
+}
+
+#[tokio::test]
 async fn test_empty_session_omits_the_range_header() {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = hosted_writable(&dir, TOKEN);

@@ -315,8 +315,8 @@ async fn test_out_of_order_chunk_on_patch_is_range_not_satisfiable() {
     )
     .await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
-    // The session is still empty, so there is no received-byte range to report.
-    assert!(!headers.contains_key(header::RANGE));
+    // The session is still empty, so it reports the 0-0 upload range OCI conformance wants.
+    assert_eq!(headers[header::RANGE], "0-0");
     // The 416 hands back the session URL and id so the client can resume rather than restart.
     assert_eq!(headers[header::LOCATION].to_str().unwrap(), location);
     assert!(headers.contains_key("docker-upload-uuid"));
@@ -346,8 +346,8 @@ async fn test_unreadable_content_range_on_patch_is_range_not_satisfiable() {
     )
     .await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
-    // The session is still empty, so there is no received-byte range to report.
-    assert!(!headers.contains_key(header::RANGE));
+    // The session is still empty, so it reports the 0-0 upload range OCI conformance wants.
+    assert_eq!(headers[header::RANGE], "0-0");
 }
 
 #[tokio::test]
@@ -374,20 +374,20 @@ async fn test_content_range_wider_than_the_body_is_range_not_satisfiable() {
     )
     .await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
-    // The session kept its bytes: still empty, so it reports no received-byte range and stays resumable.
-    assert!(!headers.contains_key(header::RANGE));
+    // The session kept its bytes: still empty, so it reports the 0-0 upload range OCI conformance wants.
+    assert_eq!(headers[header::RANGE], "0-0");
     assert_eq!(headers[header::LOCATION].to_str().unwrap(), location);
     let (status, headers, _) = send_with(&app, Method::GET, &location, &[("authorization", &auth(TOKEN))]).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(!headers.contains_key(header::RANGE));
+    assert_eq!(headers[header::RANGE], "0-0");
 }
 
 #[tokio::test]
-async fn test_empty_session_omits_the_range_header() {
+async fn test_empty_session_reports_a_zero_range() {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = hosted_writable(&dir, TOKEN);
-    // Initiating an upload stages no bytes, so the 202 has no received-byte range to report and must
-    // not fall back to `0-<u64::MAX>` from an underflowed `offset - 1`.
+    // Initiating an upload stages no bytes, so the 202 reports the 0-0 range OCI conformance requires
+    // rather than falling back to `0-<u64::MAX>` from an underflowed `offset - 1`.
     let (status, headers, _) = send_body(
         &app,
         Method::POST,
@@ -397,13 +397,13 @@ async fn test_empty_session_omits_the_range_header() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    assert!(!headers.contains_key(header::RANGE));
+    assert_eq!(headers[header::RANGE], "0-0");
 
-    // A status read of the still-empty session likewise reports no range.
+    // A status read of the still-empty session likewise reports 0-0.
     let location = headers[header::LOCATION].to_str().unwrap().to_owned();
     let (status, headers, _) = send_with(&app, Method::GET, &location, &[("authorization", &auth(TOKEN))]).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert!(!headers.contains_key(header::RANGE));
+    assert_eq!(headers[header::RANGE], "0-0");
 }
 
 #[tokio::test]

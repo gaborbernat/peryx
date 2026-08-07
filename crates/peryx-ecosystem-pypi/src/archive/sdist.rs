@@ -1,10 +1,14 @@
 //! Sdist validation and `PKG-INFO` sidecar extraction.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::io::{Read, Seek};
 use std::path::Path;
 
-use super::{ArchiveError, ValidatedArchive, is_tar_gz, read_error, safe_member_name, strip_ascii_suffix_ignore_case};
+use super::{
+    ArchiveError, EntryKind, ValidatedArchive, duplicate_member_message, is_tar_gz, read_error,
+    reject_duplicate_zip_members, safe_member_name, strip_ascii_suffix_ignore_case,
+};
 use crate::{DistributionKind, parse_distribution_filename};
 
 const MAX_SDIST_METADATA_BYTES: u64 = 16 * 1024 * 1024;
@@ -88,6 +92,10 @@ fn validate_sdist_reader(filename: &str, reader: impl Read) -> Result<ValidatedA
 
 fn validate_zip_sdist_reader(filename: &str, reader: impl Read + Seek) -> Result<ValidatedArchive, ArchiveError> {
     let root = expected_sdist_root(filename, DistributionKind::SdistZip, ".zip")?;
+    let archive = zip::ZipArchive::new(reader).map_err(read_error)?;
+    let directory_start = archive.central_directory_start();
+    let mut reader = archive.into_inner();
+    reject_duplicate_zip_members(&mut reader, directory_start, invalid_sdist)?;
     let mut archive = zip::ZipArchive::new(reader).map_err(read_error)?;
     let mut members = SdistMembers::new(root);
     let pkg_info_path = members.pkg_info_path();
@@ -125,7 +133,7 @@ struct SdistMembers {
     pyproject: bool,
     metadata: Option<Vec<u8>>,
     entries: usize,
-    paths: BTreeSet<String>,
+    paths: BTreeMap<String, EntryKind>,
 }
 
 impl SdistMembers {
@@ -135,7 +143,7 @@ impl SdistMembers {
             pyproject: false,
             metadata: None,
             entries: 0,
-            paths: BTreeSet::new(),
+            paths: BTreeMap::new(),
         }
     }
 
@@ -167,8 +175,18 @@ impl SdistMembers {
         if entry_type.is_file() {
             self.pyproject |= path == self.pyproject_path();
         }
-        if entry_type.is_file() || entry_type.is_hard_link() || entry_type.is_symlink() {
-            self.paths.insert(path);
+        let kind = if entry_type.is_dir() {
+            EntryKind::Directory
+        } else {
+            EntryKind::File
+        };
+        match self.paths.entry(path) {
+            Entry::Vacant(slot) => {
+                slot.insert(kind);
+            }
+            Entry::Occupied(slot) => {
+                return Err(invalid_sdist(duplicate_member_message(slot.key(), *slot.get(), kind)));
+            }
         }
         Ok(())
     }
@@ -199,7 +217,7 @@ impl SdistMembers {
             missing_license_files: doc
                 .license_files
                 .into_iter()
-                .filter(|value| !self.paths.contains(&format!("{}/{value}", self.root)))
+                .filter(|value| !self.paths.contains_key(&format!("{}/{value}", self.root)))
                 .collect(),
             metadata,
         })

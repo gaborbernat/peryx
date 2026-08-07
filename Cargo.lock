@@ -5283,11 +5283,13 @@ dependencies = [
 name = "peryx-search"
 version = "0.0.1"
 dependencies = [
+ "hdrhistogram",
  "peryx-core",
  "peryx-index",
  "peryx-storage",
  "serde",
  "serde_json",
+ "stats_alloc",
  "tantivy",
  "tempfile",
  "thiserror 2.0.18",

@@ -19,7 +19,8 @@ use crate::upload::Uploaded;
 use peryx_core::path::local_file_url;
 use peryx_index::{Index, IndexKind};
 use peryx_search::{
-    INDEXED_TEXT_BYTES, IndexerCtx, PackageDocument, PackageIndexer, PackageSource, SearchError, truncate_to_chars,
+    INDEXED_TEXT_BYTES, IndexerCtx, PackageDocument, PackageIndexer, PackageSource, ProjectUpdate, SearchError,
+    project_key as document_key, truncate_to_chars,
 };
 
 /// Produces `PyPI` search documents for the neutral search index.
@@ -39,6 +40,24 @@ impl PackageIndexer for PypiIndexer {
             }
         }
         Ok(documents)
+    }
+
+    /// Re-derive one project across every index it can appear on, mirroring [`documents`] for a single
+    /// name. Each index contributes the project's key so a deletion retires the stale document there, plus
+    /// the freshly derived document when the project still has files, so the neutral engine rewrites only
+    /// this project. A non-PyPI index holds no record for the name and so derives none, exactly as the
+    /// full walk finds nothing there.
+    ///
+    /// [`documents`]: PypiIndexer::documents
+    fn project_update(&self, ctx: &IndexerCtx<'_>, name: &str) -> Result<ProjectUpdate, SearchError> {
+        let mut update = ProjectUpdate::default();
+        for index in ctx.indexes {
+            update.keys.push(document_key(&index.route, name));
+            if let Some(package) = package_document(ctx, index, name)? {
+                update.documents.push(package);
+            }
+        }
+        Ok(update)
     }
 }
 

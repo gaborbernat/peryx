@@ -30,6 +30,44 @@ async fn test_search_rebuilds_after_delete() {
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"], 0);
 }
 #[tokio::test]
+async fn test_scoped_refresh_retires_only_the_mutated_project() {
+    let h = harness().await;
+    put_uploaded_package(&h.state, "Alpha", "alpha", "shared summary");
+    put_uploaded_package(&h.state, "Beta", "beta", "shared summary");
+    // Build the whole index once so the delete below takes the incremental path, not a full rebuild.
+    assert_eq!(search_total(&h.state, "/hosted/+search?q=shared&page_size=25").await, 2);
+
+    h.state
+        .meta
+        .delete_upload("hosted", "beta", "beta-1.0-py3-none-any.whl", 0)
+        .unwrap();
+    h.state.invalidate_project("beta");
+
+    assert_eq!(
+        search_total(&h.state, "/hosted/+search?q=alpha&page_size=25").await,
+        1,
+        "alpha was not re-derived and stays searchable"
+    );
+    assert_eq!(
+        search_total(&h.state, "/hosted/+search?q=beta&page_size=25").await,
+        0,
+        "beta's document was retired incrementally"
+    );
+}
+
+#[tokio::test]
+async fn test_scoped_refresh_re_derives_the_named_project() {
+    let h = harness().await;
+    put_uploaded_package(&h.state, "Alpha", "alpha", "alpha summary");
+    assert_eq!(search_total(&h.state, "/hosted/+search?q=alpha&page_size=25").await, 1);
+
+    // With the record intact, a scoped invalidation re-derives the project and re-adds its document.
+    h.state.invalidate_project("alpha");
+
+    assert_eq!(search_total(&h.state, "/hosted/+search?q=alpha&page_size=25").await, 1);
+}
+
+#[tokio::test]
 async fn test_search_uses_cached_epoch_until_mutation() {
     let h = harness().await;
     put_uploaded_package(&h.state, "PeryxPkg", "peryxpkg", "Temporary upload");

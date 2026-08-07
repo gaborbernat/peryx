@@ -175,6 +175,91 @@ async fn test_oci_indexer_skips_non_oci_indexes() {
 }
 
 #[tokio::test]
+async fn test_oci_indexer_project_update_scopes_to_one_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let pypi = Index {
+        name: "pypi".to_owned(),
+        route: "pypi".to_owned(),
+        ecosystem: Ecosystem::Pypi,
+        kind: IndexKind::Hosted { volatile: false },
+        policy: Policy::default(),
+        acl: IndexAcl::default(),
+    };
+    let (state, _app) = app_with_indexes(&dir, vec![pypi, writable_index("store", "store", true, TOKEN)]);
+    store::put_tag(&state.meta, "store", "library/app", "1.0", DIGEST).unwrap();
+    store::put_tag(&state.meta, "store", "team/api", "latest", DIGEST).unwrap();
+
+    let update = OciIndexer.project_update(&state.indexer_ctx(), "library/app").unwrap();
+
+    // The non-OCI index is skipped and only the named repository is derived, so the neutral engine
+    // rewrites just that one document.
+    assert_eq!(update.keys, vec![peryx_search::project_key("store", "library/app")]);
+    assert_eq!(update.documents.len(), 1);
+    assert_eq!(update.documents[0].display_name, "library/app");
+}
+
+#[tokio::test]
+async fn test_oci_indexer_project_update_ignores_an_absent_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = hosted_writable(&dir, TOKEN);
+    store::put_tag(&state.meta, "store", "library/app", "1.0", DIGEST).unwrap();
+
+    let update = OciIndexer.project_update(&state.indexer_ctx(), "team/ghost").unwrap();
+
+    assert!(
+        update.keys.is_empty(),
+        "a repository the index does not serve contributes no key"
+    );
+    assert!(update.documents.is_empty());
+}
+
+#[tokio::test]
+async fn test_oci_indexer_project_update_omits_a_policy_blocked_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let policy = Policy::compile(
+        &PolicyConfig {
+            block_projects: vec!["blocked/app".to_owned()],
+            ..PolicyConfig::default()
+        },
+        str::to_owned,
+    );
+    let index = Index {
+        policy,
+        ..writable_index("store", "store", true, TOKEN)
+    };
+    let (state, _app) = app_with_indexes(&dir, vec![index]);
+    store::put_tag(&state.meta, "store", "blocked/app", "1.0", DIGEST).unwrap();
+
+    let update = OciIndexer.project_update(&state.indexer_ctx(), "blocked/app").unwrap();
+
+    assert!(
+        update.keys.is_empty(),
+        "a blocked repository is not refreshed through search"
+    );
+    assert!(update.documents.is_empty());
+}
+
+#[tokio::test]
+async fn test_oci_indexer_project_update_follows_virtual_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = virtual_stack(&dir, "https://example.test");
+    store::put_tag(&state.meta, "images", "team/app", "1.0", DIGEST).unwrap();
+
+    let update = OciIndexer.project_update(&state.indexer_ctx(), "team/app").unwrap();
+
+    // The hosted member serves the repository and the virtual index reaches it, so both refresh; the
+    // cached member, which holds no tag for it, contributes nothing.
+    assert_eq!(
+        update.keys,
+        vec![
+            peryx_search::project_key("images", "team/app"),
+            peryx_search::project_key("reg", "team/app"),
+        ]
+    );
+    assert_eq!(update.documents.len(), 2);
+}
+
+#[tokio::test]
 async fn test_oci_search_availability_filter_uses_manifest_placement() {
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = hosted_writable(&dir, TOKEN);

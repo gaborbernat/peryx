@@ -41,6 +41,10 @@ pub struct PackageSearch {
     indexer: Arc<dyn PackageIndexer>,
     epoch: AtomicU64,
     indexed_epoch: Mutex<Option<u64>>,
+    /// The projects a lazy refresh must re-derive, or `None` when the whole index must rebuild. A scoped
+    /// mutation records only its project; a blanket invalidation ([`bump_epoch`](PackageSearch::bump_epoch))
+    /// or a not-yet-populated index clears it to `None`, so the next refresh re-derives everything.
+    dirty: Mutex<Option<BTreeSet<String>>>,
     rebuild_lock: Mutex<()>,
     /// The on-disk index directory, or `None` for an in-memory index. An eager rebuild uses it to
     /// mark an in-flight rebuild so a restart that interrupts one discards the partial index.
@@ -128,6 +132,7 @@ impl PackageSearch {
             indexer: default_indexer(),
             epoch: AtomicU64::new(0),
             indexed_epoch: Mutex::new(None),
+            dirty: Mutex::new(None),
             rebuild_lock: Mutex::new(()),
             home,
         })
@@ -140,9 +145,30 @@ impl PackageSearch {
         self.indexer = Arc::new(CompositeIndexer(vec![current, indexer]));
     }
 
-    /// Call after committing a mutation that changes searchable documents.
+    /// Invalidate the whole derived index after a mutation whose affected projects are not known, so the
+    /// next search re-derives every document. Reserve it for that case; a mutation that names its project
+    /// should call [`invalidate_project`](PackageSearch::invalidate_project) to refresh only that one.
+    ///
+    /// # Panics
+    /// Panics if the dirty-set lock was poisoned by a prior panic while holding it.
     pub fn bump_epoch(&self) {
-        self.epoch.fetch_add(1, Ordering::Relaxed);
+        *self.dirty.lock().expect("search dirty lock") = None;
+        self.epoch.fetch_add(1, Ordering::Release);
+    }
+
+    /// Invalidate one project after a mutation that changed its searchable documents, so the next search
+    /// re-derives and rewrites only that project instead of the whole corpus.
+    ///
+    /// While a blanket rebuild is already pending the project folds into it rather than being tracked
+    /// separately, since the rebuild re-derives everything regardless.
+    ///
+    /// # Panics
+    /// Panics if the dirty-set lock was poisoned by a prior panic while holding it.
+    pub fn invalidate_project(&self, name: &str) {
+        if let Some(dirty) = self.dirty.lock().expect("search dirty lock").as_mut() {
+            dirty.insert(name.to_owned());
+        }
+        self.epoch.fetch_add(1, Ordering::Release);
     }
 
     /// Rebuild the whole index from authoritative metadata, committing in chunks and publishing the
@@ -209,6 +235,11 @@ impl PackageSearch {
         let _ = observe(RebuildProgress { indexed, total });
         self.reader.reload()?;
         self.clear_rebuilding();
+        // The rebuild re-derived every project as of `snapshot.epoch`, so unless a mutation has advanced
+        // the epoch since, the scoped tracker starts empty and later mutations refresh only their project.
+        if self.epoch.load(Ordering::Acquire) == snapshot.epoch {
+            *self.dirty.lock().expect("search dirty lock") = Some(BTreeSet::new());
+        }
         *self.indexed_epoch.lock().expect("search epoch lock") = Some(snapshot.epoch);
         ctx.meta.set_view_frontier(SEARCH_VIEW, snapshot.frontier)?;
         Ok(RebuildOutcome::Published {
@@ -313,19 +344,69 @@ impl PackageSearch {
         let Ok(_guard) = self.rebuild_lock.try_lock() else {
             return Ok(());
         };
-        let epoch = self.epoch.load(Ordering::Relaxed);
-        if self
-            .indexed_epoch
-            .lock()
-            .expect("search epoch lock")
-            .is_none_or(|indexed| indexed != epoch)
-        {
-            let frontier = ctx.indexer.meta.current_serial()?;
-            self.write(&self.indexer.documents(&ctx.indexer)?)?;
-            *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
-            ctx.indexer.meta.set_view_frontier(SEARCH_VIEW, frontier)?;
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let indexed = *self.indexed_epoch.lock().expect("search epoch lock");
+        if indexed == Some(epoch) {
+            return Ok(());
         }
+        // A not-yet-populated index or a blanket invalidation (`dirty` cleared to `None`) rebuilds every
+        // document; otherwise the snapshot of dirty projects re-derives only those. The snapshot is read
+        // before the write and the applied names are retired after it, so a mutation that lands mid-write
+        // survives: it re-bumps the epoch, leaving `indexed` behind so the next search re-derives it.
+        let scoped = match (indexed, self.dirty.lock().expect("search dirty lock").as_ref()) {
+            (Some(_), Some(dirty)) => Some(dirty.clone()),
+            _ => None,
+        };
+        let frontier = ctx.indexer.meta.current_serial()?;
+        match &scoped {
+            Some(names) => self.apply_scoped(&ctx.indexer, names)?,
+            None => self.write(&self.indexer.documents(&ctx.indexer)?)?,
+        }
+        self.retire_applied(scoped.as_ref(), epoch);
+        *self.indexed_epoch.lock().expect("search epoch lock") = Some(epoch);
+        ctx.indexer.meta.set_view_frontier(SEARCH_VIEW, frontier)?;
         Ok(())
+    }
+
+    /// Re-derive and rewrite only `names`, retiring each project's prior documents and adding its fresh
+    /// ones in a single writer commit, then reloading the reader once.
+    fn apply_scoped(&self, ctx: &IndexerCtx<'_>, names: &BTreeSet<String>) -> Result<(), SearchError> {
+        let mut writer = self
+            .index
+            .writer_with_num_threads::<TantivyDocument>(1, WRITER_MEMORY_BYTES)?;
+        for name in names {
+            let update = self.indexer.project_update(ctx, name)?;
+            for key in &update.keys {
+                writer.delete_term(Term::from_field_text(self.fields.key, key));
+            }
+            for package in &update.documents {
+                writer.add_document(self.document(package))?;
+            }
+        }
+        writer.commit()?;
+        self.reader.reload()?;
+        Ok(())
+    }
+
+    /// Clear the just-applied invalidation once its write succeeded. A scoped write drops only the names
+    /// it wrote, leaving any that arrived mid-write; a full write, when no mutation has advanced the epoch
+    /// since it started, resets the tracker to empty so later mutations refresh only their own project.
+    fn retire_applied(&self, applied: Option<&BTreeSet<String>>, epoch: u64) {
+        let mut dirty = self.dirty.lock().expect("search dirty lock");
+        match applied {
+            Some(names) => {
+                if let Some(tracked) = dirty.as_mut() {
+                    for name in names {
+                        tracked.remove(name);
+                    }
+                }
+            }
+            None => {
+                if self.epoch.load(Ordering::Acquire) == epoch && dirty.is_none() {
+                    *dirty = Some(BTreeSet::new());
+                }
+            }
+        }
     }
 
     /// Replace one project's document on one index — the record keyed by [`project_key`] — with `docs`,

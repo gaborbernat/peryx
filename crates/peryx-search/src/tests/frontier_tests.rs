@@ -75,6 +75,26 @@ fn test_rebuild_persists_the_store_frontier_it_indexed() {
 }
 
 #[test]
+fn test_scoped_refresh_persists_the_store_frontier_it_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(OneDoc));
+    advance_serial(&stores, 3);
+    search.search(&stores.ctx(&lexicons), SearchParams::default()).unwrap();
+    assert_eq!(stores.meta.view_frontier(SEARCH_VIEW).unwrap(), Some(3));
+
+    // A per-project invalidation refreshes only its document, yet the lazy refresh still records the
+    // frontier it indexed so a replica's readable frontier advances over the mutation.
+    advance_serial(&stores, 2);
+    search.invalidate_project("pkg");
+    search.search(&stores.ctx(&lexicons), SearchParams::default()).unwrap();
+
+    assert_eq!(stores.meta.view_frontier(SEARCH_VIEW).unwrap(), Some(5));
+}
+
+#[test]
 fn test_update_project_leaves_the_view_frontier_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let stores = Stores::open(&dir);

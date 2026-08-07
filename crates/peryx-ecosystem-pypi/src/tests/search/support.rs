@@ -198,3 +198,11 @@ pub(super) fn cached_index(body: &str) -> CachedIndex {
 pub(super) fn meta_error() -> MetaError {
     MetaError::Decode(serde_json::from_str::<serde_json::Value>("not json").unwrap_err())
 }
+
+pub(super) async fn search_total(state: &Arc<AppState>, uri: &str) -> u64 {
+    let (status, _headers, body) = get(state, uri, Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"]
+        .as_u64()
+        .unwrap()
+}

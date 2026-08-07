@@ -519,15 +519,7 @@ mod tests {
             let url = format!("http://{}/hook", listener.local_addr().unwrap());
             let accepted = Arc::new(AtomicUsize::new(0));
             let counter = accepted.clone();
-            tokio::spawn(async move {
-                while let Ok((socket, _)) = listener.accept().await {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    tokio::spawn(async move {
-                        let _held = socket;
-                        std::future::pending::<()>().await;
-                    });
-                }
-            });
+            tokio::spawn(accept_and_hold(listener, counter));
             Self { url, accepted }
         }
 
@@ -542,21 +534,37 @@ mod tests {
         }
     }
 
+    async fn accept_and_hold(listener: TcpListener, counter: Arc<AtomicUsize>) {
+        while let Ok((socket, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(hold_open(socket));
+        }
+    }
+
+    async fn hold_open(socket: tokio::net::TcpStream) {
+        let _held = socket;
+        std::future::pending::<()>().await;
+    }
+
     async fn healthy_server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/hook", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = [0_u8; 1024];
-                    let _ = socket.read(&mut buf).await;
-                    let _ = socket
-                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                        .await;
-                });
-            }
-        });
+        tokio::spawn(accept_and_answer(listener));
         url
+    }
+
+    async fn accept_and_answer(listener: TcpListener) {
+        while let Ok((socket, _)) = listener.accept().await {
+            tokio::spawn(answer_ok(socket));
+        }
+    }
+
+    async fn answer_ok(mut socket: tokio::net::TcpStream) {
+        let mut buf = [0_u8; 1024];
+        let _ = socket.read(&mut buf).await;
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

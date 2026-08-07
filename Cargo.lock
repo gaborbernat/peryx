@@ -5114,6 +5114,7 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
+ "web_atoms",
  "wiremock",
  "xml-rs",
  "zip",

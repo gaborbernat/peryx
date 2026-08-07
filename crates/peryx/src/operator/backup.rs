@@ -19,10 +19,13 @@ use crate::config::Config;
 /// Create a full offline backup of a data directory.
 ///
 /// # Errors
-/// Returns an error if the repository uses an object-store blob backend, the backup target is not
-/// empty, metadata cannot be read, or a referenced blob is missing or mismatched while it is copied.
+/// Returns an error if the repository uses an object-store blob backend, the source metadata store
+/// is open by a running node, the backup target is not empty, metadata cannot be read, or a
+/// referenced blob is missing or mismatched while it is copied.
 pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
     crate::app::reject_object_store_blob(config, "creating an offline backup")?;
+    let source_metadata = config.data_dir.join("peryx.redb");
+    let _quiesced = quiesce_source(&source_metadata)?;
     prepare_new_backup_dir(path)?;
     let config_info = write_hashed(
         &path.join("config.toml"),
@@ -30,9 +33,9 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
         "config.toml",
     )
     .context("write config snapshot")?;
-    let metadata_context = format!("copy metadata store {}", config.data_dir.join("peryx.redb").display());
+    let metadata_context = format!("copy metadata store {}", source_metadata.display());
     copy_hashed(
-        &config.data_dir.join("peryx.redb"),
+        &source_metadata,
         &path.join("metadata/peryx.redb"),
         "metadata/peryx.redb",
         Access::Private,
@@ -96,6 +99,25 @@ pub fn backup_create(config: &Config, path: &Path, out: &mut dyn Write) -> anyho
         "availability\t{mode}\tfrontier {frontier}\tplacements {placements}"
     )?;
     Ok(())
+}
+
+/// Hold a read-only handle on the source metadata store so a running node's writer refuses the backup.
+///
+/// redb grants a read-only open a shared file lock and a writer an exclusive one, so a serving process
+/// holding the data directory open makes this fail with `DatabaseAlreadyOpen`; keeping the returned
+/// handle alive across the copy also stops a node from starting mid-copy. The config `read_only` flag is
+/// not consulted: another process may hold the same directory open under different settings.
+fn quiesce_source(source: &Path) -> anyhow::Result<MetaStore> {
+    MetaStore::open_existing_read_only(source).map_err(|err| {
+        if err.is_database_already_open() {
+            anyhow::anyhow!(
+                "metadata store {} is open by a running node; stop the node before creating a backup",
+                source.display()
+            )
+        } else {
+            anyhow::Error::new(err).context(format!("open metadata store {} read-only", source.display()))
+        }
+    })
 }
 
 /// Copy every blob the metadata store references into the backup, writing one index row per blob and

@@ -636,6 +636,7 @@ async fn test_client_replays_one_unauthorized_exec_credential() {
             .unwrap(),
         &UpstreamTls::default(),
         &upstream,
+        &[],
     )
     .unwrap();
 

@@ -323,14 +323,23 @@ impl<'de> Visitor<'de> for RootVisitor<'_, '_> {
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut meta = None;
+        let mut saw_projects = false;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "meta" => meta = Some(map.next_value::<JsonMeta>()?),
-                "projects" => map.next_value_seed(ProjectsSeed { batcher: self.batcher })?,
+                "projects" => {
+                    map.next_value_seed(ProjectsSeed { batcher: self.batcher })?;
+                    saw_projects = true;
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
             }
+        }
+        if !saw_projects {
+            return Err(serde::de::Error::custom(
+                "PEP 691 root response omits the required \"projects\" array",
+            ));
         }
         Meta::from_upstream(meta.and_then(|meta| meta.api_version).as_deref(), None, None)
             .map_err(serde::de::Error::custom)?;
@@ -522,7 +531,7 @@ mod tests {
     use crate::SimpleClientExt as _;
     use crate::store::{
         CatalogGeneration, abort_catalog_generation, begin_catalog_generation, catalog_state, list_projects,
-        publish_catalog_generation,
+        publish_catalog_generation, put_catalog_projects,
     };
     use peryx_storage::meta::MetaStore;
 
@@ -710,6 +719,42 @@ mod tests {
         assert!(state.staging.is_none());
     }
 
+    #[tokio::test]
+    async fn test_sync_catalog_rejects_response_without_projects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/simple/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"meta":{"api-version":"1.4"}}"#,
+                "application/vnd.pypi.simple.v1+json",
+            ))
+            .mount(&server)
+            .await;
+        let client = UpstreamClient::new(&format!("{}/simple/", server.uri())).unwrap();
+        let (_dir, meta) = store();
+        let (generation, expected) = begin_catalog_generation(&meta, "no-projects").unwrap();
+        put_catalog_projects(
+            &meta,
+            "no-projects",
+            generation,
+            &[("flask".to_owned(), "Flask".to_owned())],
+        )
+        .unwrap();
+        let mut seeded = active(generation);
+        seeded.projects = 1;
+        publish_catalog_generation(&meta, "no-projects", expected, seeded).unwrap();
+
+        let error = sync_catalog(&client, &Inflight::default(), &meta, "no-projects", client.base_url())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CatalogSyncError::Json(error) if error.to_string().contains("projects")));
+        let state = catalog_state(&meta, "no-projects").unwrap();
+        assert_eq!(state.active.unwrap().generation, generation);
+        assert!(state.staging.is_none());
+        assert_eq!(list_projects(&meta, "no-projects").unwrap(), vec!["Flask"]);
+    }
+
     #[test]
     fn test_write_catalog_stream_caps_unknown_length() {
         let mut output = Vec::new();
@@ -791,7 +836,11 @@ mod tests {
 
     #[test]
     fn test_json_parser_validates_shapes_and_ignores_extensions() {
-        for document in [r"[]", r#"{"meta":{"api-version":"1.4"},"projects":{}}"#] {
+        for document in [
+            r"[]",
+            r#"{"meta":{"api-version":"1.4"},"projects":{}}"#,
+            r#"{"meta":{"api-version":"1.4"}}"#,
+        ] {
             let (_dir, meta) = store();
             let (generation, _) = begin_catalog_generation(&meta, "shape").unwrap();
 

@@ -524,7 +524,10 @@ mod tests {
             std::thread::spawn(move || {
                 // The vec is never read; its only job is to keep each accepted socket alive so the server
                 // holds the connection open and never answers.
-                #[allow(clippy::collection_is_never_read, reason = "the vec exists only to hold sockets open")]
+                #[allow(
+                    clippy::collection_is_never_read,
+                    reason = "the vec exists only to hold sockets open"
+                )]
                 let mut held = Vec::new();
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { break };

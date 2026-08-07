@@ -1,6 +1,8 @@
 use std::io::Write as _;
 
-use super::{temp_archive, valid_sdist, valid_zip_sdist};
+use rstest::rstest;
+
+use super::{raw_zip, temp_archive, valid_sdist, valid_zip_sdist};
 use crate::archive::{ArchiveError, validate_sdist_path, validate_zip_sdist_path};
 
 fn valid_sdist_with_link(path: &str, target: &str, entry_type: tar::EntryType) -> Vec<u8> {
@@ -221,6 +223,61 @@ fn test_validate_sdist_path_rejects_duplicate_pkg_info() {
     assert!(matches!(
         validate_sdist_path("pkg-1.0.tar.gz", file.path()),
         Err(ArchiveError::Invalid(message)) if message == "invalid sdist: multiple pkg-1.0/PKG-INFO entries found"
+    ));
+}
+
+#[test]
+fn test_validate_sdist_path_rejects_duplicate_tar_member() {
+    let file = temp_archive(&valid_sdist(&[
+        (
+            "pkg-1.0/PKG-INFO",
+            b"Metadata-Version: 2.2\nName: pkg\nVersion: 1.0\n".as_slice(),
+        ),
+        ("pkg-1.0/pyproject.toml", b"[build-system]\n".as_slice()),
+        ("pkg-1.0/module.py", b"a\n".as_slice()),
+        ("pkg-1.0/module.py", b"b\n".as_slice()),
+    ]));
+
+    assert!(matches!(
+        validate_sdist_path("pkg-1.0.tar.gz", file.path()),
+        Err(ArchiveError::Invalid(message)) if message == "invalid sdist: duplicate file member \"pkg-1.0/module.py\""
+    ));
+}
+
+#[rstest]
+#[case::duplicate_file(
+    &[
+        ("pkg-1.0/PKG-INFO", b"Metadata-Version: 2.2\nName: pkg\nVersion: 1.0\n".as_slice()),
+        ("pkg-1.0/pyproject.toml", b"[build-system]\n".as_slice()),
+        ("pkg-1.0/module.py", b"a\n".as_slice()),
+        ("pkg-1.0/module.py", b"b\n".as_slice()),
+    ],
+    "duplicate file member \"pkg-1.0/module.py\""
+)]
+#[case::repeated_directory(
+    &[
+        ("pkg-1.0/PKG-INFO", b"Metadata-Version: 2.2\nName: pkg\nVersion: 1.0\n".as_slice()),
+        ("pkg-1.0/pyproject.toml", b"[build-system]\n".as_slice()),
+        ("pkg-1.0/sub/", b"".as_slice()),
+        ("pkg-1.0/sub/", b"".as_slice()),
+    ],
+    "duplicate directory member \"pkg-1.0/sub\""
+)]
+#[case::file_and_directory(
+    &[
+        ("pkg-1.0/PKG-INFO", b"Metadata-Version: 2.2\nName: pkg\nVersion: 1.0\n".as_slice()),
+        ("pkg-1.0/pyproject.toml", b"[build-system]\n".as_slice()),
+        ("pkg-1.0/data", b"x\n".as_slice()),
+        ("pkg-1.0/data/", b"".as_slice()),
+    ],
+    "member \"pkg-1.0/data\" is both a file and a directory"
+)]
+fn test_validate_zip_sdist_path_rejects_duplicate_members(#[case] entries: &[(&str, &[u8])], #[case] expected: &str) {
+    let file = temp_archive(&raw_zip(entries));
+
+    assert!(matches!(
+        validate_zip_sdist_path("pkg-1.0.zip", file.path()),
+        Err(ArchiveError::Invalid(message)) if message == format!("invalid sdist: {expected}")
     ));
 }
 

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
 use std::path::Path;
 
-use super::{ArchiveError, ValidatedArchive, read_error, safe_member_name};
+use super::{ArchiveError, ValidatedArchive, read_error, reject_duplicate_zip_members, safe_member_name};
 use crate::{DistributionKind, Version, normalize_name, parse_distribution_filename, parse_version};
 
 mod entry_points;
@@ -63,6 +63,10 @@ pub fn validate_wheel_path(filename: &str, path: &Path) -> Result<ValidatedArchi
 fn validate_wheel_reader(filename: &str, reader: impl Read + Seek) -> Result<ValidatedArchive, ArchiveError> {
     let expected = expected_wheel_dist_info(filename)?;
 
+    let archive = zip::ZipArchive::new(reader).map_err(read_error)?;
+    let directory_start = archive.central_directory_start();
+    let mut reader = archive.into_inner();
+    reject_duplicate_zip_members(&mut reader, directory_start, invalid_wheel)?;
     let mut archive = zip::ZipArchive::new(reader).map_err(read_error)?;
     let members = wheel_members(&mut archive, &expected)?;
     let dist_info = members.dist_info.as_str();

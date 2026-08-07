@@ -1,7 +1,35 @@
 use std::io::Write as _;
 
-use super::temp_archive;
+use rstest::rstest;
+
+use super::{raw_zip, temp_archive};
 use crate::archive::{ArchiveError, validate_wheel_path};
+
+#[rstest]
+#[case::duplicate_metadata(
+    &[("pkg-1.0.dist-info/METADATA", b"a".as_slice()), ("pkg-1.0.dist-info/METADATA", b"b".as_slice())],
+    "duplicate file member \"pkg-1.0.dist-info/METADATA\""
+)]
+#[case::duplicate_package_file(
+    &[("pkg/module.py", b"a".as_slice()), ("pkg/module.py", b"b".as_slice())],
+    "duplicate file member \"pkg/module.py\""
+)]
+#[case::repeated_directory(
+    &[("pkg-1.0.dist-info/", b"".as_slice()), ("pkg-1.0.dist-info/", b"".as_slice())],
+    "duplicate directory member \"pkg-1.0.dist-info\""
+)]
+#[case::file_and_directory(
+    &[("pkg/data", b"x".as_slice()), ("pkg/data/", b"".as_slice())],
+    "member \"pkg/data\" is both a file and a directory"
+)]
+fn test_validate_wheel_path_rejects_duplicate_members(#[case] entries: &[(&str, &[u8])], #[case] expected: &str) {
+    let file = temp_archive(&raw_zip(entries));
+
+    assert!(matches!(
+        validate_wheel_path("pkg-1.0-py3-none-any.whl", file.path()),
+        Err(ArchiveError::Invalid(message)) if message == format!("invalid wheel: {expected}")
+    ));
+}
 
 #[test]
 fn test_validate_wheel_path_rejects_non_wheel_filename_before_zip_read() {

@@ -87,6 +87,16 @@ impl UiSearchPage {
                 .collect(),
         })
     }
+
+    /// The 1-based inclusive `(start, end)` row interval this page shows in its summary, or `None`
+    /// when the page holds no rows. A page requested past the last result carries a nonzero total
+    /// yet an empty vector, and its start would otherwise run beyond both the end and the total.
+    #[must_use]
+    pub fn shown_range(&self) -> Option<(usize, usize)> {
+        let last = self.results.len().checked_sub(1)?;
+        let start = self.page.saturating_sub(1).saturating_mul(self.page_size) + 1;
+        Some((start, self.total.min(start + last)))
+    }
 }
 
 impl UiSearchResult {

@@ -2,8 +2,8 @@ use rstest::rstest;
 
 use crate::markdown::external_link_rel;
 use crate::model::{
-    PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage, UiSearchPage, UiShadowPage, UiSnapshot,
-    members_from_listing, projects_from_list,
+    PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage, UiSearchPage, UiSearchResult, UiShadowPage,
+    UiSnapshot, members_from_listing, projects_from_list,
 };
 
 fn policy_decision(state: &str, fresh: bool) -> UiPolicyDecision {
@@ -338,6 +338,49 @@ fn test_search_page_accepts_empty_results() {
 fn test_search_page_rejects_malformed(#[case] value: serde_json::Value) {
     let error = UiSearchPage::from_search(&value).expect_err("malformed response is rejected");
     assert!(error.starts_with("malformed search response:"), "{error}");
+}
+
+fn search_page(page: usize, page_size: usize, total: usize, results: usize) -> UiSearchPage {
+    UiSearchPage {
+        query: "flask".to_owned(),
+        source_type: "all".to_owned(),
+        availability: "all".to_owned(),
+        page,
+        page_size,
+        total,
+        results: (0..results)
+            .map(|index| UiSearchResult {
+                display_name: "Flask".to_owned(),
+                normalized_name: "flask".to_owned(),
+                route: "root/pypi".to_owned(),
+                index: index.to_string(),
+                ecosystem: "pypi".to_owned(),
+                type_label: "package".to_owned(),
+                source_type: "cached".to_owned(),
+                available: true,
+                summary: None,
+            })
+            .collect(),
+    }
+}
+
+#[rstest]
+#[case::first_full(1, 25, 100, 25, Some((1, 25)))]
+#[case::last_partial(4, 25, 76, 1, Some((76, 76)))]
+#[case::single(1, 25, 1, 1, Some((1, 1)))]
+#[case::out_of_range(999, 25, 1, 0, None)]
+fn test_search_page_shown_range(
+    #[case] page: usize,
+    #[case] page_size: usize,
+    #[case] total: usize,
+    #[case] results: usize,
+    #[case] expected: Option<(usize, usize)>,
+) {
+    let range = search_page(page, page_size, total, results).shown_range();
+    assert_eq!(range, expected);
+    if let Some((start, end)) = range {
+        assert!(start <= end && end <= total);
+    }
 }
 
 #[rstest]

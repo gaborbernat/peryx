@@ -3,6 +3,8 @@ use std::collections::BTreeSet;
 use openraft::storage::RaftStateMachine;
 use openraft::testing::log_id;
 use openraft::{Entry, EntryPayload, Membership, RaftSnapshotBuilder, Snapshot};
+use peryx_storage::raft::RaftLogStore;
+use tempfile::TempDir;
 
 use crate::ownership::{Assignment, AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipState};
 use crate::raft::{OwnershipResponse, OwnershipStateMachine, TypeConfig};
@@ -251,6 +253,117 @@ async fn test_epoch_of_reads_the_committed_epoch() {
 
     machine.apply(vec![normal(2, advance("proj"))]).await.unwrap();
     assert_eq!(machine.epoch_of(&key("proj")).await, AuthorityEpoch(2));
+}
+
+fn open_store(dir: &TempDir) -> RaftLogStore {
+    RaftLogStore::open(dir.path().join("raft.redb")).unwrap()
+}
+
+fn reopen_store(dir: &TempDir) -> RaftLogStore {
+    RaftLogStore::open_existing(dir.path().join("raft.redb")).unwrap()
+}
+
+#[tokio::test]
+async fn test_with_snapshot_store_on_a_fresh_store_starts_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut machine = OwnershipStateMachine::with_snapshot_store(open_store(&dir)).unwrap();
+
+    assert!(machine.get_current_snapshot().await.unwrap().is_none());
+    let (last_applied, membership) = machine.applied_state().await.unwrap();
+    assert_eq!(last_applied, None);
+    assert_eq!(membership.log_id(), &None);
+}
+
+#[tokio::test]
+async fn test_a_built_snapshot_survives_reopening_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut machine = OwnershipStateMachine::with_snapshot_store(open_store(&dir)).unwrap();
+    machine
+        .apply(vec![
+            normal(1, assign("proj", "east")),
+            membership_entry(2),
+            normal(3, advance("proj")),
+        ])
+        .await
+        .unwrap();
+    machine.get_snapshot_builder().await.build_snapshot().await.unwrap();
+    drop(machine);
+
+    // Reopening the store rebuilds the machine from the persisted snapshot alone — it never replays the
+    // log — so ownership, epochs, membership, and last_applied must all survive the restart.
+    let mut restored = OwnershipStateMachine::with_snapshot_store(reopen_store(&dir)).unwrap();
+    assert_eq!(
+        restored.home_of(&key("proj")).await,
+        Some(DatacenterId("east".to_owned()))
+    );
+    assert_eq!(restored.epoch_of(&key("proj")).await, AuthorityEpoch(2));
+    let (last_applied, membership) = restored.applied_state().await.unwrap();
+    assert_eq!(last_applied, Some(log_id(1, 0, 3)));
+    assert_eq!(membership.log_id(), &Some(log_id(1, 0, 2)));
+    assert_eq!(membership.membership(), &Membership::new(vec![BTreeSet::from([0])], ()));
+}
+
+#[tokio::test]
+async fn test_an_installed_snapshot_survives_reopening_the_store() {
+    let mut source = OwnershipStateMachine::default();
+    source.apply(vec![normal(1, assign("proj", "east"))]).await.unwrap();
+    let Snapshot { meta, snapshot } = source.get_snapshot_builder().await.build_snapshot().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut target = OwnershipStateMachine::with_snapshot_store(open_store(&dir)).unwrap();
+    target.install_snapshot(&meta, snapshot).await.unwrap();
+    drop(target);
+
+    let mut restored = OwnershipStateMachine::with_snapshot_store(reopen_store(&dir)).unwrap();
+    assert_eq!(
+        restored.home_of(&key("proj")).await,
+        Some(DatacenterId("east".to_owned()))
+    );
+    let (last_applied, _) = restored.applied_state().await.unwrap();
+    assert_eq!(last_applied, Some(log_id(1, 0, 1)));
+}
+
+#[tokio::test]
+async fn test_with_snapshot_store_surfaces_a_store_read_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bare.redb");
+    // A valid redb database without the raft tables: reading the persisted snapshot hits redb's "table
+    // does not exist" fault, which folds through the store-error arm into a storage error.
+    redb::Database::create(&path).unwrap();
+
+    let error = OwnershipStateMachine::with_snapshot_store(RaftLogStore::open_existing(&path).unwrap()).unwrap_err();
+
+    assert!(error.to_string().to_lowercase().contains("does not exist"), "{error}");
+}
+
+#[tokio::test]
+async fn test_with_snapshot_store_surfaces_a_corrupt_snapshot_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(&dir);
+    // Metadata bytes the snapshot-meta decoder cannot parse, written under the store's own snapshot keys.
+    store.save_snapshot(b"not valid json", b"[]").unwrap();
+
+    let error = OwnershipStateMachine::with_snapshot_store(store).unwrap_err();
+
+    assert!(error.to_string().contains("expected"), "{error}");
+}
+
+#[tokio::test]
+async fn test_with_snapshot_store_rejects_a_snapshot_whose_state_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(&dir);
+    // Persist a real snapshot, then overwrite its data with bytes the ownership state cannot restore while
+    // keeping the valid metadata, so the restore — not the meta decode — is what fails.
+    let mut machine = OwnershipStateMachine::with_snapshot_store(store.clone()).unwrap();
+    machine.apply(vec![normal(1, assign("proj", "east"))]).await.unwrap();
+    machine.get_snapshot_builder().await.build_snapshot().await.unwrap();
+    let stored = store.read_snapshot().unwrap().unwrap();
+    store.save_snapshot(&stored.meta, b"not a snapshot").unwrap();
+    drop(machine);
+
+    let error = OwnershipStateMachine::with_snapshot_store(store).unwrap_err();
+
+    assert!(error.to_string().contains("expected"), "{error}");
 }
 
 #[tokio::test]

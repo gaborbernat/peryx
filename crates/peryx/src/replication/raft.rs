@@ -139,13 +139,15 @@ impl ConsensusPlan {
             .with_context(|| format!("create the consensus log directory {}", parent.display()))?;
         let store = RaftLogStore::open(&self.log_path)
             .with_context(|| format!("open the consensus log store at {}", self.log_path.display()))?;
+        let state_machine = OwnershipStateMachine::with_snapshot_store(store.clone())
+            .context("reload the persisted ownership snapshot")?;
         let node = RaftNode::start(
             self.local,
             RaftConfig::default(),
             self.group.clone(),
             PeerRaftNetworkFactory::new(self.token.clone(), PEER_RPC_TIMEOUT),
             RaftLogStoreAdapter::new(store),
-            OwnershipStateMachine::default(),
+            state_machine,
         )
         .await
         .context("start the ownership consensus node")?;

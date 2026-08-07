@@ -63,7 +63,7 @@ pub type RaftLogError = redb::Error;
 
 /// A durable Raft log over redb. Cloning shares the one underlying database, so the `openraft` adapter
 /// and its log reader hand out cheap handles to the same store.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RaftLogStore {
     db: Arc<Database>,
 }

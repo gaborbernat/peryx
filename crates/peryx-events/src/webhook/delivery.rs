@@ -1,9 +1,12 @@
 //! The delivery pipeline: enqueue, drain the queue, sign and POST each delivery, and retry on failure.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
+use futures_util::stream::FuturesUnordered;
 use peryx_storage::meta::{
     MetaError, NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus,
 };
@@ -12,7 +15,7 @@ use super::event::WebhookEvent;
 use super::host::WebhookHost;
 use super::signature::signature;
 
-const DELIVERY_BATCH: usize = 32;
+const MAX_CONCURRENT_DELIVERIES: usize = 16;
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIAL_BACKOFF_SECS: i64 = 5;
 const MAX_BACKOFF_SECS: i64 = 300;
@@ -88,18 +91,40 @@ fn wait_secs(next: i64, now: i64) -> u64 {
     u64::try_from(next.saturating_sub(now)).unwrap_or(0).max(1)
 }
 
+/// Drain every due delivery, running targets concurrently under a global in-flight bound while keeping
+/// at most one delivery in flight per target.
+///
+/// A slow or unresponsive target holds only its own slot. The store hands back at most one due record
+/// per target and skips targets already being delivered to, so healthy targets keep filling the pool
+/// instead of queueing behind a stalled one, and per-target ordering is preserved. The pool never
+/// exceeds [`MAX_CONCURRENT_DELIVERIES`] in-flight requests, and each record's store update runs inside
+/// its own future so one slow update cannot pin a slot for the rest.
 async fn deliver_due<H: WebhookHost>(host: &Arc<H>) {
+    let mut in_flight = FuturesUnordered::new();
+    let mut busy: HashSet<(String, String)> = HashSet::new();
     loop {
-        let now = host.now();
-        let result = host.meta().list_due_webhook_deliveries(now, DELIVERY_BATCH);
-        log_queue_scan_error(result.as_ref().err());
-        let deliveries = result.unwrap_or_default();
-        if deliveries.is_empty() {
+        while in_flight.len() < MAX_CONCURRENT_DELIVERIES {
+            let now = host.now();
+            let want = MAX_CONCURRENT_DELIVERIES - in_flight.len();
+            let result = host.meta().list_due_webhook_deliveries(now, want, &busy);
+            log_queue_scan_error(result.as_ref().err());
+            let deliveries = result.unwrap_or_default();
+            if deliveries.is_empty() {
+                break;
+            }
+            for delivery in deliveries {
+                let key = (delivery.index.clone(), delivery.target.clone());
+                busy.insert(key.clone());
+                in_flight.push(async move {
+                    deliver_one(host, delivery).await;
+                    key
+                });
+            }
+        }
+        let Some(key) = in_flight.next().await else {
             return;
-        }
-        for delivery in deliveries {
-            deliver_one(host, delivery).await;
-        }
+        };
+        busy.remove(&key);
     }
 }
 
@@ -287,11 +312,15 @@ fn is_permanent(status: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use peryx_storage::meta::MetaStore;
     use rstest::rstest;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
 
     use super::*;
-    use crate::webhook::{WebhookEventKind, WebhookRuntime};
+    use crate::webhook::{WebhookEventKind, WebhookRuntime, WebhookTargetConfig};
 
     #[rstest]
     #[case::future(1_100, 1_000, 100)]
@@ -426,5 +455,152 @@ mod tests {
         assert_eq!(stored.status, expected);
         assert_eq!(stored.attempts, 1);
         assert_eq!(stored.next_attempt_at_unix.is_some(), rescheduled);
+    }
+
+    fn target_config(name: &str, url: &str) -> WebhookTargetConfig {
+        WebhookTargetConfig {
+            index: "hosted".to_owned(),
+            name: name.to_owned(),
+            url: url.to_owned(),
+            secret: "secret".to_owned(),
+            events: Vec::new(),
+        }
+    }
+
+    fn enqueue(meta: &MetaStore, target: &str, created_at_unix: i64) -> String {
+        meta.enqueue_webhook_delivery(NewWebhookDelivery {
+            index: "hosted",
+            target,
+            event: "upload",
+            payload: "{}",
+            created_at_unix,
+        })
+        .unwrap()
+    }
+
+    async fn wait_for_status(host: &Arc<TestHost>, id: &str, status: WebhookDeliveryStatus) -> WebhookDeliveryRecord {
+        for _ in 0..200 {
+            if let Some(record) = host.meta().get_webhook_delivery(id).unwrap()
+                && record.status == status
+            {
+                return record;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("delivery {id} never reached {status:?}");
+    }
+
+    /// A server that accepts connections and never answers, counting how many it holds open at once.
+    struct HangingServer {
+        url: String,
+        accepted: Arc<AtomicUsize>,
+    }
+
+    impl HangingServer {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/hook", listener.local_addr().unwrap());
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let counter = accepted.clone();
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let _held = socket;
+                        std::future::pending::<()>().await;
+                    });
+                }
+            });
+            Self { url, accepted }
+        }
+
+        async fn wait_for_accepted(&self, count: usize) {
+            for _ in 0..200 {
+                if self.accepted.load(Ordering::SeqCst) >= count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("hanging server never accepted {count} connections");
+        }
+    }
+
+    async fn healthy_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+        url
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_slow_target_does_not_block_a_healthy_one() {
+        let slow = HangingServer::start().await;
+        let healthy_url = healthy_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+        for created_at in 10..13 {
+            enqueue(&meta, "slow", created_at);
+        }
+        let healthy_id = enqueue(&meta, "healthy", 20);
+        let host = Arc::new(TestHost {
+            webhooks: WebhookRuntime::new(vec![
+                target_config("slow", &slow.url),
+                target_config("healthy", &healthy_url),
+            ])
+            .unwrap(),
+            meta,
+            now: 100,
+        });
+
+        kick(host.clone());
+
+        let delivered = wait_for_status(&host, &healthy_id, WebhookDeliveryStatus::Delivered).await;
+        assert_eq!(delivered.attempts, 1);
+        assert_eq!(delivered.response_status, Some(200));
+        // The healthy delivery finished while the slow target still holds its one connection open, so one
+        // per-target slot is all a stalled endpoint ever takes from the pool.
+        assert_eq!(slow.accepted.load(Ordering::SeqCst), 1);
+        let slow_pending = host
+            .meta()
+            .list_webhook_deliveries()
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.target == "slow")
+            .all(|record| record.status == WebhookDeliveryStatus::Pending && record.attempts == 0);
+        assert!(slow_pending, "no slow delivery advanced while its target hung");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_in_flight_requests_stay_within_the_global_bound() {
+        let slow = HangingServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+        let mut configs = Vec::new();
+        for index in 0..MAX_CONCURRENT_DELIVERIES + 4 {
+            let name = format!("t{index}");
+            enqueue(&meta, &name, 10);
+            configs.push(target_config(&name, &slow.url));
+        }
+        let host = Arc::new(TestHost {
+            webhooks: WebhookRuntime::new(configs).unwrap(),
+            meta,
+            now: 100,
+        });
+
+        kick(host.clone());
+
+        slow.wait_for_accepted(MAX_CONCURRENT_DELIVERIES).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(slow.accepted.load(Ordering::SeqCst), MAX_CONCURRENT_DELIVERIES);
     }
 }

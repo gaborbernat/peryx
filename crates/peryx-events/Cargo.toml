@@ -17,6 +17,7 @@ peryx-core.workspace = true
 peryx-identity.workspace = true
 peryx-replication.workspace = true
 peryx-storage.workspace = true
+futures-util.workspace = true
 http.workspace = true
 reqwest.workspace = true
 rustls.workspace = true

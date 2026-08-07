@@ -16,6 +16,7 @@ pub(super) use peryx_upstream::UpstreamClient;
 pub(super) use crate::cache;
 pub(super) use crate::tests::http::{get, harness, harness_with_policies};
 pub(super) use crate::upload::Uploaded;
+pub(super) use peryx_core::TrashInfo;
 pub(super) use peryx_core::path::local_file_url;
 pub(super) use peryx_driver::state::AppState;
 pub(super) use peryx_index::{Index, IndexKind};
@@ -84,6 +85,56 @@ pub(super) fn put_uploaded_package_with_metadata(
         .put_upload("hosted", normalized, &filename, to_json(&uploaded).as_bytes())
         .unwrap();
     state.meta.put_project("hosted", normalized, normalized).unwrap();
+    state.bump_search_epoch();
+}
+
+pub(super) fn put_uploaded_file(state: &peryx_driver::state::AppState, normalized: &str, version: &str) -> String {
+    let filename = format!("{normalized}-{version}-py3-none-any.whl");
+    let artifact_digest = Digest::of(filename.as_bytes());
+    let uploaded = Uploaded {
+        version: version.to_owned(),
+        file: File {
+            filename: filename.clone(),
+            url: local_file_url("hosted", artifact_digest.as_str(), &filename),
+            hashes: BTreeMap::from([("sha256".to_owned(), artifact_digest.as_str().to_owned())]),
+            requires_python: None,
+            size: Some(10),
+            upload_time: None,
+            yanked: Yanked::No,
+            core_metadata: CoreMetadata::Absent,
+            dist_info_metadata: CoreMetadata::Absent,
+            gpg_sig: None,
+            provenance: Provenance::Absent,
+        },
+        trashed: None,
+    };
+    state
+        .meta
+        .put_upload("hosted", normalized, &filename, to_json(&uploaded).as_bytes())
+        .unwrap();
+    state.meta.put_project("hosted", normalized, normalized).unwrap();
+    state.bump_search_epoch();
+    filename
+}
+
+pub(super) fn trash_upload(state: &peryx_driver::state::AppState, normalized: &str, filename: &str) {
+    let (_, bytes) = state
+        .meta
+        .list_upload_entries("hosted", normalized)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == filename)
+        .expect("the upload record exists");
+    let mut uploaded: Uploaded = serde_json::from_slice(&bytes).unwrap();
+    uploaded.trashed = Some(TrashInfo {
+        deleted_at_unix: 1000,
+        actor: None,
+        reason: None,
+    });
+    state
+        .meta
+        .put_upload("hosted", normalized, filename, to_json(&uploaded).as_bytes())
+        .unwrap();
     state.bump_search_epoch();
 }
 

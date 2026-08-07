@@ -259,6 +259,11 @@ fn local_detail(
     let mut versions = BTreeSet::new();
     for (_filename, bytes) in entries {
         let mut uploaded: Uploaded = serde_json::from_slice(&bytes)?;
+        // A soft-deleted upload is hidden from serving (see cache::resolve::local_detail); keep search in
+        // step so a trashed file never outlives package serving in the index.
+        if uploaded.trashed.is_some() {
+            continue;
+        }
         versions.insert(uploaded.version);
         if let Some(sha256) = uploaded.file.hashes.get("sha256") {
             uploaded.file.url = local_file_url(serve_route, sha256, &uploaded.file.filename);

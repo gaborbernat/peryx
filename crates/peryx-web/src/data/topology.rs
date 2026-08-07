@@ -77,8 +77,10 @@ impl Drop for TopologyStream {
 /// `None` when the browser cannot open an `EventSource`, so the caller keeps the initial snapshot rather
 /// than clearing the page.
 ///
-/// The browser reconnects on its own after a drop; `on_status` reports `Connecting` while it retries and
-/// `Offline` once it gives up, so a frozen render is always visible as such.
+/// `on_status` starts the badge live only once the connection opens or a valid event arrives, never on the
+/// strength of a pending connection. A body that will not decode reports `Stale`; the browser reconnects on
+/// its own after a drop, reporting `Connecting` while it retries and `Offline` once it gives up, so a frozen
+/// render is always visible as such.
 #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
 #[must_use]
 pub fn subscribe_topology(
@@ -93,11 +95,20 @@ pub fn subscribe_topology(
     let source = web_sys::EventSource::new(TOPOLOGY_STREAM_URL).ok()?;
     let on_status: std::rc::Rc<dyn Fn(StreamStatus)> = std::rc::Rc::new(on_status);
 
+    let snapshot_status = std::rc::Rc::clone(&on_status);
     let on_snapshot = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-        if let Some(data) = event.data().as_string()
-            && let Ok(snapshot) = parse_topology_snapshot(&data)
-        {
-            on_snapshot(snapshot);
+        let Some(data) = event.data().as_string() else {
+            return;
+        };
+        match parse_topology_snapshot(&data) {
+            // A valid event proves the stream is delivering, so the badge turns live even if `onopen` has
+            // not fired yet; a body that will not decode marks the render stale rather than dropping it
+            // silently, so a protocol error can never freeze under a live badge.
+            Ok(snapshot) => {
+                snapshot_status(StreamStatus::Live);
+                on_snapshot(snapshot);
+            }
+            Err(_) => snapshot_status(StreamStatus::Stale),
         }
     });
     source
@@ -109,10 +120,11 @@ pub fn subscribe_topology(
     source.set_onopen(Some(on_open.as_ref().unchecked_ref()));
 
     let errored_source = source.clone();
+    let error_status = std::rc::Rc::clone(&on_status);
     let on_error = Closure::<dyn FnMut()>::new(move || {
         // `CLOSED` means the browser stopped retrying, so the feed is frozen; any other state is a
         // transient drop it is already reconnecting through.
-        on_status(if errored_source.ready_state() == web_sys::EventSource::CLOSED {
+        error_status(if errored_source.ready_state() == web_sys::EventSource::CLOSED {
             StreamStatus::Offline
         } else {
             StreamStatus::Connecting

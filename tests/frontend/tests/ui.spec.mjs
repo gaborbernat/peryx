@@ -1299,3 +1299,81 @@ test("availability topology renders roster health and filters by role", async ({
   await page.locator("#topology-role").selectOption("all");
   await expect(rows).toHaveCount(3);
 });
+
+// The feed badge tracks the live connection's real state. A person reading it must never see "Live" while
+// the browser is still connecting, nor while a protocol error is freezing the render behind a stale
+// snapshot. These cases drive the stream the way the browser does: header-then-body, malformed body, drop
+// and reconnect.
+
+/// Open the topology page through a client-side nav so its loader runs in the browser and hits the mocked
+/// snapshot, mirroring the roster test above.
+async function openTopology(page) {
+  await page.route("**/+availability/topology", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify(topologySnapshot) }),
+  );
+  await goto(page, "/");
+  await page.locator(".nav-links a", { hasText: "Topology" }).click();
+  await expect(page).toHaveURL(/\/admin\/topology$/);
+  return page.locator(".ops-title .badge", { hasText: "feed:" });
+}
+
+test("topology feed stays out of live until the stream opens", async ({ page }) => {
+  let openStream;
+  const opened = new Promise((resolve) => {
+    openStream = resolve;
+  });
+  // Hold the stream response so the browser sits in the pre-open connecting state with the socket pending.
+  await page.route("**/+availability/topology/stream", async (route) => {
+    await opened;
+    await route.fulfill({
+      contentType: "text/event-stream",
+      body: `id: 1\nevent: topology\ndata: ${JSON.stringify(topologySnapshot)}\n\n`,
+    });
+  });
+  const badge = await openTopology(page);
+  await expect(badge).toHaveText("feed: Reconnecting");
+  openStream();
+  await expect(badge).toHaveText("feed: Live");
+});
+
+test("topology feed leaves live when the stream sends undecodable data", async ({ page }) => {
+  // The connection opens (badge briefly live), then a body that is not a snapshot must strand the render
+  // as stale rather than leaving the live badge over frozen data.
+  await page.route("**/+availability/topology/stream", (route) =>
+    route.fulfill({
+      contentType: "text/event-stream",
+      body: `id: 1\nevent: topology\ndata: not a snapshot\n\n`,
+    }),
+  );
+  const badge = await openTopology(page);
+  await expect(badge).toHaveText("feed: Stale");
+});
+
+test("topology feed reports reconnecting after a drop and recovers to live", async ({ page }) => {
+  let recover;
+  const recovered = new Promise((resolve) => {
+    recover = resolve;
+  });
+  let attempts = 0;
+  await page.route("**/+availability/topology/stream", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      // Deliver one valid event, then close so the browser reconnects quickly.
+      await route.fulfill({
+        contentType: "text/event-stream",
+        body: `retry: 150\nid: 1\nevent: topology\ndata: ${JSON.stringify(topologySnapshot)}\n\n`,
+      });
+      return;
+    }
+    // Hold the retry so the reconnecting state is observable, then let it recover.
+    await recovered;
+    await route.fulfill({
+      contentType: "text/event-stream",
+      body: `id: 2\nevent: topology\ndata: ${JSON.stringify(topologySnapshot)}\n\n`,
+    });
+  });
+  const badge = await openTopology(page);
+  await expect(badge).toHaveText("feed: Reconnecting");
+  recover();
+  await expect(badge).toHaveText("feed: Live");
+});

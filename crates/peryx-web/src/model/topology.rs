@@ -40,13 +40,16 @@ pub fn liveness_health(liveness: Option<NodeLiveness>) -> HealthLabel {
 
 /// The live-stream connection state, shown beside the snapshot so a paused feed never passes for fresh.
 ///
-/// `Live` means the stream is delivering updates; `Connecting` covers the first connect and every
-/// automatic reconnect; `Offline` means the browser gave up and the render is frozen.
+/// A feed starts `Connecting` and only turns `Live` once the connection opens or a valid event arrives, so
+/// it never claims to be live while the browser is still connecting. `Connecting` also covers every
+/// automatic reconnect; `Stale` means the connection is open but sent data the browser could not decode,
+/// freezing the render behind a protocol error; `Offline` means the browser gave up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum StreamStatus {
-    #[default]
     Live,
+    #[default]
     Connecting,
+    Stale,
     Offline,
 }
 
@@ -61,6 +64,10 @@ pub fn stream_status_label(status: StreamStatus) -> HealthLabel {
         },
         StreamStatus::Connecting => HealthLabel {
             text: "Reconnecting",
+            class: "health-unready",
+        },
+        StreamStatus::Stale => HealthLabel {
+            text: "Stale",
             class: "health-unready",
         },
         StreamStatus::Offline => HealthLabel {
@@ -151,6 +158,7 @@ mod tests {
     #[rstest]
     #[case(StreamStatus::Live, "Live", "health-live")]
     #[case(StreamStatus::Connecting, "Reconnecting", "health-unready")]
+    #[case(StreamStatus::Stale, "Stale", "health-unready")]
     #[case(StreamStatus::Offline, "Offline", "health-unknown")]
     fn test_stream_status_labels_every_state_with_text(
         #[case] status: StreamStatus,
@@ -172,6 +180,16 @@ mod tests {
             stream_status_label(StreamStatus::Connecting).class,
             stream_status_label(StreamStatus::Live).class,
         );
+        assert_ne!(
+            stream_status_label(StreamStatus::Stale).class,
+            stream_status_label(StreamStatus::Live).class,
+        );
+    }
+
+    #[test]
+    fn test_stream_status_starts_out_of_live() {
+        assert_ne!(StreamStatus::default(), StreamStatus::Live);
+        assert_eq!(StreamStatus::default(), StreamStatus::Connecting);
     }
 
     #[rstest]

@@ -527,7 +527,7 @@ impl PackageSearch {
             let pattern = format!(".*{}.*", escape_regex(&query));
             return Ok(Box::new(RegexQuery::from_pattern(&pattern, self.fields.raw)?));
         }
-        let queries = terms
+        let mut queries = terms
             .into_iter()
             .map(|term| {
                 Box::new(TermQuery::new(
@@ -535,7 +535,15 @@ impl PackageSearch {
                     IndexRecordOption::Basic,
                 )) as Box<dyn Query>
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // A query over MAX_NGRAM characters is split into overlapping grams AND-combined here, but the
+        // n-gram index enforces neither adjacency nor order, so a document can satisfy every gram in
+        // separate spans without containing the query. The grams stay a prefilter; a regex over the raw
+        // field verifies the complete substring, so totals, pages, and ordering count only true matches.
+        if query.chars().count() > MAX_NGRAM {
+            let pattern = format!(".*{}.*", escape_regex(&query));
+            queries.push(Box::new(RegexQuery::from_pattern(&pattern, self.fields.raw)?));
+        }
         Ok(Box::new(BooleanQuery::intersection(queries)))
     }
 

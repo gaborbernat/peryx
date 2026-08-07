@@ -215,13 +215,14 @@ async fn patch_locked(
     }
 }
 
-/// Validate the whole-blob digest, then append any trailing bytes under the session lock and commit
-/// under that digest. Run inside the per-session guard so the append and the commit see a stage no
-/// other writer can touch.
+/// Append any trailing bytes under the session lock and commit under the closing digest. Run inside the
+/// per-session guard so the append and the commit see a stage no other writer can touch.
 ///
-/// The digest is checked before the body is read: a closing `PUT` that omits it or names an algorithm
-/// the store cannot key on is rejected with the stage, offset, and activity timestamp untouched, so a
-/// client that fixes the URL and resends the same final chunk does not append those bytes twice.
+/// The session and the chunk are validated first, so an unknown session answers 404 and an out-of-order
+/// chunk answers 416 rather than being masked by digest validation. The digest is then checked before the
+/// body is read: a closing `PUT` that omits it or names an algorithm the store cannot key on is rejected
+/// with the stage, offset, and activity timestamp untouched, so a client that fixes the URL and resends
+/// the same final chunk does not append those bytes twice.
 #[allow(
     clippy::too_many_arguments,
     reason = "the final PUT threads the request, session, and commit context"
@@ -237,6 +238,10 @@ async fn finish_locked(
     body: Body,
     journal_outbox: bool,
 ) -> Result<Response, ServeError> {
+    let record = match check_session_chunk(state, index, name, session, headers, body.size_hint().exact())? {
+        Ok(record) => record,
+        Err(response) => return Ok(response),
+    };
     // A `PUT` without a digest cannot commit, but the staged bytes are still good: keep the session so
     // the client can retry with the digest rather than re-upload everything.
     let Some(digest) = query_params(query).remove("digest") else {
@@ -251,7 +256,7 @@ async fn finish_locked(
             "only sha256 blob digests are supported",
         ));
     };
-    let offset = match append_session_chunk(state, index, repo, name, session, headers, body).await? {
+    let offset = match append_checked_chunk(state, session, record.offset, body, index, repo).await? {
         Ok(offset) => offset,
         Err(response) => return Ok(response),
     };
@@ -281,18 +286,45 @@ async fn append_session_chunk(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Result<u64, Response>, ServeError> {
+    let record = match check_session_chunk(state, index, name, session, headers, body.size_hint().exact())? {
+        Ok(record) => record,
+        Err(response) => return Ok(Err(response)),
+    };
+    append_checked_chunk(state, session, record.offset, body, index, repo).await
+}
+
+/// Re-read the session under the lock and validate the incoming chunk against it, without touching the
+/// stage. Answers 404 for a session this `index`/`name` never opened and 416 for a chunk whose
+/// `Content-Range` does not begin where the last one ended or spans a byte count the body cannot honour;
+/// a rejected chunk keeps the session's bytes and still counts as activity. Returns the session record
+/// positioned at the authoritative offset, or a response to send unchanged.
+fn check_session_chunk(
+    state: &ServingState,
+    index: &Index,
+    name: &str,
+    session: &str,
+    headers: &HeaderMap,
+    body_size: Option<u64>,
+) -> Result<Result<UploadRecord, Response>, ServeError> {
     let Some(record) = session_record(state, &index.name, name, session)? else {
         return Ok(Err(error_response(ErrorCode::BlobUploadUnknown, "upload unknown")));
     };
-    // A chunk whose `Content-Range` does not begin where the last one ended is out of order; one whose
-    // range is unreadable, reversed, or spans a byte count the body does not carry makes a claim that
-    // cannot be honoured. All answer 416, and the session keeps its bytes so the client can resend; the
-    // read still counts as activity.
-    if !chunk_range(headers).admits(record.offset, body.size_hint().exact()) {
+    if !chunk_range(headers).admits(record.offset, body_size) {
         state.meta.advance_upload(session, record.offset, (state.clock)())?;
         return Ok(Err(range_not_satisfiable(name, session, record.offset)));
     }
-    let mut offset = record.offset;
+    Ok(Ok(record))
+}
+
+/// Stream a chunk validated by [`check_session_chunk`] into the durable stage, returning the new offset.
+async fn append_checked_chunk(
+    state: &ServingState,
+    session: &str,
+    mut offset: u64,
+    body: Body,
+    index: &Index,
+    repo: &str,
+) -> Result<Result<u64, Response>, ServeError> {
     if let Err(err) = append_to_stage(state, session, &mut offset, body, index, repo).await {
         return Ok(Err(append_error_response(state, session, err).await?));
     }

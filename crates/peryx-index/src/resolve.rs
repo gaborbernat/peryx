@@ -96,9 +96,39 @@ pub fn layers_include_hosted(indexes: &[Index], layers: &[usize]) -> bool {
     })
 }
 
+/// Whether the index at `position` resolves through any cached source: a cached index itself, or a
+/// virtual index that reaches one through its members at any depth.
+///
+/// Source policy (protected names, no-fallback, private-first) restricts what a *cached* member may
+/// answer, and must recognise a cache reached through a nested virtual layer just as it does a direct
+/// one. A shallow check of the direct member's kind would let a single extra virtual wrapper reopen the
+/// upstream path a policy closed, which is a dependency-confusion foothold.
+///
+/// The walk is cycle-safe: a virtual index whose members loop back to it is visited once on a path, so a
+/// self-referential configuration terminates instead of recurring forever.
+#[must_use]
+pub fn reaches_cached(indexes: &[Index], position: usize) -> bool {
+    fn walk(indexes: &[Index], position: usize, path: &mut Vec<usize>) -> bool {
+        if path.contains(&position) {
+            return false;
+        }
+        match &indexes[position].kind {
+            IndexKind::Cached { .. } => true,
+            IndexKind::Hosted { .. } => false,
+            IndexKind::Virtual { layers, .. } => {
+                path.push(position);
+                let found = layers.iter().any(|&member| walk(indexes, member, path));
+                path.pop();
+                found
+            }
+        }
+    }
+    walk(indexes, position, &mut Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RouteResolver, layers_include_hosted, remainder, shadow_order};
+    use super::{RouteResolver, layers_include_hosted, reaches_cached, remainder, shadow_order};
     use crate::index::{Index, IndexKind};
     use peryx_core::Ecosystem;
     use peryx_identity::IndexAcl;
@@ -228,6 +258,55 @@ mod tests {
             index("proxy-only", "p", virtual_layers(&[0])),
         ];
         assert!(!layers_include_hosted(&indexes, &[0, 1]));
+    }
+
+    #[test]
+    fn test_reaches_cached_reads_a_direct_member_kind() {
+        let indexes = vec![index("pypi", "c", cached()), index("hosted", "h", hosted())];
+        assert!(reaches_cached(&indexes, 0));
+        assert!(!reaches_cached(&indexes, 1));
+    }
+
+    #[test]
+    fn test_reaches_cached_finds_a_cache_one_virtual_layer_down() {
+        let indexes = vec![
+            index("pypi", "c", cached()),
+            index("hosted", "h", hosted()),
+            index("inner", "inner", virtual_layers(&[1, 0])),
+        ];
+        assert!(reaches_cached(&indexes, 2));
+    }
+
+    #[test]
+    fn test_reaches_cached_finds_a_cache_several_virtual_layers_down() {
+        let indexes = vec![
+            index("pypi", "c", cached()),
+            index("inner", "inner", virtual_layers(&[0])),
+            index("middle", "middle", virtual_layers(&[1])),
+            index("outer", "outer", virtual_layers(&[2])),
+        ];
+        assert!(reaches_cached(&indexes, 3));
+    }
+
+    #[test]
+    fn test_reaches_cached_is_false_for_a_hosted_only_virtual_tree() {
+        let indexes = vec![
+            index("hosted", "h", hosted()),
+            index("inner", "inner", virtual_layers(&[0])),
+            index("outer", "outer", virtual_layers(&[1])),
+        ];
+        assert!(!reaches_cached(&indexes, 2));
+    }
+
+    #[test]
+    fn test_reaches_cached_terminates_on_a_virtual_cycle() {
+        // A configuration a build never emits, but the walk must not recur forever if one arises: two
+        // virtual indexes reference each other and reach no cache, so the answer is a terminating false.
+        let indexes = vec![
+            index("a", "a", virtual_layers(&[1])),
+            index("b", "b", virtual_layers(&[0])),
+        ];
+        assert!(!reaches_cached(&indexes, 0));
     }
 
     fn index(name: &str, route: &str, kind: IndexKind) -> Index {

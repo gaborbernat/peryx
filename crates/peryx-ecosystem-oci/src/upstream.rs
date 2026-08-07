@@ -9,12 +9,15 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use axum::http::{HeaderValue, Method, StatusCode};
 use peryx_identity::strip_auth_scheme;
-use peryx_upstream::{Auth, CredentialError, CredentialIdentity, CredentialProvider, CredentialProviderId};
+use peryx_upstream::{
+    Auth, CredentialError, CredentialIdentity, CredentialProvider, CredentialProviderId, CredentialSnapshot,
+};
 use reqwest::Response;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 /// The manifest media types a puller accepts, mirroring containerd/docker: the Docker v2 schema and
 /// manifest list, the OCI image manifest and index, then `*/*` so a registry that only knows one of
@@ -26,17 +29,31 @@ application/vnd.oci.image.index.v1+json, \
 */*";
 
 /// A shared upstream fetcher: one HTTP client and one token cache for every configured OCI proxy.
+///
+/// `inflight` single-flights token exchanges: concurrent cold pulls that miss the same `(base, scope,
+/// provider)` key elect one leader to trade the challenge for a token while the rest await its result,
+/// so a burst that would otherwise fire one token request per pull fires one for the whole burst.
 #[derive(Debug)]
 pub struct Upstream {
     http: reqwest::Client,
     tokens: Mutex<HashMap<TokenCacheKey, CachedToken>>,
+    inflight: Mutex<HashMap<TokenCacheKey, watch::Receiver<FlightState>>>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TokenCacheKey {
     base: String,
     scope: String,
     provider: CredentialProviderId,
+}
+
+/// The result an in-flight token exchange publishes to the pulls awaiting it. `Failed` and a dropped
+/// sender both send waiters back to elect a fresh leader, so a failed exchange never poisons the key.
+#[derive(Debug, Clone)]
+enum FlightState {
+    Pending,
+    Ready(String),
+    Failed,
 }
 
 #[derive(Debug)]
@@ -109,6 +126,7 @@ impl Upstream {
         Self {
             http,
             tokens: Mutex::new(HashMap::new()),
+            inflight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -251,8 +269,7 @@ impl Upstream {
         accept: Option<&str>,
     ) -> Result<Response, UpstreamError> {
         let scope = format!("repository:{repo}:pull");
-        let mut credential = credentials.credential().await?;
-        let mut auth = credential.auth();
+        let credential = credentials.credential().await?;
         let cache_key = token_cache_key(base, &scope, credential.identity().provider());
         let cached = self
             .tokens
@@ -273,7 +290,72 @@ impl Upstream {
         else {
             return finish(response);
         };
-        let token = match self.fetch_token(&challenge, &scope, auth).await {
+        let token = self
+            .acquire_token(base, &scope, &cache_key, &challenge, credentials, &credential)
+            .await?;
+        finish(self.attempt(&method, url, accept, Some(&token)).await?)
+    }
+
+    /// Single-flight the token exchange for `cache_key`. The first pull to miss a key inserts an
+    /// in-flight slot and runs the exchange; concurrent pulls for the same key await that one result
+    /// instead of each calling the token service. A failed leader clears the slot before it publishes,
+    /// so the waiters it wakes re-enter this loop and elect one fresh leader to retry, never a herd.
+    async fn acquire_token(
+        &self,
+        base: &str,
+        scope: &str,
+        cache_key: &TokenCacheKey,
+        challenge: &Bearer,
+        credentials: &CredentialProvider,
+        credential: &Arc<CredentialSnapshot>,
+    ) -> Result<String, UpstreamError> {
+        loop {
+            let mut waiter = {
+                let mut inflight = self.inflight.lock().await;
+                if let Some(receiver) = inflight.get(cache_key) {
+                    receiver.clone()
+                } else {
+                    let (sender, receiver) = watch::channel(FlightState::Pending);
+                    inflight.insert(cache_key.clone(), receiver);
+                    drop(inflight);
+                    let result = self
+                        .exchange(base, scope, challenge, credentials, credential.clone())
+                        .await;
+                    self.inflight.lock().await.remove(cache_key);
+                    let _ = sender.send(
+                        result
+                            .as_ref()
+                            .map_or(FlightState::Failed, |token| FlightState::Ready(token.clone())),
+                    );
+                    return result;
+                }
+            };
+            let ready = waiter
+                .wait_for(|state| !matches!(state, FlightState::Pending))
+                .await
+                .ok()
+                .and_then(|state| match &*state {
+                    FlightState::Ready(token) => Some(token.clone()),
+                    _ => None,
+                });
+            if let Some(token) = ready {
+                return Ok(token);
+            }
+        }
+    }
+
+    /// Trade the bearer challenge for a token and cache it, refreshing the source credential once if
+    /// the realm rejects the current generation. This is the unit `acquire_token` single-flights.
+    async fn exchange(
+        &self,
+        base: &str,
+        scope: &str,
+        challenge: &Bearer,
+        credentials: &CredentialProvider,
+        mut credential: Arc<CredentialSnapshot>,
+    ) -> Result<String, UpstreamError> {
+        let mut auth = credential.auth();
+        let token = match self.fetch_token(challenge, scope, auth).await {
             Err(UpstreamError::Status(StatusCode::UNAUTHORIZED)) => {
                 let generation = credential.generation();
                 credential = credentials.refresh_after_unauthorized(generation).await?;
@@ -281,18 +363,18 @@ impl Upstream {
                     return Err(UpstreamError::Status(StatusCode::UNAUTHORIZED));
                 }
                 auth = credential.auth();
-                self.fetch_token(&challenge, &scope, auth).await?
+                self.fetch_token(challenge, scope, auth).await?
             }
             result => result?,
         };
         self.tokens.lock().await.insert(
-            token_cache_key(base, &scope, credential.identity().provider()),
+            token_cache_key(base, scope, credential.identity().provider()),
             CachedToken {
                 credentials: credential.identity(),
                 value: token.clone(),
             },
         );
-        finish(self.attempt(&method, url, accept, Some(&token)).await?)
+        Ok(token)
     }
 
     /// One attempt with the given method, optionally bearing a token and an `Accept` header.
@@ -574,9 +656,12 @@ struct TokenResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use peryx_upstream::{CredentialFailure, CredentialProvider, CredentialRefresh};
+    use tokio::sync::Barrier;
 
     use super::*;
     use rstest::rstest;
@@ -1199,5 +1284,129 @@ mod tests {
             .manifest(&base, &credentials, "library/nginx", "latest")
             .await
             .unwrap();
+    }
+
+    /// Fire `count` pulls that release together at a barrier, so they contend for one cold token.
+    async fn concurrent_pulls(
+        upstream: &Arc<Upstream>,
+        base: &str,
+        credentials: &CredentialProvider,
+        count: usize,
+    ) -> Vec<Result<StatusCode, UpstreamError>> {
+        let barrier = Arc::new(Barrier::new(count));
+        let mut pulls = Vec::with_capacity(count);
+        for _ in 0..count {
+            let upstream = Arc::clone(upstream);
+            let credentials = credentials.clone();
+            let base = base.to_owned();
+            let barrier = Arc::clone(&barrier);
+            pulls.push(tokio::spawn(async move {
+                barrier.wait().await;
+                upstream
+                    .manifest(&base, &credentials, "library/nginx", "latest")
+                    .await
+                    .map(|response| response.status())
+            }));
+        }
+        let mut outcomes = Vec::with_capacity(count);
+        for pull in pulls {
+            outcomes.push(pull.await.unwrap());
+        }
+        outcomes
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_send_coalesces_concurrent_token_exchanges() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(Unauthenticated)
+            .respond_with(challenge(&base))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(200))
+                    .set_body_string(r#"{"token":"tok"}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(match_header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let upstream = Arc::new(Upstream::new());
+        let credentials = credentials(basic("alice", "pw"));
+        let outcomes = concurrent_pulls(&upstream, &base, &credentials, 8).await;
+
+        for outcome in outcomes {
+            assert_eq!(outcome.unwrap(), StatusCode::OK);
+        }
+        let cached = {
+            let tokens = upstream.tokens.lock().await;
+            tokens.values().map(|token| token.value.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(cached, ["tok"]);
+    }
+
+    /// The token endpoint fails the first exchange, then succeeds: the leader whose exchange fails
+    /// clears the in-flight slot, and a waiting pull re-elects one fresh leader that retries and wins.
+    struct FailThenIssueToken(AtomicUsize);
+    impl wiremock::Respond for FailThenIssueToken {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(500).set_delay(Duration::from_millis(200))
+            } else {
+                ResponseTemplate::new(200).set_body_string(r#"{"token":"tok"}"#)
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_send_reelects_a_leader_after_a_failed_exchange() {
+        let server = MockServer::start().await;
+        let base = format!("{}/", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(Unauthenticated)
+            .respond_with(challenge(&base))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/token"))
+            .respond_with(FailThenIssueToken(AtomicUsize::new(0)))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/library/nginx/manifests/latest"))
+            .and(match_header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let upstream = Arc::new(Upstream::new());
+        let credentials = credentials(basic("alice", "pw"));
+        let outcomes = concurrent_pulls(&upstream, &base, &credentials, 2).await;
+
+        let (mut succeeded, mut failed) = (0, 0);
+        for outcome in outcomes {
+            match outcome {
+                Ok(status) => {
+                    assert_eq!(status, StatusCode::OK);
+                    succeeded += 1;
+                }
+                Err(UpstreamError::Status(StatusCode::INTERNAL_SERVER_ERROR)) => failed += 1,
+                other => panic!("unexpected pull outcome: {other:?}"),
+            }
+        }
+        assert_eq!((succeeded, failed), (1, 1));
     }
 }

@@ -28,6 +28,21 @@ const MAX_WHEEL_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WHEEL_ENTRY_POINTS_BYTES: u64 = 1024 * 1024;
 const SUPPORTED_WHEEL_MAJOR_VERSION: u64 = 1;
 
+/// Most members a wheel may declare. `validate_record` decompresses and hashes every non-signature
+/// member, so a padded archive makes validation walk more members than the compressed upload implies.
+const MAX_WHEEL_ENTRIES: usize = 100_000;
+
+/// Most bytes validation will decompress across a wheel's members. `validate_record` hashes each
+/// member, so the expanded total, not the compressed request, bounds that work; the central directory
+/// carries every member's uncompressed size, so an over-budget archive is rejected before any member
+/// is read.
+const MAX_WHEEL_EXPANDED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Largest expansion a single member may declare, uncompressed over compressed. DEFLATE tops out near
+/// 1032:1, so a member claiming more than this stored a far smaller stream than it declares and is a
+/// decompression bomb rather than ordinary content.
+const MAX_WHEEL_COMPRESSION_RATIO: u64 = 1000;
+
 /// Wrap a wheel-validation failure as [`ArchiveError::Invalid`] with the `invalid wheel:` prefix the
 /// upload API surfaces.
 fn invalid_wheel(message: impl std::fmt::Display) -> ArchiveError {
@@ -109,10 +124,19 @@ fn wheel_members<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     expected: &ExpectedDistInfo,
 ) -> Result<WheelMembers, ArchiveError> {
+    let count = archive.len();
+    if count > MAX_WHEEL_ENTRIES {
+        return Err(invalid_wheel(format!(
+            "archive has more than {MAX_WHEEL_ENTRIES} entries"
+        )));
+    }
     let mut dist_info_dirs = BTreeSet::new();
     let mut files = BTreeMap::new();
-    for index in 0..archive.len() {
+    let mut expanded = 0;
+    for index in 0..count {
         let entry = archive.by_index(index).map_err(read_error)?;
+        let size = entry.size();
+        let compressed = entry.compressed_size();
         let raw_name = entry.name();
         let name = if entry.is_dir() {
             raw_name.strip_suffix('/').unwrap_or(raw_name)
@@ -120,17 +144,13 @@ fn wheel_members<R: Read + Seek>(
             raw_name
         };
         let name = safe_member_name(name)?;
+        let is_file = entry.is_file();
+        expanded = account_member_expansion(expanded, &name, size, compressed)?;
         if let Some(dist_info_dir) = top_level_dist_info_dir(&name) {
             dist_info_dirs.insert(dist_info_dir.to_owned());
         }
-        if entry.is_file() {
-            files.insert(
-                name.clone(),
-                WheelMember {
-                    index,
-                    size: entry.size(),
-                },
-            );
+        if is_file {
+            files.insert(name.clone(), WheelMember { index, size });
         }
     }
 
@@ -215,4 +235,72 @@ fn read_zip_member_limited<R: Read + Seek>(
     let mut bytes = Vec::with_capacity(capacity);
     entry.read_to_end(&mut bytes).map_err(read_error)?;
     Ok(bytes)
+}
+
+/// Fold one member's declared uncompressed size into the running expanded total, rejecting a member
+/// that expands past [`MAX_WHEEL_COMPRESSION_RATIO`] and an archive whose members sum past
+/// [`MAX_WHEEL_EXPANDED_BYTES`]. The sum is checked, so a member declaring a size near [`u64::MAX`]
+/// fails the budget rather than wrapping it.
+fn account_member_expansion(running: u64, name: &str, size: u64, compressed: u64) -> Result<u64, ArchiveError> {
+    if size > compressed.saturating_mul(MAX_WHEEL_COMPRESSION_RATIO) {
+        return Err(invalid_wheel(format!(
+            "member {name} declares {size} bytes from {compressed} compressed, above the {MAX_WHEEL_COMPRESSION_RATIO}:1 expansion limit"
+        )));
+    }
+    running
+        .checked_add(size)
+        .filter(|total| *total <= MAX_WHEEL_EXPANDED_BYTES)
+        .ok_or_else(|| {
+            invalid_wheel(format!(
+                "archive members expand to more than the upload validation limit of {MAX_WHEEL_EXPANDED_BYTES} bytes"
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_account_member_expansion_sums_within_budget() {
+        assert_eq!(account_member_expansion(10, "pkg/a", 5, 5).unwrap(), 15);
+    }
+
+    #[test]
+    fn test_account_member_expansion_allows_max_ratio() {
+        assert_eq!(
+            account_member_expansion(0, "pkg/a", MAX_WHEEL_COMPRESSION_RATIO, 1).unwrap(),
+            MAX_WHEEL_COMPRESSION_RATIO
+        );
+    }
+
+    #[test]
+    fn test_account_member_expansion_rejects_high_ratio() {
+        let message = account_member_expansion(0, "pkg/bomb", MAX_WHEEL_COMPRESSION_RATIO + 1, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("above the 1000:1 expansion limit"), "{message}");
+    }
+
+    #[test]
+    fn test_account_member_expansion_rejects_zero_compressed_with_content() {
+        let message = account_member_expansion(0, "pkg/bomb", 1, 0).unwrap_err().to_string();
+        assert!(message.contains("expansion limit"), "{message}");
+    }
+
+    #[test]
+    fn test_account_member_expansion_rejects_over_budget() {
+        let message = account_member_expansion(MAX_WHEEL_EXPANDED_BYTES, "pkg/a", 1, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("expand to more than"), "{message}");
+    }
+
+    #[test]
+    fn test_account_member_expansion_rejects_size_overflow() {
+        let message = account_member_expansion(1, "pkg/a", u64::MAX, u64::MAX)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("expand to more than"), "{message}");
+    }
 }

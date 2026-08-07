@@ -1,5 +1,11 @@
+use std::collections::HashSet;
+
 use super::store;
 use crate::meta::{MetaStore, NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryStatus};
+
+fn none() -> HashSet<(String, String)> {
+    HashSet::new()
+}
 
 #[test]
 fn test_webhook_delivery_queue_orders_due_records() {
@@ -24,8 +30,8 @@ fn test_webhook_delivery_queue_orders_due_records() {
         .unwrap();
 
     assert_eq!(store.next_webhook_delivery_at().unwrap(), Some(10));
-    assert_eq!(store.list_due_webhook_deliveries(9, 10).unwrap(), Vec::new());
-    let due = store.list_due_webhook_deliveries(20, 1).unwrap();
+    assert_eq!(store.list_due_webhook_deliveries(9, 10, &none()).unwrap(), Vec::new());
+    let due = store.list_due_webhook_deliveries(20, 1, &none()).unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].id, earlier);
     assert_eq!(store.get_webhook_delivery(&later).unwrap().unwrap().event, "upload");
@@ -61,8 +67,8 @@ fn test_webhook_delivery_update_reschedules_and_finishes() {
     assert_eq!(pending.attempts, 1);
     assert_eq!(pending.next_attempt_at_unix, Some(16));
     assert_eq!(store.next_webhook_delivery_at().unwrap(), Some(16));
-    assert!(store.list_due_webhook_deliveries(15, 10).unwrap().is_empty());
-    assert_eq!(store.list_due_webhook_deliveries(16, 10).unwrap()[0].id, id);
+    assert!(store.list_due_webhook_deliveries(15, 10, &none()).unwrap().is_empty());
+    assert_eq!(store.list_due_webhook_deliveries(16, 10, &none()).unwrap()[0].id, id);
 
     let delivered = store
         .update_webhook_delivery(
@@ -81,7 +87,7 @@ fn test_webhook_delivery_update_reschedules_and_finishes() {
     assert_eq!(delivered.attempts, 2);
     assert_eq!(delivered.status, WebhookDeliveryStatus::Delivered);
     assert_eq!(store.next_webhook_delivery_at().unwrap(), None);
-    assert!(store.list_due_webhook_deliveries(100, 10).unwrap().is_empty());
+    assert!(store.list_due_webhook_deliveries(100, 10, &none()).unwrap().is_empty());
 }
 
 #[test]
@@ -135,7 +141,7 @@ fn test_webhook_delivery_ignores_empty_limit_and_stale_due_rows() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");
     let store = MetaStore::open(&path).unwrap();
-    assert!(store.list_due_webhook_deliveries(10, 0).unwrap().is_empty());
+    assert!(store.list_due_webhook_deliveries(10, 0, &none()).unwrap().is_empty());
     assert!(
         store
             .update_webhook_delivery(
@@ -165,5 +171,58 @@ fn test_webhook_delivery_ignores_empty_limit_and_stale_due_rows() {
     drop(db);
 
     let store = MetaStore::open(&path).unwrap();
-    assert!(store.list_due_webhook_deliveries(0, 10).unwrap().is_empty());
+    assert!(store.list_due_webhook_deliveries(0, 10, &none()).unwrap().is_empty());
+}
+
+fn enqueue(store: &MetaStore, index: &str, target: &str, created_at_unix: i64) -> String {
+    store
+        .enqueue_webhook_delivery(NewWebhookDelivery {
+            index,
+            target,
+            event: "upload",
+            payload: r#"{"event":"upload"}"#,
+            created_at_unix,
+        })
+        .unwrap()
+}
+
+#[test]
+fn test_list_due_returns_one_record_per_target_in_due_order() {
+    let (_dir, store) = store();
+    let slow_first = enqueue(&store, "hosted", "slow", 10);
+    enqueue(&store, "hosted", "slow", 11);
+    let healthy = enqueue(&store, "hosted", "healthy", 12);
+
+    let due = store.list_due_webhook_deliveries(100, 10, &none()).unwrap();
+
+    let ids: Vec<&str> = due.iter().map(|record| record.id.as_str()).collect();
+    assert_eq!(ids, [slow_first.as_str(), healthy.as_str()]);
+}
+
+#[test]
+fn test_list_due_skips_excluded_targets_to_reach_a_later_one() {
+    let (_dir, store) = store();
+    for created_at in 10..14 {
+        enqueue(&store, "hosted", "slow", created_at);
+    }
+    let healthy = enqueue(&store, "hosted", "healthy", 20);
+    let excluded = HashSet::from([("hosted".to_owned(), "slow".to_owned())]);
+
+    let due = store.list_due_webhook_deliveries(100, 10, &excluded).unwrap();
+
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, healthy);
+    assert_eq!(due[0].target, "healthy");
+}
+
+#[test]
+fn test_list_due_separates_same_target_name_across_indexes() {
+    let (_dir, store) = store();
+    let first = enqueue(&store, "one", "ci", 10);
+    let second = enqueue(&store, "two", "ci", 11);
+
+    let due = store.list_due_webhook_deliveries(100, 10, &none()).unwrap();
+
+    let ids: Vec<&str> = due.iter().map(|record| record.id.as_str()).collect();
+    assert_eq!(ids, [first.as_str(), second.as_str()]);
 }

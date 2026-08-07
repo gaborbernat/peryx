@@ -5125,6 +5125,7 @@ version = "0.0.1"
 dependencies = [
  "base64",
  "codspeed-criterion-compat",
+ "futures-util",
  "http 1.4.2",
  "peryx-core",
  "peryx-events",

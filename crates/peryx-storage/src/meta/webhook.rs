@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use redb::ReadableTable as _;
 use serde::{Deserialize, Serialize};
 
@@ -84,7 +86,12 @@ impl MetaStore {
         Ok(id)
     }
 
-    /// Pending webhook deliveries due at or before `now_unix`, ordered by due time.
+    /// Pending webhook deliveries due at or before `now_unix`, ordered by due time, at most one record
+    /// per `(index, target)` and skipping any target in `excluded`.
+    ///
+    /// Returning a single record per target and letting the caller exclude targets it is already
+    /// delivering to lets the worker spread a batch across targets instead of draining one target's
+    /// backlog first, so a slow endpoint cannot starve healthy ones.
     ///
     /// # Errors
     /// Returns a store error if the read fails or a record cannot be decoded.
@@ -92,6 +99,7 @@ impl MetaStore {
         &self,
         now_unix: i64,
         limit: usize,
+        excluded: &HashSet<(String, String)>,
     ) -> Result<Vec<WebhookDeliveryRecord>, MetaError> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -100,6 +108,7 @@ impl MetaStore {
         let due = txn.open_table(WEBHOOK_DUE)?;
         let deliveries = txn.open_table(WEBHOOK_DELIVERY)?;
         let mut records = Vec::new();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
         for entry in due.iter()? {
             let (key, id) = entry?;
             let Some(due_at) = due_key_time(key.value()) else {
@@ -108,10 +117,15 @@ impl MetaStore {
             if due_at > now_unix {
                 break;
             }
-            let Some(record) = deliveries.get(id.value())? else {
+            let Some(value) = deliveries.get(id.value())? else {
                 continue;
             };
-            records.push(serde_json::from_slice(record.value())?);
+            let record: WebhookDeliveryRecord = serde_json::from_slice(value.value())?;
+            let target = (record.index.clone(), record.target.clone());
+            if excluded.contains(&target) || !seen.insert(target) {
+                continue;
+            }
+            records.push(record);
             if records.len() == limit {
                 break;
             }

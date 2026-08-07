@@ -51,23 +51,23 @@ pub struct PackageSearch {
     home: Option<PathBuf>,
 }
 
-/// How far an eager [`rebuild`](PackageSearch::rebuild) has progressed, reported once per committed
-/// chunk so a caller can surface operator progress.
+/// How far an eager [`rebuild`](PackageSearch::rebuild) has progressed, reported once per staged chunk
+/// so a caller can surface operator progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RebuildProgress {
-    /// Documents committed to the new index so far.
+    /// Documents staged into the candidate generation so far.
     pub indexed: u64,
-    /// Documents the rebuild will commit in total.
+    /// Documents the rebuild will stage in total.
     pub total: u64,
 }
 
 /// How an eager [`rebuild`](PackageSearch::rebuild) ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebuildOutcome {
-    /// The rebuilt index replaced the served one; `documents` were published across `commits` chunks.
-    Published { documents: u64, commits: u64 },
+    /// The rebuilt index replaced the served one; `documents` were published by the single closing commit.
+    Published { documents: u64 },
     /// The caller cancelled before publication; the served index kept its prior contents. `documents`
-    /// counts the chunks committed before the abort, which a restart or the next lazy refresh discards.
+    /// counts the chunks staged before the abort, all discarded with the rolled-back candidate generation.
     Aborted { documents: u64 },
 }
 
@@ -175,12 +175,14 @@ impl PackageSearch {
     /// result atomically.
     ///
     /// Unlike the lazy refresh a search triggers, this is an eager operator recovery path for when the
-    /// derived index falls behind: it re-derives every document, adds them to the served index in
-    /// `chunk` batches so peak writer memory stays bounded, and reloads the reader only once every
-    /// chunk has committed. Concurrent searches keep serving the prior complete index until that final
-    /// reload publishes the rebuilt one, so no partial state is ever visible. On disk, a marker records
-    /// the in-flight rebuild, so a restart that interrupts one discards the partial index and starts
-    /// over rather than serving it.
+    /// derived index falls behind: it re-derives every document and stages them into the writer in
+    /// `chunk` batches, whose flushing bounds peak writer memory, then commits once at the end and
+    /// reloads the reader. Staging never commits, so the candidate generation stays out of the live
+    /// Tantivy index until that single closing commit publishes it atomically. Concurrent searches keep
+    /// serving the prior complete index until then, and a cancellation rolls the candidate generation
+    /// back so no scoped [`update_project`](PackageSearch::update_project) can later reload its writes.
+    /// On disk, a marker records the in-flight rebuild, so a restart that interrupts one discards any
+    /// staged state and starts over rather than serving it.
     ///
     /// The walk over authoritative metadata that derives every document runs off the writer lock: it
     /// reads the metadata store, not the index, so a scoped [`update_project`](PackageSearch::update_project)
@@ -216,23 +218,18 @@ impl PackageSearch {
             .writer_with_num_threads::<TantivyDocument>(1, WRITER_MEMORY_BYTES)?;
         writer.delete_all_documents()?;
         let mut indexed = 0_u64;
-        let mut commits = 0_u64;
         for slice in snapshot.documents.chunks(chunk.get()) {
             if observe(RebuildProgress { indexed, total }).is_break() {
+                writer.rollback()?;
                 return Ok(RebuildOutcome::Aborted { documents: indexed });
             }
             for package in slice {
                 writer.add_document(self.document(package))?;
             }
-            writer.commit()?;
-            commits += 1;
             indexed += slice.len() as u64;
         }
-        if commits == 0 {
-            writer.commit()?;
-            commits = 1;
-        }
         let _ = observe(RebuildProgress { indexed, total });
+        writer.commit()?;
         self.reader.reload()?;
         self.clear_rebuilding();
         // The rebuild re-derived every project as of `snapshot.epoch`, so unless a mutation has advanced
@@ -242,10 +239,7 @@ impl PackageSearch {
         }
         *self.indexed_epoch.lock().expect("search epoch lock") = Some(snapshot.epoch);
         ctx.meta.set_view_frontier(SEARCH_VIEW, snapshot.frontier)?;
-        Ok(RebuildOutcome::Published {
-            documents: indexed,
-            commits,
-        })
+        Ok(RebuildOutcome::Published { documents: indexed })
     }
 
     /// Derive the whole document set with the mutation epoch and store serial it reflects, off the

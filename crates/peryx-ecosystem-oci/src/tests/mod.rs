@@ -17,6 +17,7 @@ mod revocation_tests;
 mod scope_tests;
 mod search_tests;
 mod serve;
+mod tag_name_tests;
 mod virtual_tests;
 mod web_tests;
 mod webhooks_tests;

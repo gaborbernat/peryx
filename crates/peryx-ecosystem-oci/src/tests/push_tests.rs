@@ -270,6 +270,75 @@ async fn test_session_finish_with_an_invalid_digest_is_rejected() {
     assert!(body_has_code(&body, "DIGEST_INVALID"), "{body:?}");
 }
 
+/// A closing `PUT` whose `digest` query is absent, malformed, or names an unsupported algorithm is
+/// rejected before its body is read, so the trailing chunk never reaches the stage and the session's
+/// offset stays at the committed prefix. A client that fixes the query and resends the same chunk then
+/// finalizes cleanly instead of appending those bytes a second time.
+#[rstest]
+#[case::missing("")]
+#[case::malformed("?digest=not-a-sha256-digest")]
+#[case::unsupported_algorithm("?digest=sha512:abcdef")]
+#[tokio::test]
+async fn test_session_finish_with_a_bad_digest_leaves_the_trailing_chunk_unappended(#[case] finish_query: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = hosted_writable(&dir, TOKEN);
+    let blob = b"a-committed-prefix-then-a-trailing-final-chunk";
+    let split = 22;
+    let range = format!("{split}-{}", blob.len() - 1);
+
+    let (status, headers, _) = send_body(
+        &app,
+        Method::POST,
+        "/v2/store/app/blobs/uploads/",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+    let (status, _, _) = send_body(
+        &app,
+        Method::PATCH,
+        &location,
+        &[("authorization", &auth(TOKEN))],
+        blob[..split].to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // The closing PUT carries the tail bytes but names a bad digest: it is rejected...
+    let (status, _, body) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}{finish_query}"),
+        &[("authorization", &auth(TOKEN)), ("content-range", &range)],
+        blob[split..].to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body_has_code(&body, "DIGEST_INVALID"), "{body:?}");
+
+    // ...and status still reports only the committed prefix, so the tail did not reach the stage.
+    let (status, headers, _) = send_with(&app, Method::GET, &location, &[("authorization", &auth(TOKEN))]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(headers[header::RANGE], format!("0-{}", split - 1));
+
+    // Resending the same tail under a valid digest finalizes without appending those bytes twice.
+    let digest = oci_digest(blob);
+    let (status, _, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest={digest}"),
+        &[("authorization", &auth(TOKEN)), ("content-range", &range)],
+        blob[split..].to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(got, &blob[..]);
+}
+
 #[tokio::test]
 async fn test_session_finish_with_a_wrong_digest_keeps_the_stage_for_retry() {
     let dir = tempfile::tempdir().unwrap();

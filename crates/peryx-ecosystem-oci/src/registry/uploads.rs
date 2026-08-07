@@ -215,8 +215,13 @@ async fn patch_locked(
     }
 }
 
-/// Append any trailing bytes under the session lock, then verify and commit under the given `digest`.
-/// Run inside the per-session guard so the append and the commit see a stage no other writer can touch.
+/// Validate the whole-blob digest, then append any trailing bytes under the session lock and commit
+/// under that digest. Run inside the per-session guard so the append and the commit see a stage no
+/// other writer can touch.
+///
+/// The digest is checked before the body is read: a closing `PUT` that omits it or names an algorithm
+/// the store cannot key on is rejected with the stage, offset, and activity timestamp untouched, so a
+/// client that fixes the URL and resends the same final chunk does not append those bytes twice.
 #[allow(
     clippy::too_many_arguments,
     reason = "the final PUT threads the request, session, and commit context"
@@ -232,10 +237,6 @@ async fn finish_locked(
     body: Body,
     journal_outbox: bool,
 ) -> Result<Response, ServeError> {
-    let offset = match append_session_chunk(state, index, repo, name, session, headers, body).await? {
-        Ok(offset) => offset,
-        Err(response) => return Ok(response),
-    };
     // A `PUT` without a digest cannot commit, but the staged bytes are still good: keep the session so
     // the client can retry with the digest rather than re-upload everything.
     let Some(digest) = query_params(query).remove("digest") else {
@@ -244,7 +245,28 @@ async fn finish_locked(
             "finishing an upload requires a digest",
         ));
     };
-    commit_staged_upload(state, session, index, repo, name, &digest, offset, journal_outbox).await
+    let Some(storage) = store::blob_digest(&digest) else {
+        return Ok(error_response(
+            ErrorCode::DigestInvalid,
+            "only sha256 blob digests are supported",
+        ));
+    };
+    let offset = match append_session_chunk(state, index, repo, name, session, headers, body).await? {
+        Ok(offset) => offset,
+        Err(response) => return Ok(response),
+    };
+    commit_staged_upload(
+        state,
+        session,
+        index,
+        repo,
+        name,
+        &digest,
+        storage,
+        offset,
+        journal_outbox,
+    )
+    .await
 }
 
 /// The locked read-modify-write shared by `PATCH` and the final `PUT`: re-read the session under the lock

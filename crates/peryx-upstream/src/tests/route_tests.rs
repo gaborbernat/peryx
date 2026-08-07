@@ -244,33 +244,6 @@ async fn test_artifact_client_does_not_fallback_range_reads_when_disabled() {
 }
 
 #[tokio::test]
-async fn test_artifact_client_streams_from_the_cached_mirror_base() {
-    use futures_util::StreamExt as _;
-
-    let mirror = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/mirror/files/pkg.whl"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"payload".to_vec()))
-        .expect(1)
-        .mount(&mirror)
-        .await;
-    let source = NamedUpstream::new("origin", UpstreamClient::new("https://origin.example/simple/").unwrap())
-        .with_artifact_mirror(
-            UpstreamClient::new(&format!("{}/mirror/", mirror.uri())).unwrap(),
-            false,
-        );
-
-    let mut stream = source
-        .artifacts()
-        .stream_bytes("https://origin.example/files/pkg.whl?token=secret")
-        .await
-        .unwrap();
-    let chunk = stream.next().await.unwrap().unwrap();
-
-    assert_eq!(&chunk[..], b"payload");
-}
-
-#[tokio::test]
 async fn test_artifact_client_rejects_an_invalid_advertised_url() {
     let client = UpstreamClient::new("https://origin.example/simple/").unwrap();
     let source = NamedUpstream::new("origin", client)

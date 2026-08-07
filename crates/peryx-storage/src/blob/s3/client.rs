@@ -160,14 +160,6 @@ impl S3Client {
     /// # Errors
     /// Returns [`S3Error`] when the request or body stream fails.
     pub async fn get(&self, key: &str, range: Option<Range<u64>>) -> Result<S3Get, S3Error> {
-        // An HTTP byte range is inclusive, so an empty end-exclusive slice has no representation and
-        // reads no bytes; serve it directly instead of emitting a malformed `bytes=N-{N-1}` header.
-        if range.as_ref().is_some_and(Range::is_empty) {
-            return Ok(S3Get {
-                total_bytes: 0,
-                body: futures_util::stream::empty().boxed(),
-            });
-        }
         let deadline = tokio::time::Instant::now()
             .checked_add(self.config.request_timeout)
             .ok_or_else(|| S3Error::Request("request timeout exceeds the supported duration".to_owned()))?;

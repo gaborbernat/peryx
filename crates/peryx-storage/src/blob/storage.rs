@@ -451,8 +451,18 @@ impl BlobBlocking<'_> {
                         Some(digest),
                     ));
                 }
-                let mut result = Vec::new();
-                let read = std::io::Read::read_to_end(&mut file, &mut result).map_err(BlobError::from);
+                #[cfg(target_pointer_width = "64")]
+                let length = usize::try_from(bytes).unwrap_or(usize::MAX);
+                #[cfg(not(target_pointer_width = "64"))]
+                let length = bytes.try_into().map_err(|_| {
+                    BlobError::limit_exceeded(usize::MAX as u64, bytes).with_context(
+                        "filesystem",
+                        BlobOperation::Open,
+                        Some(digest),
+                    )
+                })?;
+                let mut result = vec![0; length];
+                let read = std::io::Read::read_exact(&mut file, &mut result).map_err(BlobError::from);
                 filesystem_context(read, BlobOperation::Open, Some(digest))?;
                 Ok(result)
             }

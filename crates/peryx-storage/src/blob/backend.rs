@@ -22,12 +22,6 @@ fn filesystem_context<T>(
     }
 }
 
-/// Reduce a joined blocking task to its inner result. A worker panic or cancellation becomes an I/O
-/// error so a transient failure keeps the backend available instead of crashing the process.
-fn flatten_join<T>(result: Result<Result<T, BlobError>, tokio::task::JoinError>) -> Result<T, BlobError> {
-    result.unwrap_or_else(|error| Err(BlobError::io(std::io::Error::other(error))))
-}
-
 /// The scope that acknowledges a successful write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobDurability {
@@ -121,6 +115,9 @@ impl BlobRead {
     ///
     /// # Errors
     /// Returns a size or payload-read error.
+    ///
+    /// # Panics
+    /// Panics if the internal blocking read task panics.
     pub async fn collect(self, max_bytes: u64) -> Result<Vec<u8>, BlobError> {
         let Self {
             metadata,
@@ -146,21 +143,20 @@ impl BlobRead {
             ));
         }
         let result = match body {
-            BlobReadBody::File(mut file) => flatten_join(
-                tokio::task::spawn_blocking(move || {
-                    file.seek(std::io::SeekFrom::Start(range.start))?;
-                    let mut bytes = Vec::new();
-                    file.take(expected).read_to_end(&mut bytes)?;
-                    if bytes.len() as u64 != expected {
-                        return Err(BlobError::io(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            format!("blob file declared {expected} bytes but yielded {}", bytes.len()),
-                        )));
-                    }
-                    Ok::<_, BlobError>(bytes)
-                })
-                .await,
-            ),
+            BlobReadBody::File(mut file) => tokio::task::spawn_blocking(move || {
+                file.seek(std::io::SeekFrom::Start(range.start))?;
+                let mut bytes = Vec::new();
+                file.take(expected).read_to_end(&mut bytes)?;
+                if bytes.len() as u64 != expected {
+                    return Err(BlobError::io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("blob file declared {expected} bytes but yielded {}", bytes.len()),
+                    )));
+                }
+                Ok::<_, BlobError>(bytes)
+            })
+            .await
+            .expect("blob collection task never panics"),
             BlobReadBody::Stream(stream) => {
                 stream
                     .try_fold(Vec::new(), |mut bytes, chunk| async move {
@@ -384,15 +380,14 @@ impl FilesystemWrite {
         let pending = self.pending.take().expect("settled writer retains its stage");
         let queued = std::mem::take(&mut self.queued);
         let store = self.store.clone();
-        let staged = flatten_join(
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let mut pending = pending;
-                queued.into_iter().try_for_each(|chunk| pending.write(&chunk))?;
-                pending.finish()
-            })
-            .await,
-        );
+        let staged = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut pending = pending;
+            queued.into_iter().try_for_each(|chunk| pending.write(&chunk))?;
+            pending.finish()
+        })
+        .await
+        .expect("blob finish task never panics");
         let staged = filesystem_context(staged, BlobOperation::Write, None)?;
         Ok(BlobStaged::filesystem(store, staged))
     }
@@ -401,13 +396,12 @@ impl FilesystemWrite {
         self.settle().await?;
         let permit = self.store.worker_permit().await;
         let pending = self.pending.take().expect("settled writer retains its stage");
-        flatten_join(
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                pending.abort()
-            })
-            .await,
-        )
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            pending.abort()
+        })
+        .await
+        .expect("blob abort task never panics")
         .map_err(|error| error.with_context("filesystem", BlobOperation::Write, None))
     }
 
@@ -430,7 +424,7 @@ impl FilesystemWrite {
         let Some(task) = self.task.take() else {
             return Ok(());
         };
-        let pending = flatten_join(task.await);
+        let pending = task.await.expect("blob batch task never panics");
         self.pending = Some(filesystem_context(pending, BlobOperation::Write, None)?);
         Ok(())
     }
@@ -503,17 +497,19 @@ impl BlobStaged {
     ///
     /// # Errors
     /// Returns a contextual commit error on storage failure, and no receipt.
+    ///
+    /// # Panics
+    /// Panics if the internal blocking task panics.
     pub async fn commit(mut self) -> Result<PlacementReceipt, BlobError> {
         match self.take_backend() {
             BlobStagedBackend::Filesystem { store, staged } => {
                 let permit = store.worker_permit().await;
-                flatten_join(
-                    tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        Self::commit_backend(BlobStagedBackend::Filesystem { store, staged })
-                    })
-                    .await,
-                )
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    Self::commit_backend(BlobStagedBackend::Filesystem { store, staged })
+                })
+                .await
+                .expect("blob commit task never panics")
             }
             BlobStagedBackend::S3(staged) => Box::pin(staged.commit()).await,
         }
@@ -558,17 +554,19 @@ impl BlobStaged {
     ///
     /// # Errors
     /// Returns a contextual cleanup error.
+    ///
+    /// # Panics
+    /// Panics if the internal blocking task panics.
     pub async fn abort(mut self) -> Result<(), BlobError> {
         match self.take_backend() {
             BlobStagedBackend::Filesystem { store, staged } => {
                 let permit = store.worker_permit().await;
-                flatten_join(
-                    tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        Self::abort_backend(BlobStagedBackend::Filesystem { store, staged })
-                    })
-                    .await,
-                )
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    Self::abort_backend(BlobStagedBackend::Filesystem { store, staged })
+                })
+                .await
+                .expect("blob abort task never panics")
             }
             BlobStagedBackend::S3(staged) => staged.abort().await,
         }
@@ -861,13 +859,12 @@ where
 {
     let permit = store.worker_permit().await;
     let error_digest = digest.clone();
-    flatten_join(
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            action(store, digest)
-        })
-        .await,
-    )
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        action(store, digest)
+    })
+    .await
+    .expect("blob backend task never panics")
     .map_err(|error| error.with_context("filesystem", operation, Some(&error_digest)))
 }
 
@@ -880,41 +877,13 @@ where
     T: Send + 'static,
 {
     let permit = store.worker_permit().await;
-    flatten_join(
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            action(store)
-        })
-        .await,
-    )
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        action(store)
+    })
+    .await
+    .expect("blob backend task never panics")
     .map_err(|error| error.with_context("filesystem", operation, None))
-}
-
-#[cfg(test)]
-mod join_tests {
-    use super::super::BlobErrorKind;
-    use super::{BlobError, flatten_join};
-
-    #[tokio::test]
-    async fn test_flatten_join_maps_a_task_panic_to_an_io_error() {
-        let joined = tokio::task::spawn_blocking(|| -> Result<(), BlobError> {
-            panic!("induced worker panic");
-        })
-        .await;
-        assert_eq!(flatten_join(joined).unwrap_err().kind(), BlobErrorKind::Io);
-    }
-
-    #[tokio::test]
-    async fn test_flatten_join_returns_the_inner_value() {
-        let joined = tokio::task::spawn_blocking(|| Ok::<_, BlobError>(7_u8)).await;
-        assert_eq!(flatten_join(joined).unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn test_flatten_join_preserves_the_inner_error() {
-        let joined = tokio::task::spawn_blocking(|| Err::<(), _>(BlobError::unsupported("nope"))).await;
-        assert_eq!(flatten_join(joined).unwrap_err().kind(), BlobErrorKind::Unsupported);
-    }
 }
 
 #[cfg(test)]

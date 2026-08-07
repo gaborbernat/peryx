@@ -91,6 +91,20 @@ impl S3Backend {
         {
             return Err(BlobError::invalid_range(range.start, range.end, total));
         }
+        if let Some(range) = &range
+            && range.is_empty()
+        {
+            return Ok(BlobRead::new(
+                "s3",
+                digest.clone(),
+                BlobMetadata {
+                    bytes: total,
+                    modified: None,
+                },
+                range.clone(),
+                BlobReadBody::Stream(futures_util::stream::empty().boxed()),
+            ));
+        }
         let response = self
             .client
             .get(&key, range.clone())

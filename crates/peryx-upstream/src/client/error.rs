@@ -38,8 +38,6 @@ pub enum UpstreamError {
     UnsupportedContentType { url: Url, content_type: String },
     #[error("upstream response exceeds the {limit}-byte limit")]
     ResponseTooLarge { limit: usize },
-    #[error("no upstream source is eligible to serve this request")]
-    NoEligibleSource,
 }
 
 impl UpstreamError {
@@ -52,8 +50,7 @@ impl UpstreamError {
             | Self::Url(_)
             | Self::MissingContentType { .. }
             | Self::UnsupportedContentType { .. }
-            | Self::ResponseTooLarge { .. }
-            | Self::NoEligibleSource => None,
+            | Self::ResponseTooLarge { .. } => None,
         }
     }
 }
@@ -74,7 +71,6 @@ impl UpstreamError {
             Self::MissingContentType { .. } => "upstream response missed Simple API Content-Type".to_owned(),
             Self::UnsupportedContentType { .. } => "upstream returned unsupported Simple API Content-Type".to_owned(),
             Self::ResponseTooLarge { limit } => format!("upstream response exceeds the {limit}-byte limit"),
-            Self::NoEligibleSource => "no upstream source is eligible to serve this request".to_owned(),
         }
     }
 }

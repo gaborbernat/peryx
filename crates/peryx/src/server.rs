@@ -589,23 +589,19 @@ fn trusted_publishing(config: &Config, signer: Signer) -> anyhow::Result<Option<
         .auth
         .trusted_publishers
         .iter()
-        .filter_map(|publisher| {
-            // `Config::validate` rejects a publisher whose repository is not a configured writable index, so
-            // the lookup is present here; skipping a stray publisher keeps this construction total instead of
-            // reintroducing the panic that indexing the map by an unknown name would cause.
-            repositories
-                .get(publisher.repository.as_str())
-                .map(|repository| peryx_identity::PublisherBinding {
-                    id: publisher.id.clone(),
-                    repository: repository.route.clone(),
-                    publisher: peryx_identity::TrustedPublisher {
-                        issuer: publisher.issuer.clone(),
-                        audience: config.auth.oidc_audience.clone(),
-                        subject: peryx_identity::Glob::new(&publisher.subject),
-                        claims: publisher.claims.clone(),
-                        projects: publisher.projects.iter().map(peryx_identity::Glob::new).collect(),
-                    },
-                })
+        .map(|publisher| {
+            let repository = repositories[publisher.repository.as_str()];
+            peryx_identity::PublisherBinding {
+                id: publisher.id.clone(),
+                repository: repository.route.clone(),
+                publisher: peryx_identity::TrustedPublisher {
+                    issuer: publisher.issuer.clone(),
+                    audience: config.auth.oidc_audience.clone(),
+                    subject: peryx_identity::Glob::new(&publisher.subject),
+                    claims: publisher.claims.clone(),
+                    projects: publisher.projects.iter().map(peryx_identity::Glob::new).collect(),
+                },
+            }
         })
         .collect();
     peryx_identity::OidcRuntime::new(bindings, signer, config.auth.token_ttl_secs)
@@ -919,31 +915,15 @@ fn build_credential_provider(
             let credentials = credentials.clone();
             let index = index.clone();
             async move {
-                let resolved = tokio::task::spawn_blocking({
-                    let index = index.clone();
-                    move || {
-                        resolve_upstream_auth(&credentials)
-                            .map_err(|error| CredentialError::new(format!("index {index}: {error:#}")))
-                    }
+                tokio::task::spawn_blocking(move || {
+                    resolve_upstream_auth(&credentials)
+                        .map_err(|error| CredentialError::new(format!("index {index}: {error:#}")))
                 })
-                .await;
-                join_secret_resolution(&index, resolved)
+                .await
+                .expect("secret resolution has no panic path")
             }
         },
     ))
-}
-
-// A blocking secret refresh can be aborted or panic; surface that as a credential error so startup
-// and later refreshes stay a normal failure path rather than tearing down the process.
-pub(crate) fn join_secret_resolution(
-    index: &str,
-    resolved: Result<Result<Auth, CredentialError>, tokio::task::JoinError>,
-) -> Result<Auth, CredentialError> {
-    resolved.unwrap_or_else(|error| {
-        Err(CredentialError::new(format!(
-            "index {index}: secret resolution task failed: {error}"
-        )))
-    })
 }
 
 fn resolve_upstream_auth(credentials: &UpstreamCredentials) -> anyhow::Result<Auth> {

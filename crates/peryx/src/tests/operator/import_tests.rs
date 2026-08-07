@@ -49,6 +49,26 @@ fn test_import_dir_validates_and_reports_files() {
 }
 
 #[test]
+fn test_import_dir_rejects_the_s3_blob_backend_before_touching_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let import = root.path().join("import");
+    std::fs::create_dir(&import).unwrap();
+    std::fs::write(import.join("Demo-2.0.tar.gz"), sdist("Demo", "2.0")).unwrap();
+    let config = Config {
+        data_dir: root.path().join("data"),
+        blob: crate::tests::s3_blob_backend(),
+        ..Config::default()
+    };
+
+    let error = operator::import_dir(&config, "root/pypi", &import, &mut Vec::new()).unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("S3"), "{message}");
+    assert!(message.contains("filesystem-backed repository"), "{message}");
+    assert!(!config.data_dir.join("peryx.redb").exists());
+}
+
+#[test]
 fn test_import_dir_reports_duplicate_nested_and_invalid_files() {
     let root = tempfile::tempdir().unwrap();
     let import = root.path().join("import");

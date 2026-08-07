@@ -14,9 +14,11 @@ use crate::config::Config;
 /// Import local artifact files into a hosted index.
 ///
 /// # Errors
-/// Returns an error if the data directory cannot be opened, the selected index cannot accept
-/// imported files, its ecosystem does not support directory import, or output fails.
+/// Returns an error if the repository uses an object-store blob backend, the data directory cannot
+/// be opened, the selected index cannot accept imported files, its ecosystem does not support
+/// directory import, or output fails.
 pub fn import_dir(config: &Config, selector: &str, dir: &Path, out: &mut dyn Write) -> anyhow::Result<()> {
+    crate::app::reject_object_store_blob(config, "import")?;
     if !dir.is_dir() {
         bail!("import directory {} does not exist", dir.display());
     }

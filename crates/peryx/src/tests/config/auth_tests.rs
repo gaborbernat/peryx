@@ -290,6 +290,12 @@ fn test_auth_table_overlays_every_default() {
 }
 
 #[test]
+fn test_the_largest_ttl_is_accepted() {
+    let auth = toml_config("[auth]\ntoken_ttl_secs = 86400\n").auth;
+    assert_eq!(auth.token_ttl_secs, 86_400);
+}
+
+#[test]
 fn test_signing_key_reads_from_a_file() {
     let auth = toml_config("[auth]\nsigning_key_file = \"/run/secrets/key\"\n").auth;
     assert_eq!(
@@ -304,6 +310,10 @@ fn test_signing_key_reads_from_a_file() {
     "auth: set at most one of a secret and its `_file` sibling"
 )]
 #[case::zero_ttl("[auth]\ntoken_ttl_secs = 0\n", "auth: `token_ttl_secs` must be positive")]
+#[case::over_max_ttl(
+    "[auth]\ntoken_ttl_secs = 86401\n",
+    "auth: `token_ttl_secs` must not exceed 86400 (one day)"
+)]
 #[case::empty_audience("[auth]\noidc_audience = \" \"\n", "auth: `oidc_audience` must not be empty")]
 #[case::empty_publisher(
     "[[auth.trusted_publisher]]\nid = \"\"\nissuer = \"https://issuer.example\"\nrepository = \"repo\"\nsubject = \"*\"\nprojects = [\"app\"]\n",

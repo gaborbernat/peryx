@@ -466,6 +466,11 @@ impl Config {
     }
 }
 
+/// The largest `token_ttl_secs` an operator may configure: one day. Realm and trusted-publishing
+/// tokens are short-lived credentials, so a longer lifetime is a misconfiguration. Bounding it here
+/// also keeps `iat + ttl` far from the `i64` overflow that would wrap a token's expiry into the past.
+pub const MAX_TOKEN_TTL_SECS: i64 = 86_400;
+
 /// The `[auth]` table: the settings every index's access rules share.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthConfig {

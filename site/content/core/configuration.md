@@ -1061,13 +1061,13 @@ default_anonymous_read = false
 oidc_audience = "https://packages.example/_/oidc"
 ```
 
-| Key                      | Meaning                                                              | Default |
-| ------------------------ | -------------------------------------------------------------------- | ------- |
-| `signing_key`            | Secret peryx signs its own tokens with                               | (none)  |
-| `signing_key_file`       | Path to read `signing_key` from instead of inlining it               | (none)  |
-| `token_ttl_secs`         | Lifetime of a minted token, in seconds; must be positive             | `300`   |
-| `default_anonymous_read` | What an index's `anonymous_read` defaults to when the index omits it | `true`  |
-| `oidc_audience`          | Audience external CI identity tokens must carry                      | `peryx` |
+| Key                      | Meaning                                                                              | Default |
+| ------------------------ | ------------------------------------------------------------------------------------ | ------- |
+| `signing_key`            | Secret peryx signs its own tokens with                                               | (none)  |
+| `signing_key_file`       | Path to read `signing_key` from instead of inlining it                               | (none)  |
+| `token_ttl_secs`         | Lifetime of a minted token, in seconds; must be positive and at most 86400 (one day) | `300`   |
+| `default_anonymous_read` | What an index's `anonymous_read` defaults to when the index omits it                 | `true`  |
+| `oidc_audience`          | Audience external CI identity tokens must carry                                      | `peryx` |
 
 Set at most one of `signing_key` and `signing_key_file`. peryx reads the key at startup and uses it to mint OCI and
 trusted-publishing tokens whose maximum lifetime is `token_ttl_secs`. `default_anonymous_read = false` sets the

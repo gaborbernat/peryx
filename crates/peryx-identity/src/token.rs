@@ -99,7 +99,10 @@ impl Signer {
             },
             aud: &self.audience,
             iat: issued_at,
-            exp: issued_at + ttl_secs,
+            // A caller that does not pass through config validation could hand us a `ttl_secs` that
+            // overflows the `iat + ttl` sum. Clamp to the far future rather than wrap into the past,
+            // which would silently expire the token the instant it is minted.
+            exp: issued_at.checked_add(ttl_secs).unwrap_or(i64::MAX),
             jti: token_id,
             purpose,
             grants,

@@ -1,12 +1,24 @@
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::json;
 
 use crate::{Action, Glob, Grant, Principal, Signer};
 
 const HOUR: i64 = 3600;
+
+/// Read the `exp` claim straight off a minted token's payload, without the expiry validation that
+/// `verify` applies, so a boundary case can assert on the raw signed value.
+fn signed_exp(token: &str) -> i64 {
+    let payload = token.split('.').nth(1).unwrap();
+    let bytes = URL_SAFE_NO_PAD.decode(payload).unwrap();
+    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["exp"]
+        .as_i64()
+        .unwrap()
+}
 
 fn signer() -> Signer {
     Signer::new(b"signing-key", "peryx")
@@ -75,6 +87,20 @@ fn test_verify_rejects_an_expired_token() {
         signer.verify(&token).unwrap_err().to_string(),
         "invalid token: ExpiredSignature"
     );
+}
+
+#[test]
+fn test_mint_sets_exp_to_the_sum_of_iat_and_ttl() {
+    let token = signer().mint(&named("ci"), &grants(), 1_000, HOUR);
+
+    assert_eq!(signed_exp(&token), 1_000 + HOUR);
+}
+
+#[test]
+fn test_mint_clamps_exp_instead_of_wrapping_past_the_i64_boundary() {
+    let token = signer().mint(&named("ci"), &grants(), i64::MAX - 1, HOUR);
+
+    assert_eq!(signed_exp(&token), i64::MAX);
 }
 
 #[test]

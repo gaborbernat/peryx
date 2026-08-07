@@ -645,6 +645,37 @@ async fn test_token_endpoint_treats_a_non_basic_header_as_anonymous() {
 }
 
 #[tokio::test]
+async fn test_token_endpoint_advertises_an_expiry_that_matches_the_signed_token() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let app = team_registry(&dir);
+    let before = current_unix_time();
+    let (status, _, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/token?service=peryx",
+        &[("authorization", &auth(SECRET))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let expires_in = response["expires_in"].as_i64().unwrap();
+    let payload = response["token"].as_str().unwrap().split('.').nth(1).unwrap();
+    let claims: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap(),
+    )
+    .unwrap();
+    let exp = claims["exp"].as_i64().unwrap();
+
+    assert!(exp > before, "signed expiry {exp} is not in the future of {before}");
+    assert_eq!(exp - claims["iat"].as_i64().unwrap(), expires_in);
+}
+
+#[tokio::test]
 async fn test_token_endpoint_accepts_a_trailing_slash() {
     let dir = tempfile::tempdir().unwrap();
     let app = team_registry(&dir);

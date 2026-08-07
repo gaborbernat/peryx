@@ -25,8 +25,8 @@ use super::model::{
     AcmeConfig, AuthConfig, AvailabilityConfig, AvailabilityListenerConfig, AvailabilityListenerTls, AvailabilityMode,
     BlobStorageConfig, Config, CredentialFailureMode, CredentialRefreshConfig, DEFAULT_REPLICA_PAGE_SIZE,
     DEFAULT_REPLICA_POLL_INTERVAL_SECS, DEFAULT_WRITE_ACK_DEADLINE_SECS, DcMember, DcMembership, DcRole, IndexConfig,
-    IndexKind, JobsConfig, LdapBindConfig, LdapProviderConfig, LogConfig, OidcProviderConfig, ReplicationConfig,
-    S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig,
+    IndexKind, JobsConfig, LdapBindConfig, LdapProviderConfig, LogConfig, MAX_TOKEN_TTL_SECS, OidcProviderConfig,
+    ReplicationConfig, S3StorageConfig, SecretSource, TlsConfig, TokenConfig, TrustedPublisherConfig, UpstreamConfig,
     UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret, WriteAckConfig,
 };
 use super::raw::{
@@ -882,6 +882,11 @@ impl AuthConfig {
         if token_ttl_secs <= 0 {
             return Err(ConfigError::Auth {
                 reason: "`token_ttl_secs` must be positive",
+            });
+        }
+        if token_ttl_secs > MAX_TOKEN_TTL_SECS {
+            return Err(ConfigError::Auth {
+                reason: "`token_ttl_secs` must not exceed 86400 (one day)",
             });
         }
         let oidc_audience = partial.oidc_audience.unwrap_or(self.oidc_audience);

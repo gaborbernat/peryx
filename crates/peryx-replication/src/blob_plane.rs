@@ -15,7 +15,7 @@ use std::num::NonZeroUsize;
 use bytes::Bytes;
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
-use peryx_storage::meta::{ArtifactSource, MetaStore};
+use peryx_storage::meta::{ArtifactSource, MetaStore, PlacementEvent};
 
 use crate::blob::BlobTransport;
 use crate::blob_availability::{BlobAvailability, ReferencedBlob, blob_availability};
@@ -43,8 +43,10 @@ pub struct BlobPlaneReport {
 
 /// Pull every referenced blob this replica lacks, commit it, and record it local.
 ///
-/// A blob already present is skipped: its bytes are down, so its placement is already
-/// [`Local`](peryx_storage::meta::ByteAvailability::Local). The absent ones are pulled whole through
+/// A blob already present is not re-fetched, but its local placement is verified and repaired first: the
+/// commit publishes bytes before recording placement, so a placement write that failed after the bytes
+/// landed leaves the record reading remote-only, unavailable, or missing, and a plain skip would strand
+/// that. The absent ones are pulled whole through
 /// [`fetch_missing`], which digest-verifies each in transport, and each fetched blob is committed under
 /// its digest and its placement flipped to local. A retryable loss leaves the affected blobs
 /// [pending](BlobPlaneReport::pending) for the next pass; a terminal loss on a whole-blob fetch is a real
@@ -65,6 +67,8 @@ pub async fn pull_referenced<T: BlobTransport>(
     for (digest, size) in referenced {
         if blobs.head(digest).await?.is_none() {
             absent.push((digest.clone(), *size));
+        } else {
+            repair_local_placement(meta, digest)?;
         }
     }
     if absent.is_empty() {
@@ -210,6 +214,7 @@ pub async fn pull_outstanding<T: BlobTransport>(
     let mut ranged = Vec::new();
     for (digest, size) in &referenced {
         if blobs.head(digest).await?.is_some() {
+            repair_local_placement(meta, digest)?;
             continue;
         }
         let descriptors = placement_descriptors(meta, digest)?;
@@ -339,6 +344,29 @@ pub async fn advance_blob_frontier(
     let BlobAvailability { serial, .. } = blob_availability(batch_end, &referenced);
     meta.set_view_frontier(BLOB_VIEW, serial)?;
     Ok(serial)
+}
+
+/// Repair the local placement of a blob whose bytes are already present but whose placement does not yet
+/// record them [`Local`](peryx_storage::meta::ByteAvailability::Local).
+///
+/// [`commit_blob`] publishes bytes before recording placement, so a placement write that failed after the
+/// commit leaves a local blob whose placement still reads remote-only, unavailable, or missing. A retry
+/// finds the bytes present and would skip the blob; this rewrites the record instead, so reconciliation
+/// and availability see the copy that is actually here. A placement already local is left untouched.
+fn repair_local_placement(meta: &MetaStore, digest: &Digest) -> Result<(), SyncError> {
+    match meta.get_artifact_placement(digest.as_str())? {
+        Some(placement) if placement.availability.is_local() => {}
+        // A placement exists but reads absent: flip it local, keeping the recorded source.
+        Some(_) => {
+            meta.apply_placement_event(digest.as_str(), PlacementEvent::BytesVerified)?;
+        }
+        // No placement at all: record it under the resupply-able source `commit_blob` records a freshly
+        // pulled replicated blob under.
+        None => {
+            meta.record_artifact_placement(digest.as_str(), ArtifactSource::Proxy, true)?;
+        }
+    }
+    Ok(())
 }
 
 /// Commit one verified blob's bytes under its digest and record it locally present.

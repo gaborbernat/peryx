@@ -6,7 +6,7 @@ use bytes::Bytes;
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::{
-    BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId, MetaStore,
+    ArtifactSource, BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId, MetaStore,
 };
 
 use crate::blob::{BlobRequest, BlobTransport, LoopbackBlobSource};
@@ -127,6 +127,78 @@ async fn test_pull_referenced_skips_a_present_blob() {
         .unwrap();
 
     assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
+}
+
+#[tokio::test]
+async fn test_pull_referenced_repairs_a_present_blob_missing_its_placement() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"orphaned";
+    let digest = Digest::of(bytes);
+    // The state a placement write that failed after the blob commit leaves behind: bytes present, no
+    // placement recorded. `seed_local` writes bytes without recording placement, so this reproduces it.
+    seed_local(&blobs, &digest, bytes).await;
+    assert!(meta.get_artifact_placement(digest.as_str()).unwrap().is_none());
+    // A transport that errors if asked proves the retry repairs from the local bytes without re-fetching.
+    let source = Faulty(TransportError::BlobNotFound {
+        digest: digest.as_str().to_owned(),
+    });
+
+    let report = pull_referenced(&source, &blobs, &meta, &[(digest.clone(), bytes.len() as u64)], nz(2))
+        .await
+        .unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
+    let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
+    assert!(placement.availability.is_local());
+    assert_eq!(placement.source, ArtifactSource::Proxy);
+}
+
+#[tokio::test]
+async fn test_pull_referenced_repairs_a_present_blob_with_stale_placement() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"stale-record";
+    let digest = Digest::of(bytes);
+    seed_local(&blobs, &digest, bytes).await;
+    // A prior placement reads the bytes absent under a hosted source: the record is stale, not missing.
+    let stale = meta
+        .record_artifact_placement(digest.as_str(), ArtifactSource::Hosted, false)
+        .unwrap();
+    assert!(!stale.availability.is_local());
+    let source = Faulty(TransportError::BlobNotFound {
+        digest: digest.as_str().to_owned(),
+    });
+
+    pull_referenced(&source, &blobs, &meta, &[(digest.clone(), bytes.len() as u64)], nz(2))
+        .await
+        .unwrap();
+
+    let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
+    assert!(placement.availability.is_local());
+    // The repair flips availability but keeps the intrinsic source rather than re-recording it as proxy.
+    assert_eq!(placement.source, ArtifactSource::Hosted);
+}
+
+#[tokio::test]
+async fn test_pull_referenced_leaves_an_already_local_placement_untouched() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"already-recorded";
+    let digest = Digest::of(bytes);
+    seed_local(&blobs, &digest, bytes).await;
+    // The placement already records the bytes local under a hosted source; a repair must not touch it.
+    meta.record_artifact_placement(digest.as_str(), ArtifactSource::Hosted, true)
+        .unwrap();
+    let source = Faulty(TransportError::BlobNotFound {
+        digest: digest.as_str().to_owned(),
+    });
+
+    pull_referenced(&source, &blobs, &meta, &[(digest.clone(), bytes.len() as u64)], nz(2))
+        .await
+        .unwrap();
+
+    let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
+    assert!(placement.availability.is_local());
+    // A local placement is left as-is; the source is not rewritten to proxy the way a missing one would be.
+    assert_eq!(placement.source, ArtifactSource::Hosted);
 }
 
 #[tokio::test]
@@ -334,6 +406,33 @@ async fn test_pull_outstanding_skips_a_present_tail_blob() {
     let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
 
     assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
+}
+
+#[tokio::test]
+async fn test_pull_outstanding_repairs_a_present_tail_blob_missing_its_placement() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"tail-orphan";
+    let digest = Digest::of(bytes);
+    seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
+    // Bytes present from an earlier pull whose placement write failed, so no placement was recorded.
+    seed_local(&blobs, &digest, bytes).await;
+    assert!(meta.get_artifact_placement(digest.as_str()).unwrap().is_none());
+    // A transport that errors if asked proves the tail retry repairs from local bytes without re-pulling.
+    let source = Faulty(TransportError::BlobNotFound {
+        digest: digest.as_str().to_owned(),
+    });
+    let delegates = HashMap::new();
+    let sources = BlobSources {
+        simple: &source,
+        delegates: &delegates,
+        local_dc: "",
+    };
+
+    let report = pull_outstanding(&sources, &meta, &blobs, nz(10), nz(2)).await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
+    let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
+    assert!(placement.availability.is_local());
 }
 
 #[tokio::test]

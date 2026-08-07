@@ -168,16 +168,19 @@ fn describe(violations: &[QuotaLimit]) -> String {
 }
 
 /// Publish a blob's `(index, repo)` membership, committing a quota reservation with it when the push
-/// was metered so the two land in one transaction.
+/// was metered so the two land in one transaction. A finalizing resumable upload names its `session`,
+/// closed in that same transaction so membership never lands while the client's recovery handle
+/// lingers; a mount or a monolithic push passes `None`.
 pub fn commit_blob_membership(
     meta: &MetaStore,
     index: &str,
     repo: &str,
     digest: &str,
     reservation: Option<QuotaReservationRecord>,
+    session: Option<&str>,
     journal: bool,
 ) -> Result<(), ServeError> {
-    finalize(meta, reservation, |txn| {
+    finalize(meta, reservation, session, |txn| {
         txn.put(&store::blob_membership_key(index, repo, digest), &[])?;
         let entries = crate::outbox::record(journal, || crate::outbox::OciMutation::MountBlob {
             index: index.to_owned(),
@@ -241,18 +244,19 @@ pub fn publish_manifest(
         });
         Ok((grew, entries))
     };
-    finalize(meta, reservation, body)
+    finalize(meta, reservation, None, body)
 }
 
 fn finalize<T>(
     meta: &MetaStore,
     reservation: Option<QuotaReservationRecord>,
+    session: Option<&str>,
     body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), ServeError>,
 ) -> Result<T, ServeError> {
     let Some(record) = reservation else {
-        return meta.commit_driver_txn(body);
+        return meta.commit_driver_txn_closing_upload(session, body);
     };
-    match meta.commit_driver_txn_with_quota(record.id, body) {
+    match meta.commit_driver_txn_with_quota_closing_upload(record.id, session, body) {
         Ok(value) => Ok(value),
         Err(err) => {
             meta.release_quota_reservation(record.id)?;
@@ -351,7 +355,7 @@ mod tests {
         let record = meta.reserve_quota(request, QuotaLimits::default()).unwrap();
         let id = record.id;
 
-        let result = finalize(&meta, Some(record), |_txn| {
+        let result = finalize(&meta, Some(record), None, |_txn| {
             Err::<((), Vec<Vec<u8>>), _>(ServeError::Transport("driver write failed".to_owned()))
         });
 

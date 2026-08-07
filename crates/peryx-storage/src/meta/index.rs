@@ -207,6 +207,32 @@ impl MetaStore {
         self.commit_driver_txn_at(None, None, true, |_, _| Ok(()), body)
     }
 
+    /// Commit driver rows and close the finalizing upload `session` in the same transaction, so an
+    /// unmetered upload cannot land membership while leaving the client's recovery handle dangling. A
+    /// `None` session commits the rows alone.
+    ///
+    /// # Errors
+    /// Returns the body's error, or a store error mapped into it, if the transaction fails to open,
+    /// read, write, or commit.
+    pub fn commit_driver_txn_closing_upload<T, E: From<MetaError>>(
+        &self,
+        session: Option<&str>,
+        body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
+    ) -> Result<T, E> {
+        self.commit_driver_txn_at(
+            None,
+            None,
+            true,
+            move |txn, _| {
+                if let Some(session) = session {
+                    super::upload_session::close_upload_in_txn(txn, session)?;
+                }
+                Ok(())
+            },
+            body,
+        )
+    }
+
     /// Commit driver rows and publish the catalog generation that produced their policy inputs in
     /// the same transaction.
     ///

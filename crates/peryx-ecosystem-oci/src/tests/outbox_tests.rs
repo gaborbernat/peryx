@@ -92,7 +92,7 @@ fn test_none_mode_publish_records_no_outbox_entry() {
 fn test_blob_membership_records_a_mount_operation() {
     let (_dir, meta) = store();
 
-    quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, true).unwrap();
+    quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, None, true).unwrap();
 
     assert_eq!(
         only_op(&meta),
@@ -215,7 +215,7 @@ fn test_aborted_transaction_leaves_no_row_or_outbox_entry() {
     // Consume the reservation so the commit finds it unavailable and the transaction aborts.
     meta.release_quota_reservation(reservation.id).unwrap();
 
-    let outcome = quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", Some(reservation), true);
+    let outcome = quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", Some(reservation), None, true);
 
     assert!(outcome.is_err(), "an unavailable reservation aborts the commit");
     assert!(
@@ -231,7 +231,7 @@ fn test_journal_survives_a_restart() {
     let path = dir.path().join("peryx.redb");
     {
         let meta = MetaStore::open(&path).unwrap();
-        quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, true).unwrap();
+        quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, None, true).unwrap();
     }
 
     let meta = MetaStore::open(&path).unwrap();

@@ -65,7 +65,15 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     release_reservation(state, reservation)?;
                     return Ok(authority_moved());
                 }
-                crate::quota::commit_blob_membership(&state.meta, &index.name, &repo, mount, reservation, journal)?;
+                crate::quota::commit_blob_membership(
+                    &state.meta,
+                    &index.name,
+                    &repo,
+                    mount,
+                    reservation,
+                    None,
+                    journal,
+                )?;
                 return Ok(blob_created(name, mount));
             }
         }

@@ -248,9 +248,17 @@ async fn test_blob_head_and_unsatisfiable_range() {
     assert_eq!(headers[header::CONTENT_LENGTH], blob.len().to_string());
     assert!(got.is_empty());
 
+    // A HEAD transfers no body, so a Range never applies (RFC 9110 s14.2): an existing blob answers
+    // 200 with its full size, never 206 or 416.
     let (status, headers, _) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=5-6")]).await;
-    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-    assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 5-6/{}", blob.len()));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_LENGTH], blob.len().to_string());
+    assert!(!headers.contains_key(header::CONTENT_RANGE));
+
+    let (status, headers, _) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=50-60")]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_LENGTH], blob.len().to_string());
+    assert!(!headers.contains_key(header::CONTENT_RANGE));
 
     let (status, headers, _) = send_with(&app, Method::GET, &uri, &[("range", "bytes=50-60")]).await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
@@ -298,20 +306,32 @@ async fn test_blob_is_served_under_its_digest_as_an_entity_tag(#[case] method: M
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::ETAG], layer_etag());
 }
-#[rstest]
-#[case::get(Method::GET, &LAYER[5..=6])]
-#[case::head(Method::HEAD, b"")]
 #[tokio::test]
-async fn test_blob_serves_a_range_an_if_range_still_names(#[case] method: Method, #[case] expected: &[u8]) {
+async fn test_blob_get_serves_a_range_an_if_range_still_names() {
     let dir = tempfile::tempdir().unwrap();
     let (app, uri) = stored_layer(&dir);
 
     let conditional = [("if-range", &*layer_etag()), ("range", "bytes=5-6")];
-    let (status, headers, got) = send_with(&app, method, &uri, &conditional).await;
+    let (status, headers, got) = send_with(&app, Method::GET, &uri, &conditional).await;
 
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 5-6/{}", LAYER.len()));
-    assert_eq!(got, expected);
+    assert_eq!(got, &LAYER[5..=6]);
+}
+// A matching If-Range keeps the Range for a GET, but a HEAD transfers no body, so it never applies:
+// the response is 200 with the full size and no Content-Range (RFC 9110 s14.2, OCI distribution spec).
+#[tokio::test]
+async fn test_blob_head_ignores_a_range_a_matching_if_range_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, uri) = stored_layer(&dir);
+
+    let conditional = [("if-range", &*layer_etag()), ("range", "bytes=5-6")];
+    let (status, headers, got) = send_with(&app, Method::HEAD, &uri, &conditional).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_LENGTH], LAYER.len().to_string());
+    assert!(!headers.contains_key(header::CONTENT_RANGE));
+    assert!(got.is_empty());
 }
 #[rstest]
 #[case::stale_tag(STALE)]

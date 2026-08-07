@@ -4,6 +4,8 @@ use leptos::prelude::*;
 use peryx_core::{UiManifest, UiMember, UiMemberChunk, UiProjectView};
 use peryx_driver::AppState;
 
+use super::{authorize_project, resolve};
+
 /// The project names of the index at `route`, produced by the index's ecosystem driver.
 ///
 /// # Errors
@@ -87,31 +89,4 @@ pub async fn layer_chunk(
             offset,
         )
         .await
-}
-
-/// The position of the index at `route` and the driver serving its ecosystem.
-fn resolve<'a>(
-    app: &'a AppState,
-    route: &str,
-) -> Result<(usize, &'a Arc<dyn peryx_driver::serving::EcosystemDriver>), String> {
-    let position = app
-        .indexes
-        .iter()
-        .position(|index| index.route == route)
-        .ok_or_else(|| format!("index {route:?} is not configured"))?;
-    let driver = app
-        .driver_for(app.index_at(position).ecosystem)
-        .ok_or_else(|| format!("index {route:?} has no ecosystem driver"))?;
-    Ok((position, driver))
-}
-
-async fn authorize_project(app: &AppState, position: usize, project: &str) -> Result<(), String> {
-    if app.index_at(position).acl.anonymous_read {
-        return Ok(());
-    }
-    super::read_access(app)
-        .await?
-        .for_index(app.index_at(position))
-        .authorize_project(project)
-        .map_err(super::access_error)
 }

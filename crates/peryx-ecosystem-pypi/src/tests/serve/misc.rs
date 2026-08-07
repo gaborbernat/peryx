@@ -146,28 +146,98 @@ async fn test_artifact_path_rejects_an_invalid_digest() {
 
     let h = harness().await;
     let err = crate::serving::PypiServing
-        .artifact_path(h.state.serving.clone(), 0, "not-hex".to_owned(), "flask.whl".to_owned())
+        .artifact_path_in_project(
+            h.state.serving.clone(),
+            0,
+            "flask".to_owned(),
+            "not-hex".to_owned(),
+            "flask.whl".to_owned(),
+        )
         .await
         .unwrap_err();
     assert!(err.contains("invalid sha256 digest"), "{err}");
 }
 
 #[tokio::test]
-async fn test_artifact_path_reports_an_unfetchable_file() {
+async fn test_artifact_path_rejects_a_digest_that_is_not_a_project_member() {
+    use peryx_driver::serving::EcosystemDriver as _;
+
+    let h = harness().await;
+    let listed = Digest::of(b"listed wheel");
+    let page = format!(
+        "{{\"meta\":{{\"api-version\":\"1.1\"}},\"name\":\"flask\",\"versions\":[\"1.0\"],\
+         \"files\":[{{\"filename\":\"flask-1.0-py3-none-any.whl\",\"url\":\"{}/files/flask.whl\",\
+         \"hashes\":{{\"sha256\":\"{}\"}}}}]}}",
+        h.server.uri(),
+        listed.as_str(),
+    );
+    mount_json_page(&h.server, &page).await;
+    get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+
+    let foreign = Digest::of(b"another project's wheel");
+    let err = crate::serving::PypiServing
+        .artifact_path_in_project(
+            h.state.serving.clone(),
+            0,
+            "flask".to_owned(),
+            foreign.as_str().to_owned(),
+            "flask-1.0-py3-none-any.whl".to_owned(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.contains("is not a member of project"), "{err}");
+}
+
+#[tokio::test]
+async fn test_artifact_path_reports_an_unfetchable_member_file() {
     use peryx_driver::serving::EcosystemDriver as _;
 
     let h = harness().await;
     let digest = Digest::of(b"never stored");
+    let page = format!(
+        "{{\"meta\":{{\"api-version\":\"1.1\"}},\"name\":\"flask\",\"versions\":[\"1.0\"],\
+         \"files\":[{{\"filename\":\"flask-1.0-py3-none-any.whl\",\"url\":\"{}/files/flask.whl\",\
+         \"hashes\":{{\"sha256\":\"{}\"}}}}]}}",
+        h.server.uri(),
+        digest.as_str(),
+    );
+    mount_json_page(&h.server, &page).await;
+    get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+
     let err = crate::serving::PypiServing
-        .artifact_path(
+        .artifact_path_in_project(
             h.state.serving.clone(),
             0,
+            "flask".to_owned(),
             digest.as_str().to_owned(),
-            "flask.whl".to_owned(),
+            "flask-1.0-py3-none-any.whl".to_owned(),
         )
         .await
         .unwrap_err();
     assert!(err.contains("artifact on index"), "{err}");
+}
+
+#[tokio::test]
+async fn test_artifact_path_reports_a_project_detail_error() {
+    use peryx_driver::serving::EcosystemDriver as _;
+
+    let h = harness().await;
+    h.state
+        .meta
+        .put_index("pypi/flask", &fresh_record(br#"{"files":[{"bad": }]}"#))
+        .unwrap();
+    let digest = Digest::of(b"wheel");
+    let err = crate::serving::PypiServing
+        .artifact_path_in_project(
+            h.state.serving.clone(),
+            0,
+            "flask".to_owned(),
+            digest.as_str().to_owned(),
+            "flask-1.0-py3-none-any.whl".to_owned(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.contains("for project"), "{err}");
 }
 
 #[rstest]

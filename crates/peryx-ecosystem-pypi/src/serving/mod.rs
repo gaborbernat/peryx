@@ -456,14 +456,15 @@ impl EcosystemDriver for PypiServing {
             .map(|(project, meta)| peryx_core::UiProjectView::Files { project, meta }))
     }
 
-    async fn artifact_path(
+    async fn artifact_path_in_project(
         &self,
         state: Arc<ServingState>,
         position: usize,
+        project: String,
         digest_hex: String,
         filename: String,
     ) -> Result<peryx_storage::blob::BlobLease, String> {
-        web::artifact_path(state, position, digest_hex, filename).await
+        web::artifact_path_in_project(state, position, project, digest_hex, filename).await
     }
 
     async fn refresh_stale(&self, state: Arc<ServingState>) -> Result<RefreshSweep, String> {

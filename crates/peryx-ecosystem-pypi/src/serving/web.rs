@@ -266,19 +266,43 @@ async fn metadata_for(state: &Arc<ServingState>, route: &str, file: &peryx_core:
 }
 
 /// The local blob-store path of the artifact `digest_hex`/`filename` on the index at `position`,
-/// fetching it through the proxy on a miss.
-pub(super) async fn artifact_path(
+/// fetching it through the proxy on a miss. The file must be a member of `project`: the archive
+/// browser reaches this by digest, so the membership check keeps one project's digest from resolving
+/// another's blob past the caller's already-authorized read of `project`.
+pub(super) async fn artifact_path_in_project(
     state: Arc<ServingState>,
     position: usize,
+    project: String,
     digest_hex: String,
     filename: String,
 ) -> Result<BlobLease, String> {
-    let route = state.index_at(position).route.clone();
+    let index = state.index_at(position);
+    let route = index.route.clone();
+    let normalized = normalize_name(&project);
     let Some(digest) = Digest::from_hex(&digest_hex) else {
         return Err(format!(
             "artifact on index {route:?} for file {filename:?}: invalid sha256 digest {digest_hex:?}"
         ));
     };
+    let belongs = cache::resolve_detail(&state, index, &normalized, &route)
+        .await
+        .map_err(|err| {
+            format!(
+                "artifact on index {route:?} for project {normalized:?} file {filename:?}: {}",
+                err.user_message()
+            )
+        })?
+        .is_some_and(|detail| {
+            detail
+                .files
+                .iter()
+                .any(|file| file.filename == filename && file.sha256() == Some(digest.as_str()))
+        });
+    if !belongs {
+        return Err(format!(
+            "artifact on index {route:?}: file {filename:?} with digest {digest_hex} is not a member of project {normalized:?}"
+        ));
+    }
     cache::file_path(state, digest, route.clone(), filename.clone())
         .await
         .map_err(|err| {

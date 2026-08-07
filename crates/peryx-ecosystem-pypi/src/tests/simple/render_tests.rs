@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use super::{sample_detail, sample_list};
-use crate::{CoreMetadata, File, Meta, ProjectDetail, Provenance, Yanked, render_detail_html, render_index_html};
+use crate::{
+    CoreMetadata, File, Meta, ProjectDetail, ProjectList, ProjectListEntry, Provenance, Yanked, render_detail_html,
+    render_index_html,
+};
 
 #[test]
 fn test_detail_html_snapshot() {
@@ -113,4 +116,56 @@ fn test_render_detail_html_escapes_core_metadata_hash() {
     assert!(html.contains("data-core-metadata=\"sha256=ab&quot; onload=alert(1) x=&quot;\""));
     assert!(html.contains("data-dist-info-metadata=\"sha256=ab&quot; onload=alert(1) x=&quot;\""));
     assert!(!html.contains("onload=alert(1) x=\"\""));
+}
+
+#[test]
+fn test_render_index_html_percent_encodes_route_injection_in_href() {
+    let list = index_of(&["x\" onmouseover=\"alert(1)"]);
+
+    let html = render_index_html(&list);
+
+    assert!(html.contains("<a href=\"x%22%20onmouseover%3D%22alert%281%29/\">"));
+}
+
+#[test]
+fn test_render_index_html_normalized_route_survives_encoding_unchanged() {
+    let list = index_of(&["Flask"]);
+
+    let html = render_index_html(&list);
+
+    assert!(html.contains("<a href=\"flask/\">Flask</a>"));
+}
+
+#[test]
+fn test_render_index_html_injects_no_attributes_for_hostile_names() {
+    let names = ["x\" onmouseover=\"alert(1)", "a&b", "<script>", "café-π"];
+    let list = index_of(&names);
+
+    let html = render_index_html(&list);
+
+    let dom = tl::parse(&html, tl::ParserOptions::default()).expect("valid HTML");
+    let anchors: Vec<_> = dom
+        .nodes()
+        .iter()
+        .filter_map(|node| node.as_tag())
+        .filter(|tag| tag.name().as_bytes().eq_ignore_ascii_case(b"a"))
+        .collect();
+    assert_eq!(anchors.len(), names.len());
+    for anchor in anchors {
+        let attrs: Vec<_> = anchor.attributes().iter().collect();
+        assert_eq!(attrs.len(), 1, "only href, got {attrs:?}");
+        assert!(attrs[0].0.eq_ignore_ascii_case("href"));
+    }
+}
+
+fn index_of(names: &[&str]) -> ProjectList {
+    ProjectList {
+        meta: Meta::default(),
+        projects: names
+            .iter()
+            .map(|name| ProjectListEntry {
+                name: (*name).to_owned(),
+            })
+            .collect(),
+    }
 }

@@ -2,7 +2,41 @@
 
 use std::fmt::Write as _;
 
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+
 use super::{CoreMetadata, Meta, ProjectDetail, ProjectList, Provenance, Yanked};
+
+/// Every ASCII byte a project route must percent-encode: controls, space, the RFC 3986 reserved
+/// gen/sub-delims, and the quote/backtick/backslash that HTML or a browser could act on. Only the
+/// unreserved `A-Za-z0-9-._~` pass through, so a PEP 503 route of `[a-z0-9-]` is emitted verbatim.
+const ROUTE_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 /// Render the PEP 503 HTML for the root project list. The `href` is the normalized name; the
 /// anchor text is the project's display name.
@@ -11,12 +45,24 @@ pub fn render_index_html(list: &ProjectList) -> String {
     let mut out = String::new();
     push_head(&mut out, "Simple index", &list.meta);
     for entry in &list.projects {
-        let _ = write!(out, "    <a href=\"{}/\">", crate::normalize_name_cow(&entry.name));
+        out.push_str("    <a href=\"");
+        push_route(&mut out, &crate::normalize_name_cow(&entry.name));
+        out.push_str("/\">");
         push_escaped(&mut out, &entry.name, Escape::Text);
         out.push_str("</a>\n");
     }
     push_tail(&mut out);
     out
+}
+
+/// Write a normalized project name into an `href` as a percent-encoded path segment, then escape the
+/// result as an attribute value. Normalization only lowercases and collapses `-_.`; every other
+/// character of an untrusted upstream name survives it, so the route is made attribute-safe here
+/// rather than trusted to contain no HTML metacharacters.
+fn push_route(out: &mut String, route: &str) {
+    for chunk in utf8_percent_encode(route, ROUTE_SEGMENT) {
+        push_escaped(out, chunk, Escape::Attr);
+    }
 }
 
 /// Render the PEP 503 HTML for a project detail page.

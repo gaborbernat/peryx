@@ -11,6 +11,6 @@ expression: render_index_html(&sample_list())
   <body>
     <a href="flask/">Flask</a>
     <a href="zope-interface/">zope.interface</a>
-    <a href="a&<>/">a&amp;&lt;&gt;</a>
+    <a href="a%26%3C%3E/">a&amp;&lt;&gt;</a>
   </body>
 </html>

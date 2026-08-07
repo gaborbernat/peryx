@@ -5076,6 +5076,7 @@ dependencies = [
  "moka",
  "pep440_rs",
  "pep508_rs",
+ "percent-encoding",
  "peryx-core",
  "peryx-driver",
  "peryx-events",

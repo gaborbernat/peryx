@@ -493,15 +493,18 @@ mod tests {
     }
 
     async fn wait_for_status(host: &Arc<TestHost>, id: &str, status: WebhookDeliveryStatus) -> WebhookDeliveryRecord {
-        for _ in 0..200 {
-            if let Some(record) = host.meta().get_webhook_delivery(id).unwrap()
-                && record.status == status
-            {
-                return record;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(record) = host.meta().get_webhook_delivery(id).unwrap()
+                    && record.status == status
+                {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("delivery {id} never reached {status:?}");
+        })
+        .await
+        .expect("webhook delivery never reached the expected status")
     }
 
     /// A server that accepts connections and never answers, counting how many it holds open at once.
@@ -529,13 +532,13 @@ mod tests {
         }
 
         async fn wait_for_accepted(&self, count: usize) {
-            for _ in 0..200 {
-                if self.accepted.load(Ordering::SeqCst) >= count {
-                    return;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.accepted.load(Ordering::SeqCst) < count {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            panic!("hanging server never accepted {count} connections");
+            })
+            .await
+            .expect("hanging server never accepted enough connections");
         }
     }
 

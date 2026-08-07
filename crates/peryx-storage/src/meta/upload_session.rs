@@ -133,3 +133,14 @@ impl MetaStore {
         Ok(expired)
     }
 }
+
+/// Close `session` inside an open write transaction, so a finalize can drop the session in the same
+/// commit as the membership and quota rows it stands in for. Removing an already-closed session is a
+/// no-op, which keeps a retried finalize idempotent.
+///
+/// # Errors
+/// Returns a store error when the table cannot be opened or the delete cannot be staged.
+pub(super) fn close_upload_in_txn(txn: &redb::WriteTransaction, session: &str) -> Result<(), MetaError> {
+    txn.open_table(UPLOAD_SESSION)?.remove(session)?;
+    Ok(())
+}

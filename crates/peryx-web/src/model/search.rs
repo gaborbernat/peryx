@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use super::{string_at, usize_from};
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct UiSearchPage {
     pub query: String,
@@ -11,6 +9,35 @@ pub struct UiSearchPage {
     pub page_size: usize,
     pub total: usize,
     pub results: Vec<UiSearchResult>,
+}
+
+/// The `/+search` success body, whose required fields reject an absent or wrong-typed value so a
+/// schema mismatch surfaces as an error rather than an empty index. Mirrors the server's
+/// `SearchResponse`; only fields the API marks optional carry a serde default.
+#[derive(Deserialize)]
+struct WireSearchPage {
+    query: String,
+    #[serde(rename = "type")]
+    source_type: String,
+    availability: String,
+    page: usize,
+    page_size: usize,
+    total: usize,
+    results: Vec<WireSearchResult>,
+}
+
+#[derive(Deserialize)]
+struct WireSearchResult {
+    display_name: String,
+    normalized_name: String,
+    route: String,
+    index: String,
+    ecosystem: String,
+    type_label: String,
+    #[serde(rename = "type")]
+    source_type: String,
+    available: bool,
+    summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,32 +56,36 @@ pub struct UiSearchResult {
 }
 
 impl UiSearchPage {
-    #[must_use]
-    pub fn from_search(value: &serde_json::Value) -> Self {
-        Self {
-            query: string_at(value, "query"),
-            source_type: string_at(value, "type"),
-            availability: string_at(value, "availability"),
-            page: usize_from(value["page"].as_u64(), 1),
-            page_size: usize_from(value["page_size"].as_u64(), 25),
-            total: usize_from(value["total"].as_u64(), 0),
-            results: value["results"]
-                .as_array()
+    /// Build a search page from a successful `/+search` response body.
+    ///
+    /// # Errors
+    /// Returns a user-visible message when the body does not match the search wire contract, so a
+    /// server/client schema mismatch is reported instead of rendering as an empty index.
+    pub fn from_search(value: &serde_json::Value) -> Result<Self, String> {
+        let wire = WireSearchPage::deserialize(value).map_err(|err| format!("malformed search response: {err}"))?;
+        Ok(Self {
+            query: wire.query,
+            source_type: wire.source_type,
+            availability: wire.availability,
+            page: wire.page,
+            page_size: wire.page_size,
+            total: wire.total,
+            results: wire
+                .results
                 .into_iter()
-                .flatten()
                 .map(|result| UiSearchResult {
-                    display_name: string_at(result, "display_name"),
-                    normalized_name: string_at(result, "normalized_name"),
-                    route: string_at(result, "route"),
-                    index: string_at(result, "index"),
-                    ecosystem: string_at(result, "ecosystem"),
-                    type_label: string_at(result, "type_label"),
-                    source_type: string_at(result, "type"),
-                    available: result["available"].as_bool().unwrap_or(false),
-                    summary: result["summary"].as_str().map(str::to_owned),
+                    display_name: result.display_name,
+                    normalized_name: result.normalized_name,
+                    route: result.route,
+                    index: result.index,
+                    ecosystem: result.ecosystem,
+                    type_label: result.type_label,
+                    source_type: result.source_type,
+                    available: result.available,
+                    summary: result.summary,
                 })
                 .collect(),
-        }
+        })
     }
 }
 

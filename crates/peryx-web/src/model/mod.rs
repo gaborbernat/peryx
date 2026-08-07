@@ -50,7 +50,3 @@ fn string_at(value: &serde_json::Value, key: &str) -> String {
 fn u64_at(value: &serde_json::Value, key: &str) -> u64 {
     value[key].as_u64().unwrap_or_default()
 }
-
-fn usize_from(value: Option<u64>, default: usize) -> usize {
-    value.and_then(|value| usize::try_from(value).ok()).unwrap_or(default)
-}

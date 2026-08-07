@@ -41,5 +41,5 @@ pub async fn search(
     }
     .map_err(|err| format!("package search: {err}"))?;
     let value = serde_json::to_value(response).map_err(|err| format!("search result: {err}"))?;
-    Ok(UiSearchPage::from_search(&value))
+    UiSearchPage::from_search(&value)
 }

@@ -32,7 +32,7 @@ pub async fn load_search(
                 page_size,
             ))
             .await
-            .map(|value| UiSearchPage::from_search(&value))
+            .and_then(|value| UiSearchPage::from_search(&value))
         })
         .await
     }

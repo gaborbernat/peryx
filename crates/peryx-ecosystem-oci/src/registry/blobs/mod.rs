@@ -592,15 +592,10 @@ pub(super) async fn commit_staged_upload(
     repo: &str,
     name: &str,
     digest: &str,
+    storage: Digest,
     bytes: u64,
     journal: bool,
 ) -> Result<Response, ServeError> {
-    let Some(storage) = store::blob_digest(digest) else {
-        return Ok(error_response(
-            ErrorCode::DigestInvalid,
-            "only sha256 blob digests are supported",
-        ));
-    };
     let fence = upload_epoch(state, repo).await;
     let reservation = if store::blob_is_member(&state.meta, &index.name, repo, digest)? {
         None

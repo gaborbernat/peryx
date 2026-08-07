@@ -504,6 +504,7 @@ async fn test_a_repeated_idempotency_key_returns_one_committed_result() {
 #[case::not_leader(ControlError::NotLeader { leader: Some("east.internal:4460".to_owned()) }, StatusCode::SERVICE_UNAVAILABLE)]
 #[case::unavailable(ControlError::Unavailable("log gone".to_owned()), StatusCode::SERVICE_UNAVAILABLE)]
 #[case::invalid(ControlError::Invalid("same home".to_owned()), StatusCode::CONFLICT)]
+#[case::key_reuse(ControlError::KeyReuse, StatusCode::CONFLICT)]
 #[case::overloaded(ControlError::Overloaded, StatusCode::TOO_MANY_REQUESTS)]
 #[tokio::test]
 async fn test_a_command_failure_maps_to_its_status(#[case] error: ControlError, #[case] expected: StatusCode) {

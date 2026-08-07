@@ -6,18 +6,20 @@
 //! node, and this plane wraps it so a control request is idempotent, bounded, and audited without the
 //! HTTP surface reaching the consensus internals.
 //!
-//! [`ControlPlane::execute`] is the whole path. A request that carries an idempotency key it has already
-//! committed returns the same [`CommandReceipt`] without resubmitting, so a client that retries across a
-//! leader loss reads one committed result rather than minting a second command. A permit bounds the
-//! commands in flight, a bounded window retains recent receipts and latencies, and every attempt writes
-//! one audit line naming the actor, command, target, result, and committed identity — never the request
-//! body, so an address or token never reaches the log.
+//! [`ControlPlane::execute`] is the whole path. A keyed request atomically claims its idempotency key
+//! under one lock before it executes, binding the key to a fingerprint of the command body: a concurrent
+//! retry on the same key waits on the in-flight command and replays its committed [`CommandReceipt`]
+//! rather than reaching a second submission, and a key reused for a different command is rejected instead
+//! of replaying the first command's receipt. A permit bounds the commands in flight, a bounded window
+//! retains recent receipts and latencies, and every attempt writes one audit line naming the actor,
+//! command, target, result, and committed identity — never the request body, so an address or token
+//! never reaches the log.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 
 use crate::state::Clock;
 
@@ -36,7 +38,7 @@ const RETAINED: usize = 256;
 /// The four membership variants rewrite the consensus roster through `OpenRaft`; the two authority
 /// variants move or fence an artifact home through a committed ownership command. Every variant commits
 /// through the Raft log, so no handler writes the ownership or membership store directly.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlCommand {
     /// Add a datacenter as a non-voting learner that replicates the log without counting toward quorum.
@@ -108,6 +110,17 @@ impl ControlCommand {
             Self::TransferAuthority { authority, .. } | Self::AdvanceEpoch { authority } => authority,
         }
     }
+
+    /// A canonical fingerprint of the command body, so an idempotency key is bound to the request that
+    /// claimed it. Two commands share a fingerprint exactly when they are equal, so a genuine retry of the
+    /// same request matches its claimed key while a key reused for a different command does not.
+    #[must_use]
+    fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 /// The committed identity of a control command.
@@ -169,6 +182,10 @@ pub enum ControlError {
     /// The plane is already running its bounded set of concurrent commands.
     #[error("too many concurrent availability commands in flight")]
     Overloaded,
+    /// The idempotency key was already claimed for a different command. A retry must carry the same command
+    /// the key first ran, so a reused key never replays another request's receipt.
+    #[error("idempotency key already used for a different command")]
+    KeyReuse,
 }
 
 impl ControlError {
@@ -179,6 +196,7 @@ impl ControlError {
             Self::Unavailable(_) => "unavailable",
             Self::Invalid(_) => "invalid",
             Self::Overloaded => "overloaded",
+            Self::KeyReuse => "key_reuse",
         }
     }
 }
@@ -301,11 +319,42 @@ pub struct CommandMetrics {
     pub p99_ms: i64,
 }
 
-/// The bounded recent history the plane keeps behind one lock: the idempotency receipts and the latency
+/// One idempotency slot in the bounded window: the key, a fingerprint of the command that claimed it, and
+/// whether that command is still in flight or has committed.
+struct KeyEntry {
+    key: String,
+    fingerprint: u64,
+    state: KeyState,
+}
+
+/// The state of a claimed idempotency key.
+enum KeyState {
+    /// The command is in flight; a concurrent retry clones this receiver and wakes when the owner drops
+    /// the paired sender on settle. A `watch` receiver is version-tracked, so a retry that clones it
+    /// under the lock never misses the drop that the owner then performs.
+    Pending(watch::Receiver<()>),
+    /// The command committed; a retry on the key replays this receipt.
+    Done(CommandReceipt),
+}
+
+/// The atomic outcome of claiming an idempotency key against the current window.
+enum Claim {
+    /// The caller owns the in-flight command and settles the slot when it resolves. Dropping the sender
+    /// wakes every waiter, which then reclaims and reads the settled outcome.
+    Execute(watch::Sender<()>),
+    /// The key already committed this exact command; replay its receipt.
+    Replay(CommandReceipt),
+    /// Another request holds the key in flight; wait on its receiver, then reclaim.
+    Wait(watch::Receiver<()>),
+    /// The key is held under a different command fingerprint.
+    Conflict,
+}
+
+/// The bounded recent history the plane keeps behind one lock: the idempotency slots and the latency
 /// samples, each a recent-history window rather than a growing ledger.
 #[derive(Default)]
 struct History {
-    receipts: VecDeque<(String, CommandReceipt)>,
+    receipts: VecDeque<KeyEntry>,
     latencies: VecDeque<i64>,
 }
 
@@ -339,42 +388,65 @@ impl ControlPlane {
 
     /// Run `command` for `actor`, deduplicating on `key` and auditing the attempt.
     ///
-    /// A `key` already committed returns its receipt without resubmitting, so a client that retries after
-    /// a leader loss reads one committed result. Otherwise the command runs under a concurrency permit,
-    /// its latency is recorded, its receipt is retained under `key`, and one audit line names the actor,
-    /// command, target, result, and committed identity.
+    /// A keyed request atomically claims its key before it executes, binding it to a fingerprint of the
+    /// command body. A concurrent retry on the same key waits on the in-flight command and replays its
+    /// committed receipt rather than reaching a second submission, so a client that retries after a leader
+    /// loss reads one committed result. A key reused for a different command is rejected. Otherwise the
+    /// command runs under a concurrency permit, its latency is recorded, its receipt is retained under the
+    /// key, and one audit line names the actor, command, target, result, and committed identity.
     ///
     /// # Errors
-    /// Returns [`ControlError::Overloaded`] when the concurrency bound is saturated, or the
-    /// [`ControlError`] the submission produced.
+    /// Returns [`ControlError::KeyReuse`] when `key` was already claimed for a different command,
+    /// [`ControlError::Overloaded`] when the concurrency bound is saturated, or the [`ControlError`] the
+    /// submission produced.
     pub async fn execute(
         &self,
         actor: &str,
         key: Option<&str>,
         command: ControlCommand,
     ) -> Result<CommandReceipt, ControlError> {
-        if let Some(key) = key
-            && let Some(receipt) = self.replay(key)
-        {
-            AuditRecord::replayed(actor, &command, &receipt).emit();
-            return Ok(receipt);
+        let Some(key) = key else {
+            return self.run(actor, &command).await;
+        };
+        let fingerprint = command.fingerprint();
+        loop {
+            match self.claim(key, fingerprint) {
+                Claim::Replay(receipt) => {
+                    AuditRecord::replayed(actor, &command, &receipt).emit();
+                    return Ok(receipt);
+                }
+                Claim::Conflict => {
+                    let error = ControlError::KeyReuse;
+                    AuditRecord::failed(actor, &command, &error).emit();
+                    return Err(error);
+                }
+                Claim::Execute(sender) => {
+                    let result = self.run(actor, &command).await;
+                    self.settle(key, &result, sender);
+                    return result;
+                }
+                Claim::Wait(mut receiver) => {
+                    let _ = receiver.changed().await;
+                }
+            }
         }
+    }
+
+    /// Submit `command` for `actor` under a concurrency permit, recording its latency and auditing the
+    /// attempt. This is the non-idempotent core: a keyless command runs it directly, and a keyed command
+    /// runs it once as the owner of its claimed key.
+    async fn run(&self, actor: &str, command: &ControlCommand) -> Result<CommandReceipt, ControlError> {
         let Ok(_permit) = self.permits.try_acquire() else {
             let error = ControlError::Overloaded;
-            AuditRecord::failed(actor, &command, &error).emit();
+            AuditRecord::failed(actor, command, &error).emit();
             return Err(error);
         };
         let started = (self.clock)();
         let result = self.control.submit(command.clone()).await;
         self.record(((self.clock)() - started).max(0));
         match &result {
-            Ok(receipt) => {
-                if let Some(key) = key {
-                    self.remember(key, receipt.clone());
-                }
-                AuditRecord::committed(actor, &command, receipt).emit();
-            }
-            Err(error) => AuditRecord::failed(actor, &command, error).emit(),
+            Ok(receipt) => AuditRecord::committed(actor, command, receipt).emit(),
+            Err(error) => AuditRecord::failed(actor, command, error).emit(),
         }
         result
     }
@@ -396,16 +468,48 @@ impl ControlPlane {
         self.history.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn replay(&self, key: &str) -> Option<CommandReceipt> {
-        self.lock()
-            .receipts
-            .iter()
-            .find(|(retained, _)| retained == key)
-            .map(|(_, receipt)| receipt.clone())
+    /// Atomically claim `key` for a command with `fingerprint` under one lock: replay a committed receipt,
+    /// wait on an in-flight command, reject a fingerprint mismatch, or insert a fresh pending slot and own
+    /// the execution. Claiming and inserting in the same critical section is what stops two concurrent
+    /// same-key requests from both reaching a submission.
+    fn claim(&self, key: &str, fingerprint: u64) -> Claim {
+        let mut history = self.lock();
+        if let Some(entry) = history.receipts.iter().find(|entry| entry.key == key) {
+            if entry.fingerprint != fingerprint {
+                return Claim::Conflict;
+            }
+            return match &entry.state {
+                KeyState::Done(receipt) => Claim::Replay(receipt.clone()),
+                KeyState::Pending(receiver) => Claim::Wait(receiver.clone()),
+            };
+        }
+        let (sender, receiver) = watch::channel(());
+        history.receipts.push_back(KeyEntry {
+            key: key.to_owned(),
+            fingerprint,
+            state: KeyState::Pending(receiver),
+        });
+        evict_committed(&mut history.receipts, self.retained);
+        drop(history);
+        Claim::Execute(sender)
     }
 
-    fn remember(&self, key: &str, receipt: CommandReceipt) {
-        push_bounded(&mut self.lock().receipts, (key.to_owned(), receipt), self.retained);
+    /// Resolve the owned key slot once its command settles, then wake every waiter so it reclaims and reads
+    /// the outcome: on commit, replace the pending slot with the receipt so a retry replays it; on failure,
+    /// drop the slot so the key reopens to a later attempt. Releasing the lock before dropping `sender`
+    /// lets a woken waiter take the lock and observe the settled slot rather than the pending one.
+    fn settle(&self, key: &str, result: &Result<CommandReceipt, ControlError>, sender: watch::Sender<()>) {
+        let mut history = self.lock();
+        match result {
+            Ok(receipt) => {
+                if let Some(entry) = history.receipts.iter_mut().find(|entry| entry.key == key) {
+                    entry.state = KeyState::Done(receipt.clone());
+                }
+            }
+            Err(_) => history.receipts.retain(|entry| entry.key != key),
+        }
+        drop(history);
+        drop(sender);
     }
 
     fn record(&self, latency: i64) {
@@ -420,6 +524,20 @@ fn push_bounded<T>(queue: &mut VecDeque<T>, item: T, cap: usize) {
     queue.push_back(item);
     while queue.len() > cap {
         queue.pop_front();
+    }
+}
+
+/// Evict the oldest committed slots until the window holds at most `cap`, leaving in-flight slots in place
+/// so a pending claim is never dropped from under the request that owns it or the waiters parked on it.
+fn evict_committed(receipts: &mut VecDeque<KeyEntry>, cap: usize) {
+    while receipts.len() > cap {
+        let Some(oldest) = receipts
+            .iter()
+            .position(|entry| matches!(entry.state, KeyState::Done(_)))
+        else {
+            break;
+        };
+        receipts.remove(oldest);
     }
 }
 
@@ -439,15 +557,17 @@ fn percentile(samples: &VecDeque<i64>, pct: usize) -> i64 {
 mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tokio::sync::Notify;
 
     use super::{
-        AuditRecord, CommandOutcome, CommandReceipt, ControlCommand, ControlError, ControlPlane, MembershipControl,
-        percentile, plan_voter_roster,
+        AuditRecord, CommandOutcome, CommandReceipt, ControlCommand, ControlError, ControlPlane, KeyEntry, KeyState,
+        MembershipControl, evict_committed, percentile, plan_voter_roster,
     };
     use crate::state::Clock;
     use std::collections::{BTreeSet, VecDeque};
+    use tokio::sync::watch;
 
     fn receipt(index: u64) -> CommandReceipt {
         CommandReceipt {
@@ -487,16 +607,18 @@ mod tests {
         }
     }
 
-    /// A control double that blocks inside `submit` until released, so a test can hold a permit and drive
-    /// the concurrency bound deterministically.
+    /// A control double that blocks inside `submit` until released, counting its submissions so a test can
+    /// hold a command in flight and prove how many requests reached it.
     struct GatedControl {
         entered: Arc<Notify>,
         release: Arc<Notify>,
+        submissions: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
     impl MembershipControl for GatedControl {
         async fn submit(&self, _command: ControlCommand) -> Result<CommandReceipt, ControlError> {
+            self.submissions.fetch_add(1, Ordering::SeqCst);
             self.entered.notify_one();
             self.release.notified().await;
             Ok(receipt(1))
@@ -606,12 +728,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_requests_on_one_key_reach_the_command_once() {
+        // The owner holds the command in flight while a second request retries the same key. The retry must
+        // wait on the claimed key and replay the committed receipt rather than reach a second submission.
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let control = Arc::new(GatedControl {
+            entered: entered.clone(),
+            release: release.clone(),
+            submissions: submissions.clone(),
+        });
+        let plane = Arc::new(ControlPlane::new(control, fixed_clock()));
+
+        let owner = tokio::spawn({
+            let plane = plane.clone();
+            async move { plane.execute("alice", Some("k1"), transfer()).await }
+        });
+        entered.notified().await;
+
+        let waiter = tokio::spawn({
+            let plane = plane.clone();
+            async move { plane.execute("bob", Some("k1"), transfer()).await }
+        });
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        assert_eq!(owner.await.unwrap().unwrap(), receipt(1));
+        assert_eq!(
+            waiter.await.unwrap().unwrap(),
+            receipt(1),
+            "the retry replayed the owner's receipt"
+        );
+        assert_eq!(
+            submissions.load(Ordering::SeqCst),
+            1,
+            "the retry never reached a second submission"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_key_reused_for_a_different_command_is_rejected() {
+        let control = ScriptedControl::new([Ok(receipt(7))]);
+        let plane = ControlPlane::new(control.clone(), fixed_clock());
+
+        plane.execute("alice", Some("k1"), transfer()).await.unwrap();
+        let other = ControlCommand::AdvanceEpoch {
+            authority: "proj".to_owned(),
+        };
+        let reused = plane.execute("alice", Some("k1"), other).await;
+
+        assert_eq!(reused, Err(ControlError::KeyReuse));
+        assert_eq!(
+            control.submissions.lock().unwrap().len(),
+            1,
+            "the reused key never reached a second command"
+        );
+    }
+
+    #[tokio::test]
     async fn test_the_concurrency_bound_rejects_an_excess_command() {
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let control = Arc::new(GatedControl {
             entered: entered.clone(),
             release: release.clone(),
+            submissions: Arc::new(AtomicUsize::new(0)),
         });
         let plane = Arc::new(ControlPlane::with_limits(control, fixed_clock(), 1, 8));
 
@@ -660,6 +842,25 @@ mod tests {
     #[test]
     fn test_percentile_of_an_empty_window_is_zero() {
         assert_eq!(percentile(&VecDeque::new(), 99), 0);
+    }
+
+    #[test]
+    fn test_eviction_keeps_in_flight_slots_over_cap() {
+        // Two commands are in flight with a one-slot cap: neither slot is committed, so eviction leaves
+        // both rather than drop a pending claim from under the request that owns it.
+        let pending = |key: &str| {
+            let (_sender, receiver) = watch::channel(());
+            KeyEntry {
+                key: key.to_owned(),
+                fingerprint: 0,
+                state: KeyState::Pending(receiver),
+            }
+        };
+        let mut receipts = VecDeque::from([pending("k0"), pending("k1")]);
+
+        evict_committed(&mut receipts, 1);
+
+        assert_eq!(receipts.len(), 2);
     }
 
     #[test]
@@ -808,6 +1009,10 @@ mod tests {
         assert_eq!(
             ControlError::Overloaded.to_string(),
             "too many concurrent availability commands in flight",
+        );
+        assert_eq!(
+            ControlError::KeyReuse.to_string(),
+            "idempotency key already used for a different command",
         );
     }
 

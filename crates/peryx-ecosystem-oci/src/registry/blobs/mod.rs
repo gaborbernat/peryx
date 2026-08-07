@@ -56,7 +56,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         // A blob is content-addressed, so its digest is the strong validator for its bytes.
         let etag = format!("\"{digest}\"");
         let asked = BlobRequest {
-            range: applicable_range(headers, &etag),
+            // A `HEAD` transfers no body, so a `Range` (and the `If-Range` that guards it) never
+            // applies to it (RFC 9110 s14.2); only a `GET` resolves one.
+            range: if head { None } else { applicable_range(headers, &etag) },
             etag: &etag,
             head,
         };
@@ -701,9 +703,6 @@ async fn serve_stored_blob(
     for (name, value) in common {
         builder = builder.header(name, value);
     }
-    if asked.head {
-        return Ok(builder.body(Body::empty()).expect("range head response builds"));
-    }
     Ok(builder
         .body(peryx_driver::body::blob_read(
             blobs.open(storage, Some(range)).await.map_err(blob_fault)?,
@@ -712,36 +711,19 @@ async fn serve_stored_blob(
 }
 
 /// A blob `HEAD` response: the size and digest headers a client needs to decide whether to pull, with
-/// no body.
+/// no body. A `HEAD` transfers no content, so a `Range` never applies (RFC 9110 s14.2) and an existing
+/// blob always answers `200` with its full representation size (OCI distribution spec).
 fn blob_head_response(digest: &str, size: Option<u64>, asked: &BlobRequest<'_>) -> Response {
-    // A `HEAD` answers a `Range` the way the matching `GET` would. Ignoring it here while honouring
-    // it for a cached blob made one request give two answers depending on what the store happened to
-    // hold, which is the one thing a client checking a layer must not see.
-    let (status, length, content_range) = match size {
-        None => (StatusCode::OK, None, None),
-        Some(size) => match parse_range(asked.range, size) {
-            RangeRequest::Whole => (StatusCode::OK, Some(size), None),
-            RangeRequest::Unsatisfiable => return unsatisfiable_range(size),
-            RangeRequest::Partial(range) => (
-                StatusCode::PARTIAL_CONTENT,
-                Some(range.end - range.start),
-                Some(format!("bytes {}-{}/{size}", range.start, range.end - 1)),
-            ),
-        },
-    };
     let mut builder = Response::builder()
-        .status(status)
+        .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, OCTET_STREAM)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, header_value(asked.etag))
         .header(DOCKER_CONTENT_DIGEST, header_value(digest));
-    if let Some(length) = length {
-        builder = builder.header(header::CONTENT_LENGTH, length);
+    if let Some(size) = size {
+        builder = builder.header(header::CONTENT_LENGTH, size);
     }
-    if let Some(content_range) = content_range {
-        builder = builder.header(header::CONTENT_RANGE, content_range);
-    }
-    let body = length.map_or_else(
+    let body = size.map_or_else(
         || Body::from_stream(futures_util::stream::empty::<Result<bytes::Bytes, std::io::Error>>()),
         |_| Body::empty(),
     );

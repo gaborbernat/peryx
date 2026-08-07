@@ -383,8 +383,16 @@ async fn test_unreadable_blob_is_a_gateway_error() {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert_eq!(status, StatusCode::BAD_GATEWAY);
 }
+// A HEAD transfers no body, so a Range never applies (RFC 9110 s14.2): a proxy HEAD that misses
+// locally asks upstream and answers 200 with the full size, never a 206 or 416, whatever the field
+// holds. A valid, unsatisfiable, malformed, or If-Range-guarded Range all return the whole size.
+#[rstest]
+#[case::valid(&[("range", "bytes=0-3")])]
+#[case::unsatisfiable(&[("range", "bytes=99-100")])]
+#[case::malformed(&[("range", "chunks=1-2")])]
+#[case::if_range(&[("if-range", "\"sha256:0000\""), ("range", "bytes=0-3")])]
 #[tokio::test]
-async fn test_proxy_blob_head_answers_a_range_it_has_not_cached() {
+async fn test_proxy_blob_head_ignores_a_range_it_has_not_cached(#[case] extra: &[(&str, &str)]) {
     let server = MockServer::start().await;
     let blob = b"a-real-layer";
     let digest = oci_digest(blob);
@@ -397,14 +405,10 @@ async fn test_proxy_blob_head_answers_a_range_it_has_not_cached() {
     let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
     let uri = format!("/v2/hub/library/nginx/blobs/{digest}");
 
-    // A cached blob answers this with 206. Whether the store happens to hold the layer must not change
-    // what a client checking a range is told.
-    let (status, headers, _) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=0-3")]).await;
-    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-    assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 0-3/{}", blob.len()));
-
-    let (status, _, _) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=99-100")]).await;
-    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    let (status, headers, _) = send_with(&app, Method::HEAD, &uri, extra).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_LENGTH], blob.len().to_string());
+    assert!(!headers.contains_key(header::CONTENT_RANGE));
 }
 
 #[tokio::test]

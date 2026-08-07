@@ -815,6 +815,153 @@ fn test_quota_parallel_reservations_admit_only_capacity_that_fits() {
 }
 
 #[test]
+fn test_quota_file_bytes_admit_reservations_up_to_the_limit() {
+    let (_dir, meta) = store();
+    let limits = QuotaLimits {
+        max_file_bytes: Some(10),
+        ..QuotaLimits::default()
+    };
+    meta.reserve_quota(request("package", "1.0", "sha256:first", 7), limits)
+        .unwrap();
+    let second = meta
+        .reserve_quota(request("package", "2.0", "sha256:second", 3), limits)
+        .unwrap();
+
+    assert_eq!(
+        (second.state, meta.quota_usage("private").unwrap().file_bytes),
+        (
+            QuotaReservationState::Reserved,
+            QuotaValue {
+                committed: 0,
+                reserved: 10,
+            },
+        )
+    );
+}
+
+#[test]
+fn test_quota_file_bytes_reject_the_reservation_that_overflows_the_limit() {
+    let (_dir, meta) = store();
+    let limits = QuotaLimits {
+        max_file_bytes: Some(10),
+        ..QuotaLimits::default()
+    };
+    meta.reserve_quota(request("package", "1.0", "sha256:first", 7), limits)
+        .unwrap();
+    let error = meta
+        .reserve_quota(request("package", "2.0", "sha256:second", 4), limits)
+        .unwrap_err();
+
+    assert_eq!(
+        (
+            matches!(error, QuotaError::Exceeded { violations } if violations == [QuotaLimit::FileBytes]),
+            meta.quota_usage("private").unwrap().file_bytes,
+        ),
+        (
+            true,
+            QuotaValue {
+                committed: 0,
+                reserved: 7,
+            },
+        )
+    );
+}
+
+#[test]
+fn test_quota_file_bytes_charge_committed_reservations_against_the_limit() {
+    let (_dir, meta) = store();
+    let limits = QuotaLimits {
+        max_file_bytes: Some(10),
+        ..QuotaLimits::default()
+    };
+    let first = meta
+        .reserve_quota(request("package", "1.0", "sha256:first", 7), limits)
+        .unwrap();
+    meta.commit_quota_reservation(first.id).unwrap();
+    let error = meta
+        .reserve_quota(request("package", "2.0", "sha256:second", 4), limits)
+        .unwrap_err();
+
+    assert_eq!(
+        (
+            matches!(error, QuotaError::Exceeded { violations } if violations == [QuotaLimit::FileBytes]),
+            meta.quota_usage("private").unwrap().file_bytes,
+        ),
+        (
+            true,
+            QuotaValue {
+                committed: 7,
+                reserved: 0,
+            },
+        )
+    );
+}
+
+#[test]
+fn test_quota_file_bytes_release_frees_capacity_for_a_later_reservation() {
+    let (_dir, meta) = store();
+    let limits = QuotaLimits {
+        max_file_bytes: Some(10),
+        ..QuotaLimits::default()
+    };
+    let first = meta
+        .reserve_quota(request("package", "1.0", "sha256:first", 7), limits)
+        .unwrap();
+    meta.reserve_quota(request("package", "2.0", "sha256:second", 3), limits)
+        .unwrap();
+    meta.release_quota_reservation(first.id).unwrap();
+    let refilled = meta
+        .reserve_quota(request("package", "3.0", "sha256:third", 7), limits)
+        .unwrap();
+
+    assert_eq!(
+        (refilled.state, meta.quota_usage("private").unwrap().file_bytes),
+        (
+            QuotaReservationState::Reserved,
+            QuotaValue {
+                committed: 0,
+                reserved: 10,
+            },
+        )
+    );
+}
+
+#[test]
+fn test_quota_parallel_reservations_admit_only_file_bytes_that_fit() {
+    let (_dir, meta) = store();
+    let meta = Arc::new(meta);
+    let barrier = Arc::new(Barrier::new(3));
+    let threads = ["first", "second"].map(|digest| {
+        let meta = Arc::clone(&meta);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            meta.reserve_quota(
+                request(digest, "1.0", digest, 7),
+                QuotaLimits {
+                    max_file_bytes: Some(10),
+                    ..QuotaLimits::default()
+                },
+            )
+        })
+    });
+    barrier.wait();
+    let results = threads.map(|thread| thread.join().unwrap());
+
+    assert_eq!(
+        (
+            results.iter().filter(|result| result.is_ok()).count(),
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(QuotaError::Exceeded { .. })))
+                .count(),
+            meta.quota_usage("private").unwrap().file_bytes.reserved,
+        ),
+        (1, 1, 7)
+    );
+}
+
+#[test]
 fn test_quota_repair_is_bounded_and_preserves_committed_allocations() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");

@@ -146,7 +146,7 @@ async fn virtual_detail(
     let consult_cached = mode != FallbackMode::NoFallback && cached_denial.is_none();
     let ordered: Vec<_> = peryx_index::shadow_order(&state.indexes, layers)
         .into_iter()
-        .filter(|&pos| !is_cached(state.index_at(pos)) || consult_cached)
+        .filter(|&pos| !peryx_index::reaches_cached(&state.indexes, pos) || consult_cached)
         .collect();
     let resolved = futures_util::future::join_all(ordered.iter().map(|&pos| {
         let layer = state.index_at(pos);
@@ -176,13 +176,17 @@ async fn virtual_detail(
     if mode != FallbackMode::Fallback {
         details.retain(|(_, detail)| !detail.files.is_empty());
     }
-    let hosted_found = details.iter().any(|(pos, _)| !is_cached(state.index_at(*pos)));
-    let cached_found = details.iter().any(|(pos, _)| is_cached(state.index_at(*pos)));
+    let hosted_found = details
+        .iter()
+        .any(|(pos, _)| !peryx_index::reaches_cached(&state.indexes, *pos));
+    let cached_found = details
+        .iter()
+        .any(|(pos, _)| peryx_index::reaches_cached(&state.indexes, *pos));
     if mode == FallbackMode::PrivateFirst && hosted_found {
         if cached_found {
             record_collision(state, index, layers, project);
         }
-        details.retain(|(pos, _)| !is_cached(state.index_at(*pos)));
+        details.retain(|(pos, _)| !peryx_index::reaches_cached(&state.indexes, *pos));
     }
     if details.is_empty() {
         if let Some(denial) = cached_denial {
@@ -235,16 +239,11 @@ async fn virtual_detail(
     Ok(Some(detail))
 }
 
-const fn is_cached(index: &Index) -> bool {
-    matches!(index.kind, IndexKind::Cached { .. })
-}
-
 fn member_names(state: &ServingState, layers: &[usize], cached: bool) -> String {
     layers
         .iter()
-        .map(|&pos| state.index_at(pos))
-        .filter(|index| is_cached(index) == cached)
-        .map(|index| index.name.as_str())
+        .filter(|&&pos| peryx_index::reaches_cached(&state.indexes, pos) == cached)
+        .map(|&pos| state.index_at(pos).name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
 }

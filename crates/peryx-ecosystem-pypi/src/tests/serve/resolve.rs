@@ -1,7 +1,30 @@
 //! Resolving across an index's layers: overlay, offline, upstream refresh.
 
 use super::support::*;
+use crate::tests::http::{LogCapture, field, policy, put_local_project};
 use peryx_identity::IndexAcl;
+use peryx_policy::FallbackMode;
+
+/// A minimal upstream flask page with no `core-metadata`, so consulting the cache never spawns a
+/// backfill that would race the mock these nested-source tests set up.
+fn nested_flask_page(digest: &str) -> String {
+    format!(
+        "{{\"meta\":{{\"api-version\":\"1.1\"}},\"name\":\"flask\",\"versions\":[\"1.0\"],\
+         \"files\":[{{\"filename\":\"flask-1.0-py3-none-any.whl\",\
+         \"url\":\"https://upstream.invalid/flask-1.0-py3-none-any.whl\",\
+         \"hashes\":{{\"sha256\":\"{digest}\"}}}}]}}"
+    )
+}
+
+async fn flask_upstream_hits(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/simple/flask/")
+        .count()
+}
 
 #[tokio::test]
 async fn test_overlay_project_missing_everywhere_is_not_found() {
@@ -508,6 +531,242 @@ async fn test_oci_index_rejects_pypi_protocol_dispatch() {
         crate::tests::http::post_upload(&state, "/oci/", Some(&auth), &content_type, body).await,
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn test_no_fallback_denies_a_cache_reached_through_a_nested_virtual() {
+    let server = MockServer::start().await;
+    mount_json_page(&server, &nested_flask_page(Digest::of(b"upstream flask").as_str())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, &format!("{}/simple/", server.uri()), |client| {
+        vec![
+            Index {
+                name: "pypi".to_owned(),
+                route: "pypi".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Cached { client, offline: false },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "hosted".to_owned(),
+                route: "hosted".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Hosted { volatile: true },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "inner".to_owned(),
+                route: "inner".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    upload: None,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "outer".to_owned(),
+                route: "outer".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![1, 2],
+                    upload: None,
+                },
+                policy: policy(|_neutral, pypi| pypi.fallback_mode = FallbackMode::NoFallback),
+                acl: IndexAcl::default(),
+            },
+        ]
+    });
+
+    let (status, _, body) = get(&state, "/outer/simple/flask/", Some("application/json")).await;
+
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(denial["rule"], "virtual-fallback");
+    let reason = denial["reason"].as_str().unwrap();
+    assert!(reason.contains("no-fallback"), "{reason}");
+    assert!(reason.contains("hosted"), "{reason}");
+    assert!(reason.contains("inner"), "{reason}");
+    assert_eq!(flask_upstream_hits(&server).await, 0);
+}
+
+#[tokio::test]
+async fn test_no_fallback_denies_a_cache_reached_through_several_virtual_layers() {
+    let server = MockServer::start().await;
+    mount_json_page(&server, &nested_flask_page(Digest::of(b"upstream flask").as_str())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, &format!("{}/simple/", server.uri()), |client| {
+        vec![
+            Index {
+                name: "pypi".to_owned(),
+                route: "pypi".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Cached { client, offline: false },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "inner".to_owned(),
+                route: "inner".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    upload: None,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "middle".to_owned(),
+                route: "middle".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![1],
+                    upload: None,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "outer".to_owned(),
+                route: "outer".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![2],
+                    upload: None,
+                },
+                policy: policy(|_neutral, pypi| pypi.fallback_mode = FallbackMode::NoFallback),
+                acl: IndexAcl::default(),
+            },
+        ]
+    });
+
+    let (status, _, body) = get(&state, "/outer/simple/flask/", Some("application/json")).await;
+
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(denial["rule"], "virtual-fallback");
+    assert!(denial["reason"].as_str().unwrap().contains("middle"), "{body}");
+    assert_eq!(flask_upstream_hits(&server).await, 0);
+}
+
+#[tokio::test]
+async fn test_protected_name_blocks_a_cache_reached_through_a_nested_virtual() {
+    let server = MockServer::start().await;
+    mount_json_page(&server, &nested_flask_page(Digest::of(b"upstream flask").as_str())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, &format!("{}/simple/", server.uri()), |client| {
+        vec![
+            Index {
+                name: "pypi".to_owned(),
+                route: "pypi".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Cached { client, offline: false },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "inner".to_owned(),
+                route: "inner".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    upload: None,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "outer".to_owned(),
+                route: "outer".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![1],
+                    upload: None,
+                },
+                policy: policy(|neutral, _pypi| neutral.protected_names = vec!["flask".to_owned()]),
+                acl: IndexAcl::default(),
+            },
+        ]
+    });
+
+    let (status, _, body) = get(&state, "/outer/simple/flask/", Some("application/json")).await;
+
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(denial["rule"], "protected-name");
+    assert_eq!(flask_upstream_hits(&server).await, 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_private_first_shadows_a_cache_reached_through_a_nested_virtual() {
+    let server = MockServer::start().await;
+    mount_json_page(&server, &nested_flask_page(Digest::of(b"upstream flask").as_str())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, &format!("{}/simple/", server.uri()), |client| {
+        vec![
+            Index {
+                name: "pypi".to_owned(),
+                route: "pypi".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Cached { client, offline: false },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "hosted".to_owned(),
+                route: "hosted".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Hosted { volatile: true },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "inner".to_owned(),
+                route: "inner".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    upload: None,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "outer".to_owned(),
+                route: "outer".to_owned(),
+                ecosystem: peryx_core::Ecosystem::Pypi,
+                kind: IndexKind::Virtual {
+                    layers: vec![1, 2],
+                    upload: None,
+                },
+                policy: policy(|_neutral, pypi| pypi.fallback_mode = FallbackMode::PrivateFirst),
+                acl: IndexAcl::default(),
+            },
+        ]
+    });
+    put_local_project(&state, "flask", "flask-9.9-py3-none-any.whl", b"hosted flask", "9.9");
+    let logs = LogCapture::default();
+    let guard = logs.install();
+
+    let (status, _, body) = get(&state, "/outer/simple/flask/", Some("application/json")).await;
+
+    drop(guard);
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("flask-9.9-py3-none-any.whl"), "{body}");
+    assert!(!body.contains("flask-1.0-py3-none-any.whl"), "{body}");
+    let event = logs
+        .security_events()
+        .into_iter()
+        .find(|event| field(event, "event") == Some("policy_decision"))
+        .unwrap();
+    assert_eq!(field(&event, "result"), Some("shadowed"));
+    assert_eq!(field(&event, "index"), Some("outer"));
+    assert_eq!(field(&event, "hosted_members"), Some("hosted"));
+    assert_eq!(field(&event, "cached_members"), Some("inner"));
 }
 
 #[tokio::test]

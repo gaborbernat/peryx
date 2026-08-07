@@ -36,6 +36,19 @@ enum Mode {
     Versions,
 }
 
+/// Escape-decoding sub-state for the object key being captured. PEP 691 member names carry meaning
+/// (`files`, `meta`, `name`, `versions`), and RFC 8259 lets any character be spelled with an escape,
+/// so the key is decoded to its actual value before dispatch: `"files"` matches `files`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyDecode {
+    /// Reading literal key bytes.
+    Literal,
+    /// Saw a backslash; the next byte selects the escape.
+    Escape,
+    /// Inside a `\uXXXX` sequence, holding the digits seen and the value so far.
+    Unicode { seen: u8, value: u16 },
+}
+
 /// A chunk-at-a-time rewriter for one upstream page.
 #[allow(
     clippy::struct_excessive_bools,
@@ -51,6 +64,7 @@ pub struct PageTransformer {
     /// Unknown keys pass through, so storage stops at the longest key that changes output.
     key: [u8; MAX_KEY_BYTES],
     key_len: usize,
+    key_decode: KeyDecode,
     capturing_key: bool,
     /// Set between a top-level `"name"` key's colon and its value, so the value is captured.
     expect_name_value: bool,
@@ -90,6 +104,7 @@ impl PageTransformer {
             escaped: false,
             key: [0; MAX_KEY_BYTES],
             key_len: 0,
+            key_decode: KeyDecode::Literal,
             capturing_key: false,
             expect_name_value: false,
             capturing_name: false,
@@ -207,7 +222,7 @@ impl PageTransformer {
         if self.in_string {
             out.push(byte);
             if self.capturing_key && (self.escaped || byte != b'"') {
-                self.capture_key_byte(byte);
+                self.decode_key_byte(byte);
             }
             if self.capturing_name {
                 self.name.push(byte);
@@ -240,6 +255,7 @@ impl PageTransformer {
                         self.name.clear();
                     } else {
                         self.key_len = 0;
+                        self.key_decode = KeyDecode::Literal;
                         self.capturing_key = true;
                     }
                 }
@@ -302,7 +318,66 @@ impl PageTransformer {
         }
     }
 
-    const fn capture_key_byte(&mut self, byte: u8) {
+    /// Feed one raw key byte through the JSON string-escape grammar, appending decoded bytes to the
+    /// key buffer so dispatch matches the member name's value, not its spelling.
+    fn decode_key_byte(&mut self, byte: u8) {
+        match self.key_decode {
+            KeyDecode::Literal => {
+                if byte == b'\\' {
+                    self.key_decode = KeyDecode::Escape;
+                } else {
+                    self.push_key_byte(byte);
+                }
+            }
+            KeyDecode::Escape => {
+                if byte == b'u' {
+                    self.key_decode = KeyDecode::Unicode { seen: 0, value: 0 };
+                } else {
+                    // Only `\uXXXX` can spell an ASCII letter, so only it can build a dispatched
+                    // member name. Every other escape resolves to a byte (`"`, `\`, `/`, control) no
+                    // control key contains, so a sentinel that matches nothing stands in and the key
+                    // falls through to passthrough.
+                    self.key_decode = KeyDecode::Literal;
+                    self.push_key_byte(0xFF);
+                }
+            }
+            KeyDecode::Unicode { seen, value } => {
+                let digit = match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'f' => byte - b'a' + 10,
+                    b'A'..=b'F' => byte - b'A' + 10,
+                    _ => {
+                        self.key_decode = KeyDecode::Literal;
+                        self.push_key_byte(0xFF);
+                        return;
+                    }
+                };
+                let value = value << 4 | u16::from(digit);
+                if seen + 1 == 4 {
+                    self.key_decode = KeyDecode::Literal;
+                    self.push_key_codepoint(value);
+                } else {
+                    self.key_decode = KeyDecode::Unicode { seen: seen + 1, value };
+                }
+            }
+        }
+    }
+
+    /// Append a decoded `\uXXXX` codepoint to the key buffer as UTF-8. A lone surrogate is no valid
+    /// scalar and no member name peryx dispatches on, so a sentinel byte stands in: it cannot match.
+    fn push_key_codepoint(&mut self, codepoint: u16) {
+        match char::from_u32(u32::from(codepoint)) {
+            Some(decoded) => {
+                let mut buffer = [0; 4];
+                for &byte in decoded.encode_utf8(&mut buffer).as_bytes() {
+                    self.push_key_byte(byte);
+                }
+            }
+            None => self.push_key_byte(0xFF),
+        }
+    }
+
+    const fn push_key_byte(&mut self, byte: u8) {
         if self.key_len < MAX_KEY_BYTES {
             self.key[self.key_len] = byte;
         }

@@ -291,6 +291,65 @@ fn test_escapes_and_braces_inside_strings_survive() {
 }
 
 #[test]
+fn test_escaped_files_key_withholds_quarantined_files() {
+    // RFC 8259 lets `files` be spelled `files`; the decoded key must still reach quarantine
+    // withholding, or an escaped upstream key would leak a quarantined project's files.
+    let page = r#"{"m\u0065ta":{"project-status":"quarantined"},"name":"demo","fi\u006ces":[
+        {"filename":"demo-1.0-py3-none-any.whl","url":"https://up/demo-1.0-py3-none-any.whl",
+         "hashes":{"sha256":"aa11"}}
+    ]}"#;
+    for chunk in [1, page.len()] {
+        let (out, registrations) = transform(page, plain_context(), chunk);
+        let detail = parse_detail(out.as_bytes()).unwrap();
+        assert_eq!(
+            detail.meta.status(),
+            crate::ProjectStatus::Quarantined,
+            "chunk size {chunk}"
+        );
+        assert!(detail.files.is_empty(), "chunk size {chunk}");
+        assert!(registrations.is_empty(), "chunk size {chunk}");
+        assert!(!out.contains("up/"), "chunk size {chunk}: {out}");
+    }
+}
+
+#[test]
+fn test_escaped_keys_dispatch_like_plain_spellings() {
+    // Every control key spelled with a `\uXXXX` escape: meta, name, versions, files. Each must be
+    // decoded and transformed exactly as its plain spelling, so the file URL is rewritten and the
+    // source registered.
+    let page = r#"{"m\u0065ta":{"api-version":"1.1"},"nam\u0065":"demo",
+        "v\u0065rsions":["1.0"],"fi\u006ces":[
+        {"filename":"demo-1.0-py3-none-any.whl","url":"https://up/demo-1.0-py3-none-any.whl",
+         "hashes":{"sha256":"aa11"},"yanked":false}
+    ]}"#;
+    for chunk in [1, 6, page.len()] {
+        let (out, summary) = transform_summary(page, plain_context(), chunk);
+        let detail = parse_detail(out.as_bytes()).unwrap();
+        assert_eq!(summary.name.as_deref(), Some("demo"), "chunk size {chunk}");
+        assert_eq!(detail.versions, ["1.0"], "chunk size {chunk}");
+        assert_eq!(
+            detail.files[0].url, "/root/pypi/files/aa11/demo-1.0-py3-none-any.whl",
+            "chunk size {chunk}"
+        );
+        assert_eq!(summary.registrations[0].sha256, "aa11", "chunk size {chunk}");
+    }
+}
+
+#[test]
+fn test_escaped_keys_that_cannot_spell_a_member_pass_through() {
+    // Escapes that resolve to no ASCII letter of a control key leave the key unknown, so the
+    // member streams through byte-for-byte: a named escape, a non-hex `\u`, a multi-byte scalar,
+    // and a lone surrogate. A misfire into files/meta/versions would rewrite the output.
+    for key in [r"fi\tles", r"na\uzzzze", r"m\u00e9ta", r"fi\uD800les"] {
+        let page = format!(r#"{{"name":"demo","{key}":1,"files":[]}}"#);
+        for chunk in [1, page.len()] {
+            let (out, _) = transform_summary(&page, plain_context(), chunk);
+            assert_eq!(out, page, "chunk size {chunk}, key {key}");
+        }
+    }
+}
+
+#[test]
 fn test_chunk_boundaries_preserve_corpus_output_and_summary() {
     for (page, expected_out, expected_name) in [
         (

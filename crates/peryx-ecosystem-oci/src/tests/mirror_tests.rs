@@ -263,6 +263,218 @@ async fn test_mirror_follows_a_manifest_list() {
     assert_eq!(rows.last().unwrap().status, "synced");
 }
 
+/// An image index body naming `children` in order. `marker` rides as an annotation so two indexes over
+/// the same child still hash to distinct digests, letting a diamond have real shared descendants.
+fn index_over(children: &[&str], marker: &str) -> Vec<u8> {
+    let entries = children
+        .iter()
+        .map(|digest| format!(r#"{{"mediaType":"{MANIFEST_TYPE}","digest":"{digest}"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"{INDEX_TYPE}","annotations":{{"marker":"{marker}"}},"manifests":[{entries}]}}"#,
+    )
+    .into_bytes()
+}
+
+/// How many times the mock upstream was asked for `repo`'s manifest at `reference`.
+async fn manifest_fetches(server: &MockServer, repo: &str, reference: &str) -> usize {
+    let target = format!("/v2/{repo}/manifests/{reference}");
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|req| req.url.path() == target)
+        .count()
+}
+
+#[tokio::test]
+async fn test_mirror_terminates_on_a_self_referential_manifest() {
+    let server = MockServer::start().await;
+    // A non-sha256 descriptor names the index's own digest with no hash fixed point, a one-node cycle.
+    // Deduplicating by digest fetches it once and the walk ends instead of looping forever.
+    let own = format!("sha512:{}", "a".repeat(128));
+    let index = index_over(&[own.as_str()], "self");
+    mount_manifest(&server, "library/loop", "latest", &index, INDEX_TYPE).await;
+    mount_manifest(&server, "library/loop", &own, &index, INDEX_TYPE).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let rows = mirror(
+        &state.serving,
+        &state.indexes[0],
+        &["library/loop:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows.last().unwrap().status, "synced");
+    assert_eq!(manifest_fetches(&server, "library/loop", &own).await, 1);
+}
+
+#[tokio::test]
+async fn test_mirror_terminates_on_a_two_node_cycle() {
+    let server = MockServer::start().await;
+    // Two indexes name each other by a non-sha256 digest. Each digest is fetched once, then the second
+    // sighting is skipped, so the queue drains.
+    let a = format!("sha512:{}", "a".repeat(128));
+    let b = format!("sha512:{}", "b".repeat(128));
+    let index_a = index_over(&[b.as_str()], "a");
+    let index_b = index_over(&[a.as_str()], "b");
+    mount_manifest(&server, "library/cycle", "latest", &index_a, INDEX_TYPE).await;
+    mount_manifest(&server, "library/cycle", &a, &index_a, INDEX_TYPE).await;
+    mount_manifest(&server, "library/cycle", &b, &index_b, INDEX_TYPE).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let rows = mirror(
+        &state.serving,
+        &state.indexes[0],
+        &["library/cycle:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows.last().unwrap().status, "synced");
+    assert_eq!(manifest_fetches(&server, "library/cycle", &a).await, 1);
+    assert_eq!(manifest_fetches(&server, "library/cycle", &b).await, 1);
+}
+
+#[tokio::test]
+async fn test_mirror_deduplicates_a_diamond_of_shared_descendants() {
+    let server = MockServer::start().await;
+    let config = b"{}";
+    let layer = b"shared-descendant-layer";
+    let leaf = image_manifest(config, layer);
+    let leaf_digest = oci_digest(&leaf);
+    // Two sub-indexes both name the same leaf; the marker keeps their bytes distinct so the root is a
+    // real diamond, not one child listed twice.
+    let left = index_over(&[leaf_digest.as_str()], "left");
+    let right = index_over(&[leaf_digest.as_str()], "right");
+    let left_digest = oci_digest(&left);
+    let right_digest = oci_digest(&right);
+    let root = index_over(&[left_digest.as_str(), right_digest.as_str()], "root");
+    mount_manifest(&server, "library/diamond", "latest", &root, INDEX_TYPE).await;
+    mount_manifest(&server, "library/diamond", &left_digest, &left, INDEX_TYPE).await;
+    mount_manifest(&server, "library/diamond", &right_digest, &right, INDEX_TYPE).await;
+    mount_manifest(&server, "library/diamond", &leaf_digest, &leaf, MANIFEST_TYPE).await;
+    mount_blob(&server, "library/diamond", config).await;
+    mount_blob(&server, "library/diamond", layer).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let rows = mirror(
+        &state.serving,
+        &state.indexes[0],
+        &["library/diamond:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows.last().unwrap().status, "synced");
+    // The shared leaf is pulled once despite two parents naming it, so no descendant work is repeated.
+    assert_eq!(manifest_fetches(&server, "library/diamond", &leaf_digest).await, 1);
+}
+
+#[tokio::test]
+async fn test_mirror_bounds_an_over_wide_manifest_graph() {
+    let server = MockServer::start().await;
+    // An index naming more children than the 1024-node cap is refused on scheduling, before any child
+    // is fetched.
+    let children: Vec<String> = (0..1100).map(|index| format!("sha512:{index:0128x}")).collect();
+    let refs: Vec<&str> = children.iter().map(String::as_str).collect();
+    let root = index_over(&refs, "wide");
+    mount_manifest(&server, "library/wide", "latest", &root, INDEX_TYPE).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let rows = mirror(
+        &state.serving,
+        &state.indexes[0],
+        &["library/wide:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        rows.iter().any(|row| row.reason.contains("exceeds 1024 nodes")),
+        "{rows:?}"
+    );
+    assert_eq!(manifest_fetches(&server, "library/wide", &children[0]).await, 0);
+}
+
+#[tokio::test]
+async fn test_mirror_bounds_a_too_deep_manifest_graph() {
+    let server = MockServer::start().await;
+    let config = b"{}";
+    let layer = b"deep-layer";
+    let leaf = image_manifest(config, layer);
+    let mut body = leaf.clone();
+    let mut digest = oci_digest(&leaf);
+    mount_manifest(&server, "library/deep", &digest, &body, MANIFEST_TYPE).await;
+    // Nest indexes far past the 32-level depth cap; the walk descends only to the cap, then stops.
+    for level in 0..40 {
+        body = index_over(&[digest.as_str()], &format!("level-{level}"));
+        digest = oci_digest(&body);
+        mount_manifest(&server, "library/deep", &digest, &body, INDEX_TYPE).await;
+    }
+    mount_blob(&server, "library/deep", config).await;
+    mount_blob(&server, "library/deep", layer).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let by_digest = format!("library/deep@{digest}");
+    let rows = mirror(
+        &state.serving,
+        &state.indexes[0],
+        std::slice::from_ref(&by_digest),
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        rows.iter().any(|row| row.reason.contains("exceeds depth 32")),
+        "{rows:?}"
+    );
+    // The leaf sits below the cap, so it and its blobs were never reached.
+    assert_eq!(manifest_fetches(&server, "library/deep", &oci_digest(&leaf)).await, 0);
+}
+
+#[tokio::test]
+async fn test_mirror_continues_past_a_missing_child_manifest() {
+    let server = MockServer::start().await;
+    // The index's only child is never mounted, so its fetch 404s; the walk records it and moves on.
+    let child = format!("sha512:{}", "c".repeat(128));
+    let index = index_over(&[child.as_str()], "root");
+    mount_manifest(&server, "library/gap", "latest", &index, INDEX_TYPE).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let rows = mirror(
+        &state.serving,
+        &state.indexes[0],
+        &["library/gap:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        rows.iter()
+            .any(|row| row.kind == "manifest" && row.reference == "latest" && row.status == "synced")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.kind == "manifest" && row.reference == child && row.status == "error")
+    );
+}
+
 #[tokio::test]
 async fn test_mirror_reports_an_unreachable_reference() {
     let server = MockServer::start().await;

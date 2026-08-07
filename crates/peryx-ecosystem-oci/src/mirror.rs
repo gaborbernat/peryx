@@ -2,6 +2,7 @@
 //! into the store so a cached index can serve them with no upstream, the container analogue of
 //! `peryx mirror sync`. A manifest list is followed into its per-platform manifests.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use peryx_driver::ServingState;
@@ -17,6 +18,16 @@ use crate::upstream::Upstream;
 
 /// The media type recorded for a manifest whose upstream response omits one.
 const DEFAULT_MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+
+/// How many distinct manifests one mirror run fetches before it gives up. A cyclic or explosively
+/// wide graph, which a non-SHA-256 descriptor lets an upstream build without a fixed point, would
+/// otherwise never drain the queue; the cap bounds the work well above any real multi-arch index.
+const MAX_GRAPH_NODES: usize = 1024;
+
+/// How deep a mirror run descends into nested manifest lists. Real images nest an index over a
+/// handful of per-platform manifests; this leaves ample headroom while still ending a chain a hostile
+/// upstream keeps extending.
+const MAX_GRAPH_DEPTH: usize = 32;
 
 /// One line of a mirror run: a manifest or blob that was synced, already cached, or failed, plus a
 /// closing summary. The verb `kind` and `status` keep the report machine-readable.
@@ -187,6 +198,37 @@ pub async fn mirror(
     Ok(rows)
 }
 
+/// Enqueue a manifest's child descriptors for the walk, deduplicating by digest and holding the graph
+/// within `MAX_GRAPH_NODES` and `MAX_GRAPH_DEPTH`. A child already scheduled this run is skipped, so a
+/// cycle or diamond fetches each digest once. Returns `true` when a bound is hit, after recording the
+/// error row, so the caller stops the walk.
+fn schedule_children(
+    repo: &str,
+    children: Vec<String>,
+    depth: usize,
+    visited: &mut HashSet<String>,
+    pending: &mut Vec<(String, usize)>,
+    rows: &mut Vec<MirrorRow>,
+) -> bool {
+    for child in children {
+        if !visited.insert(child.clone()) {
+            continue;
+        }
+        if depth > MAX_GRAPH_DEPTH {
+            let reason = format!("manifest graph exceeds depth {MAX_GRAPH_DEPTH}");
+            rows.push(MirrorRow::error("manifest", repo, &child, "", reason));
+            return true;
+        }
+        if visited.len() > MAX_GRAPH_NODES {
+            let reason = format!("manifest graph exceeds {MAX_GRAPH_NODES} nodes");
+            rows.push(MirrorRow::error("manifest", repo, &child, "", reason));
+            return true;
+        }
+        pending.push((child, depth));
+    }
+    false
+}
+
 impl Mirror<'_> {
     /// The name `repo` is spelled with upstream. What lands in the store keeps the operator's spelling,
     /// so a mirrored image serves under the name it was asked for.
@@ -313,17 +355,31 @@ impl Mirror<'_> {
 
     /// Follow a manifest to the blobs it needs, over a work queue rather than recursion: an image
     /// index enqueues its per-platform manifests; an image manifest names a config blob and layers.
+    ///
+    /// A descriptor digest is scheduled at most once per run, so a self-referential or cyclic graph
+    /// terminates and a diamond fetches each shared descendant a single time. Bounds are enforced when
+    /// a child is scheduled, before it is fetched, so a graph a hostile upstream keeps growing stops on
+    /// a stable error row without the fetch that would follow.
     async fn walk_manifest(&self, repo: &str, manifest: &Manifest, rows: &mut Vec<MirrorRow>) -> anyhow::Result<()> {
-        let mut pending = vec![manifest.bytes.clone()];
-        while let Some(bytes) = pending.pop() {
-            let (children, blobs) = store::manifest_descriptors(&bytes);
-            for child in children {
-                if let Some(child_manifest) = self.manifest_of(repo, &child, None, rows).await? {
-                    pending.push(child_manifest.bytes);
-                }
-            }
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut pending: Vec<(String, usize)> = Vec::new();
+        let (children, blobs) = store::manifest_descriptors(&manifest.bytes);
+        for digest in blobs {
+            self.blob(repo, &digest, rows).await;
+        }
+        if schedule_children(repo, children, 1, &mut visited, &mut pending, rows) {
+            return Ok(());
+        }
+        while let Some((digest, depth)) = pending.pop() {
+            let Some(child) = self.manifest_of(repo, &digest, None, rows).await? else {
+                continue;
+            };
+            let (children, blobs) = store::manifest_descriptors(&child.bytes);
             for digest in blobs {
                 self.blob(repo, &digest, rows).await;
+            }
+            if schedule_children(repo, children, depth + 1, &mut visited, &mut pending, rows) {
+                return Ok(());
             }
         }
         Ok(())

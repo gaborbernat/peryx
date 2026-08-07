@@ -83,10 +83,16 @@ fn MemberList(
 ) -> impl IntoView {
     let members = Resource::new(
         {
-            let key = (route.clone(), sha256.clone(), filename.clone(), containers.clone());
+            let key = (
+                route.clone(),
+                project.clone(),
+                sha256.clone(),
+                filename.clone(),
+                containers.clone(),
+            );
             move || key.clone()
         },
-        |(route, sha256, filename, containers)| load_members(route, sha256, filename, containers),
+        |(route, project, sha256, filename, containers)| load_members(route, project, sha256, filename, containers),
     );
     let heading = containers.last().cloned().unwrap_or_else(|| filename.clone());
     view! {
@@ -302,6 +308,7 @@ fn MemberView(
         {
             let key = (
                 route.clone(),
+                project.clone(),
                 sha256.clone(),
                 filename.clone(),
                 containers.clone(),
@@ -310,8 +317,8 @@ fn MemberView(
             );
             move || key.clone()
         },
-        |(route, sha256, filename, containers, member, offset)| {
-            load_member_chunk(route, sha256, filename, containers, member, offset)
+        |(route, project, sha256, filename, containers, member, offset)| {
+            load_member_chunk(route, project, sha256, filename, containers, member, offset)
         },
     );
     let back = browse_archive_listing_url(&route, &project, &sha256, &filename, &containers);

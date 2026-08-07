@@ -4,19 +4,22 @@ use leptos::prelude::*;
 use peryx_driver::AppState;
 use peryx_storage::archive;
 
+use super::{authorize_project, resolve};
 use crate::model::{UiMember, UiMemberChunk};
 
 /// The member listing of a cached archive, for server rendering.
 ///
 /// # Errors
-/// Returns a user-visible message when the artifact cannot be found, fetched, or listed.
+/// Returns a user-visible message when the project cannot be read, or the artifact cannot be found,
+/// fetched, or listed.
 pub async fn members(
     route: &str,
+    project: &str,
     sha256: &str,
     filename: &str,
     containers: &[String],
 ) -> Result<Vec<UiMember>, String> {
-    let lease = artifact_path(route, sha256, filename).await?;
+    let lease = artifact_path(route, project, sha256, filename).await?;
     let archive = filename.to_owned();
     let containers = containers.to_vec();
     let members =
@@ -38,16 +41,18 @@ pub async fn members(
 /// One archive member chunk, for server rendering.
 ///
 /// # Errors
-/// Returns a user-visible message when the member cannot be previewed as UTF-8 text.
+/// Returns a user-visible message when the project cannot be read, or the member cannot be previewed
+/// as UTF-8 text.
 pub async fn member_chunk(
     route: &str,
+    project: &str,
     sha256: &str,
     filename: &str,
     containers: &[String],
     member: &str,
     offset: u64,
 ) -> Result<UiMemberChunk, String> {
-    let lease = artifact_path(route, sha256, filename).await?;
+    let lease = artifact_path(route, project, sha256, filename).await?;
     let archive = filename.to_owned();
     let containers = containers.to_vec();
     let selected = member.to_owned();
@@ -74,20 +79,27 @@ pub async fn member_chunk(
     })
 }
 
-/// The local path of the artifact `sha256`/`filename` on the index at `route`, fetched through that
-/// index's ecosystem driver so this crate carries no format-specific fetch logic.
-async fn artifact_path(route: &str, sha256: &str, filename: &str) -> Result<peryx_storage::blob::BlobLease, String> {
+/// The local path of `project`'s artifact `sha256`/`filename` on the index at `route`, fetched through
+/// that index's ecosystem driver so this crate carries no format-specific fetch logic. The project is
+/// authorized first and the driver proves the file belongs to it, so a browse route cannot read a
+/// private project's blob by pairing an accessible project name with a foreign digest.
+async fn artifact_path(
+    route: &str,
+    project: &str,
+    sha256: &str,
+    filename: &str,
+) -> Result<peryx_storage::blob::BlobLease, String> {
     let app = expect_context::<Arc<AppState>>();
-    let position = app
-        .indexes
-        .iter()
-        .position(|index| index.route == route)
-        .ok_or_else(|| format!("index {route:?} is not configured"))?;
-    let driver = app
-        .driver_for(app.index_at(position).ecosystem)
-        .ok_or_else(|| format!("index {route:?} has no ecosystem driver"))?
-        .clone();
+    let (position, driver) = resolve(&app, route)?;
+    authorize_project(&app, position, project).await?;
+    let driver = driver.clone();
     driver
-        .artifact_path(app.serving.clone(), position, sha256.to_owned(), filename.to_owned())
+        .artifact_path_in_project(
+            app.serving.clone(),
+            position,
+            project.to_owned(),
+            sha256.to_owned(),
+            filename.to_owned(),
+        )
         .await
 }

@@ -11,16 +11,18 @@ use crate::model::{UiMember, UiMemberChunk};
 /// Returns a user-visible message when the archive cannot be fetched, listed, or decoded.
 pub async fn load_members(
     route: String,
+    project: String,
     sha256: String,
     filename: String,
     containers: Vec<String>,
 ) -> Result<Vec<UiMember>, String> {
     #[cfg(feature = "ssr")]
     {
-        crate::ssr::members(&route, &sha256, &filename, &containers).await
+        crate::ssr::members(&route, &project, &sha256, &filename, &containers).await
     }
     #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
     {
+        let _ = project;
         send_wrapper::SendWrapper::new(async move {
             super::fetch_json_required(&crate::url::inspect_url(
                 &route,
@@ -37,7 +39,7 @@ pub async fn load_members(
     }
     #[cfg(all(not(feature = "ssr"), not(feature = "hydrate")))]
     {
-        let _ = (route, sha256, filename, containers);
+        let _ = (route, project, sha256, filename, containers);
         Ok(Vec::new())
     }
 }
@@ -48,6 +50,7 @@ pub async fn load_members(
 /// Returns a user-visible message when the member cannot be previewed as text.
 pub async fn load_member_chunk(
     route: String,
+    project: String,
     sha256: String,
     filename: String,
     containers: Vec<String>,
@@ -56,10 +59,11 @@ pub async fn load_member_chunk(
 ) -> Result<UiMemberChunk, String> {
     #[cfg(feature = "ssr")]
     {
-        crate::ssr::member_chunk(&route, &sha256, &filename, &containers, &member, offset).await
+        crate::ssr::member_chunk(&route, &project, &sha256, &filename, &containers, &member, offset).await
     }
     #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
     {
+        let _ = project;
         send_wrapper::SendWrapper::new(async move {
             super::fetch_member_chunk(&crate::url::inspect_url(
                 &route,
@@ -75,7 +79,7 @@ pub async fn load_member_chunk(
     }
     #[cfg(all(not(feature = "ssr"), not(feature = "hydrate")))]
     {
-        let _ = (route, sha256, filename, containers, member, offset);
+        let _ = (route, project, sha256, filename, containers, member, offset);
         Ok(UiMemberChunk::default())
     }
 }

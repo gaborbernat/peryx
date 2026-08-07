@@ -466,6 +466,86 @@ fn reader_authorization() -> String {
     format!("Basic {}", STANDARD.encode("_:read-secret"))
 }
 
+#[fixture]
+fn private_pypi_ui_router() -> (tempfile::TempDir, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let router = build_router(&private_pypi_ui_config(&dir)).unwrap();
+    (dir, router)
+}
+
+/// A hosted `PyPI` index that denies anonymous reads, with a writer token to seed it and a reader
+/// token that may read every project, so the archive-browser tests can separate the read ACL from the
+/// digest-membership check.
+fn private_pypi_ui_config(dir: &tempfile::TempDir) -> Config {
+    Config {
+        data_dir: dir.path().to_path_buf(),
+        indexes: vec![IndexConfig {
+            name: "vault".to_owned(),
+            route: "vault".to_owned(),
+            policy: peryx_policy::PolicyConfig::default(),
+            ecosystem_policy: toml::Table::new(),
+            ecosystem_settings: toml::Table::new(),
+            webhooks: Vec::new(),
+            ecosystem: peryx_core::Ecosystem::Pypi,
+            anonymous_read: Some(false),
+            tokens: vec![
+                crate::tests::writer_token(SecretSource::Literal("s3cret".to_owned())),
+                TokenConfig {
+                    name: "reader".to_owned(),
+                    secret: SecretSource::Literal("read-secret".to_owned()),
+                    projects: vec!["*".to_owned()],
+                    actions: BTreeSet::from([Action::Read]),
+                    expires_at: None,
+                },
+            ],
+            kind: IndexKind::Hosted { volatile: true },
+        }],
+        ..Config::default()
+    }
+}
+
+/// Upload the browsable `veloxdemo` wheel to the private `vault` index with its writer token, returning
+/// the file's sha256 hex.
+async fn upload_private_fixture(router: &axum::Router) -> String {
+    let wheel = include_bytes!("../../../../tests/frontend/fixtures/veloxdemo-1.0.0-py3-none-any.whl");
+    let boundary = "peryxuitest";
+    let sha256 = Digest::of(wheel);
+    let mut body = Vec::new();
+    for (name, value) in [
+        (":action", "file_upload"),
+        ("name", "veloxdemo"),
+        ("version", "1.0.0"),
+        ("filetype", "bdist_wheel"),
+        ("sha256_digest", sha256.as_str()),
+    ] {
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes(),
+        );
+    }
+    body.extend_from_slice(
+        b"--peryxuitest\r\nContent-Disposition: form-data; name=\"content\"; \
+          filename=\"veloxdemo-1.0.0-py3-none-any.whl\"\r\n\r\n",
+    );
+    body.extend_from_slice(wheel);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let request = Request::builder()
+        .uri("/vault/")
+        .method("POST")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header(
+            header::AUTHORIZATION,
+            format!("Basic {}", STANDARD.encode("__token__:s3cret")),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    sha256.as_str().to_owned()
+}
+
 async fn reader_bearer(router: &axum::Router) -> String {
     let (status, body) = get_authorized(
         router,
@@ -1667,6 +1747,75 @@ async fn test_ui_archive_tree_links_nested_archives_and_blocks_binary_preview(
     let (status, content) = get(&router, &member_url).await;
     assert_eq!(status, StatusCode::OK);
     assert!(content.contains("x = 1"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_ui_private_archive_listing_rejects_anonymous_reads(
+    private_pypi_ui_router: (tempfile::TempDir, axum::Router),
+) {
+    let (_dir, router) = private_pypi_ui_router;
+    let sha = upload_private_fixture(&router).await;
+    let file = "veloxdemo-1.0.0-py3-none-any.whl";
+    let listing_url = format!("/browse?index=vault&project=veloxdemo&sha256={sha}&file={file}");
+
+    let (status, listing) = get(&router, &listing_url).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listing.contains("read access denied"), "{listing}");
+    assert!(!listing.contains("dist-info/METADATA"), "{listing}");
+
+    let member = format!("{listing_url}&member=veloxdemo-1.0.0.dist-info%2FMETADATA");
+    let (status, content) = get(&router, &member).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content.contains("read access denied"), "{content}");
+    assert!(!content.contains("Metadata-Version"), "{content}");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_ui_private_archive_listing_serves_an_authorized_reader(
+    private_pypi_ui_router: (tempfile::TempDir, axum::Router),
+) {
+    let (_dir, router) = private_pypi_ui_router;
+    let sha = upload_private_fixture(&router).await;
+    let file = "veloxdemo-1.0.0-py3-none-any.whl";
+    let listing_url = format!("/browse?index=vault&project=veloxdemo&sha256={sha}&file={file}");
+
+    let (status, listing) = get_authorized(&router, &listing_url, &reader_authorization()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listing.contains("dist-info/METADATA"), "{listing}");
+
+    let member = format!("{listing_url}&member=veloxdemo-1.0.0.dist-info%2FMETADATA");
+    let (status, content) = get_authorized(&router, &member, &reader_authorization()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content.contains("Metadata-Version"), "{content}");
+}
+
+/// A reader authorized for the named project cannot pair it with a foreign digest to reach a blob the
+/// project never published: the driver proves the digest belongs to the project before serving it.
+#[rstest]
+#[tokio::test]
+async fn test_ui_private_archive_listing_rejects_a_foreign_digest(
+    private_pypi_ui_router: (tempfile::TempDir, axum::Router),
+) {
+    let (_dir, router) = private_pypi_ui_router;
+    upload_private_fixture(&router).await;
+    let foreign = Digest::of(b"another project's wheel");
+    let file = "veloxdemo-1.0.0-py3-none-any.whl";
+    let listing_url = format!(
+        "/browse?index=vault&project=veloxdemo&sha256={}&file={file}",
+        foreign.as_str()
+    );
+
+    let (status, listing) = get_authorized(&router, &listing_url, &reader_authorization()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listing.contains("is not a member of project"), "{listing}");
+    assert!(!listing.contains("dist-info/METADATA"), "{listing}");
+
+    let member = format!("{listing_url}&member=veloxdemo-1.0.0.dist-info%2FMETADATA");
+    let (status, content) = get_authorized(&router, &member, &reader_authorization()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content.contains("is not a member of project"), "{content}");
 }
 
 fn wheel_record(entries: &[(String, Vec<u8>)], record_path: &str) -> String {

@@ -512,7 +512,13 @@ async fn test_bare_driver_unsupported_operations_report_an_error() {
     let driver = BareDriver;
     assert!(
         driver
-            .artifact_path(state.serving.clone(), 0, "hex".to_owned(), "f.whl".to_owned())
+            .artifact_path_in_project(
+                state.serving.clone(),
+                0,
+                "proj".to_owned(),
+                "hex".to_owned(),
+                "f.whl".to_owned()
+            )
             .await
             .is_err()
     );

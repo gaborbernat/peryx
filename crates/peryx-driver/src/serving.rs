@@ -490,15 +490,19 @@ pub trait EcosystemDriver: Send + Sync {
         Ok(UiMemberChunk::default())
     }
 
-    /// Return a seekable artifact, fetching or materializing it when needed. The returned lease
-    /// keeps the local representation alive while the archive engine reads it. Default: unsupported.
+    /// Return a seekable artifact after proving `digest_hex`/`filename` is a member of `project` on the
+    /// index at `position`, so a caller cannot borrow another project's digest to reach content it may
+    /// not read. The returned lease keeps the local representation alive while the archive engine reads
+    /// it. Default: unsupported.
     ///
     /// # Errors
-    /// Returns a user-visible message when the artifact cannot be found or fetched.
-    async fn artifact_path(
+    /// Returns a user-visible message when the file does not belong to the project, or cannot be found
+    /// or fetched.
+    async fn artifact_path_in_project(
         &self,
         _state: Arc<ServingState>,
         _position: usize,
+        _project: String,
         _digest_hex: String,
         _filename: String,
     ) -> Result<peryx_storage::blob::BlobLease, String> {

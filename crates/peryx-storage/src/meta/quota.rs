@@ -626,7 +626,14 @@ fn limit_violations(
     project_file_bytes_exceeded: bool,
 ) -> Vec<QuotaLimit> {
     let mut violations = Vec::new();
-    if limits.max_file_bytes.is_some_and(|limit| bytes > limit) || project_file_bytes_exceeded {
+    if limits.max_file_bytes.is_some_and(|limit| {
+        rows.usage
+            .file_bytes
+            .total()
+            .checked_add(bytes)
+            .is_none_or(|total| total > limit)
+    }) || project_file_bytes_exceeded
+    {
         violations.push(QuotaLimit::FileBytes);
     }
     if adds.accounted_bytes

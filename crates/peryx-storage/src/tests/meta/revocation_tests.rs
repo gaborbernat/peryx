@@ -380,6 +380,34 @@ fn test_digest_revocation_open_backfills_active_count_for_pre_index_store() {
 }
 
 #[test]
+fn test_digest_revocation_open_skips_a_corrupt_row_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    write_raw_revocation_rows(&path, &[revocation(1, DigestRevocationState::Active)]);
+    // A row whose bytes cannot decode must not fail the whole store open: the backfill skips it and
+    // counts only the rows it can read.
+    {
+        let database = redb::Database::open(&path).unwrap();
+        let txn = database.begin_write().unwrap();
+        {
+            let mut table = txn
+                .open_table(redb::TableDefinition::<&str, &[u8]>::new("digest_revocation"))
+                .unwrap();
+            table
+                .insert(digest(2).canonical().as_str(), b"not json".as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let store = MetaStore::open(&path).unwrap();
+
+    assert!(store.has_active_digest_revocation().unwrap());
+    store.lift_digest_revocation(&digest(1), &UserId::random(), 30).unwrap();
+    assert!(!store.has_active_digest_revocation().unwrap());
+}
+
+#[test]
 fn test_digest_revocation_open_leaves_a_consistent_count_untouched() {
     let (dir, store) = store();
     store

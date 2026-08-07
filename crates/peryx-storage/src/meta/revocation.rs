@@ -128,15 +128,23 @@ pub enum DigestRevocationQueryError {
 /// The count is bounded by the row count, so a fresh sum cannot overflow the way an externally
 /// supplied count can.
 ///
+/// A record that cannot be decoded is skipped rather than counted, so one corrupt row does not fail
+/// the store open.
+///
 /// # Errors
-/// Returns a store error when the tables cannot be opened, read, decoded, or written.
+/// Returns a store error when the tables cannot be opened, read, or written.
 pub(super) fn backfill_digest_revocation_state(txn: &redb::WriteTransaction) -> Result<(), MetaError> {
     let active = {
         let records = txn.open_table(DIGEST_REVOCATION)?;
         let mut active: u64 = 0;
         for entry in records.iter()? {
             let (_key, value) = entry?;
-            let record: DigestRevocation = serde_json::from_slice(value.value())?;
+            // A record that cannot be decoded cannot be classified. Skip it rather than fail the whole
+            // store open on one corrupt row; the read path surfaces the corruption when that digest is
+            // actually queried.
+            let Ok(record) = serde_json::from_slice::<DigestRevocation>(value.value()) else {
+                continue;
+            };
             if record.state == DigestRevocationState::Active {
                 active += 1;
             }

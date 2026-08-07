@@ -41,6 +41,44 @@ fn test_backup_create_rejects_existing_target_paths() {
 }
 
 #[test]
+fn test_backup_create_rejects_live_metadata_store() {
+    let (_source, config, _content_digest, _metadata_digest) = backup_fixture();
+    let live = MetaStore::open(config.data_dir.join("peryx.redb")).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let backup = root.path().join("backup");
+
+    let err = operator::backup_create(&config, &backup, &mut Vec::new()).unwrap_err();
+
+    assert!(err.to_string().contains("is open by a running node"));
+    assert!(!backup.join("manifest.json").exists());
+    drop(live);
+}
+
+#[test]
+fn test_backup_create_succeeds_on_stopped_store() {
+    let (_source, config, _content_digest, _metadata_digest) = backup_fixture();
+    let root = tempfile::tempdir().unwrap();
+    let backup = root.path().join("backup");
+
+    operator::backup_create(&config, &backup, &mut Vec::new()).unwrap();
+
+    assert!(backup.join("manifest.json").exists());
+}
+
+#[test]
+fn test_backup_create_reports_unreadable_source() {
+    let (_source, config, _content_digest, _metadata_digest) = backup_fixture();
+    std::fs::remove_file(config.data_dir.join("peryx.redb")).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let backup = root.path().join("backup");
+
+    let err = operator::backup_create(&config, &backup, &mut Vec::new()).unwrap_err();
+
+    assert!(err.to_string().contains("read-only"));
+    assert!(!backup.exists());
+}
+
+#[test]
 fn test_backup_create_rejects_missing_source_blob() {
     let (_source, config, content_digest, _metadata_digest) = backup_fixture();
     std::fs::remove_file(BlobStore::new(config.data_dir.join("blobs")).path_for(&content_digest)).unwrap();

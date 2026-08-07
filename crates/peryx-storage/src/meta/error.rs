@@ -24,6 +24,15 @@ pub enum MetaError {
     BlobReclaiming { digest: String },
 }
 
+impl MetaError {
+    /// Whether opening failed because another process already holds the database open — a live writer
+    /// excludes a read-only open, and a read-only open excludes a writer, through redb's file lock.
+    #[must_use]
+    pub const fn is_database_already_open(&self) -> bool {
+        matches!(self, Self::Database(redb::DatabaseError::DatabaseAlreadyOpen))
+    }
+}
+
 /// A rejected writer-identity claim or promotion.
 #[derive(Debug, thiserror::Error)]
 pub enum WriterIdentityError {

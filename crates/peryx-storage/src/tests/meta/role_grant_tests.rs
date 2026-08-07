@@ -91,6 +91,44 @@ fn test_regranting_the_same_role_and_reach_is_idempotent() {
 }
 
 #[test]
+fn test_reprovisioning_keeps_the_binding_at_version_one() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    let grant = RoleGrant::new(alice.clone(), Role::Operator, GrantScope::Server);
+
+    store.grant_role(&alice, Role::Operator, GrantScope::Server).unwrap();
+    store.grant_role(&alice, Role::Operator, GrantScope::Server).unwrap();
+
+    let id = StoredRoleGrant {
+        grant,
+        version: 0,
+        granted_by: None,
+        granted_at_unix: None,
+    }
+    .id();
+    let stored = store.managed_grant(&id).unwrap().unwrap();
+    assert_eq!(stored.version, 1);
+    assert_eq!(stored.granted_by, None);
+    assert_eq!(stored.granted_at_unix, None);
+}
+
+#[test]
+fn test_provisioning_preserves_an_already_updated_grant() {
+    let (_dir, store) = store();
+    let alice = store.create_user("Alice").unwrap().id;
+    let bob = store.create_user("Bob").unwrap().id;
+    let grant = RoleGrant::new(alice.clone(), Role::Operator, GrantScope::Server);
+
+    store.create_managed_grant(&grant, &bob, 1_000).unwrap();
+    let updated = store.create_managed_grant(&grant, &bob, 2_000).unwrap().record;
+    assert_eq!(updated.version, 2);
+
+    store.grant_role(&alice, Role::Operator, GrantScope::Server).unwrap();
+
+    assert_eq!(store.managed_grant(&updated.id()).unwrap(), Some(updated));
+}
+
+#[test]
 fn test_revoke_removes_only_the_named_binding_and_reports_presence() {
     let (_dir, store) = store();
     let alice = store.create_user("Alice").unwrap().id;

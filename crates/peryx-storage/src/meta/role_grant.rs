@@ -126,8 +126,12 @@ impl MetaStore {
             return Err(RoleGrantStoreError::UnknownUser { id: id.clone() });
         }
         let grant = RoleGrant::new(id.clone(), role, scope);
-        write_grant(&txn, &StoredRoleGrant::provisioned(grant.clone()))?;
-        txn.commit().map_err(MetaError::from)?;
+        // Provisioning is a create, not an overwrite: an existing binding keeps its version and audit
+        // fields so a stale version-1 write can't move it backward and defeat optimistic concurrency.
+        if read_grant(&txn, &primary_key(&grant))?.is_none() {
+            write_grant(&txn, &StoredRoleGrant::provisioned(grant.clone()))?;
+            txn.commit().map_err(MetaError::from)?;
+        }
         Ok(grant)
     }
 

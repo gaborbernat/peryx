@@ -330,8 +330,6 @@ mod tests {
 
     use peryx_storage::meta::MetaStore;
     use rstest::rstest;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::net::TcpListener;
 
     use super::*;
     use crate::webhook::{WebhookEventKind, WebhookRuntime, WebhookTargetConfig};
@@ -514,12 +512,26 @@ mod tests {
     }
 
     impl HangingServer {
-        async fn start() -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // A blocking std listener on its own thread accepts and holds each connection. Running the accept
+        // loop as ordinary thread code, rather than a spawned future, keeps its body on lines the x86
+        // line-coverage gate attributes; an async task body only executes inside the runtime's poll and
+        // is left uncovered.
+        fn start() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/hook", listener.local_addr().unwrap());
             let accepted = Arc::new(AtomicUsize::new(0));
-            let counter = accepted.clone();
-            tokio::spawn(accept_and_hold(listener, counter));
+            let counter = Arc::clone(&accepted);
+            std::thread::spawn(move || {
+                // The vec is never read; its only job is to keep each accepted socket alive so the server
+                // holds the connection open and never answers.
+                #[allow(clippy::collection_is_never_read, reason = "the vec exists only to hold sockets open")]
+                let mut held = Vec::new();
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { break };
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    held.push(stream);
+                }
+            });
             Self { url, accepted }
         }
 
@@ -534,88 +546,26 @@ mod tests {
         }
     }
 
-    async fn accept_and_hold(listener: TcpListener, counter: Arc<AtomicUsize>) {
-        while let Ok((socket, _)) = listener.accept().await {
-            counter.fetch_add(1, Ordering::SeqCst);
-            tokio::spawn(hold_open(socket));
-        }
-    }
+    fn healthy_server() -> String {
+        use std::io::{Read as _, Write as _};
 
-    async fn hold_open(socket: tokio::net::TcpStream) {
-        let _held = socket;
-        std::future::pending::<()>().await;
-    }
-
-    async fn healthy_server() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/hook", listener.local_addr().unwrap());
-        tokio::spawn(accept_and_answer(listener));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            }
+        });
         url
-    }
-
-    async fn accept_and_answer(listener: TcpListener) {
-        while let Ok((socket, _)) = listener.accept().await {
-            tokio::spawn(answer_ok(socket));
-        }
-    }
-
-    async fn answer_ok(mut socket: tokio::net::TcpStream) {
-        let mut buf = [0_u8; 1024];
-        let _ = socket.read(&mut buf).await;
-        let _ = socket
-            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-            .await;
-    }
-
-    // Run the server helpers in this task rather than a spawned one: llvm-cov does not attribute the
-    // body of a future that only executes inside `tokio::spawn`, so the accept, hold, and answer paths
-    // are exercised directly here to keep the line-coverage gate honest.
-    #[tokio::test]
-    async fn test_server_helpers_run_in_the_foreground() {
-        use std::sync::Arc;
-        use std::sync::atomic::Ordering;
-        use std::time::Duration;
-
-        use tokio::net::TcpStream;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let counter = Arc::new(AtomicUsize::new(0));
-        let client = tokio::spawn(async move {
-            let stream = TcpStream::connect(addr).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            drop(stream);
-        });
-        let _ = tokio::time::timeout(Duration::from_millis(150), accept_and_hold(listener, counter.clone())).await;
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-        client.await.unwrap();
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let peer = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
-        let (server_socket, _) = listener.accept().await.unwrap();
-        let _peer = peer.await.unwrap();
-        let _ = tokio::time::timeout(Duration::from_millis(50), hold_open(server_socket)).await;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client = tokio::spawn(async move {
-            let mut stream = TcpStream::connect(addr).await.unwrap();
-            stream.write_all(b"GET /hook HTTP/1.1\r\n\r\n").await.unwrap();
-            let mut buf = Vec::new();
-            let _ = stream.read_to_end(&mut buf).await;
-            buf
-        });
-        let (server_socket, _) = listener.accept().await.unwrap();
-        answer_ok(server_socket).await;
-        let response = client.await.unwrap();
-        assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{response:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_slow_target_does_not_block_a_healthy_one() {
-        let slow = HangingServer::start().await;
-        let healthy_url = healthy_server().await;
+        let slow = HangingServer::start();
+        let healthy_url = healthy_server();
         let dir = tempfile::tempdir().unwrap();
         let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
         for created_at in 10..13 {
@@ -652,7 +602,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_in_flight_requests_stay_within_the_global_bound() {
-        let slow = HangingServer::start().await;
+        let slow = HangingServer::start();
         let dir = tempfile::tempdir().unwrap();
         let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
         let mut configs = Vec::new();

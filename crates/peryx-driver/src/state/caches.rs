@@ -37,10 +37,12 @@ impl ServingState {
         self.cache.remember_negative(key, (self.clock)() + ttl_secs);
     }
 
-    /// Invalidate one project's rendered pages and the search documents after a `PyPI` mutation.
+    /// Invalidate one project's rendered pages and the search documents after a `PyPI` mutation. The
+    /// search side refreshes only this project's documents, so a mutation no longer rebuilds the whole
+    /// index on the next search.
     pub fn invalidate_project(&self, project: &str) {
         self.cache.invalidate_hot(project);
-        self.bump_search_epoch();
+        self.search.invalidate_project(project);
     }
 
     /// Retire one project's rendered pages without touching the search epoch. A replica applying a page

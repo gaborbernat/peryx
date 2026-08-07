@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use peryx_core::Ecosystem;
 use peryx_index::{Index, IndexKind};
 use peryx_policy::PolicyAction;
-use peryx_search::{IndexerCtx, PackageDocument, PackageIndexer, PackageSource, SearchError};
+use peryx_search::{
+    IndexerCtx, PackageDocument, PackageIndexer, PackageSource, ProjectUpdate, SearchError, project_key,
+};
 
 use crate::store;
 
@@ -30,6 +32,41 @@ impl PackageIndexer for OciIndexer {
             }
         }
         Ok(documents)
+    }
+
+    /// Re-derive one repository across every OCI index that serves it. A repository the index does not
+    /// serve contributes nothing, so a scoped refresh for another ecosystem's project touches no OCI
+    /// document; membership is decided from the repository's own tag keys, not a full repository scan.
+    fn project_update(&self, ctx: &IndexerCtx<'_>, name: &str) -> Result<ProjectUpdate, SearchError> {
+        let mut update = ProjectUpdate::default();
+        for index in ctx.indexes {
+            if index.ecosystem != Ecosystem::Oci || !serves_repository(ctx, index, name)? {
+                continue;
+            }
+            update.keys.push(project_key(&index.route, name));
+            update.documents.push(document(ctx, index, name)?);
+        }
+        Ok(update)
+    }
+}
+
+/// Whether `index` serves `repo`, mirroring [`repositories`] for a single repository: a cached or hosted
+/// index serves it when policy allows and it has at least one tag; a virtual index serves it when any
+/// layer does. It reads only that repository's tag keys, so the check stays cheap on a large registry.
+fn serves_repository(ctx: &IndexerCtx<'_>, index: &Index, repo: &str) -> Result<bool, SearchError> {
+    match &index.kind {
+        IndexKind::Cached { .. } | IndexKind::Hosted { .. } => {
+            Ok(index.policy.check_project(PolicyAction::Serve, repo).is_ok()
+                && !store::list_tags(ctx.meta, &index.name, repo)?.is_empty())
+        }
+        IndexKind::Virtual { layers, .. } => {
+            for &position in layers {
+                if serves_repository(ctx, ctx.index_at(position), repo)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
     }
 }
 

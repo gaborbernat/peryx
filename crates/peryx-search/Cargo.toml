@@ -19,7 +19,13 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+hdrhistogram.workspace = true
+stats_alloc.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "incremental_refresh"
+harness = false
 
 [lints]
 workspace = true

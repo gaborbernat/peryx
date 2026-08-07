@@ -20,7 +20,7 @@ pub const SEARCH_VIEW: &str = "search";
 pub use context::{IndexerCtx, SearchCtx};
 pub use engine::{PackageSearch, RebuildOutcome, RebuildProgress, project_key, truncate_to_chars};
 pub use error::SearchError;
-pub use indexer::{EmptyIndexer, INDEXED_TEXT_BYTES, PackageDocument, PackageIndexer};
+pub use indexer::{EmptyIndexer, INDEXED_TEXT_BYTES, PackageDocument, PackageIndexer, ProjectUpdate};
 pub use params::{AvailabilityFilter, PackageSource, SearchParams, SourceFilter};
 pub use response::{SearchResponse, SearchResult};
 

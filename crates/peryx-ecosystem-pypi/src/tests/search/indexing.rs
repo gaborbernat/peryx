@@ -27,6 +27,39 @@ async fn test_search_indexes_uploaded_metadata_and_route_scope() {
     assert_eq!(value["results"][0]["type"], "uploaded");
 }
 #[tokio::test]
+async fn test_search_drops_a_project_whose_only_upload_is_trashed() {
+    let h = harness().await;
+    put_uploaded_package(&h.state, "TrashOnly", "trash-only", "Soft-deleted upload");
+    trash_upload(&h.state, "trash-only", "trash-only-1.0-py3-none-any.whl");
+
+    let (status, _headers, body) = get(
+        &h.state,
+        "/hosted/+search?q=trash-only&type=uploaded&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"], 0);
+}
+#[tokio::test]
+async fn test_search_keeps_a_live_release_when_a_sibling_is_trashed() {
+    let h = harness().await;
+    put_uploaded_package(&h.state, "MixedPkg", "mixed-pkg", "A partly trashed project");
+    let trashed = put_uploaded_file(&h.state, "mixed-pkg", "2.0");
+    trash_upload(&h.state, "mixed-pkg", &trashed);
+
+    let (status, _headers, body) = get(
+        &h.state,
+        "/hosted/+search?q=mixed-pkg&type=uploaded&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["total"], 1);
+    assert_eq!(value["results"][0]["display_name"], "MixedPkg");
+}
+#[tokio::test]
 async fn test_search_collects_direct_mirror_and_local_projects() {
     let h = harness().await;
     put_cached_package(

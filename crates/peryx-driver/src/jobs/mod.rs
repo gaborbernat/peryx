@@ -441,7 +441,7 @@ impl NodeJob for SearchRebuildJob {
             })
             .map_err(|error| JobFailure::new("search_rebuild", error.to_string()))?;
         Ok(match outcome {
-            RebuildOutcome::Published { documents, .. } => JobReport {
+            RebuildOutcome::Published { documents } => JobReport {
                 processed: documents,
                 changed: documents,
             },

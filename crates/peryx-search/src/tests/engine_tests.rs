@@ -100,13 +100,7 @@ fn test_rebuild_publishes_new_documents_without_an_epoch_bump() {
         .rebuild(&stores.indexer_ctx(), NonZeroUsize::new(2).unwrap(), &mut no_cancel)
         .unwrap();
 
-    assert_eq!(
-        outcome,
-        RebuildOutcome::Published {
-            documents: 3,
-            commits: 2
-        }
-    );
+    assert_eq!(outcome, RebuildOutcome::Published { documents: 3 });
     assert_eq!(total(&search, &stores, &lexicons), 3);
 }
 
@@ -125,13 +119,7 @@ fn test_rebuild_to_an_empty_index_commits_once() {
         .rebuild(&stores.indexer_ctx(), NonZeroUsize::new(4).unwrap(), &mut no_cancel)
         .unwrap();
 
-    assert_eq!(
-        outcome,
-        RebuildOutcome::Published {
-            documents: 0,
-            commits: 1
-        }
-    );
+    assert_eq!(outcome, RebuildOutcome::Published { documents: 0 });
     assert_eq!(total(&search, &stores, &lexicons), 0);
 }
 
@@ -166,8 +154,8 @@ fn test_rebuild_cancelled_after_a_chunk_does_not_expose_partial_results() {
     search.add_indexer(Arc::new(NamedDocs(names.clone())));
     assert_eq!(total(&search, &stores, &lexicons), 2);
 
-    // Commit one chunk, then cancel: the reader must still serve the two prior documents, never the
-    // single partially committed one.
+    // Stage one chunk, then cancel: the reader must still serve the two prior documents, never the
+    // single staged one from the rolled-back candidate generation.
     *names.lock().unwrap() = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
     let mut chunks = 0;
     let outcome = search
@@ -183,6 +171,50 @@ fn test_rebuild_cancelled_after_a_chunk_does_not_expose_partial_results() {
 
     assert_eq!(outcome, RebuildOutcome::Aborted { documents: 1 });
     assert_eq!(total(&search, &stores, &lexicons), 2);
+}
+
+#[test]
+fn test_cancelled_rebuild_does_not_leak_into_a_later_scoped_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = Stores::open(&dir);
+    let lexicons = LexiconRegistry::default();
+    let names = Arc::new(Mutex::new(vec!["x".to_owned(), "y".to_owned()]));
+    let mut search = PackageSearch::in_memory();
+    search.add_indexer(Arc::new(NamedDocs(names.clone())));
+    assert_eq!(total(&search, &stores, &lexicons), 2);
+
+    // Cancel a rebuild after the chunk holding `a` stages, then scope-update `x`. The reload that update
+    // runs must not publish the abandoned candidate generation: `y` stays and `a`/`b`/`c` never surface.
+    *names.lock().unwrap() = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+    let mut chunks = 0;
+    let outcome = search
+        .rebuild(&stores.indexer_ctx(), NonZeroUsize::new(1).unwrap(), &mut |_| {
+            chunks += 1;
+            if chunks > 1 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+    assert_eq!(outcome, RebuildOutcome::Aborted { documents: 1 });
+
+    search
+        .update_project(&[pypi_doc("x", "x")], &crate::project_key("root", "x"))
+        .unwrap();
+
+    assert_eq!(hits(&search, &stores, &lexicons, "x"), 1, "the scoped update keeps x");
+    assert_eq!(hits(&search, &stores, &lexicons, "y"), 1, "the prior y is still served");
+    assert_eq!(
+        hits(&search, &stores, &lexicons, "a"),
+        0,
+        "the cancelled chunk stays hidden"
+    );
+    assert_eq!(
+        total(&search, &stores, &lexicons),
+        2,
+        "only the prior two projects remain"
+    );
 }
 
 #[test]
@@ -204,13 +236,7 @@ fn test_on_disk_rebuild_marks_then_clears_the_in_flight_marker() {
         })
         .unwrap();
 
-    assert_eq!(
-        outcome,
-        RebuildOutcome::Published {
-            documents: 2,
-            commits: 2
-        }
-    );
+    assert_eq!(outcome, RebuildOutcome::Published { documents: 2 });
     assert!(seen_marker, "the marker records an in-flight on-disk rebuild");
     assert!(!marker.exists(), "a published rebuild clears its marker");
     assert_eq!(total(&search, &stores, &lexicons), 2);

@@ -121,13 +121,13 @@ is matched as written. Because `*` crosses `/`, `team/*` covers a whole reposito
 
 The `[auth]` table holds the settings every index's access rules share. All keys are optional.
 
-| Key                      | Meaning                                                              | Default |
-| ------------------------ | -------------------------------------------------------------------- | ------- |
-| `signing_key`            | Secret peryx signs its own tokens with                               | (none)  |
-| `signing_key_file`       | Path to read `signing_key` from instead of inlining it               | (none)  |
-| `token_ttl_secs`         | Lifetime of a minted token, in seconds; must be positive             | `300`   |
-| `default_anonymous_read` | What an index's `anonymous_read` defaults to when the index omits it | `true`  |
-| `oidc_audience`          | Audience external CI identity tokens must carry                      | `peryx` |
+| Key                      | Meaning                                                                              | Default |
+| ------------------------ | ------------------------------------------------------------------------------------ | ------- |
+| `signing_key`            | Secret peryx signs its own tokens with                                               | (none)  |
+| `signing_key_file`       | Path to read `signing_key` from instead of inlining it                               | (none)  |
+| `token_ttl_secs`         | Lifetime of a minted token, in seconds; must be positive and at most 86400 (one day) | `300`   |
+| `default_anonymous_read` | What an index's `anonymous_read` defaults to when the index omits it                 | `true`  |
+| `oidc_audience`          | Audience external CI identity tokens must carry                                      | `peryx` |
 
 `signing_key` and `token_ttl_secs` configure the token realm used by OCI and PyPI trusted publishing. peryx reads the
 key at startup and uses it to sign repository-scoped tokens. Set at most one of `signing_key` and `signing_key_file`.

@@ -313,6 +313,9 @@ async fn test_redirect_loop_stops_at_limit() {
         panic!("expected an HTTP redirect error, got {error:?}");
     };
     assert!(err.is_redirect());
+    // A redirect-policy failure carries no HTTP status and is not a timeout, connect, or decode error,
+    // so it renders through the generic Http fallback rather than a specific class.
+    assert_eq!(error.user_message(), "upstream request failed");
     // The custom policy surfaces its own reason as the error source; rendering the chain exercises the
     // limit error's Display and proves the reason a client sees is the redirect bound, not a generic fault.
     let mut reasons = Vec::new();

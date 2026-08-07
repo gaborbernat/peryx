@@ -59,14 +59,9 @@ fn serves_repository(ctx: &IndexerCtx<'_>, index: &Index, repo: &str) -> Result<
             Ok(index.policy.check_project(PolicyAction::Serve, repo).is_ok()
                 && !store::list_tags(ctx.meta, &index.name, repo)?.is_empty())
         }
-        IndexKind::Virtual { layers, .. } => {
-            for &position in layers {
-                if serves_repository(ctx, ctx.index_at(position), repo)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
+        IndexKind::Virtual { layers, .. } => layers.iter().try_fold(false, |served, &position| {
+            Ok(served || serves_repository(ctx, ctx.index_at(position), repo)?)
+        }),
     }
 }
 

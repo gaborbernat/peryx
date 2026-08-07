@@ -2,8 +2,8 @@ use redb::ReadableTable as _;
 
 use super::error::{MetaError, MetaScanError};
 use super::{
-    DRIVER_KV, DriverBatch, DriverBlobReference, DriverMutation, JOURNAL, JOURNAL_BLOBS, JOURNAL_MUTATIONS, MetaStore,
-    POLICY_INPUT_GENERATION, PolicyInputGeneration, SERIAL, SERIAL_KEY,
+    BLOB_RECLAIM_GUARD, DRIVER_KV, DriverBatch, DriverBlobReference, DriverMutation, JOURNAL, JOURNAL_BLOBS,
+    JOURNAL_MUTATIONS, MetaStore, POLICY_INPUT_GENERATION, PolicyInputGeneration, SERIAL, SERIAL_KEY,
 };
 
 impl MetaStore {
@@ -281,6 +281,17 @@ impl MetaStore {
             };
             (value, journal, mutations, blobs)
         };
+        if expected_serial.is_none() && !blobs.is_empty() {
+            let guards = txn.open_table(BLOB_RECLAIM_GUARD).map_err(MetaError::from)?;
+            for blob in &blobs {
+                if guards.get(blob.sha256.as_str()).map_err(MetaError::from)?.is_some() {
+                    return Err(MetaError::BlobReclaiming {
+                        digest: blob.sha256.clone(),
+                    }
+                    .into());
+                }
+            }
+        }
         if !journal.is_empty() {
             let mut serials = txn.open_table(SERIAL).map_err(MetaError::from)?;
             let mut journal_table = txn.open_table(JOURNAL).map_err(MetaError::from)?;

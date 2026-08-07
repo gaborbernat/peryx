@@ -30,6 +30,7 @@ mod placement;
 mod placement_reconcile;
 mod policy_decision;
 mod quota;
+mod reclaim_guard;
 mod reclamation;
 mod reconcile;
 mod repository;
@@ -190,6 +191,7 @@ const TRANSFER_ATTEMPT: TableDefinition<&str, &[u8]> = TableDefinition::new("tra
 /// last staged offset.
 const UPLOAD_SESSION: TableDefinition<&str, &[u8]> = TableDefinition::new("upload_session");
 const RECLAMATION_TOMBSTONE: TableDefinition<&str, &[u8]> = TableDefinition::new("reclamation_tombstone");
+const BLOB_RECLAIM_GUARD: TableDefinition<&str, i64> = TableDefinition::new("blob_reclaim_guard");
 const REPOSITORY: TableDefinition<&str, &[u8]> = TableDefinition::new("repository");
 const REPOSITORY_ROUTE: TableDefinition<&str, &str> = TableDefinition::new("repository_route");
 const SCOPED_TOKEN: TableDefinition<&str, &[u8]> = TableDefinition::new("scoped_token");
@@ -329,6 +331,7 @@ impl MetaStore {
             txn.open_table(TRANSFER_ATTEMPT)?;
             txn.open_table(UPLOAD_SESSION)?;
             txn.open_table(RECLAMATION_TOMBSTONE)?;
+            txn.open_table(BLOB_RECLAIM_GUARD)?;
             txn.open_table(OPERATION_OUTCOME)?;
             txn.open_table(INGRESS_INTENT)?;
             txn.open_table(INGRESS_INTENT_COUNT)?;

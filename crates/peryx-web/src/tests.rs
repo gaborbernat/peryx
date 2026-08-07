@@ -1,6 +1,6 @@
 use rstest::rstest;
 
-use crate::markdown::external_link_rel;
+use crate::markdown::{external_link_rel, is_safe_artifact_link, is_safe_link};
 use crate::model::{
     PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage, UiSearchPage, UiShadowPage, UiSnapshot,
     members_from_listing, projects_from_list,
@@ -346,9 +346,36 @@ fn test_search_page_rejects_malformed(#[case] value: serde_json::Value) {
 #[case::mailto("mailto:maintainer@example.com", None)]
 #[case::absolute_route("/pypi/files/veloxdemo-1.0.0.tar.gz", None)]
 #[case::relative_route("../docs/", None)]
+#[case::fragment("#usage", None)]
+#[case::protocol_relative_attacker("//attacker.example/path", Some("external nofollow noopener noreferrer"))]
+#[case::protocol_relative_loopback("//127.0.0.1/admin", Some("external nofollow noopener noreferrer"))]
 #[case::malformed("http://[invalid", None)]
 fn test_external_link_rel(#[case] target: &str, #[case] expected: Option<&str>) {
     assert_eq!(external_link_rel(target), expected);
+}
+
+#[rstest]
+#[case::https("https://example.com/docs", true)]
+#[case::mailto("mailto:maintainer@example.com", true)]
+#[case::absolute_route("/pypi/files/veloxdemo-1.0.0.tar.gz", true)]
+#[case::fragment("#usage", true)]
+#[case::protocol_relative_attacker("//attacker.example/path", true)]
+#[case::protocol_relative_loopback("//127.0.0.1/admin", true)]
+#[case::javascript("javascript:alert(1)", false)]
+fn test_is_safe_link(#[case] target: &str, #[case] expected: bool) {
+    assert_eq!(is_safe_link(target), expected);
+}
+
+#[rstest]
+#[case::https("https://example.com/pkg.whl", true)]
+#[case::mailto("mailto:maintainer@example.com", false)]
+#[case::absolute_route("/pypi/files/veloxdemo-1.0.0.tar.gz", true)]
+#[case::fragment("#usage", true)]
+#[case::protocol_relative_attacker("//attacker.example/pkg.whl", true)]
+#[case::protocol_relative_loopback("//127.0.0.1/pkg.whl", true)]
+#[case::javascript("javascript:alert(1)", false)]
+fn test_is_safe_artifact_link(#[case] target: &str, #[case] expected: bool) {
+    assert_eq!(is_safe_artifact_link(target), expected);
 }
 
 #[test]

@@ -241,7 +241,8 @@ fn fallback_result<T: SimpleStatus>(result: &Result<T, UpstreamError>) -> bool {
             | UpstreamError::Url(_)
             | UpstreamError::MissingContentType { .. }
             | UpstreamError::UnsupportedContentType { .. }
-            | UpstreamError::ResponseTooLarge { .. },
+            | UpstreamError::ResponseTooLarge { .. }
+            | UpstreamError::BlockedDestination { .. },
         ) => false,
     }
 }

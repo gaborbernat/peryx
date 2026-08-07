@@ -3,6 +3,7 @@
 mod credential;
 mod error;
 mod exec;
+pub(crate) mod guard;
 mod netrc;
 pub mod retry;
 mod tls;
@@ -21,6 +22,7 @@ use reqwest::header::{
 };
 use url::Url;
 
+use self::guard::OutboundGuard;
 use self::response::header_str;
 use self::retry::{
     MAX_RETRIES, should_retry_error, should_retry_status, sleep_before_retry_status, sleep_before_retry_str,
@@ -112,6 +114,7 @@ pub struct UpstreamClient {
     cross_origin_bulk: reqwest::Client,
     base: Url,
     credentials: CredentialProvider,
+    guard: OutboundGuard,
     range_support: Arc<AtomicU8>,
     reachability: Arc<AtomicU8>,
 }
@@ -164,11 +167,14 @@ impl UpstreamClient {
         tls: &UpstreamTls,
         identity_origin: &str,
     ) -> Result<Self, UpstreamError> {
-        Self::with_credentials_and_tls_for_origin(base, CredentialProvider::fixed(auth), tls, identity_origin)
+        Self::with_credentials_and_tls_for_origin(base, CredentialProvider::fixed(auth), tls, identity_origin, &[])
     }
 
     /// Build a client with refreshable credentials. Clones of `credentials` share one refresh gate
     /// and generation, which lets an artifact mirror use its metadata source's credential provider.
+    ///
+    /// `trusted_hosts` names private artifact servers the outbound policy may reach even though they
+    /// do not resolve to a public address; the configured `base` host is trusted without listing.
     ///
     /// # Errors
     /// Returns [`UpstreamError::Url`] if either origin is invalid, or [`UpstreamError::Http`] if
@@ -178,6 +184,7 @@ impl UpstreamClient {
         credentials: CredentialProvider,
         tls: &UpstreamTls,
         identity_origin: &str,
+        trusted_hosts: &[String],
     ) -> Result<Self, UpstreamError> {
         // Pin the ring crypto provider: unlike aws-lc it is pure Rust plus portable assembly, so
         // every release target cross-compiles without a C toolchain. Err means already installed.
@@ -188,15 +195,18 @@ impl UpstreamClient {
             let with_slash = format!("{}/", base.path());
             base.set_path(&with_slash);
         }
+        let guard = OutboundGuard::new(&base, trusted_hosts);
         let http = configure_http_client(
             tls.apply(reqwest::Client::builder(), include_identity),
-            identity_redirect_policy(&base, tls, include_identity),
+            guarded_redirect_policy(&base, tls, include_identity, &guard),
+            &guard,
         )
         .http2_adaptive_window(true)
         .build()?;
         let bulk = configure_http_client(
             tls.apply(reqwest::Client::builder(), include_identity),
-            identity_redirect_policy(&base, tls, include_identity),
+            guarded_redirect_policy(&base, tls, include_identity, &guard),
+            &guard,
         )
         .http1_only()
         .build()?;
@@ -204,13 +214,15 @@ impl UpstreamClient {
             (
                 configure_http_client(
                     tls.apply(reqwest::Client::builder(), false),
-                    reqwest::redirect::Policy::default(),
+                    guarded_redirect_policy(&base, tls, false, &guard),
+                    &guard,
                 )
                 .http2_adaptive_window(true)
                 .build()?,
                 configure_http_client(
                     tls.apply(reqwest::Client::builder(), false),
-                    reqwest::redirect::Policy::default(),
+                    guarded_redirect_policy(&base, tls, false, &guard),
+                    &guard,
                 )
                 .http1_only()
                 .build()?,
@@ -225,6 +237,7 @@ impl UpstreamClient {
             cross_origin_bulk,
             base,
             credentials,
+            guard,
             range_support: Arc::new(AtomicU8::new(RANGE_UNKNOWN)),
             reachability: Arc::new(AtomicU8::new(REACHABILITY_UNKNOWN)),
         })
@@ -298,6 +311,7 @@ impl UpstreamClient {
     ) -> Result<impl Stream<Item = Result<Bytes, UpstreamError>> + Send + use<>, UpstreamError> {
         use futures_util::TryStreamExt as _;
         let url = Url::parse(url)?;
+        self.guard.check_url(&url)?;
         let response = self
             .send_with_retry(|auth| {
                 self.authenticate(
@@ -318,6 +332,7 @@ impl UpstreamClient {
     /// request fails or answers a non-success status.
     pub async fn fetch_bytes(&self, url: &str) -> Result<Bytes, UpstreamError> {
         let url = Url::parse(url)?;
+        self.guard.check_url(&url)?;
         let mut attempt = 0;
         loop {
             let response = self
@@ -351,6 +366,7 @@ impl UpstreamClient {
         use futures_util::TryStreamExt as _;
 
         let url = Url::parse(url)?;
+        self.guard.check_url(&url)?;
         let mut attempt = 0;
         loop {
             let response = self
@@ -409,6 +425,7 @@ impl UpstreamClient {
     /// and [`RangeError::Upstream`] on other request failures.
     pub async fn head_file_for_range(&self, url: &str) -> Result<FileHead, RangeError> {
         let url = Url::parse(url).map_err(UpstreamError::from)?;
+        self.guard.check_url(&url).map_err(RangeError::from)?;
         let response = self
             .send_with_retry(|auth| {
                 self.authenticate(self.http(&url).head(url.clone()), &url, auth)
@@ -457,6 +474,7 @@ impl UpstreamClient {
             return Err(RangeError::Invalid("requested range does not fit memory".to_owned()));
         };
         let url = Url::parse(url).map_err(UpstreamError::from)?;
+        self.guard.check_url(&url).map_err(RangeError::from)?;
         let response = self
             .send_with_retry(|auth| {
                 self.authenticate(self.http(&url).get(url.clone()), &url, auth)
@@ -638,6 +656,7 @@ fn same_origin(left: &Url, right: &Url) -> bool {
 fn configure_http_client(
     builder: reqwest::ClientBuilder,
     redirect: reqwest::redirect::Policy,
+    guard: &OutboundGuard,
 ) -> reqwest::ClientBuilder {
     builder
         .user_agent(USER_AGENT)
@@ -647,22 +666,48 @@ fn configure_http_client(
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .tls_version_min(reqwest::tls::Version::TLS_1_3)
+        .dns_resolver(guard.clone())
         .redirect(redirect)
 }
 
-fn identity_redirect_policy(base: &Url, tls: &UpstreamTls, include_identity: bool) -> reqwest::redirect::Policy {
-    if !include_identity || !tls.has_identity() {
-        return reqwest::redirect::Policy::default();
-    }
+/// A redirect policy that enforces the outbound destination on every hop. It keeps the client's TLS
+/// identity from following a cross-origin redirect and rejects a hop to a disallowed IP-literal host
+/// before the connection; hostname hops are caught by the guarding resolver.
+fn guarded_redirect_policy(
+    base: &Url,
+    tls: &UpstreamTls,
+    include_identity: bool,
+    guard: &OutboundGuard,
+) -> reqwest::redirect::Policy {
+    let restrict_identity = include_identity && tls.has_identity();
     let base = base.clone();
+    let guard = guard.clone();
     reqwest::redirect::Policy::custom(move |attempt| {
-        if same_origin(&base, attempt.url()) {
-            reqwest::redirect::Policy::default().redirect(attempt)
-        } else {
-            attempt.error("upstream client identity cannot follow a cross-origin redirect")
+        if attempt.previous().len() > MAX_REDIRECTS {
+            return attempt.error(TooManyRedirects);
+        }
+        if restrict_identity && !same_origin(&base, attempt.url()) {
+            return attempt.error("upstream client identity cannot follow a cross-origin redirect");
+        }
+        match guard.check_url(attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(err) => attempt.error(err),
         }
     })
 }
+
+const MAX_REDIRECTS: usize = 10;
+
+#[derive(Debug)]
+struct TooManyRedirects;
+
+impl std::fmt::Display for TooManyRedirects {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("too many redirects")
+    }
+}
+
+impl std::error::Error for TooManyRedirects {}
 
 /// Remove credential-bearing URL parts before displaying configured upstreams.
 #[must_use]

@@ -1013,7 +1013,7 @@ fn build_upstream_client(
     tls: &UpstreamTls,
     identity_origin: &str,
 ) -> anyhow::Result<UpstreamClient> {
-    UpstreamClient::with_credentials_and_tls_for_origin(upstream, credentials, tls, identity_origin)
+    UpstreamClient::with_credentials_and_tls_for_origin(upstream, credentials, tls, identity_origin, &[])
         .with_context(|| format!("build cached index {index} with upstream {}", redact_url(upstream)))
 }
 

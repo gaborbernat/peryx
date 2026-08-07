@@ -199,6 +199,7 @@ async fn test_routed_project_does_not_fall_back_after_a_credential_failure() {
                 credentials,
                 &UpstreamTls::default(),
                 &first.uri(),
+                &[],
             )
             .unwrap(),
         ),

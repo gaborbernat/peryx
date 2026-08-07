@@ -3,6 +3,7 @@ mod credential_tests;
 mod error_tests;
 #[cfg(unix)]
 mod exec_tests;
+mod guard_tests;
 mod netrc_tests;
 mod retry_tests;
 

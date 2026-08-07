@@ -16,6 +16,20 @@ fn test_credential_error_is_redacted_for_users() {
     );
 }
 
+#[test]
+fn test_blocked_destination_hides_reason_from_users() {
+    let error = UpstreamError::BlockedDestination {
+        reason: "169.254.169.254 is not a public address".to_owned(),
+    };
+
+    assert_eq!(error.status(), None);
+    assert_eq!(error.user_message(), "upstream destination is not permitted");
+    assert_eq!(
+        error.to_string(),
+        "upstream destination is not permitted: 169.254.169.254 is not a public address"
+    );
+}
+
 #[tokio::test]
 async fn test_fetch_bytes_reports_decode_errors() {
     let server = MockServer::start().await;
@@ -39,9 +53,12 @@ async fn test_fetch_bytes_reports_decode_errors() {
 #[tokio::test]
 async fn test_fetch_bytes_reports_request_failures() {
     let client = UpstreamClient::new("https://pypi.org/simple/").unwrap();
-    let err = client.fetch_bytes("ftp://example.invalid/pkg.whl").await.unwrap_err();
+    let err = client
+        .fetch_bytes("http://peryx.nonexistent.invalid/pkg.whl")
+        .await
+        .unwrap_err();
 
-    assert_eq!(err.user_message(), "upstream request failed");
+    assert_eq!(err.user_message(), "upstream connection failed");
     assert_eq!(client.reachability().as_str(), "unreachable");
 }
 

@@ -172,6 +172,7 @@ async fn test_client_replays_a_401_with_the_refreshed_generation() {
         ),
         &UpstreamTls::default(),
         &format!("{}/simple/", server.uri()),
+        &[],
     )
     .unwrap();
 
@@ -228,6 +229,7 @@ async fn test_client_replays_only_once_after_a_401() {
         ),
         &UpstreamTls::default(),
         &format!("{}/simple/", server.uri()),
+        &[],
     )
     .unwrap();
 
@@ -254,6 +256,7 @@ async fn test_warm_records_a_credential_refresh_failure() {
         ),
         &UpstreamTls::default(),
         "https://example.invalid/simple/",
+        &[],
     )
     .unwrap();
 

@@ -163,8 +163,17 @@ fn SearchResults(query: String, source_type: String, availability: String, page_
         };
         return view! { <p class="dim">{message}</p> }.into_any();
     }
-    let start = page_data.page.saturating_sub(1).saturating_mul(page_data.page_size) + 1;
-    let end = page_data.total.min(start + page_data.results.len().saturating_sub(1));
+    let Some((start, end)) = page_data.shown_range() else {
+        let last_page = page_data.total.div_ceil(page_data.page_size);
+        let href = search_page_url(&query, &source_type, &availability, last_page, page_data.page_size);
+        return view! {
+            <p class="dim">"This page is past the last result of "{page_data.total}"."</p>
+            <nav class="pagination" aria-label="Search pages">
+                <a class="page-link" href=href>"Go to last page"</a>
+            </nav>
+        }
+        .into_any();
+    };
     let previous = (page_data.page > 1).then(|| {
         search_page_url(
             &query,

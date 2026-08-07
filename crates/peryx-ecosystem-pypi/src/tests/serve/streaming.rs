@@ -240,6 +240,35 @@ async fn test_live_stream_with_trailing_garbage_errors_and_never_persists() {
     assert!(h.state.meta.get_index("pypi/flask").unwrap().is_none());
 }
 #[tokio::test]
+async fn test_live_stream_rejects_malformed_punctuation_and_never_persists() {
+    let h = harness().await;
+    // A missing value after `"unknown":` balances depth and finishes clean through the structural
+    // lexer; the grammar guard fails the body so the malformed page is never cached.
+    mount_json_page(
+        &h.server,
+        r#"{"meta":{"api-version":"1.4"},"name":"flask","versions":["1.0"],"files":[],"unknown":,}"#,
+    )
+    .await;
+    let items = stream_outcome(&h.state).await;
+    assert!(items.last().is_some_and(Result::is_err));
+    assert!(h.state.meta.get_index("pypi/flask").unwrap().is_none());
+}
+#[tokio::test]
+async fn test_cold_page_with_a_scalar_root_errors_and_never_persists() {
+    let h = harness().await;
+    // A bare scalar is valid JSON but not a PEP 691 project-detail object; the cold path must fail
+    // it before publishing a cache record.
+    mount_json_page(&h.server, "123").await;
+    let outcome = cache::stream_detail(h.state.serving.clone(), 0, "flask".to_owned()).await;
+    assert!(outcome.is_err());
+    assert!(h.state.meta.get_index("pypi/flask").unwrap().is_none());
+    drop(
+        cache::flight_gate(&h.state.serving, "pypi/flask")
+            .try_lock_owned()
+            .unwrap(),
+    );
+}
+#[tokio::test]
 async fn test_live_stream_error_releases_the_inflight_entry() {
     let h = harness().await;
     mount_json_page(

@@ -500,6 +500,7 @@ fn transform_error(err: crate::stream::TransformError) -> CacheError {
         crate::stream::TransformError::Simple(err) => CacheError::Simple(err),
         crate::stream::TransformError::Truncated
         | crate::stream::TransformError::Trailing
+        | crate::stream::TransformError::Malformed
         | crate::stream::TransformError::TooLarge => CacheError::Unavailable,
     }
 }

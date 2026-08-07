@@ -317,7 +317,7 @@ fn test_escaped_keys_dispatch_like_plain_spellings() {
     // Every control key spelled with a `\uXXXX` escape: meta, name, versions, files. Each must be
     // decoded and transformed exactly as its plain spelling, so the file URL is rewritten and the
     // source registered.
-    let page = r#"{"m\u0065ta":{"api-version":"1.1"},"nam\u0065":"demo",
+    let page = r#"{"m\u0065ta":{"api-version":"1.1"},"\u006eame":"demo",
         "v\u0065rsions":["1.0"],"fi\u006ces":[
         {"filename":"demo-1.0-py3-none-any.whl","url":"https://up/demo-1.0-py3-none-any.whl",
          "hashes":{"sha256":"aa11"},"yanked":false}
@@ -338,9 +338,9 @@ fn test_escaped_keys_dispatch_like_plain_spellings() {
 #[test]
 fn test_escaped_keys_that_cannot_spell_a_member_pass_through() {
     // Escapes that resolve to no ASCII letter of a control key leave the key unknown, so the
-    // member streams through byte-for-byte: a named escape, a non-hex `\u`, a multi-byte scalar,
-    // and a lone surrogate. A misfire into files/meta/versions would rewrite the output.
-    for key in [r"fi\tles", r"na\uzzzze", r"m\u00e9ta", r"fi\uD800les"] {
+    // member streams through byte-for-byte: a named escape, a multi-byte scalar, and a lone
+    // surrogate. A misfire into files/meta/versions would rewrite the output.
+    for key in [r"fi\tles", r"m\u00e9ta", r"fi\uD800les"] {
         let page = format!(r#"{{"name":"demo","{key}":1,"files":[]}}"#);
         for chunk in [1, page.len()] {
             let (out, _) = transform_summary(&page, plain_context(), chunk);
@@ -844,6 +844,123 @@ fn test_rejects_a_page_past_the_byte_limit() {
     let err = result.unwrap_err();
     assert_eq!(err.to_string(), "upstream page exceeds the size or file-count limit");
     assert!(matches!(err, TransformError::TooLarge));
+}
+
+/// Drive the transformer over the page in fixed-size chunks and return the finish outcome, so a
+/// grammar violation surfaces whether it lands mid-chunk or only at the document's end.
+fn stream_result(page: &str, chunk: usize) -> Result<PageSummary, TransformError> {
+    let mut transformer = PageTransformer::new(plain_context());
+    let mut out = Vec::new();
+    for piece in page.as_bytes().chunks(chunk) {
+        transformer.push_into(piece, &mut out)?;
+    }
+    transformer.finish()
+}
+
+#[test]
+fn test_non_object_root_is_rejected() {
+    // PEP 691 project detail is an object; a scalar, array, or literal root is grammatically valid
+    // JSON yet still not a project-detail page.
+    for page in [
+        "123",
+        "12.5",
+        "-0",
+        r#""demo""#,
+        "true",
+        "false",
+        "null",
+        "[]",
+        r#"["a"]"#,
+    ] {
+        for chunk in [1, page.len()] {
+            assert!(
+                matches!(stream_result(page, chunk), Err(TransformError::Malformed)),
+                "page {page} chunk {chunk}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_malformed_top_level_punctuation_is_rejected() {
+    // A missing value after `:` keeps balanced depth and finishes clean through the structural
+    // lexer; only the grammar guard rejects it before it can be cached.
+    let page = r#"{"files":[],"unknown":,}"#;
+    for chunk in [1, page.len()] {
+        assert!(
+            matches!(stream_result(page, chunk), Err(TransformError::Malformed)),
+            "chunk {chunk}"
+        );
+    }
+}
+
+#[test]
+fn test_non_hex_unicode_escape_in_a_key_is_rejected() {
+    // `\u` must be followed by four hex digits; the structural lexer passes the malformed key
+    // through, so the grammar guard is what fails the body.
+    let page = r#"{"na\uzzzze":1,"files":[]}"#;
+    for chunk in [1, page.len()] {
+        assert!(
+            matches!(stream_result(page, chunk), Err(TransformError::Malformed)),
+            "chunk {chunk}"
+        );
+    }
+}
+
+#[test]
+fn test_grammar_guard_accepts_every_json_scalar_shape() {
+    // The number, string, and literal DFAs must clear valid inputs, or the guard would reject good
+    // pages: signs, fractions, exponents, escapes, and the three keywords all appear here, carried
+    // by an unrecognized member the structural lexer copies through untouched.
+    let page = r#"{"meta":{"api-version":"1.4"},"name":"demo","versions":["1.0"],
+        "extra":[null,true,false,0,-0,0e1,12,3.14,-1.5e10,1E+3,-0.0e-2,"a\tbé","",{}],
+        "files":[{"filename":"demo-1.0-py3-none-any.whl","url":"https://up/demo.whl",
+         "hashes":{"sha256":"aa11"},"gpg-sig":true,"yanked":false}]}"#;
+    for chunk in [1, 5, page.len()] {
+        assert!(stream_result(page, chunk).is_ok(), "chunk {chunk}");
+    }
+}
+
+#[test]
+fn test_grammar_guard_rejects_every_structural_violation() {
+    // One page per grammar failure the structural lexer leaves balanced: a missing value, a bad
+    // container start, a non-string key, a missing colon, junk after a value, mismatched brackets,
+    // an invalid escape, a raw control byte, each malformed number shape, and a broken keyword.
+    for page in [
+        r#"{"a":,}"#,
+        r"{,}",
+        r#"{"a":1,2}"#,
+        r#"{"a"1}"#,
+        r#"{"a":1 2}"#,
+        r#"{"a":[0}]"#,
+        r#"{"a":"\q"}"#,
+        "{\"a\":\"x\ny\"}",
+        r#"{"a":-}"#,
+        r#"{"a":1.}"#,
+        r#"{"a":1e}"#,
+        r#"{"a":1e+}"#,
+        r#"{"a":nul}"#,
+    ] {
+        for chunk in [1, page.len()] {
+            assert!(
+                matches!(stream_result(page, chunk), Err(TransformError::Malformed)),
+                "page {page:?} chunk {chunk}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_incomplete_page_is_rejected() {
+    // An empty or whitespace-only body clears the structural checks yet holds no root object.
+    for page in ["", "   "] {
+        let mut transformer = PageTransformer::new(plain_context());
+        transformer.push(page.as_bytes()).unwrap();
+        assert!(
+            matches!(transformer.finish(), Err(TransformError::Malformed)),
+            "page {page:?}"
+        );
+    }
 }
 
 #[test]

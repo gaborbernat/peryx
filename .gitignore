@@ -21,3 +21,4 @@ __pycache__/
 /magic/
 /site/node_modules/
 /results/
+build.log

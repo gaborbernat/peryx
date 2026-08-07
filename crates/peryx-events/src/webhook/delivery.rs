@@ -567,6 +567,51 @@ mod tests {
             .await;
     }
 
+    // Run the server helpers in this task rather than a spawned one: llvm-cov does not attribute the
+    // body of a future that only executes inside `tokio::spawn`, so the accept, hold, and answer paths
+    // are exercised directly here to keep the line-coverage gate honest.
+    #[tokio::test]
+    async fn test_server_helpers_run_in_the_foreground() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        use tokio::net::TcpStream;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let client = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(stream);
+        });
+        let _ = tokio::time::timeout(Duration::from_millis(150), accept_and_hold(listener, counter.clone())).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        client.await.unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (server_socket, _) = listener.accept().await.unwrap();
+        let _peer = peer.await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(50), hold_open(server_socket)).await;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(b"GET /hook HTTP/1.1\r\n\r\n").await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+            buf
+        });
+        let (server_socket, _) = listener.accept().await.unwrap();
+        answer_ok(server_socket).await;
+        let response = client.await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{response:?}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_slow_target_does_not_block_a_healthy_one() {
         let slow = HangingServer::start().await;

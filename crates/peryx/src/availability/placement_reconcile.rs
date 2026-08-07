@@ -64,14 +64,22 @@ pub struct FilesystemPlacementReconciler {
 impl FilesystemPlacementReconciler {
     /// Build the reconciler for a filesystem node from its configuration and runtime store.
     ///
-    /// Returns `None` when the node reconciles nothing: no membership, no writer identity, this node
+    /// Returns `None` when the node reconciles nothing: no membership, no node identity, this node
     /// absent from the roster, or a single-data-center group with no peer a repair could pull from.
+    ///
+    /// The node names its own roster entry through `node_identity`, so the reconciler resolves its own
+    /// datacenter from that; `writer_identity` is the shared writer every node claims and is the same
+    /// across the group, so it names one datacenter for all and would place a replica in the authority's
+    /// datacenter. It falls back to `writer_identity` only for a single-writer group that configures no
+    /// distinct node identity.
     ///
     /// # Errors
     /// Returns an error when a configured data center is not a valid placement component.
     pub fn from_config(config: &Config, store: BlobStore) -> anyhow::Result<Option<Self>> {
-        let (Some(membership), Some(identity)) = (config.dc_membership.as_ref(), config.writer_identity.as_deref())
-        else {
+        let (Some(membership), Some(identity)) = (
+            config.dc_membership.as_ref(),
+            config.node_identity.as_deref().or(config.writer_identity.as_deref()),
+        ) else {
             return Ok(None);
         };
         Self::plan(membership, identity, store)

@@ -673,6 +673,34 @@ fn test_from_config_builds_a_reconciler_across_datacenters() {
 }
 
 #[test]
+fn test_from_config_resolves_the_local_datacenter_from_the_node_identity() {
+    // writer_identity is the one writer every node claims, the same across the group, so a replica in
+    // another datacenter must place itself by node_identity. Here writer_identity names the east
+    // authority while node_identity names this node's west member; the reconciler owns west placements,
+    // not the authority's east ones.
+    let (_sdir, store, _root, _backend) = filesystem();
+    let config = Config {
+        writer_identity: Some("authority".to_owned()),
+        node_identity: Some("replica".to_owned()),
+        dc_membership: Some(membership(vec![
+            member("authority", "east", DcRole::Writer),
+            member("replica", "west", DcRole::Replica),
+        ])),
+        ..Config::default()
+    };
+
+    let reconciler = FilesystemPlacementReconciler::from_config(&config, store)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        reconciler.local_dc,
+        dc("west"),
+        "node_identity resolves the local datacenter, not writer_identity"
+    );
+}
+
+#[test]
 fn test_from_config_rejects_an_invalid_datacenter() {
     let (_sdir, store, _root, _backend) = filesystem();
     let config = Config {

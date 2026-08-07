@@ -67,6 +67,7 @@ pep440_rs.workspace = true
 tl.workspace = true
 web_atoms.workspace = true
 url.workspace = true
+percent-encoding.workspace = true
 sha2.workspace = true
 xml-rs = "0.8"
 

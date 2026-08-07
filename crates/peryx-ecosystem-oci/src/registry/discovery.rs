@@ -42,7 +42,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 self.filter_proxy_tag_page(state, name, &member.name, client, repo, response)
                     .await
             } else {
-                Ok(response)
+                serve_proxy_tag_page(name, response).await
             };
         }
         let tags = self.visible_tag_names(state, name, repo, active, &members).await?;
@@ -534,7 +534,9 @@ pub(super) fn serve_catalog(state: &ServingState, query: &str) -> Result<Respons
 /// A tag-list page as this registry answers it: the upstream body, and a `Link` to the next page
 /// rewritten to this registry's client-facing name. The upstream's `Link` names the upstream
 /// repository (`/v2/library/nginx/...`, no index route), which a client would resolve back against
-/// peryx and 404; only its query carries over.
+/// peryx and 404; only its query carries over. The body's `name` is the upstream repository too and is
+/// rewritten by [`serve_proxy_tag_page`] on the client-facing path; the aggregation path reads only the
+/// `tags` and ignores it.
 fn tag_page_response(name: &str, upstream_link: Option<&str>, body: Vec<u8>) -> Response {
     let mut response = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     if let Some(query) = upstream_link.and_then(next_page_query)
@@ -543,6 +545,46 @@ fn tag_page_response(name: &str, upstream_link: Option<&str>, body: Vec<u8>) -> 
         response.headers_mut().insert(header::LINK, value);
     }
     response
+}
+
+/// Rewrite a served proxy tag page's body `name` to the client-facing repository. `proxy_tags` caches
+/// and forwards the upstream body verbatim, whose `name` is the upstream repository (`library/nginx`) a
+/// client cannot address and which the cached, filtered, and virtual paths never emit; the single
+/// online-proxy serve path swaps it here. Tag order and count carry over, the already-rewritten `Link`
+/// stays, and an upstream error passes through untouched. A success body that is not a tag list is a
+/// gateway fault, not a listing.
+async fn serve_proxy_tag_page(name: &str, response: Response) -> Result<Response, ServeError> {
+    if !response.status().is_success() {
+        return Ok(response);
+    }
+    let (mut parts, body) = response.into_parts();
+    let body = axum::body::to_bytes(body, MAX_TAGS_BYTES)
+        .await
+        .expect("proxy tag pages are bounded before serving");
+    let body = rewrite_tag_page_name(name, &body)?;
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Ok(Response::from_parts(parts, Body::from(body)))
+}
+
+/// Rewrite a proxied tag-list body's `name` to the client-facing repository, preserving tag order and
+/// count. Upstream answers under its own repository name, so forwarding it unchanged leaks a name the
+/// client cannot address. A body that is not a tag-list object with a string-array (or absent) `tags`
+/// is rejected rather than served as one.
+fn rewrite_tag_page_name(name: &str, body: &[u8]) -> Result<Vec<u8>, ServeError> {
+    let invalid = || ServeError::Transport("upstream tag list is invalid".to_owned());
+    let document = serde_json::from_slice::<serde_json::Value>(body)
+        .map_err(|err| ServeError::Transport(format!("upstream tag list is invalid: {err}")))?;
+    let serde_json::Value::Object(fields) = &document else {
+        return Err(invalid());
+    };
+    let tags = match fields.get("tags") {
+        Some(serde_json::Value::Array(tags)) if tags.iter().all(serde_json::Value::is_string) => tags.clone(),
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(_) => return Err(invalid()),
+    };
+    Ok(serde_json::json!({ "name": name, "tags": tags })
+        .to_string()
+        .into_bytes())
 }
 
 /// `next_page_query`, reading an already-parsed header value.

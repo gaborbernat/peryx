@@ -3,7 +3,9 @@
 //! A reader asks for the accepted download totals over a day range, scoped to one repository or across
 //! all of them, and wants to know whether the answer covers every producer it should. This folds the
 //! converged [`AnalyticsReceiver`] totals into per-day buckets and classifies the range against the
-//! expected producers with [`assess`](crate::completeness::assess).
+//! expected producers with [`assess`](crate::completeness::assess). Only the expected producers' rows
+//! are folded, so a decommissioned or rogue producer outside the topology never inflates the reported
+//! totals while the range still reads complete.
 //!
 //! Completeness is measured against the cluster's own accepted frontier, not the wall clock. The
 //! frontier is the highest sealed day any expected producer has been folded through; a producer that has
@@ -14,7 +16,7 @@
 //! newest sealed day is. A historical range whose end sits below the frontier requires only coverage
 //! through its own end, so a producer still catching up to today can still be complete for the past.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analytics::{AggregateDelta, AnalyticsReceiver, ProducerId};
 use crate::completeness::{Completeness, ProducerCoverage, assess};
@@ -87,6 +89,12 @@ pub struct CompletenessReport {
 /// expected producer, each required to reach the cluster frontier capped at the range end. An empty
 /// expected set is [`Unavailable`](Completeness::Unavailable), the fail-closed answer, since a picture
 /// vouched for against zero producers cannot be told apart from one a filter narrowed to nothing.
+///
+/// When the expected set is non-empty the buckets and totals fold only rows reported by an expected
+/// producer, so a producer outside the topology set is left out of both the verdict and the sums rather
+/// than counted toward a total the assessment never checked it against. An empty expected set has no
+/// topology to exclude against, so it falls back to surfacing every accepted row's totals as a
+/// best-effort reading under its [`Unavailable`](Completeness::Unavailable) verdict.
 #[must_use]
 pub fn assess_completeness(
     receiver: &AnalyticsReceiver,
@@ -122,10 +130,12 @@ pub fn assess_completeness(
         })
         .collect();
 
+    let expected_producers: BTreeSet<&ProducerId> = expected.iter().map(|expected| &expected.producer).collect();
     let mut folded: BTreeMap<i64, (u64, u64)> = BTreeMap::new();
     let mut totals = AggregateDelta::default();
-    for (key, delta) in receiver.accepted_rows() {
-        if key.day < query.from_day
+    for (producer, key, delta) in receiver.accepted_rows() {
+        if (!expected_producers.is_empty() && !expected_producers.contains(producer))
+            || key.day < query.from_day
             || key.day > query.to_day
             || query.repository.as_deref().is_some_and(|route| key.repository != route)
         {

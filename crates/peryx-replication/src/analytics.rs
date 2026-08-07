@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::envelope::AuthorityEpoch;
 
 /// The snapshot schema this build writes and is willing to restore.
-pub const APPLY_STATE_SCHEMA: u32 = 1;
+pub const APPLY_STATE_SCHEMA: u32 = 2;
 
 /// The default apply bounds: a batch is metadata-sized, and retained replay keys stay bounded so a
 /// stalled compaction frontier cannot grow the deduplication set without limit.
@@ -187,20 +187,39 @@ impl Frontier {
     }
 }
 
+/// An accepted aggregate's dimension stamped with the producer that reported it. Folding keeps the
+/// producer in the key so a completeness query can restrict its totals to the expected producer set,
+/// leaving an unexpected or decommissioned producer's rows out of the reported sums instead of letting
+/// them inflate a total the verdict never consulted them for.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AcceptedKey {
+    producer: ProducerId,
+    dimension: AggregateKey,
+}
+
 /// The persisted serde shape of an [`ApplyState`]: a schema tag guarding the accepted totals and the
 /// replay set, so a format change is a deliberate migration rather than a silent misread.
 #[derive(Debug, Serialize, Deserialize)]
 struct ApplyStateSnapshot {
     schema: u32,
-    totals: Vec<AggregateRow>,
+    totals: Vec<AcceptedSnapshotRow>,
     applied: Vec<IntervalId>,
+}
+
+/// One accepted total in a snapshot: the producer that reported the dimension, the dimension, and its
+/// converged delta.
+#[derive(Debug, Serialize, Deserialize)]
+struct AcceptedSnapshotRow {
+    producer: ProducerId,
+    key: AggregateKey,
+    delta: AggregateDelta,
 }
 
 /// A replica's converged view: the accepted additive totals plus the replay set that keeps applying a
 /// batch idempotent.
 #[derive(Debug, Clone)]
 pub struct ApplyState {
-    totals: BTreeMap<AggregateKey, AggregateDelta>,
+    totals: BTreeMap<AcceptedKey, AggregateDelta>,
     applied: BTreeSet<IntervalId>,
     limits: ApplyLimits,
 }
@@ -240,17 +259,25 @@ impl ApplyState {
             });
         }
         for row in &batch.rows {
-            let total = self.totals.entry(row.key.clone()).or_default();
+            let key = AcceptedKey {
+                producer: batch.interval.producer.clone(),
+                dimension: row.key.clone(),
+            };
+            let total = self.totals.entry(key).or_default();
             *total = total.saturating_add(row.delta);
         }
         self.applied.insert(batch.interval.clone());
         Ok(ApplyOutcome::Applied)
     }
 
-    /// The accepted total for `key`, or a zero delta for a dimension nothing has folded into.
+    /// The accepted total for `key` across every producer that reported it, or a zero delta for a
+    /// dimension nothing has folded into.
     #[must_use]
     pub fn total(&self, key: &AggregateKey) -> AggregateDelta {
-        self.totals.get(key).copied().unwrap_or_default()
+        self.totals
+            .iter()
+            .filter(|(stored, _)| &stored.dimension == key)
+            .fold(AggregateDelta::default(), |sum, (_, delta)| sum.saturating_add(*delta))
     }
 
     /// The number of interval keys the replay set currently retains.
@@ -276,8 +303,9 @@ impl ApplyState {
             totals: self
                 .totals
                 .iter()
-                .map(|(key, delta)| AggregateRow {
-                    key: key.clone(),
+                .map(|(key, delta)| AcceptedSnapshotRow {
+                    producer: key.producer.clone(),
+                    key: key.dimension.clone(),
                     delta: *delta,
                 })
                 .collect(),
@@ -302,7 +330,19 @@ impl ApplyState {
             });
         }
         Ok(Self {
-            totals: snapshot.totals.into_iter().map(|row| (row.key, row.delta)).collect(),
+            totals: snapshot
+                .totals
+                .into_iter()
+                .map(|row| {
+                    (
+                        AcceptedKey {
+                            producer: row.producer,
+                            dimension: row.key,
+                        },
+                        row.delta,
+                    )
+                })
+                .collect(),
             applied: snapshot.applied.into_iter().collect(),
             limits,
         })
@@ -405,10 +445,14 @@ impl AnalyticsReceiver {
         self.accepted.get(producer).copied()
     }
 
-    /// The accepted aggregate dimensions and their converged totals, for a completeness query to fold
-    /// over a day range and repository scope.
-    pub(crate) fn accepted_rows(&self) -> impl Iterator<Item = (&AggregateKey, &AggregateDelta)> {
-        self.state.totals.iter()
+    /// The accepted aggregate dimensions and their converged totals, each tagged with the producer that
+    /// reported it, for a completeness query to fold over a day range and repository scope while
+    /// excluding producers outside its expected set.
+    pub(crate) fn accepted_rows(&self) -> impl Iterator<Item = (&ProducerId, &AggregateKey, &AggregateDelta)> {
+        self.state
+            .totals
+            .iter()
+            .map(|(key, delta)| (&key.producer, &key.dimension, delta))
     }
 
     /// The accepted total for `key`.

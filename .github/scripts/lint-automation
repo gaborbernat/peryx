@@ -26,6 +26,7 @@ fi
 .github/scripts/tests/conformance.bash
 .github/scripts/tests/run-codspeed.bash
 .github/scripts/tests/ci-design.bash
+.github/scripts/tests/job-results.bash
 .github/scripts/tests/mutation.bash
 .github/scripts/tests/coverage-frontend.bash
 .github/scripts/tests/coverage-linux.bash

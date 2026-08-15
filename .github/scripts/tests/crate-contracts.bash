@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)
+grep -Fxq 'doctest = false' "$repo/crates/peryx-bench-core/Cargo.toml"
 mkdir -p "$repo/.tox/tmp"
 scratch=$(mktemp -d "$repo/.tox/tmp/crate-contracts.XXXXXX")
 scratch=$(cd "$scratch" && pwd -P)
@@ -129,8 +130,14 @@ awk -F '|' -v profile="$coverage_target/peryx-%p-%10m.profraw" -v target="$cover
   'NF != 2 || $1 != profile || $2 != target { exit 1 }' \
   "$COVERAGE_ENV_LOG"
 [[ ! -e $coverage_target.lock ]]
-for package in tested benched checked portable rlib-tested rlib-disabled; do
+for package in checked rlib-disabled; do
   grep -q "|check -p $package --all-targets --all-features|" "$CARGO_LOG"
+done
+for package in tested benched portable rlib-tested; do
+  if grep -q "|check -p $package " "$CARGO_LOG"; then
+    printf 'coverage-built package was checked separately: %s\n' "$package" >&2
+    exit 1
+  fi
 done
 grep -Fq "$coverage_target|llvm-cov nextest -p tested --all-features --lib --no-report|$scratch/shared-target" \
   "$CARGO_LOG"
@@ -157,11 +164,9 @@ if grep -Eq -- '--no-clean.*--no-report|--no-report.*--no-clean' "$CARGO_LOG"; t
 fi
 doctest_line=$(grep -n '|test -p tested --doc --all-features|' "$CARGO_LOG" | cut -d: -f1)
 test_line=$(grep -n '|llvm-cov nextest -p tested --all-features --lib --no-report|' "$CARGO_LOG" | cut -d: -f1)
-build_line=$(grep -n '|check -p tested --all-targets --all-features|' "$CARGO_LOG" | cut -d: -f1)
 normal_clean_line=$(grep -nF "|clean -p tested --target-dir $scratch/shared-target|" "$CARGO_LOG" | cut -d: -f1)
 coverage_clean_line=$(grep -nF "|clean -p tested --target-dir $coverage_target|" "$CARGO_LOG" | cut -d: -f1)
-((normal_clean_line < coverage_clean_line && coverage_clean_line < build_line && \
-  build_line < doctest_line && doctest_line < test_line))
+((normal_clean_line < coverage_clean_line && coverage_clean_line < doctest_line && doctest_line < test_line))
 [[ ! -e $scratch/success/profiles ]]
 jq -se 'all(.[]; .status == "passed") and any(.[]; .phase == "metadata" and .package == null) and any(.[]; .phase == "build" and .package == "checked")' \
   "$scratch/success/timings.jsonl" >/dev/null

@@ -4,6 +4,7 @@ set -euo pipefail
 shard_count=${1:-8}
 scope=${2:-contracts}
 timings=${3:-}
+packages_file=${4:-}
 if [[ ! "$shard_count" =~ ^[1-9][0-9]*$ ]]; then
   printf 'shard count must be a positive integer: %s\n' "$shard_count" >&2
   exit 2
@@ -19,7 +20,19 @@ esac
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 cargo metadata --no-deps --format-version 1 >"$scratch/metadata.json"
-scripts/ci/workspace-package-list "$scope" | while IFS= read -r package; do
+if [[ -n $packages_file ]]; then
+  [[ -f $packages_file ]] || { printf 'package file does not exist: %s\n' "$packages_file" >&2; exit 2; }
+  sort -u "$packages_file" >"$scratch/selected-packages"
+  scripts/ci/workspace-package-list "$scope" >"$scratch/available-packages"
+  unknown=$(comm -23 "$scratch/selected-packages" "$scratch/available-packages")
+  if [[ -n $unknown ]]; then
+    printf 'packages are outside the %s scope:\n%s\n' "$scope" "$unknown" >&2
+    exit 2
+  fi
+else
+  scripts/ci/workspace-package-list "$scope" >"$scratch/selected-packages"
+fi
+while IFS= read -r package; do
   package_root=$(jq -r --arg package "$package" '
     .packages[]
     | select(.name == $package)
@@ -53,7 +66,7 @@ scripts/ci/workspace-package-list "$scope" | while IFS= read -r package; do
     ' "$timings")
   fi
   printf '%s\t%s\t%s\n' "$package" "$weight" "$measured"
-done >"$scratch/raw-packages.tsv"
+done <"$scratch/selected-packages" >"$scratch/raw-packages.tsv"
 
 awk -F '\t' '
   NF == 3 && length($3) { ratio_sum += $3 / $2; measured++; }

@@ -34,7 +34,8 @@ output=$(cd "$repo" && PERYX_MUTATION_BUDGET=32 .github/scripts/mutation-diff ba
 grep -Fq 'mutation candidates=65 budget=32 part=1/1 shard=0/3' <<<"$output"
 (("$(wc -l <"$MUTATION_TEST_LOG")" == 2))
 grep -Fq -- '--workspace --all-features --in-diff' "$MUTATION_TEST_LOG"
-tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--baseline skip --output .tox/mutants --shard 0/3 --sharding round-robin --in-place'
+tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- \
+  '--no-shuffle --test-tool=nextest --baseline skip --timeout 120 --build-timeout 300 --output .tox/mutants --shard 0/3 --sharding round-robin --in-place'
 if tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--jobs'; then
   printf 'in-place mutation passed a job count\n' >&2
   exit 1

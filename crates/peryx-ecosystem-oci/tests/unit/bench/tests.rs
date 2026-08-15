@@ -142,7 +142,16 @@ async fn peryx_server_writes_oci_configuration() {
     true,
     "did not emit its startup event"
 )]
-#[case(Some("#!/bin/sh\nexit 7\n"), false, "exited before its startup event")]
+#[case(
+    Some("#!/bin/sh\nexit 7\n"),
+    false,
+    "exited before its startup event with exit status: 7"
+)]
+#[case(
+    Some("#!/bin/sh\nexec python3 -c 'import os, signal; os.close(1); os.close(2); signal.pause()'\n"),
+    false,
+    "closed its output before its startup event"
+)]
 #[case(
     Some("#!/bin/sh\nprintf 'peryx listening\\n'\nexit 7\n"),
     false,
@@ -610,7 +619,7 @@ if [ "$1" = run ]; then
     printf 'listening on fixture\n' >&2
     printf fixture
   else
-    exec python3 - "$port" "${0%/*}/distribution.pid" <<'PY'
+    python3 - "$port" "${0%/*}/distribution.pid" <<'PY'
 import http.server
 import os
 import sys
@@ -619,6 +628,8 @@ open(sys.argv[2], "w").write(str(os.getpid()))
 print("listening on fixture", file=sys.stderr, flush=True)
 http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), http.server.SimpleHTTPRequestHandler).serve_forever()
 PY
+    status=$?
+    exit "$status"
   fi
 elif [ "$1" = logs ]; then
   printf 'listening on fixture\n'

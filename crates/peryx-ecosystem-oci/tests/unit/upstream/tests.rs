@@ -668,15 +668,69 @@ async fn test_token_flight_wait_has_a_deadline() {
 
 #[tokio::test]
 async fn test_token_flight_retries_when_the_sender_closes() {
-    let (sender, receiver) = broadcast::channel(1);
-    drop(sender);
-
-    assert_eq!(
-        wait_for_flight(receiver, Instant::now() + Duration::from_secs(1))
-            .await
-            .unwrap(),
-        None
+    let upstream = Upstream::new();
+    let credentials = credentials(basic("alice", "pw"));
+    let credential = credentials.credential().await.unwrap();
+    let cache_key = token_cache_key(
+        "https://registry.example/",
+        "repository:library/nginx:pull",
+        credential.identity().provider(),
     );
+    let (sender, _) = broadcast::channel(1);
+    upstream.inflight.lock().await.insert(cache_key.clone(), sender.clone());
+    let close = async {
+        tokio::task::yield_now().await;
+        assert_eq!(sender.receiver_count(), 1);
+        upstream.tokens.lock().await.insert(
+            cache_key.clone(),
+            CachedToken {
+                credentials: credential.identity(),
+                value: "retried".to_owned(),
+            },
+        );
+        upstream.inflight.lock().await.remove(&cache_key);
+        drop(sender);
+    };
+    let challenge = Bearer {
+        realm: "unreachable".to_owned(),
+        service: None,
+        scope: None,
+    };
+
+    let ((), token) = tokio::join!(
+        biased;
+        close,
+        upstream.acquire_token(&cache_key, None, &challenge, &credentials, &credential),
+    );
+
+    assert_eq!(token.unwrap(), "retried");
+}
+
+#[tokio::test]
+async fn test_token_flight_waiter_returns_the_leader_token() {
+    let upstream = Upstream::new();
+    let credentials = credentials(basic("alice", "pw"));
+    let credential = credentials.credential().await.unwrap();
+    let cache_key = token_cache_key(
+        "https://registry.example/",
+        "repository:library/nginx:pull",
+        credential.identity().provider(),
+    );
+    let (sender, _) = broadcast::channel(1);
+    upstream.inflight.lock().await.insert(cache_key.clone(), sender.clone());
+    let challenge = Bearer {
+        realm: "unreachable".to_owned(),
+        service: None,
+        scope: None,
+    };
+
+    let (token, _) = tokio::join!(
+        biased;
+        upstream.acquire_token(&cache_key, None, &challenge, &credentials, &credential),
+        async { sender.send("shared".to_owned()).unwrap() },
+    );
+
+    assert_eq!(token.unwrap(), "shared");
 }
 
 #[tokio::test]

@@ -473,6 +473,19 @@ async fn test_worker_reports_backing_store_failure() {
 }
 
 #[tokio::test]
+async fn test_wait_for_work_consumes_a_pending_notification() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = TestHost {
+        webhooks: WebhookRuntime::disabled(),
+        meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
+        now: 100,
+    };
+    host.webhooks.notify.notify_one();
+
+    wait_for_work(&host).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_empty_scheduler_wait_resumes_on_notification() {
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(TestHost {

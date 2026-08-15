@@ -218,7 +218,6 @@ for package in "$@"; do
     package_failed=1
   fi
   run_package_step "$package" 'clean package coverage' clean_package_coverage "$package"
-  run_package_step "$package" build cargo check -p "$package" --all-targets --all-features
   mapfile -t bench_targets < <(
     jq -r '.targets[] | select(.kind | index("bench")) | .name' <<<"$package_metadata"
   )
@@ -238,6 +237,14 @@ for package in "$@"; do
   fi
   if jq -e 'any(.targets[]; .test and (.kind | index("test")))' <<<"$package_metadata" >/dev/null; then
     test_targets+=(--tests)
+  fi
+  if ! jq -e '(.targets | length > 0) and all(.targets[];
+    (.kind | index("custom-build"))
+    or (.test and ((.kind | index("lib")) or (.kind | index("rlib")) or (.kind | index("bin"))
+      or (.kind | index("test"))))
+    or (.kind | index("example"))
+    or (.kind | index("bench")))' <<<"$package_metadata" >/dev/null; then
+    run_package_step "$package" build cargo check -p "$package" --all-targets --all-features
   fi
   if ((${#test_targets[@]})); then
     run_package_step "$package" 'test targets' cargo llvm-cov nextest -p "$package" \

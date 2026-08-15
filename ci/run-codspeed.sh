@@ -58,13 +58,19 @@ run_with_timeout "$build_timeout" cargo codspeed build --locked -j "$jobs" -m si
 if [[ "$rebuilt" == true ]]; then
   printf '%s\n' "$CODSPEED_SOURCE_KEY" > "$marker"
 fi
-sha256sum "$target_directory/codspeed/analysis/$package"/*
+analysis=()
+shopt -s nullglob
+analysis=("$target_directory/codspeed/analysis/$package"/*)
+shopt -u nullglob
+((${#analysis[@]} == 0)) || sha256sum "${analysis[@]}"
 if [[ ${CODSPEED_BUILD_ONLY:-false} == true ]]; then
   exit 0
 fi
 codspeed_args=(run --mode simulation)
+codspeed_command=(codspeed)
 if [[ ${CODSPEED_SKIP_UPLOAD:-false} == true ]]; then
   codspeed_args+=(--skip-upload)
+  codspeed_command=(env GITHUB_ACTIONS=false codspeed)
 fi
-run_with_timeout "$run_timeout" codspeed "${codspeed_args[@]}" -- \
+run_with_timeout "$run_timeout" "${codspeed_command[@]}" "${codspeed_args[@]}" -- \
   cargo codspeed run -p "$package" "${bench_args[@]}"

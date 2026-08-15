@@ -31,7 +31,7 @@ rg -q 'just fuzz-package peryx-ecosystem-pypi 30' .github/workflows/ci.yml
 rg -q 'just fuzz-package peryx-ecosystem-oci 30' .github/workflows/ci.yml
 sed -n '/^  frontend:/,/^  coverage:/p' .github/workflows/ci.yml | grep -Fq 'sudo apt-get install --yes lcov'
 rg -Fq -- "- 'crates/*/docs/**'" .github/workflows/ci.yml
-rg -Fq -- "- '!crates/*/docs/**'" .github/workflows/ci.yml
+rg -Fq -- "- '!crates/**/docs/**'" .github/workflows/ci.yml
 [[ $(rg -c 'predicate-quantifier: some-with-excludes' .github/workflows/ci.yml) == 1 ]]
 codspeed_shared=$(sed -n '/^            shared:/,/^            runner:/p' \
   .github/workflows/codspeed.yml)
@@ -49,6 +49,11 @@ for pattern in \
   "crates/peryx-ecosystem-oci/{Cargo.toml,build.rs,src/*,src/!(tests)/**,benches/**}"; do
   grep -Fq -- "- '$pattern'" .github/workflows/codspeed.yml
 done
+codspeed_baseline=$(sed -n "/^          if \\[\\[ \"\\\$status\"/,/^          fi\$/p" \
+  .github/workflows/codspeed.yml)
+grep -Fq 'exact base benchmark is unavailable' <<<"$codspeed_baseline"
+grep -Fq 'exit 0' <<<"$codspeed_baseline"
+bash .github/scripts/tests/contract-checks.bash
 metadata=$(cargo metadata --no-deps --format-version 1)
 workspace_crates=$(jq -r '.packages[].manifest_path | sub("/Cargo.toml$"; "")' <<<"$metadata")
 while IFS= read -r crate; do
@@ -57,7 +62,9 @@ while IFS= read -r crate; do
     exit 1
   fi
 done < <(rg -o "crates/[^/{']+" .github/workflows/codspeed.yml | sort -u)
-rg -q 'timings-\$SHARD[.]jsonl' .github/workflows/ci.yml
+package_ref=\$PACKAGE
+grep -Fq "just crate-contracts \".tox/crate-contracts/$package_ref\" \"$package_ref\"" \
+  .github/actions/crate-contract/action.yml
 rg -q 'just conformance peryx-ecosystem-oci' .github/workflows/conformance.yml
 if rg -n 'DISTRIBUTION_SPEC_REF|fcfba1ec' .github/workflows; then
   printf 'workflow contains an owner conformance revision\n' >&2

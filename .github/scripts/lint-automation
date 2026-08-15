@@ -29,4 +29,6 @@ fi
 .github/scripts/tests/coverage-linux.bash
 .github/scripts/tests/owner-tools.bash
 .github/scripts/tests/platform-contract.bash
+scripts/ci/test-affected-contract-packages
 scripts/ci/test-fuzz-package
+scripts/ci/test-workspace-packages

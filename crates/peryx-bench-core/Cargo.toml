@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Ecosystem-neutral benchmark measurement and reporting for peryx."
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

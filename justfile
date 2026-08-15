@@ -123,8 +123,11 @@ workspace-package-list scope="all": _project-temp
     scripts/ci/workspace-package-list "{{scope}}"
 
 # Split workspace crates into weighted contract or system shards.
-workspace-packages shards="8" scope="contracts" timings="": _project-temp
-    scripts/ci/workspace-packages "{{shards}}" "{{scope}}" "{{timings}}"
+workspace-packages shards="8" scope="contracts" timings="" packages_file="": _project-temp
+    scripts/ci/workspace-packages "{{shards}}" "{{scope}}" "{{timings}}" "{{packages_file}}"
+
+affected-contract-packages event: _project-temp
+    scripts/ci/affected-contract-packages "{{event}}" "${PERYX_CHANGED_PATHS:-[]}"
 
 # Check GitHub job results against the workflow policy.
 ci-gate policy: _project-temp
@@ -358,6 +361,9 @@ coverage-frontend native=".tox/coverage/frontend-native.lcov" wasm=".tox/coverag
 # Merge LCOV reports and enforce complete coverage.
 coverage-merge output +inputs: _project-temp
     .github/scripts/coverage-merge "{{output}}" {{inputs}}
+
+coverage-merge-selected output packages_file +inputs: _project-temp
+    .github/scripts/coverage-merge "{{output}}" --packages-file "{{packages_file}}" {{inputs}}
 
 # Record and merge all Linux coverage reports.
 coverage output=".tox/coverage": _project-temp

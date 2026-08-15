@@ -1,0 +1,51 @@
+name: Run crate contract
+description: Run one workspace crate's coverage contract
+inputs:
+  package:
+    description: Workspace package name
+    required: true
+  build-jobs:
+    description: Maximum parallel Cargo build jobs
+    required: false
+    default: "2"
+runs:
+  using: composite
+  steps:
+    - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      with:
+        cache: false
+    - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      env:
+        NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
+      with:
+        shared-key: crate-contract-${{ inputs.package }}
+        cache-on-failure: true
+        workspaces: ". -> .tox/crate-contracts/target"
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+    - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+      with:
+        tool: cargo-llvm-cov,cargo-nextest,just
+    - if: inputs.package == 'peryx'
+      shell: bash
+      run: |
+        curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
+          https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64
+        chmod +x "${RUNNER_TEMP}/toxiproxy-server"
+    - shell: bash
+      env:
+        CARGO_BUILD_JOBS: ${{ inputs.build-jobs }}
+        PACKAGE: ${{ inputs.package }}
+        PERYX_COVERAGE_TARGET_DIR: .tox/crate-contracts/target
+      run: |
+        export PATH="${RUNNER_TEMP}:$PATH"
+        just crate-contracts ".tox/crate-contracts/$PACKAGE" "$PACKAGE"
+    - if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: coverage-crate-${{ inputs.package }}
+        path: |
+          .tox/crate-contracts/${{ inputs.package }}/*.lcov
+          .tox/crate-contracts/${{ inputs.package }}/*.contract.json
+        if-no-files-found: error

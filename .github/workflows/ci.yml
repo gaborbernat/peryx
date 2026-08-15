@@ -28,7 +28,9 @@ jobs:
     timeout-minutes: 5
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
-      crate_matrix: ${{ steps.crates.outputs.matrix }}
+      contract_packages: ${{ steps.crates.outputs.packages }}
+      contract_packages_all: ${{ steps.crates.outputs.available }}
+      contracts: ${{ steps.crates.outputs.selected }}
       automation: ${{ steps.filter.outputs.automation }}
       shared: ${{ steps.filter.outputs.shared }}
       pypi: ${{ steps.filter.outputs.pypi }}
@@ -43,10 +45,14 @@ jobs:
         id: filter
         with:
           predicate-quantifier: some-with-excludes
+          list-files: json
           filters: |
+            contract_inputs:
+              - '**'
             rust:
               - 'crates/**'
-              - '!crates/*/docs/**'
+              - '!crates/**/docs/**'
+              - '!crates/**/*.md'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
@@ -57,7 +63,6 @@ jobs:
               - 'scripts/ci/Dockerfile'
               - 'scripts/ci/**'
               - '.github/scripts/**'
-              - '.github/workflows/ci.yml'
               - '.pre-commit-config.yaml'
               - 'mise.toml'
             shared:
@@ -119,22 +124,24 @@ jobs:
               - 'scripts/ci/Dockerfile'
               - 'scripts/ci/**'
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        if: steps.filter.outputs.rust == 'true' || github.event_name != 'pull_request'
         with:
           cache: false
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        if: steps.filter.outputs.rust == 'true' || github.event_name != 'pull_request'
         with:
           tool: just,ripgrep
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: steps.filter.outputs.rust == 'true' || github.event_name != 'pull_request'
-        with:
-          path: .tox/ci-timings/timings.jsonl
-          key: crate-timings-${{ github.event.pull_request.base.sha || github.sha }}
-          restore-keys: crate-timings-
       - id: crates
-        if: steps.filter.outputs.rust == 'true' || github.event_name != 'pull_request'
-        run: echo "matrix=$(just workspace-packages 8 contracts .tox/ci-timings/timings.jsonl)" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PERYX_CHANGED_PATHS: ${{ steps.filter.outputs.contract_inputs_files }}
+        run: |
+          mkdir -p .tox
+          just affected-contract-packages "$EVENT_NAME" > .tox/affected-contract-packages
+          if [[ -s .tox/affected-contract-packages ]]; then selected=true; else selected=false; fi
+          {
+            echo "packages=$(jq -Rsc 'split("\n") | map(select(length > 0))' .tox/affected-contract-packages)"
+            echo "available=$(scripts/ci/workspace-package-list contracts | jq -Rsc 'split("\n") | map(select(length > 0))')"
+            echo "selected=$selected"
+          } >> "$GITHUB_OUTPUT"
 
   lint-source:
     needs: changes
@@ -307,65 +314,425 @@ jobs:
         run: just sccache-smoke
       - run: just platform-contract
 
-  crate-contracts:
-    name: crate contracts (shard ${{ matrix.shard }}, weight ${{ matrix.weight }})
+  crate-contract-peryx:
+    name: crate contract (peryx)
     needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      max-parallel: 8
-      matrix: ${{ fromJSON(needs.changes.outputs.crate_matrix) }}
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          cache: false
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/crate-contract
         env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
         with:
-          shared-key: crate-contracts-${{ matrix.shard }}
-          cache-on-failure: true
-          workspaces: ". -> .tox/crate-contracts/target"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+          package: peryx
+
+  crate-contract-peryx-archive:
+    name: crate contract (peryx-archive)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-archive')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-archive
+
+  crate-contract-peryx-bench:
+    name: crate contract (peryx-bench)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-bench')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-bench
+
+  crate-contract-peryx-bench-core:
+    name: crate contract (peryx-bench-core)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-bench-core')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          build-jobs: 1
+          package: peryx-bench-core
+
+  crate-contract-peryx-core:
+    name: crate contract (peryx-core)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-core')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-core
+
+  crate-contract-peryx-driver:
+    name: crate contract (peryx-driver)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-driver')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-driver
+
+  crate-contract-peryx-ecosystem-oci:
+    name: crate contract (peryx-ecosystem-oci)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ecosystem-oci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-ecosystem-oci
+
+  crate-contract-peryx-ecosystem-pypi:
+    name: crate contract (peryx-ecosystem-pypi)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ecosystem-pypi')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-ecosystem-pypi
+
+  crate-contract-peryx-events:
+    name: crate contract (peryx-events)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-events')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-events
+
+  crate-contract-peryx-ha:
+    name: crate contract (peryx-ha)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ha')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-ha
+
+  crate-contract-peryx-ha-distributed:
+    name: crate contract (peryx-ha-distributed)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ha-distributed')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-ha-distributed
+
+  crate-contract-peryx-http:
+    name: crate contract (peryx-http)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-http')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-http
+
+  crate-contract-peryx-identity:
+    name: crate contract (peryx-identity)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-identity')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-identity
+
+  crate-contract-peryx-index:
+    name: crate contract (peryx-index)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-index')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-index
+
+  crate-contract-peryx-plugin-registry:
+    name: crate contract (peryx-plugin-registry)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-plugin-registry')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-plugin-registry
+
+  crate-contract-peryx-policy:
+    name: crate contract (peryx-policy)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-policy')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-policy
+
+  crate-contract-peryx-pql:
+    name: crate contract (peryx-pql)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-pql')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-pql
+
+  crate-contract-peryx-search:
+    name: crate contract (peryx-search)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-search')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-search
+
+  crate-contract-peryx-storage:
+    name: crate contract (peryx-storage)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-storage')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-storage
+
+  crate-contract-peryx-test-support:
+    name: crate contract (peryx-test-support)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-test-support')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-test-support
+
+  crate-contract-peryx-upstream:
+    name: crate contract (peryx-upstream)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-upstream')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-upstream
+
+  crate-contract-peryx-web:
+    name: crate contract (peryx-web)
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-web')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/crate-contract
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        with:
+          package: peryx-web
+
+  crate-contracts:
+    name: crate contracts
+    needs:
+      - changes
+      - crate-contract-peryx
+      - crate-contract-peryx-archive
+      - crate-contract-peryx-bench
+      - crate-contract-peryx-bench-core
+      - crate-contract-peryx-core
+      - crate-contract-peryx-driver
+      - crate-contract-peryx-ecosystem-oci
+      - crate-contract-peryx-ecosystem-pypi
+      - crate-contract-peryx-events
+      - crate-contract-peryx-ha
+      - crate-contract-peryx-ha-distributed
+      - crate-contract-peryx-http
+      - crate-contract-peryx-identity
+      - crate-contract-peryx-index
+      - crate-contract-peryx-plugin-registry
+      - crate-contract-peryx-policy
+      - crate-contract-peryx-pql
+      - crate-contract-peryx-search
+      - crate-contract-peryx-storage
+      - crate-contract-peryx-test-support
+      - crate-contract-peryx-upstream
+      - crate-contract-peryx-web
+    if: >-
+      always() && needs.changes.result == 'success' &&
+      needs.changes.outputs.contracts == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
-          tool: cargo-llvm-cov,cargo-nextest,just
-      - if: contains(format(' {0} ', matrix.packages), ' peryx ')
-        run: |
-          curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
-            https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64
-          chmod +x "${RUNNER_TEMP}/toxiproxy-server"
-          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
-      - run: |
-          read -r -a packages <<< "$PACKAGES"
-          just crate-contracts ".tox/crate-contracts/shard-$SHARD" "${packages[@]}"
-          cp ".tox/crate-contracts/shard-$SHARD/timings.jsonl" \
-            ".tox/crate-contracts/shard-$SHARD/timings-$SHARD.jsonl"
-        env:
-          PERYX_COVERAGE_TARGET_DIR: .tox/crate-contracts/target
-          PACKAGES: ${{ matrix.packages }}
-          SHARD: ${{ matrix.shard }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
-        with:
-          name: coverage-crates-${{ matrix.shard }}
-          path: |
-            .tox/crate-contracts/shard-${{ matrix.shard }}/*.lcov
-            .tox/crate-contracts/shard-${{ matrix.shard }}/*.contract.json
-            .tox/crate-contracts/shard-${{ matrix.shard }}/timings-${{ matrix.shard }}.jsonl
-          if-no-files-found: error
+          tool: just
+      - env:
+          CI_RESULTS: ${{ toJSON(needs) }}
+          CI_CONTEXT: >-
+            {"available":${{ needs.changes.outputs.contract_packages_all }},
+            "selected":${{ needs.changes.outputs.contract_packages }}}
+        run: just ci-gate contracts
 
   system:
     name: system coverage (${{ matrix.lane }})
@@ -486,7 +853,9 @@ jobs:
       always() &&
       (needs.changes.outputs.rust == 'true' || github.event_name == 'push' ||
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
-      needs.crate-contracts.result == 'success' && needs.frontend.result == 'success' &&
+      (needs.crate-contracts.result == 'success' ||
+      (needs.changes.outputs.contracts != 'true' && needs.crate-contracts.result == 'skipped')) &&
+      needs.frontend.result == 'success' &&
       needs.system.result == 'success' &&
       (needs.fuzz-oci.result == 'success' || needs.fuzz-oci.result == 'skipped') &&
       (needs.fuzz-pypi.result == 'success' || needs.fuzz-pypi.result == 'skipped')
@@ -507,10 +876,15 @@ jobs:
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: just
+      - name: Restore selected crate packages
+        env:
+          CONTRACT_PACKAGES: ${{ needs.changes.outputs.contract_packages }}
+        run: jq -r '.[]' <<< "$CONTRACT_PACKAGES" > .tox/affected-contract-packages
       - name: Merge executed coverage
         run: |
           mapfile -t parts < <(find .tox/coverage-parts -type f -name '*.lcov' -print | sort)
-          just coverage-merge .tox/coverage/lcov.info "${parts[@]}"
+          just coverage-merge-selected .tox/coverage/lcov.info \
+            .tox/affected-contract-packages "${parts[@]}"
       - name: Preserve measured crate timings
         run: |
           mkdir -p .tox/ci-timings
@@ -744,6 +1118,7 @@ jobs:
         env:
           CI_CONTEXT: >-
             {"event":"${{ github.event_name }}","automation":${{ needs.changes.outputs.automation == 'true' }},
+            "contracts":${{ needs.changes.outputs.contracts == 'true' }},
             "docs":${{ needs.changes.outputs.docs == 'true' }},
             "frontend_tests":${{ needs.changes.outputs.frontend_tests == 'true' }},
             "oci":${{ needs.changes.outputs.oci == 'true' }},"pypi":${{ needs.changes.outputs.pypi == 'true' }},

@@ -285,14 +285,18 @@ impl BenchServer {
             port,
         };
         let deadline = tokio::time::Instant::now() + environment.startup_timeout;
-        if wait_for_startup(receiver, deadline).await.is_err() {
-            if let Some(process) = active.process.as_mut()
-                && let Some(status) = process.try_wait()?
-            {
+        match wait_for_startup(receiver, deadline).await {
+            Ok(Some(())) => {}
+            Ok(None) => {
+                let Some(status) = active.process.as_mut().context("server process")?.try_wait()? else {
+                    bail!("{} closed its output before its startup event", self.name);
+                };
                 bail!("{} exited before its startup event with {status}", self.name);
             }
-            let tail = std::fs::read_to_string(&log).unwrap_or_default();
-            bail!("{} did not emit its startup event; server log tail:\n{tail}", self.name);
+            Err(_) => {
+                let tail = std::fs::read_to_string(&log).unwrap_or_default();
+                bail!("{} did not emit its startup event; server log tail:\n{tail}", self.name);
+            }
         }
         let scratch = tempfile::tempdir()?;
         if let Err(error) = readiness_pull_until(
@@ -368,11 +372,10 @@ fn capture_stream(
 async fn wait_for_startup(
     mut receiver: tokio::sync::mpsc::Receiver<()>,
     deadline: tokio::time::Instant,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<()>> {
     tokio::time::timeout_at(deadline, receiver.recv())
         .await
-        .context("startup event timed out")?
-        .context("process closed its output before startup")
+        .context("startup event timed out")
 }
 
 async fn wait_for_container_event(
@@ -393,7 +396,9 @@ async fn wait_for_container_event(
     let stderr = guard.child_mut().stderr.take().context("docker logs stderr")?;
     let StartupCapture { receiver, threads } =
         capture_startup(stdout, stderr, &scratch.path().join("mirror.log"), marker)?;
-    let result = wait_for_startup(receiver, deadline).await;
+    let result = wait_for_startup(receiver, deadline)
+        .await
+        .and_then(|event| event.context("process closed its output before startup"));
     guard.terminate();
     for thread in threads {
         let _ = thread.join();
@@ -518,7 +523,7 @@ fn terminate_child(process: &mut Child, process_group: bool) {
     if process_group {
         #[cfg(unix)]
         let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{}", process.id())])
+            .args(["-KILL", "--", &format!("-{}", process.id())])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();

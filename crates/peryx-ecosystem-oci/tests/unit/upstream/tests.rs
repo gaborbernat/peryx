@@ -658,7 +658,7 @@ async fn concurrent_pulls(
 
 #[tokio::test]
 async fn test_token_flight_wait_has_a_deadline() {
-    let (_sender, receiver) = watch::channel(FlightState::Pending);
+    let (_sender, receiver) = broadcast::channel(1);
 
     assert_eq!(
         wait_for_flight(receiver, Instant::now()).await.unwrap_err().to_string(),
@@ -668,7 +668,7 @@ async fn test_token_flight_wait_has_a_deadline() {
 
 #[tokio::test]
 async fn test_token_flight_retries_when_the_sender_closes() {
-    let (sender, receiver) = watch::channel(FlightState::Pending);
+    let (sender, receiver) = broadcast::channel(1);
     drop(sender);
 
     assert_eq!(

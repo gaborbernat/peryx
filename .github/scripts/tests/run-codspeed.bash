@@ -5,7 +5,7 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/bin" "$scratch/work"
-jq -n --arg root "$scratch/work" '{packages: [{
+jq -n --arg root "$scratch/work" --arg target "$scratch/codspeed-target" '{target_directory: $target, packages: [{
   name: "owner", manifest_path: ($root + "/Cargo.toml"), metadata: {"peryx-ci": {codspeed: {
     label: "Owner", "change-key": "owner", order: 0, "cargo-jobs": 2, benches: ["fixture"]
   }}}
@@ -18,8 +18,8 @@ printf 'cargo\t%s\n' "$*" >>"$COMMAND_LOG"
 if [[ $1 == metadata ]]; then
   cat "$CARGO_METADATA_FIXTURE"
 elif [[ $1 == codspeed && $2 == build ]]; then
-  mkdir -p target/codspeed/analysis/owner
-  printf 'benchmark\n' >target/codspeed/analysis/owner/fixture
+  mkdir -p "$CODSPEED_TARGET/codspeed/analysis/owner"
+  printf 'benchmark\n' >"$CODSPEED_TARGET/codspeed/analysis/owner/fixture"
 fi
 EOF
 cat >"$scratch/bin/codspeed" <<'EOF'
@@ -46,10 +46,12 @@ exec "$@"
 EOF
 chmod +x "$scratch/bin/"*
 export CARGO_METADATA_FIXTURE="$scratch/metadata.json"
+export CODSPEED_TARGET="$scratch/codspeed-target"
 export COMMAND_LOG="$scratch/commands.log"
 export PATH="$scratch/bin:$PATH"
 
 (cd "$scratch/work" && CODSPEED_SKIP_UPLOAD=true "$repo/ci/run-codspeed.sh" owner 2 >/dev/null)
+[[ ! -e $scratch/work/target/codspeed ]]
 cat >"$scratch/expected.log" <<'EOF'
 cargo	metadata --no-deps --format-version 1
 deadline	1200	cargo codspeed build --locked -j 2 -m simulation -p owner --bench fixture

@@ -354,6 +354,8 @@ fn topology_signal_reports_observable_outcomes() {
         let node = &cluster.nodes()[0];
         node.await_log_signal(Duration::ZERO, "fixture event")
             .expect("receive a queued process event");
+        node.await_log_signal(Duration::ZERO, "fixture event")
+            .expect("observe a persisted process event");
         assert!(matches!(
             node.await_log_signal(FAILURE_TIMEOUT, "missing fixture event"),
             Err(HarnessError::SignalTimeout { .. })

@@ -24,15 +24,18 @@ fn usage_reports_initial_failure() {
 #[test]
 fn usage_reports_terminal_sampling_failure() {
     let (release, released) = channel();
+    let (sample, sampled) = channel();
     let mut initial = true;
     let usage = Usage::watch_with(Duration::ZERO, move || {
         if std::mem::take(&mut initial) {
             return Ok((1, 1));
         }
+        sample.send(()).unwrap();
         released.recv().unwrap();
         bail!("later sample failed");
     })
     .unwrap();
+    sampled.recv().unwrap();
     release.send(()).unwrap();
     assert_eq!(
         usage.finish().unwrap_err().to_string(),

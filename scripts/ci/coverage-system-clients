@@ -9,6 +9,7 @@ if [[ -z ${PERYX_COVERAGE_RUN_DIR:-} ]]; then
 fi
 mkdir -p "$(dirname -- "$output")"
 metadata=$(cargo metadata --no-deps --format-version 1)
+export PATH="$repo/.tox/tools/bin:$PATH"
 while IFS= read -r package; do
   scripts/ci/package-tools "$package"
 done < <(jq -r '
@@ -16,5 +17,4 @@ done < <(jq -r '
   | select(.metadata["peryx-ci"].coverage.clients != null and .metadata["peryx-ci"].tools != null)
   | .name
 ' <<<"$metadata")
-export PATH="$repo/.tox/tools/bin:$PATH"
 scripts/ci/coverage-system-suite clients "$output"

@@ -16,7 +16,7 @@ use peryx_upstream::{
     Auth, CredentialError, CredentialIdentity, CredentialProvider, CredentialProviderId, CredentialSnapshot,
 };
 use reqwest::Response;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, broadcast};
 use tokio::time::{Instant, timeout_at};
 
 const TOKEN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -39,7 +39,7 @@ application/vnd.oci.image.index.v1+json, \
 pub struct Upstream {
     http: reqwest::Client,
     tokens: Mutex<HashMap<TokenCacheKey, CachedToken>>,
-    inflight: Mutex<HashMap<TokenCacheKey, watch::Receiver<FlightState>>>,
+    inflight: Mutex<HashMap<TokenCacheKey, broadcast::Sender<String>>>,
     token_flight_timeout: Duration,
 }
 
@@ -48,15 +48,6 @@ struct TokenCacheKey {
     base: String,
     scope: String,
     provider: CredentialProviderId,
-}
-
-/// The result an in-flight token exchange publishes to the pulls awaiting it. `Failed` and a dropped
-/// sender both send waiters back to elect a fresh leader, so a failed exchange never poisons the key.
-#[derive(Debug, Clone)]
-enum FlightState {
-    Pending,
-    Ready(String),
-    Failed,
 }
 
 #[derive(Debug)]
@@ -94,21 +85,13 @@ impl From<reqwest::Error> for UpstreamError {
 }
 
 async fn wait_for_flight(
-    mut receiver: watch::Receiver<FlightState>,
+    mut receiver: broadcast::Receiver<String>,
     deadline: Instant,
 ) -> Result<Option<String>, UpstreamError> {
-    match timeout_at(
-        deadline,
-        receiver.wait_for(|state| !matches!(state, FlightState::Pending)),
-    )
-    .await
-    {
+    match timeout_at(deadline, receiver.recv()).await {
         Err(_) => Err(UpstreamError::Transport("token exchange wait timed out".to_owned())),
         Ok(Err(_)) => Ok(None),
-        Ok(Ok(state)) => Ok(match &*state {
-            FlightState::Ready(token) => Some(token.clone()),
-            FlightState::Pending | FlightState::Failed => None,
-        }),
+        Ok(Ok(token)) => Ok(Some(token)),
     }
 }
 
@@ -320,8 +303,8 @@ impl Upstream {
         loop {
             let waiter = {
                 let mut inflight = self.inflight.lock().await;
-                if let Some(receiver) = inflight.get(cache_key) {
-                    receiver.clone()
+                if let Some(sender) = inflight.get(cache_key) {
+                    sender.subscribe()
                 } else {
                     if let Some(token) = self
                         .cached_token(cache_key, credential)
@@ -330,8 +313,8 @@ impl Upstream {
                     {
                         return Ok(token);
                     }
-                    let (sender, receiver) = watch::channel(FlightState::Pending);
-                    inflight.insert(cache_key.clone(), receiver);
+                    let (sender, _) = broadcast::channel(1);
+                    inflight.insert(cache_key.clone(), sender.clone());
                     drop(inflight);
                     let result = timeout_at(
                         deadline,
@@ -347,11 +330,9 @@ impl Upstream {
                     .map_err(|_| UpstreamError::Transport("token exchange timed out".to_owned()))
                     .and_then(|result| result);
                     self.inflight.lock().await.remove(cache_key);
-                    let _ = sender.send(
-                        result
-                            .as_ref()
-                            .map_or(FlightState::Failed, |token| FlightState::Ready(token.clone())),
-                    );
+                    if let Ok(token) = &result {
+                        let _ = sender.send(token.clone());
+                    }
                     return result;
                 }
             };

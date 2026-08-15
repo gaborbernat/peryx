@@ -94,6 +94,8 @@ jobs:
         run: ${{ matrix.install_dist.run }}
       - name: Fetch local artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        env:
+          NODE_OPTIONS: --no-deprecation # https://github.com/actions/download-artifact/issues/484
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -139,12 +141,16 @@ jobs:
           submodules: recursive
       - name: Install cached dist
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        env:
+          NODE_OPTIONS: --no-deprecation # https://github.com/actions/download-artifact/issues/484
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       - name: Fetch local artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        env:
+          NODE_OPTIONS: --no-deprecation # https://github.com/actions/download-artifact/issues/484
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -192,12 +198,16 @@ jobs:
           submodules: recursive
       - name: Install cached dist
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        env:
+          NODE_OPTIONS: --no-deprecation # https://github.com/actions/download-artifact/issues/484
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       - name: Fetch artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        env:
+          NODE_OPTIONS: --no-deprecation # https://github.com/actions/download-artifact/issues/484
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -216,6 +226,8 @@ jobs:
           path: dist-manifest.json
       - name: "Download GitHub Artifacts"
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        env:
+          NODE_OPTIONS: --no-deprecation # https://github.com/actions/download-artifact/issues/484
         with:
           pattern: artifacts-*
           path: artifacts

@@ -30,6 +30,7 @@ if [[ ! $build_timeout =~ ^[1-9][0-9]*$ || ! $run_timeout =~ ^[1-9][0-9]*$ ]]; t
 fi
 
 metadata=$(cargo metadata --no-deps --format-version 1)
+target_directory=$(jq -er '.target_directory' <<<"$metadata")
 if ! jq -e --arg package "$package" '
   any(.packages[]; .name == $package and .metadata["peryx-ci"].codspeed != null)
 ' <<<"$metadata" >/dev/null; then
@@ -46,7 +47,7 @@ done < <(jq -r --arg package "$package" '
 git config --global --add safe.directory "$(pwd)"
 rebuilt=false
 if [[ ${CODSPEED_FORCE_REBUILD:-false} == true ]]; then
-  marker="target/codspeed/local-source-$package"
+  marker="$target_directory/codspeed/local-source-$package"
   if [[ ! -f "$marker" || $(< "$marker") != "${CODSPEED_SOURCE_KEY:-}" ]]; then
     cargo clean --profile release -p "$package"
     rebuilt=true
@@ -57,7 +58,7 @@ run_with_timeout "$build_timeout" cargo codspeed build --locked -j "$jobs" -m si
 if [[ "$rebuilt" == true ]]; then
   printf '%s\n' "$CODSPEED_SOURCE_KEY" > "$marker"
 fi
-sha256sum "target/codspeed/analysis/$package"/*
+sha256sum "$target_directory/codspeed/analysis/$package"/*
 if [[ ${CODSPEED_BUILD_ONLY:-false} == true ]]; then
   exit 0
 fi

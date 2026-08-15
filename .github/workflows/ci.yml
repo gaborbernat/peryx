@@ -148,6 +148,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Create Git Bash temp directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $gitRoot = Split-Path -Parent (Split-Path -Parent (Get-Command git).Source)
+          New-Item -ItemType Directory -Force (Join-Path $gitRoot tmp) | Out-Null
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         env:
           NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
@@ -297,8 +303,6 @@ jobs:
       - name: Verify sccache response files
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          TMPDIR: ${{ runner.temp }}
         run: just sccache-smoke
       - run: just platform-contract
 
@@ -488,26 +492,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
+      actions: read
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: coverage-*
-          path: .tox/coverage-parts
-          merge-multiple: true
+      - name: Download coverage parts
+        run: gh run download "$GITHUB_RUN_ID" --pattern 'coverage-*' --dir .tox/coverage-parts
+        env:
+          GH_TOKEN: ${{ github.token }}
       - run: sudo apt-get update && sudo apt-get install --yes lcov
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: just
       - name: Merge executed coverage
-        run: just coverage-merge .tox/coverage/lcov.info .tox/coverage-parts/*.lcov
+        run: |
+          mapfile -t parts < <(find .tox/coverage-parts -type f -name '*.lcov' -print | sort)
+          just coverage-merge .tox/coverage/lcov.info "${parts[@]}"
       - name: Preserve measured crate timings
         run: |
           mkdir -p .tox/ci-timings
-          cat .tox/coverage-parts/timings-*.jsonl > .tox/ci-timings/timings.jsonl
+          mapfile -t timings < <(find .tox/coverage-parts -type f -name 'timings-*.jsonl' -print | sort)
+          cat "${timings[@]}" > .tox/ci-timings/timings.jsonl
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .tox/ci-timings/timings.jsonl

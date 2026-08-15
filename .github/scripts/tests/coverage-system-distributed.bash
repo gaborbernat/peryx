@@ -114,6 +114,10 @@ cp "$repo/scripts/ci/coverage-system-clients" "$repo/scripts/ci/coverage-system-
 cat >"$suite_fixture/scripts/ci/package-tools" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+case ":$PATH:" in
+  *":$PWD/.tox/tools/bin:"*) ;;
+  *) exit 1 ;;
+esac
 printf 'tools|%s\n' "$*" >>"$CALL_LOG"
 EOF
 chmod +x "$suite_fixture/scripts/ci/coverage-system-clients" \

@@ -31,10 +31,10 @@ export RUNNER_TEMP=$scratch/tmp
 
 export MUTATION_TEST_CANDIDATES=65
 output=$(cd "$repo" && PERYX_MUTATION_BUDGET=32 .github/scripts/mutation-diff base 1 true)
-grep -Fq 'mutation candidates=65 budget=32 part=1/1 shard=1/3' <<<"$output"
+grep -Fq 'mutation candidates=65 budget=32 part=1/1 shard=0/3' <<<"$output"
 (("$(wc -l <"$MUTATION_TEST_LOG")" == 2))
 grep -Fq -- '--workspace --all-features --in-diff' "$MUTATION_TEST_LOG"
-tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--baseline skip --output .tox/mutants --shard 1/3 --sharding round-robin --in-place'
+tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--baseline skip --output .tox/mutants --shard 0/3 --sharding round-robin --in-place'
 if tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--jobs'; then
   printf 'in-place mutation passed a job count\n' >&2
   exit 1
@@ -42,8 +42,14 @@ fi
 
 : >"$MUTATION_TEST_LOG"
 output=$(cd "$repo" && PERYX_MUTATION_BUDGET=32 .github/scripts/mutation-diff base 1 true 2/8)
-grep -Fq 'mutation candidates=65 budget=32 part=2/8 shard=2/17' <<<"$output"
-tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--shard 2/17 --sharding round-robin --in-place'
+grep -Fq 'mutation candidates=65 budget=32 part=2/8 shard=1/17' <<<"$output"
+tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--shard 1/17 --sharding round-robin --in-place'
+
+: >"$MUTATION_TEST_LOG"
+export MUTATION_TEST_CANDIDATES=8
+output=$(cd "$repo" && PERYX_MUTATION_BUDGET=32 .github/scripts/mutation-diff base 1 true 2/8)
+grep -Fq 'mutation candidates=8 budget=32 part=2/8 shard=1/2' <<<"$output"
+tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--shard 1/2 --sharding round-robin --in-place'
 
 : >"$MUTATION_TEST_LOG"
 export MUTATION_TEST_CANDIDATES=20

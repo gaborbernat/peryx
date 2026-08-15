@@ -13,6 +13,7 @@ use peryx_ha::{ControlAuthorizer as _, ReferenceInventory as _};
 use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::{MetaStore, ObservedFrontier};
 use serde_json::Value;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tower::ServiceExt as _;
 
 use super::*;
@@ -862,7 +863,14 @@ async fn prepared_ha_runtime_binds_consensus_workers_and_shutdown() {
     let address = prepared.handle.listener_address().unwrap();
     let mut active = prepared.activate().unwrap();
     assert!(state.serving.ownership_authority().is_some());
-    drop(tokio::net::TcpStream::connect(address).await.unwrap());
+    let mut connection = tokio::net::TcpStream::connect(address).await.unwrap();
+    connection
+        .write_all(b"GET /+replication/v1/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    connection.read_to_end(&mut response).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 "));
     peryx_ha::ActiveAvailabilityHandle::shutdown(&mut active.handle)
         .await
         .unwrap();

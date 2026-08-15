@@ -6,8 +6,8 @@ weight = 8
 
 The OCI implementation maps the shared [availability contracts](@/core/availability/contracts.md) to Distribution
 responses. Configuration selects `availability.mode` once during startup. `none` keeps reads and writes local and
-installs no distributed routes, workers, timers, metrics, or replica state. `dc` and `ha` install distributed
-coordination behind the same capability traits.
+installs no distributed routes, workers, timers, metrics, or replica state. `dc` and `ha` add coordination and
+replication.
 
 - A read-only replica refuses blob and manifest mutations with `503 Service Unavailable` before protocol dispatch.
 - A mutation under a superseded authority returns `503 Service Unavailable` with code `UNAVAILABLE`. Retry it against
@@ -44,8 +44,8 @@ no local hosted serial to gate.
 
 ## Remote content and reclamation {#reclamation-references}
 
-A blob that misses local storage can use [remote read-through](@/core/remote-read-through.md) from a verified peer
-placement.
+A blob that misses local storage can use [remote read-through](@/core/repositories/remote-read-through.md) from a
+verified peer placement.
 
 The OCI reclamation inventory retains repository blob memberships plus each manifest's config, layers, and child content
 descriptors. Trash and verified placements add the shared references described in
@@ -57,5 +57,5 @@ Availability traces map manifest or repository publication to `publish`, deletio
 population to `cache-fill`, and metadata visibility changes to `visibility`. Content details stay out of the operation
 envelope event.
 
-See [client behavior across availability modes](@/core/availability/client-behavior.md) and [logging](@/core/logging.md)
-for shared fields.
+See [client behavior across availability modes](@/core/availability/client-behavior.md) and
+[logging](@/core/operations/logging.md) for shared fields.

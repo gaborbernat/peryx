@@ -11,7 +11,7 @@ The exception does not cross a network or VM boundary. Docker Desktop and simila
 `localhost` is not the engine's loopback address. A registry reached by hostname or non-loopback address needs HTTPS or
 an explicit insecure-registry setting.
 
-For production, configure [HTTPS](@/core/serve-https.md). For local testing, `podman` and `crane` accept per-command
-insecure flags; Docker uses its daemon `insecure-registries` setting.
+For production, configure [HTTPS](@/core/operations/serve-https.md). For local testing, `podman` and `crane` accept
+per-command insecure flags; Docker uses its daemon `insecure-registries` setting.
 
 See [run a container registry](container-registry.md) for complete client commands.

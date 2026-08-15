@@ -9,8 +9,8 @@ Placement records and local files can diverge after crashes, disk loss, or opera
 filesystem-backed `dc` or `ha` node. It reads the placement ledger, verifies local copies, retires copies outside
 policy, and schedules missing copies through the cross-datacenter copier.
 
-The reconciler consumes placement and reconciliation store traits from `peryx-ha`. Storage performs atomic reads and
-compare-and-writes. `peryx-ha-distributed` owns scan order, repair policy, cancellation, and resource bounds.
+The reconciler reads placement records, applies repair policy, and commits changes with atomic compare-and-write
+operations. Each scan has cancellation and resource limits.
 
 ## The two passes
 

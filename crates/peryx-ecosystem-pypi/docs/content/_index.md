@@ -17,8 +17,8 @@ fetches.
 
 ## PyPI-to-peryx mapping
 
-peryx uses Python's `index`, `project`, `version`, and `file` terms for PyPI. See [the index model](@/core/indexes.md)
-and [glossary](@/core/glossary.md).
+peryx uses Python's `index`, `project`, `version`, and `file` terms for PyPI. See
+[the index model](@/core/repositories/indexes.md) and [glossary](@/core/reference/glossary.md).
 
 The binary includes the PyPI implementation. An index with `ecosystem = "pypi"` activates it. Omitting `ecosystem`
 selects PyPI. Without a PyPI index, peryx installs no PyPI routes, jobs, or services. `[availability]` selects
@@ -39,7 +39,7 @@ peryx uses the role names **cached**, **hosted**, and **virtual**, plus **shadow
 
 ## PyPI index roles
 
-The three [index roles](@/core/indexes.md) map to PyPI as follows:
+The three [index roles](@/core/repositories/indexes.md) map to PyPI as follows:
 
 - **cached**: a read-through cache of an upstream Python index such as [pypi.org](https://pypi.org/). On a miss, peryx
   fetches, stores, and serves the project page or artifact. Later requests use the stored copy. A cached index can front

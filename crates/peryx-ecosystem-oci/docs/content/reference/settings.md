@@ -70,7 +70,7 @@ Everything on peryx's side keeps the spelling the client used:
 - The local cache keys for manifests, blobs, and tags.
 - The tag list (`/v2/hub/ubuntu/tags/list` names `hub/ubuntu`).
 - The referrers index.
-- The name the image is served, listed, and browsed under, in the API and the [web UI](@/core/web-ui.md).
+- The name the image is served, listed, and browsed under, in the API and the [web UI](@/core/operations/web-ui.md).
 
 `peryx mirror sync hub --option 'images=["ubuntu:24.04"]'` follows the same rule: it pulls `library/ubuntu` from Hub and
 stores it as `ubuntu`.
@@ -80,4 +80,4 @@ stores it as `ubuntu`.
 - The task, with the `true` and `false` cases: [mirror Docker Hub official images](../guides/hub-official-images.md)
 - Why Hub needs the namespace, and what an upstream `401` means:
   [Docker Hub names and upstream auth](../hub-names-and-auth.md)
-- Every other TOML key: [configuration](@/core/configuration.md)
+- Every other TOML key: [configuration](@/core/operations/configuration.md)

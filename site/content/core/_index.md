@@ -1,6 +1,6 @@
 +++
 title = "Core"
-description = "Shared peryx services: installation, configuration, the CLI, repositories, TLS, logging, monitoring, and the web UI."
+description = "Install and configure peryx for daily operation."
 sort_by = "weight"
 template = "section.html"
 weight = 0

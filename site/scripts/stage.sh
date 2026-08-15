@@ -4,6 +4,9 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 stage=${1:-"$repo/.tox/site"}
 
+"$repo/site/scripts/test_check_user_doc_boundaries.sh"
+"$repo/site/scripts/check_user_doc_boundaries.sh" "$repo"
+
 copy_tree() {
   local source=$1
   local target=$2

@@ -5,14 +5,13 @@ weight = 7
 aliases = [ "/core/availability-deployment/"]
 +++
 
-peryx supports three deployment shapes, one per [availability mode](@/core/configuration.md#availability): local
-(`none`), a single-datacenter group (`dc`), and a geo-distributed group (`ha`). The
+peryx supports three deployment shapes, one per [availability mode](@/core/operations/configuration.md#availability):
+local (`none`), a single-datacenter group (`dc`), and a geo-distributed group (`ha`). The
 [availability contracts](@/core/availability/contracts.md) define each mode's acknowledgement and recovery objectives.
-The [`[availability]`](@/core/configuration.md#availability) reference defines the configuration keys. The sections
-below cover hardware sizing, TOML validation, and monitoring.
+The [`[availability]`](@/core/operations/configuration.md#availability) reference defines the configuration keys. The
+sections below cover hardware sizing, TOML validation, and monitoring.
 
-The binary links `peryx-ha-distributed`. Configuration `none` skips availability assembly; `dc` and `ha` prepare and
-activate distributed resources.
+Mode `none` skips availability setup; `dc` and `ha` prepare and activate replication and coordination services.
 
 ## Choose a shape
 
@@ -32,10 +31,10 @@ deployment has one failure domain; do not use it where the service must survive 
 ## Storage capability per shape
 
 A mode that acknowledges a write across nodes needs more evidence than a bare storage success. The `dc` and `ha` modes
-require the blob backend to prove two [durability capabilities](@/core/configuration.md#durability-capabilities): a
-conditional create-if-absent write and a checksum-validated write. Startup resolves both once and refuses a `dc` or `ha`
-mode backed by a store that declares either missing, naming the guarantee and never the endpoint, bucket, or
-credentials.
+require the blob backend to prove two
+[durability capabilities](@/core/operations/configuration.md#durability-capabilities): a conditional create-if-absent
+write and a checksum-validated write. Startup resolves both once and refuses a `dc` or `ha` mode backed by a store that
+declares either missing, naming the guarantee and never the endpoint, bucket, or credentials.
 
 The local filesystem backend proves both capabilities through its atomic no-clobber rename, so it satisfies each mode
 and needs no extra declaration. An S3-compatible backend proves what its endpoint honors, not what its vendor brands:
@@ -193,11 +192,12 @@ writer in the datacenter whose write latency you most need to protect.
 ## Secure the replication path
 
 Replicas reach a primary over its HTTPS listener, so each member `address` is an `https://` URL and the replication
-stream inherits the node's [TLS configuration](@/core/serve-https.md). Terminate TLS at peryx or at a trusted proxy in
-front of it; do not expose a plaintext replication endpoint. The shared replication credential authenticates a follower
-to the journal and is administrator-managed: mount it as a Docker or Kubernetes secret or a systemd credential and point
-`token_file` at the path. peryx reads it at startup and omits it from logs. A `peryx backup` snapshot records the path
-rather than the secret. Rotate the credential by replacing the mounted file and restarting the members that read it.
+stream inherits the node's [TLS configuration](@/core/operations/serve-https.md). Terminate TLS at peryx or at a trusted
+proxy in front of it; do not expose a plaintext replication endpoint. The shared replication credential authenticates a
+follower to the journal and is administrator-managed: mount it as a Docker or Kubernetes secret or a systemd credential
+and point `token_file` at the path. peryx reads it at startup and omits it from logs. A `peryx backup` snapshot records
+the path rather than the secret. Rotate the credential by replacing the mounted file and restarting the members that
+read it.
 
 ## Bootstrap order
 
@@ -210,8 +210,8 @@ Bring a group up writer first. Start the writer, wait for
 each replica; a replica whose primary is not yet reachable reports `sync_error` on its availability readiness probe and
 joins the read pool once its first poll succeeds. Populate a replica's data directory from a verified backup taken at or
 before the writer's current frontier before it first polls, so its catch-up copies only the tail of history rather than
-the whole catalogue. The [bootstrap administrator](@/core/bootstrap-administrator.md) runs on the writer; replicas serve
-the identity state they copy.
+the whole catalogue. The [bootstrap administrator](@/core/access/bootstrap-administrator.md) runs on the writer;
+replicas serve the identity state they copy.
 
 During shutdown, the node cancels distributed work before joining its listener, consensus, and workers.
 
@@ -224,14 +224,14 @@ availability subsystem and mounts neither. Point a replica read pool at
 or disconnected replica leaves rotation without a restart, naming its cause in `reasons` (`frontier_lag`, `sync_error`,
 `incompatible_schema`, or `blob_store`). Use the public `/+ready?writes=true` for the writer pool.
 
-Scrape [`/metrics`](@/core/metrics.md) for durable signals. Alert on `peryx_ha_distributed_lag`, the committed-serial
-distance a replica runs behind its primary, and on a sustained `rate(peryx_availability_sync_errors_total[5m])` split by
-its bounded failure class to catch a primary a replica can no longer reach. `peryx_availability_pending_serials` is the
-queue depth behind the frontier and moves with the lag. The [monitor](@/core/monitor.md) page covers the request
-counters and cache health every shape shares. The `/+status` operator surface reveals index topology and upstream
-reachability only to an `administration:read` caller, so a pending dedicated availability topology page, which later
-observability work adds, is an operator convenience rather than the control that keeps the topology off an
-unauthenticated response.
+Scrape [`/metrics`](@/core/operations/metrics.md) for durable signals. Alert on `peryx_ha_distributed_lag`, the
+committed-serial distance a replica runs behind its primary, and on a sustained
+`rate(peryx_availability_sync_errors_total[5m])` split by its bounded failure class to catch a primary a replica can no
+longer reach. `peryx_availability_pending_serials` is the queue depth behind the frontier and moves with the lag. The
+[monitor](@/core/operations/monitor.md) page covers the request counters and cache health every shape shares. The
+`/+status` operator surface reveals index topology and upstream reachability only to an `administration:read` caller, so
+a pending dedicated availability topology page, which later observability work adds, is an operator convenience rather
+than the control that keeps the topology off an unauthenticated response.
 
 ## What each claim rests on
 
@@ -243,10 +243,10 @@ to size a `dc` or `ha` group.
 ## Related
 
 - What each mode promises and refuses: [availability contracts](@/core/availability/contracts.md)
-- Every configuration key these examples use: [`[availability]`](@/core/configuration.md#availability)
+- Every configuration key these examples use: [`[availability]`](@/core/operations/configuration.md#availability)
 - Operate each availability mode: [high availability](@/core/availability/high-availability.md)
-- The replication and availability series to alert on: [metrics reference](@/core/metrics.md)
-- Serve the HTTPS listener replicas follow: [serve over HTTPS](@/core/serve-https.md)
+- The replication and availability series to alert on: [metrics reference](@/core/operations/metrics.md)
+- Serve the HTTPS listener replicas follow: [serve over HTTPS](@/core/operations/serve-https.md)
 
 [method]: @/core/availability/contracts.md#benchmark-method-for-mode-budgets
 [rpo]: @/core/availability/contracts.md#recovery-objectives

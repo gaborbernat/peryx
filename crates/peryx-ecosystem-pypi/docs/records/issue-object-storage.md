@@ -2,7 +2,7 @@
 
 Add pluggable blob storage with an S3-compatible backend.
 
-Depends on #31 for mirror use cases. Availability consumes the backend's durability capabilities through core traits.
+Depends on #31 for mirror use cases. Availability uses the backend's durability guarantees.
 
 ## Problem
 

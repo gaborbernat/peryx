@@ -38,7 +38,7 @@ volume.
 
 `docker` and `podman` trust a loopback registry (`localhost`, `127.0.0.0/8`) over plain HTTP with no configuration, so a
 runner on the same host as peryx works as written. Reaching peryx across the runner network (the usual CI shape) means a
-client demands HTTPS: give peryx a certificate ([serve HTTPS](@/core/serve-https.md)) or set the client's
+client demands HTTPS: give peryx a certificate ([serve HTTPS](@/core/operations/serve-https.md)) or set the client's
 insecure-registry option. `crane` and `podman` take a per-command flag; `docker` needs an `insecure-registries` entry in
 its daemon config. The examples use `peryx.internal:4433`.
 
@@ -129,7 +129,7 @@ curl -s -u operator:"$OPERATOR_PASSWORD" 'http://peryx.internal:4433/+stats?inde
 ```
 
 `downloads` and `bytes` count what peryx served. Once the working set is warm, upstream traffic drops to manifest
-revalidations while layer bytes come from disk. [`/metrics`](@/core/monitor.md) exports these counters to
+revalidations while layer bytes come from disk. [`/metrics`](@/core/operations/monitor.md) exports these counters to
 [Prometheus](https://prometheus.io/).
 
 The cache CLI reads the shared content store and scopes metadata commands by the OCI route:

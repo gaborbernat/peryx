@@ -2,8 +2,8 @@
 
 Add a repository policy engine that decides whether peryx may upload, mirror, cache, or serve a project release file.
 
-Status: implemented through core policy traits and PyPI rules. See [Policy settings](@/reference/policy.md). The text
-below records the original proposal.
+Status: implemented through shared policy decisions and PyPI rules. See [Policy settings](@/reference/policy.md). The
+text below records the original proposal.
 
 ## Problem
 

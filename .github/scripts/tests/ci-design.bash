@@ -32,6 +32,7 @@ rg -q 'just fuzz-package peryx-ecosystem-oci 30' .github/workflows/ci.yml
 sed -n '/^  frontend:/,/^  coverage:/p' .github/workflows/ci.yml | grep -Fq 'sudo apt-get install --yes lcov'
 rg -Fq -- "- 'crates/*/docs/**'" .github/workflows/ci.yml
 rg -Fq -- "- '!crates/*/docs/**'" .github/workflows/ci.yml
+[[ $(rg -c 'predicate-quantifier: some-with-excludes' .github/workflows/ci.yml) == 1 ]]
 codspeed_shared=$(sed -n '/^            shared:/,/^            runner:/p' \
   .github/workflows/codspeed.yml)
 if grep -Fxq "              - 'crates/**'" <<<"$codspeed_shared"; then

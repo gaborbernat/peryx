@@ -6,13 +6,13 @@ weight = 11
 
 peryx implements the [OCI distribution protocol](../_index.md), so `docker`, `podman`, and `crane` can pull and push
 through it. The configuration below defines cached, hosted, and virtual indexes. Install peryx first; see
-[Getting started](@/core/getting-started.md).
+[Getting started](@/core/start/getting-started.md).
 
 ## Configure the indexes
 
-An [index](@/core/glossary.md#index) has one of three [roles](@/core/indexes.md#roles) and names the `oci` plugin. This
-config declares all three: a proxy of Docker Hub, a hosted store for your own images, and a virtual index that stacks
-them:
+An [index](@/core/reference/glossary.md#index) has one of three [roles](@/core/repositories/indexes.md#roles) and names
+the `oci` plugin. This config declares all three: a proxy of Docker Hub, a hosted store for your own images, and a
+virtual index that stacks them:
 
 ```toml
 # peryx.toml
@@ -53,8 +53,8 @@ Run it with `peryx serve --config peryx.toml`.
 `docker` and `podman` trust a [loopback](local-transport.md) registry (`localhost`, `127.0.0.0/8`) over plain HTTP with
 no configuration, so on the same host the commands below work as written. Over the network (or from Docker Desktop,
 whose engine runs in a VM where the host's `localhost` is not the engine's), a client demands HTTPS. For that, give
-peryx a certificate ([serve HTTPS](@/core/serve-https.md)) or set the client's insecure-registry option. `crane` and
-`podman` take a per-command flag, shown below; `docker` needs `insecure-registries` in its daemon config.
+peryx a certificate ([serve HTTPS](@/core/operations/serve-https.md)) or set the client's insecure-registry option.
+`crane` and `podman` take a per-command flag, shown below; `docker` needs `insecure-registries` in its daemon config.
 
 ## Pull through the proxy
 
@@ -126,7 +126,7 @@ restrict who reaches peryx at the network layer (or front it with TLS) when a ho
 
 Pull through the `reg` route and peryx walks the members hosted-first: an image you pushed to `images` wins over a
 same-named one on Docker Hub, and anything you have not published falls through to the upstream. This is
-[shadowing](@/core/indexes.md#shadowing), the dependency-confusion defense, applied to containers:
+[shadowing](@/core/repositories/indexes.md#shadowing), the dependency-confusion defense, applied to containers:
 
 ```shell
 # your own build of `my-app` if you pushed it, otherwise Docker Hub's:
@@ -149,7 +149,7 @@ crane delete --insecure 127.0.0.1:4433/images/my-app@sha256:<digest>
 ## Related
 
 - Protocol, roles, and client examples: [OCI ecosystem](../_index.md)
-- Serve trusted HTTPS so clients need no insecure flag: [serve HTTPS](@/core/serve-https.md)
+- Serve trusted HTTPS so clients need no insecure flag: [serve HTTPS](@/core/operations/serve-https.md)
 - What ships per ecosystem: [capability matrix](@/ecosystems/capabilities.md)
 - Why Hub needs the `library/` namespace, and what an upstream `401` means:
   [Docker Hub names and upstream auth](../hub-names-and-auth.md)

@@ -10,8 +10,8 @@ permanent home failure, the control quorum moves the authority and retained writ
 recovery procedure uses [node liveness](@/core/availability/liveness.md) for the failure signal and the
 [availability contracts](@/core/availability/contracts.md) for durability.
 
-`peryx-ha` defines owner-neutral authority and retained-operation contracts. Content owners derive authority keys and
-handle operations. `peryx-ha-distributed` owns epochs, target selection, fencing, and drain order.
+Each ecosystem derives authority keys and handles retained operations. Peryx manages epochs, target selection, fencing,
+and drain order.
 
 ## Suspicion never moves a home
 
@@ -51,7 +51,7 @@ retained intents at the new home"\]; class hold,none warn; class commit,drain go
 Moving the home settles ownership; it does not settle the writes the old home was still holding. Before a home finalizes
 a write, the ingress datacenter that received it retains it as an intent (see the ingress staging model in the
 [availability contracts](@/core/availability/contracts.md)). When the home moves, those intents have to be finalized at
-the new home. That is the drain, run with [`peryx job drain`](@/core/cli.md#job-drain):
+the new home. That is the drain, run with [`peryx job drain`](@/core/operations/cli.md#job-drain):
 
 - **Ordered.** It finalizes retained intents in admission order, held by a durable never-reused sequence that survives a
   restart, so the drain is deterministic and two operators running it reach the same result.
@@ -115,4 +115,4 @@ the drain finalizes it. The caller must retry an unacknowledged in-flight write 
 - The failure signal that a home is dead: [node liveness](@/core/availability/liveness.md)
 - The durability each step preserves: [availability contracts](@/core/availability/contracts.md)
 - Writer recovery procedures: [failover and recovery](@/core/availability/failover-recovery.md)
-- The `job drain` command and its flags: [command line reference](@/core/cli.md#job-drain)
+- The `job drain` command and its flags: [command line reference](@/core/operations/cli.md#job-drain)

@@ -37,8 +37,9 @@ metadata, and the JSON API.
 [nginx_pypi_cache](https://github.com/hauntsaninja/nginx_pypi_cache) is an nginx config that reverse-proxies pypi.org
 and files.pythonhosted.org with `proxy_cache`: the read-through half of the job in one file, with the upstreams
 hard-coded and no uploads or private packages. peryx adds the index-aware half: digest verification,
-`Cache-Control`-driven refresh with a background sweep, private hosting, and [usage counters](@/core/monitor.md).
-(Flask-Pypi-Proxy, sometimes cited alongside it, last released in 2014 and predates every modern index PEP.)
+`Cache-Control`-driven refresh with a background sweep, private hosting, and
+[usage counters](@/core/operations/monitor.md). (Flask-Pypi-Proxy, sometimes cited alongside it, last released in 2014
+and predates every modern index PEP.)
 
 ## Configuration mapping
 

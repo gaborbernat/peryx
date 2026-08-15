@@ -14,4 +14,4 @@ template = "index.html"
   for a configured stale window during an outage.
 - Availability choice. `availability.mode = "none"` starts no distributed tasks, listeners, timers, or watchers.
   Distributed modes add replication, placement, and lifecycle services through neutral contracts.
-- Verification. CI requires exact line and function coverage per crate and per declared system-test source root.
+- Verification. CI checks documentation, supported platforms, client behavior, and complete source coverage.

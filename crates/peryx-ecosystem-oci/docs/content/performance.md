@@ -5,23 +5,11 @@ weight = 2
 +++
 
 peryx streams image blobs into a content-addressed store while serving the client. Concurrent pulls of one uncached
-layer share one upstream fetch. OCI benchmarks compare that behavior with other Docker Hub caches. Workloads live in
-`crates/peryx-ecosystem-oci/src/bench`; `peryx-bench` provides execution and comparison code. Every registry runs on the
-same Apple Silicon host. Pulls use [crane](https://github.com/google/go-containerregistry) for manifest traversal and
-Bearer authentication. Layer transfers use in-process HTTP so subprocess startup does not affect registry throughput.
+layer share one upstream fetch. OCI benchmarks compare that behavior with other Docker Hub caches on the same Apple
+Silicon host. Pulls use [crane](https://github.com/google/go-containerregistry) for manifest traversal and Bearer
+authentication. Layer transfers use in-process HTTP so subprocess startup does not affect registry throughput.
 
 {{ machine(owner="oci") }}
-
-## Running benchmarks
-
-Inspect the OCI benchmark entrypoint, run one target, or run the CodSpeed package lane:
-
-```shell
-cargo run -p peryx-ecosystem-oci --features bench --bin peryx-bench-oci -- --help
-cargo bench --locked -p peryx-ecosystem-oci --bench manifest_by_digest
-just codspeed peryx-ecosystem-oci
-ci/run-codspeed-local.sh peryx-ecosystem-oci
-```
 
 ## Benchmark setup
 
@@ -44,12 +32,12 @@ collapse to the single fetch the [fleet numbers](#concurrent-pull-fleet) show.
 Every party is a pull-through cache of Docker Hub, so the tables read against **direct**: a pull straight from
 `registry-1.docker.io` with nothing in between, the baseline every ratio compares against.
 
-| Registry                                                     | Stack                                                                                            | On a cold pull                                                                    | Persisted cache                 |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | ------------------------------- |
-| [peryx](@/core/architecture.md)                              | Static Rust binary using [tokio](https://tokio.rs/) and [axum](https://github.com/tokio-rs/axum) | Streams each blob into the store; concurrent misses for one layer share one fetch | Content-addressed blobs on disk |
-| [distribution](https://distribution.github.io/distribution/) | Go reference registry (`registry:2`) in `proxy` mode                                             | Fetches and stores each blob, then serves it                                      | Filesystem, by repository       |
-| [zot](https://zotregistry.dev/)                              | Go registry with on-demand `sync`                                                                | Syncs the image when a client first requests its manifest                         | Filesystem, by repository       |
-| direct ([Docker Hub](https://hub.docker.com/))               | Client connects to Docker Hub                                                                    | Fetches the full image for each pull                                              | None                            |
+| Registry                                                     | Deployment                         | On a cold pull                                                                    | Persisted cache                 |
+| ------------------------------------------------------------ | ---------------------------------- | --------------------------------------------------------------------------------- | ------------------------------- |
+| [peryx](@/contributing/runtime-architecture.md)              | Single process                     | Streams each blob into the store; concurrent misses for one layer share one fetch | Content-addressed blobs on disk |
+| [distribution](https://distribution.github.io/distribution/) | Reference registry in `proxy` mode | Fetches and stores each blob, then serves it                                      | Filesystem, by repository       |
+| [zot](https://zotregistry.dev/)                              | Registry with on-demand `sync`     | Syncs the image when a client first requests its manifest                         | Filesystem, by repository       |
+| direct ([Docker Hub](https://hub.docker.com/))               | No intermediary                    | Fetches the full image for each pull                                              | None                            |
 
 ## Pulling images
 
@@ -84,8 +72,8 @@ byte but serialized behind one reader's syscalls, so it needs eight overlapping 
 MB/s and reach the same neighbourhood.
 
 That neighbourhood is the socket, not the registry. On this box a
-[server that does nothing but write a buffer](@/core/performance.md#host-controls) hands a 30 MB body to one loopback
-client at 10.2 GB/s. peryx's single stream is the same order of magnitude as that; zot's 2.8 GB/s is not. Both
+[server that does nothing but write a buffer](@/core/operations/performance.md#host-controls) hands a 30 MB body to one
+loopback client at 10.2 GB/s. peryx's single stream is the same order of magnitude as that; zot's 2.8 GB/s is not. Both
 registries leave the network-bound rows far behind, where Docker Hub itself manages 61 MB/s and distribution 99.
 
 {{ bench(file="image-throughput", owner="oci") }}
@@ -129,13 +117,13 @@ immutable, and there the comparison is clean.
 
 For revalidation, peryx sends a `HEAD` request that returns the tag's digest without a body. It fetches the manifest
 only when that digest changes. The freshness window removes this request from fresh reads, and the single-flight gate
-reduces a burst of stale-tag pulls to one upstream check. [`cache_ttl_secs`](@/core/configuration.md) sets the window
-and defaults to five minutes.
+reduces a burst of stale-tag pulls to one upstream check. [`cache_ttl_secs`](@/core/operations/configuration.md) sets
+the window and defaults to five minutes.
 
 `tag list` used to send each request from a single-member proxy to its upstream, so the benchmark measured a Docker Hub
-round trip. peryx now caches this mutable list for [`cache_ttl_secs`](@/core/configuration.md), revalidates it after the
-window, and answers from the last list when the upstream cannot be reached, bounded by `max_stale_secs`. A burst of
-listings costs the upstream one request, not one per client.
+round trip. peryx now caches this mutable list for [`cache_ttl_secs`](@/core/operations/configuration.md), revalidates
+it after the window, and answers from the last list when the upstream cannot be reached, bounded by `max_stale_secs`. A
+burst of listings costs the upstream one request, not one per client.
 
 ## Reproducing
 
@@ -146,5 +134,6 @@ and the Docker Hub credentials they need.
 ## Related
 
 - What the roles mean for containers: [the OCI ecosystem](_index.md)
-- Why the cold path keeps up and the warm path pulls ahead: [performance and methodology](@/core/performance.md)
+- Why the cold path keeps up and the warm path pulls ahead:
+  [performance and methodology](@/core/operations/performance.md)
 - Run the container registry: [run a container registry](guides/container-registry.md)

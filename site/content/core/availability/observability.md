@@ -6,7 +6,7 @@ aliases = [ "/core/availability-observability/"]
 +++
 
 Peryx exposes the group roster, node roles, readable frontiers, and replica lag through bounded, role-filtered surfaces.
-See [`[availability]`](@/core/configuration.md#availability) for configuration and
+See [`[availability]`](@/core/operations/configuration.md#availability) for configuration and
 [availability contracts](@/core/availability/contracts.md) for acknowledgement guarantees.
 
 Every surface below filters its fields to the caller's class, sends `Cache-Control: no-store`, and stamps its own
@@ -18,10 +18,11 @@ or storage state per request.
 The topology surface is one immutable picture of the group taken at a single instant: the mode, the group identity, the
 configured roster with each node's datacenter and role, and this node's own live frontier and liveness.
 [Availability modes](@/core/availability/high-availability.md#availability-topology-snapshot) documents the snapshot and
-its per-class filtering in full; read it as the [availability topology page](@/core/web-ui.md#availability-topology) at
-`/admin/topology`, or as JSON from `GET /+availability/topology`. A peer's liveness stays `unknown` until a consensus
-layer observes it, so read peer health from a `dc` or `ha` writer's replication documents (see
-[Node liveness](@/core/availability/liveness.md)) rather than from the snapshot.
+its per-class filtering in full; read it as the
+[availability topology page](@/core/operations/web-ui.md#availability-topology) at `/admin/topology`, or as JSON from
+`GET /+availability/topology`. A peer's liveness stays `unknown` until a consensus layer observes it, so read peer
+health from a `dc` or `ha` writer's replication documents (see [Node liveness](@/core/availability/liveness.md)) rather
+than from the snapshot.
 
 An open operator page keeps that picture current without polling each node. `GET /+availability/topology/stream` is a
 bounded Server-Sent Events feed of the same role-filtered snapshot. It sends the current snapshot on connect, then one
@@ -38,8 +39,8 @@ what a page already reveals.
 
 The placement surface reports how the store's bytes are placed: how many artifacts serve from local storage, how many
 have no local bytes but a reachable upstream, and how many have neither. Read it as the
-[artifact placement-health page](@/core/web-ui.md#artifact-placement-health) at `/admin/placements`, or as JSON from
-`GET /+availability/placements`.
+[artifact placement-health page](@/core/operations/web-ui.md#artifact-placement-health) at `/admin/placements`, or as
+JSON from `GET /+availability/placements`.
 
 The whole-store counts need `operator:read` and are aggregated before serialization, so the summary never scales with
 the object count. A per-digest table needs `administration:read`, because a digest identifies an artifact; it pages in
@@ -56,7 +57,7 @@ a store that has applied metadata ahead of the blobs it references, which the
 The operations surface reports the admitted writes the node retains, bucketed by the client-facing status each reads:
 `pending` while a write is in flight within its retention deadline, `published` once it finalizes, `failed` when it
 gives up, and `expired` when it outlives its deadline without finalizing. Read it as the
-[pending-operations page](@/core/web-ui.md#pending-operations) at `/admin/operations`, or as JSON from
+[pending-operations page](@/core/operations/web-ui.md#pending-operations) at `/admin/operations`, or as JSON from
 `GET /+availability/operations`.
 
 The whole-ledger counts need `operator:read` and are aggregated before serialization, so the summary never scales with

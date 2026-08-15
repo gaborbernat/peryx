@@ -18,9 +18,9 @@ speaks to `pip`, `uv`, and `twine`.
 ## Prerequisites
 
 You need Python with `pip` or [`uv`](https://docs.astral.sh/uv/) as the client, and a peryx binary. Pick whichever
-install channel fits; [installation](@/core/installation.md) lists them all:
+install channel fits; [installation](@/core/start/installation.md) lists them all:
 
-{% tabs(names="installer, uv, pip, from source") %}
+{% tabs(names="installer, uv, pip") %}
 
 ```shell
 # standalone binary, no Python involved
@@ -39,16 +39,9 @@ uv tool install peryx
 pip install peryx
 ```
 
-%%%
-
-```shell
-# needs a Rust toolchain (https://rustup.rs); rust-toolchain.toml pins the version
-git clone https://github.com/tox-dev/peryx.git
-cd peryx
-cargo build --release
-```
-
 {% end %}
+
+Contributors can [build from a checkout](@/contributing/build.md).
 
 ## Start peryx
 
@@ -56,7 +49,7 @@ The read path needs no configuration. The defaults give you a pypi.org cached in
 combined by a virtual index in front of them, served at route `root/pypi`:
 
 ```shell
-peryx serve            # ./target/release/peryx serve when built from source
+peryx serve
 ```
 
 peryx is now listening on `127.0.0.1:4433`. Leave it running and use a second terminal for the rest of the tutorial.
@@ -158,4 +151,4 @@ JSON at `/+stats` and [Prometheus](https://prometheus.io/) at `/metrics`.
 - [Front another index](@/tutorials/front-another-index.md): cache a private index alongside pypi.org.
 - [Build a team index](@/tutorials/team-index.md): a shared upload store your whole team installs from.
 - [PyPI performance](@/performance.md): how peryx compares to devpi, proxpi, and pip's own cache.
-- [Configuration reference](@/core/configuration.md): every TOML key, including TLS.
+- [Configuration reference](@/core/operations/configuration.md): every TOML key, including TLS.

@@ -10,25 +10,25 @@ loss require different recovery procedures. The selected [availability contract]
 determines the recovery bound and whether recovery is local, same-datacenter, or cross-datacenter.
 
 Use [high availability](@/core/availability/high-availability.md) for the writer-and-replica model,
-[back up and restore](@/core/backup-restore.md) for offline images, and the [command line reference](@/core/cli.md) for
-command options.
+[back up and restore](@/core/operations/backup-restore.md) for offline images, and the
+[command line reference](@/core/operations/cli.md) for command options.
 
 ## Before an incident
 
 Confirm these conditions before an incident:
 
 - A verified backup exists and is recent enough. `peryx backup create` writes an offline image; `peryx backup verify`
-  reproves it. Keep [verify](@/core/backup-restore.md#verify-a-backup) on a timer against every backup you intend to
-  keep, on the host that holds it, so a copy that rotted on cold storage is caught before a restore depends on it. Your
-  worst-case data loss is everything committed after the last backup you can still verify.
+  reproves it. Keep [verify](@/core/operations/backup-restore.md#verify-a-backup) on a timer against every backup you
+  intend to keep, on the host that holds it, so a copy that rotted on cold storage is caught before a restore depends on
+  it. Your worst-case data loss is everything committed after the last backup you can still verify.
 - For `dc` and `ha`, record the configured `writer_identity`. Promotion and restore check it against the store claim.
 - The probes are reachable. `GET /+health`, `GET /+ready`, and, on a `dc` or `ha` node, `GET /+replication/v1/ready` are
-  how you tell a recovered node from a lying one. Their fields and the classes that may read each are on the
+  how you tell a recovered node from a lying one. Their fields and the access levels that may read each are on the
   [availability health and readiness](@/core/availability/high-availability.md#availability-health-and-readiness)
   reference.
 - You know where blobs live. A local-filesystem store and an
-  [S3-compatible bucket](@/core/backup-restore.md#object-storage-backends) recover their bytes differently, and the
-  storage-loss procedure below branches on it.
+  [S3-compatible bucket](@/core/operations/backup-restore.md#object-storage-backends) recover their bytes differently,
+  and the storage-loss procedure below branches on it.
 
 ## Classify the failure
 
@@ -38,7 +38,7 @@ sym --> link{"nodes healthy but cannot reach each other?"}; link -->|"replica ca
 partition"\]; sym --> quorum{"a dc or ha mutation refuses with 503?"}; quorum -->|"required failure domain unreachable"|
 cq["control-quorum loss"]; class proc,part good; class store,cq warn {% end %}
 
-The four classes are distinct because the contract distinguishes
+The four failure categories are distinct because the contract distinguishes
 [crash from storage loss](@/core/availability/contracts.md#crash-versus-storage-loss) and a
 [partition from an outage](@/core/availability/contracts.md#why-a-partition-refuses-instead-of-accepting). Treating any
 two as one either restores when a restart would have sufficed or restarts into corruption a restore would have caught.
@@ -96,7 +96,7 @@ Blob bytes recover by backend:
 - **S3-compatible bucket.** The backup carries the metadata and the configuration that address the bucket, not the
   object bytes. Recover the bucket with the object store's own tooling, versioning, replication, or a lifecycle-managed
   copy, and pair the restored metadata with a bucket that already holds the referenced objects. See
-  [object storage backends](@/core/backup-restore.md#object-storage-backends).
+  [object storage backends](@/core/operations/backup-restore.md#object-storage-backends).
 
 If the restored node is a replacement writer, promote it as in the [failover](#writer-failover) procedure below. If it
 is a replica, start it in replica mode and let it resync.
@@ -204,7 +204,8 @@ not by a stopwatch.
 ## Related
 
 - Availability mode behavior and probes: [high availability](@/core/availability/high-availability.md)
-- The offline image every restore reads: [back up and restore](@/core/backup-restore.md)
+- The offline image every restore reads: [back up and restore](@/core/operations/backup-restore.md)
 - What each mode's acknowledgement promised and risks: [availability contracts](@/core/availability/contracts.md)
-- The counters and status surface to watch during recovery: [monitor](@/core/monitor.md#check-operational-status)
-- The exact flags on each command: [command line reference](@/core/cli.md)
+- The counters and status surface to watch during recovery:
+  [monitor](@/core/operations/monitor.md#check-operational-status)
+- The exact flags on each command: [command line reference](@/core/operations/cli.md)

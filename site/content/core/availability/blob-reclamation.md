@@ -14,7 +14,7 @@ A selector builds the retained set from these sources:
 
 - Owner-provided references to immutable content.
 - Restorable trash entries.
-- Verified [placements](@/core/blob-placement.md) that can serve the digest.
+- Verified [placements](@/core/repositories/blob-placement.md) that can serve the digest.
 
 Each content owner implements the shared reference-inventory trait. The availability layer receives only a set of
 content digests and does not import owner metadata types.
@@ -37,9 +37,8 @@ One cluster worker selects and advances tombstones. Its singleton lease uses the
 tombstone transition records that term and rejects a stale term. A process without an ownership group uses term zero and
 cannot reclaim content.
 
-`peryx-ha` defines `ReclamationStore`, `ReclaimGuardStore`, `ReferenceInventory`, and `ReclamationFrontiers`. Storage
-implements atomic compare-and-write operations. `peryx-ha-distributed` decides when to advance a tombstone. The first
-write creates the reclamation table; reads return an empty result before that write.
+The first reclamation write creates its ledger; reads return an empty result before that write. Peryx advances a
+tombstone when the ownership term and reference scan still match, using one atomic update.
 
 ## Tombstone states
 
@@ -67,6 +66,6 @@ Metrics expose low-cardinality counts for pending, ready, and skipped tombstones
 
 ## Related
 
-- [Blob placement](@/core/blob-placement.md)
+- [Blob placement](@/core/repositories/blob-placement.md)
 - [Fenced cluster jobs](@/core/availability/high-availability.md)
-- [Backup and restore](@/core/backup-restore.md)
+- [Backup and restore](@/core/operations/backup-restore.md)

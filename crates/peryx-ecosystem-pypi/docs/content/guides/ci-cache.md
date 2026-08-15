@@ -75,8 +75,9 @@ curl -s -u operator:"$OPERATOR_PASSWORD" 'http://peryx.internal:4433/+stats?inde
 ```
 
 `downloads` and `bytes` count what peryx served; once the working set is warm, upstream traffic drops to page
-revalidations (`refreshes`, mostly `304`s with no body). The [dashboard](@/core/web-ui.md) shows the same numbers with
-per-project drill-down, and [`/metrics`](@/core/monitor.md) feeds [Prometheus](https://prometheus.io/).
+revalidations (`refreshes`, mostly `304`s with no body). The [dashboard](@/core/operations/web-ui.md) shows the same
+numbers with per-project drill-down, and [`/metrics`](@/core/operations/monitor.md) feeds
+[Prometheus](https://prometheus.io/).
 
 The cache CLI reads the shared content store and scopes metadata commands by the PyPI route:
 
@@ -101,6 +102,6 @@ metadata reference. Rebuild the derived package search after a metadata restore 
 ## Cache behavior
 
 - Wheels are immutable and content-addressed. Each wheel crosses the uplink once
-  ([architecture](@/core/architecture.md)).
-- Cold misses stream through at upstream speed ([measurements](@/core/performance.md)).
+  ([architecture](@/contributing/runtime-architecture.md)).
+- Cold misses stream through at upstream speed ([measurements](@/core/operations/performance.md)).
 - During a pypi.org outage, peryx serves stale pages and artifacts from disk.

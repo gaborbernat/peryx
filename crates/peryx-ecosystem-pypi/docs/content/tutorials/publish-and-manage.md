@@ -13,7 +13,7 @@ pip do.
 
 ## Prerequisites
 
-You need a peryx binary ([installation](@/core/installation.md) lists the channels), Python 3 with
+You need a peryx binary ([installation](@/core/start/installation.md) lists the channels), Python 3 with
 [pip](https://pip.pypa.io/), [build](https://build.pypa.io/), [twine](https://twine.readthedocs.io/), and
 [uv](https://docs.astral.sh/uv/), and `curl`. Work in a scratch directory.
 

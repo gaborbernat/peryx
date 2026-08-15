@@ -5,13 +5,12 @@ sort_by = "weight"
 template = "section.html"
 +++
 
-An ecosystem owner is the crate that implements one artifact protocol. It defines the stable ID, configuration,
-metadata, client commands, examples, and support matrix. Each `[[index]]` selects one owner by ID. A process can
-activate several owners through separate indexes; a virtual index combines indexes from one owner.
+An ecosystem defines one artifact format, its configuration, client commands, and support matrix. Each `[[index]]`
+selects an ecosystem by ID. One process can activate several ecosystems through separate indexes; a virtual index
+combines indexes from one ecosystem.
 
 Use the owner pages for setup and protocol reference:
 
 {{ ecosystem_owner_links() }}
 
-The [capability contract](@/ecosystems/capabilities.md) defines registration, selection, and installation.
-`peryx-plugin-registry` composes linked owners. Shared crates depend on core IDs and capability traits, not owner types.
+The [activation contract](@/ecosystems/capabilities.md) defines selection, startup behavior, and unsupported features.

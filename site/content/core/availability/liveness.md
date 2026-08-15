@@ -6,10 +6,10 @@ aliases = [ "/core/availability-liveness/"]
 +++
 
 A datacenter replication group is a fixed roster: one writer and its read replicas, set by the
-[`[[availability.member]]`](@/core/configuration.md#availability) configuration and changed only by an operator editing
-it. Liveness tracking observes how recently each replica reported in, so routing and operators can tell a lagging
-replica from a healthy one. It never edits that roster. A missed heartbeat cannot evict a replica, promote a replica to
-writer, or transfer authority; only a reviewed configuration edit changes membership.
+[`[[availability.member]]`](@/core/operations/configuration.md#availability) configuration and changed only by an
+operator editing it. Liveness tracking observes how recently each replica reported in, so routing and operators can tell
+a lagging replica from a healthy one. It never edits that roster. A missed heartbeat cannot evict a replica, promote a
+replica to writer, or transfer authority; only a reviewed configuration edit changes membership.
 
 Heartbeat tasks start only after distributed activation. Shutdown cancels them before joining workers. Configuration
 `none` creates no heartbeat state, timer, metric, or task.

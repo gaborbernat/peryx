@@ -57,8 +57,8 @@ password_file = "/run/secrets/corp-token" # or password_env = "PERYX_CORP_TOKEN"
 ```
 
 peryx reads the source at startup. It reports missing, empty, or oversized files and unset variables without printing
-their values. The [configuration reference](@/core/configuration.md#upstream-credential-sources) covers systemd and
-Kubernetes secret layouts, precedence, redaction, and migration from inline credentials.
+their values. The [configuration reference](@/core/operations/configuration.md#upstream-credential-sources) covers
+systemd and Kubernetes secret layouts, precedence, redaction, and migration from inline credentials.
 
 ## Read Basic credentials from netrc
 
@@ -84,8 +84,8 @@ password pypi-token
 ```
 
 Run `chmod 600 /run/secrets/upstream.netrc` on Unix. A `token`, or a complete `username` and `password` pair on the
-index, overrides netrc. The [configuration reference](@/core/configuration.md#upstream-netrc-credentials) covers custom
-ports, `default` entries, startup errors, and redirect isolation.
+index, overrides netrc. The [configuration reference](@/core/operations/configuration.md#upstream-netrc-credentials)
+covers custom ports, `default` entries, startup errors, and redirect isolation.
 
 ## Sync for offline use
 
@@ -248,6 +248,6 @@ the upstream URL in the error body.
 
 ## Related
 
-- Why one URL with shadowing beats `--extra-index-url`: [the index model](@/core/indexes.md)
+- Why one URL with shadowing beats `--extra-index-url`: [the index model](@/core/repositories/indexes.md)
 - Serve a network with no internet route: [air-gapped](@/guides/air-gapped.md)
 - Upstream capability differences peryx papers over: [standards](@/reference/standards.md)

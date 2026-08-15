@@ -61,5 +61,5 @@ restart can trigger another attempt, but one operation ID can produce one commit
 ## Placement
 
 Finalization requires a verified placement somewhere in the topology. It does not wait for the content to reach the home
-or each replica. Background replication and [remote read-through](@/core/remote-read-through.md) make those bytes
-available after metadata publication.
+or each replica. Background replication and [remote read-through](@/core/repositories/remote-read-through.md) make those
+bytes available after metadata publication.

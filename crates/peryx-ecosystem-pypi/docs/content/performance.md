@@ -6,7 +6,7 @@ weight = 2
 
 Each result includes its command. A **cold** install through peryx costs about the same as a direct pypi.org install. A
 **warm** install is faster than pypi.org and bounded by installer CPU instead of network latency. See
-[performance and methodology](@/core/performance.md) for the shared test controls.
+[performance and methodology](@/core/operations/performance.md) for the shared test controls.
 
 {{ machine(owner="pypi") }}
 
@@ -29,7 +29,8 @@ Setup: peryx release build and the client on the same Apple Silicon machine, rou
 is the median over three independent rounds, each restarting the server on empty state; "cold" is that empty first pass,
 "warm" reruns against the now-full cache. Every server is torn down with its whole process group between rounds, so a
 forked worker cannot outlive its round and steal CPU from whoever is measured next. See
-[performance and methodology](@/core/performance.md) for how the rounds, spread, and network-bound rows are handled.
+[performance and methodology](@/core/operations/performance.md) for how the rounds, spread, and network-bound rows are
+handled.
 
 | Scenario                  | Wall time | What dominates                             |
 | ------------------------- | --------- | ------------------------------------------ |
@@ -54,13 +55,13 @@ The comparison includes every alternative that starts hermetically from a packag
 benchmarks measure cache-miss data paths and concurrent misses. The comparison derives both behaviors from each server's
 source.
 
-| Server                                                 | Stack                     | On a miss                          | Persisted cache                          | Private uploads         |
-| ------------------------------------------------------ | ------------------------- | ---------------------------------- | ---------------------------------------- | ----------------------- |
-| [peryx](@/core/architecture.md)                        | Rust, Tokio, Axum         | Streams to the client and store    | redb plus content-addressed blobs        | Scoped tokens per index |
-| [devpi](https://devpi.net/docs/)                       | Python, Pyramid, waitress | Parses pages; streams files        | SQLite keyfs plus sha256-addressed files | Per-user ACL            |
-| [proxpi](https://github.com/EpicWink/proxpi)           | Python, Flask, gunicorn   | Downloads to a temporary directory | In-memory index and files on disk        | None                    |
-| [pypiserver](https://github.com/pypiserver/pypiserver) | Python, Bottle            | Redirects to pypi.org              | None                                     | htpasswd per directory  |
-| [pypicloud](https://pypicloud.readthedocs.io/)         | Python, Pyramid, waitress | Buffers, stores, then serves       | SQLite or remote metadata plus files     | User and group access   |
+| Server                                                 | Deployment                     | On a miss                          | Persisted cache                          | Private uploads         |
+| ------------------------------------------------------ | ------------------------------ | ---------------------------------- | ---------------------------------------- | ----------------------- |
+| [peryx](@/contributing/runtime-architecture.md)        | Single process                 | Streams to the client and store    | redb plus content-addressed blobs        | Scoped tokens per index |
+| [devpi](https://devpi.net/docs/)                       | Application plus reverse proxy | Parses pages; streams files        | SQLite keyfs plus sha256-addressed files | Per-user ACL            |
+| [proxpi](https://github.com/EpicWink/proxpi)           | Application server             | Downloads to a temporary directory | In-memory index and files on disk        | None                    |
+| [pypiserver](https://github.com/pypiserver/pypiserver) | Single process                 | Redirects to pypi.org              | None                                     | htpasswd per directory  |
+| [pypicloud](https://pypicloud.readthedocs.io/)         | Python, Pyramid, waitress      | Buffers, stores, then serves       | SQLite or remote metadata plus files     | User and group access   |
 
 ### Cache-miss data path
 
@@ -73,10 +74,10 @@ pypi.org;<br/>nothing is downloaded or cached"\] miss --> C\["pypicloud:<br/>buf
 file,<br/>write to store + DB, then serve"\] class V good class C,S warn {% end %}
 
 - **peryx** never buffers a whole response.
-  [Page and artifact bytes stream to the client and into the store at once](@/core/architecture.md); peryx transforms a
-  page chunk by chunk mid-flight, and tees a wheel to a temp file, hashes it, and renames it into the store once the
-  client already has its bytes. A miss costs upstream wire time plus one hop. That sets the cold-install and
-  cold-throughput numbers.
+  [Page and artifact bytes stream to the client and into the store at once](@/contributing/runtime-architecture.md);
+  peryx transforms a page chunk by chunk mid-flight, and tees a wheel to a temp file, hashes it, and renames it into the
+  store once the client already has its bytes. A miss costs upstream wire time plus one hop. That sets the cold-install
+  and cold-throughput numbers.
 - **devpi** handles artifacts much as peryx does. `FileStreamer` writes each chunk to a local file and yields it to the
   client, then commits the sha256-addressed file once the body completes. Simple pages take the slower route: devpi
   fetches the upstream page, parses it, writes the link list into its SQLite keyfs, and only then renders a response
@@ -98,10 +99,10 @@ file,<br/>write to store + DB, then serve"\] class V good class C,S warn {% end 
   archived since 2023 and runs only under Python 3.10 with [SQLAlchemy](https://www.sqlalchemy.org/) pinned below 2.
 
 Only peryx serves [PEP 658](https://peps.python.org/pep-0658/) `.metadata` by default (and
-[synthesizes it with byte-range reads](@/core/architecture.md) when an upstream lacks it); proxpi proxies it when the
-upstream advertises it, devpi hides it behind an experimental `--enable-core-metadata`, and pypiserver and pypicloud do
-not serve it at all. This drives the warm-resolution numbers: a resolver comparing ten versions fetches kilobytes from
-peryx and megabytes of wheels from the servers that cannot offer the sibling.
+[synthesizes it with byte-range reads](@/contributing/runtime-architecture.md) when an upstream lacks it); proxpi
+proxies it when the upstream advertises it, devpi hides it behind an experimental `--enable-core-metadata`, and
+pypiserver and pypicloud do not serve it at all. This drives the warm-resolution numbers: a resolver comparing ten
+versions fetches kilobytes from peryx and megabytes of wheels from the servers that cannot offer the sibling.
 
 ### Concurrent cold bursts
 
@@ -133,22 +134,9 @@ where.
 
 ## Benchmark suite
 
-The neutral [benchmark runner](https://github.com/tox-dev/peryx/tree/main/crates/peryx-bench) builds peryx, starts each
-competitor, runs one workload through a native HTTP client, samples each process tree, and writes the TOML reports
-rendered here. The PyPI crate owns the workload and server adapters in `crates/peryx-ecosystem-pypi/src/bench/` and
-exposes them through `peryx-bench-pypi`. Cell colors rank each row. Parenthesized ratios compare each server with the
-no-proxy **direct** baseline.
-
-### Running benchmarks
-
-Inspect the PyPI benchmark command, run one local target, or run the complete CodSpeed package lane:
-
-```shell
-cargo run -p peryx-ecosystem-pypi --features bench --bin peryx-bench-pypi -- --help
-cargo bench --locked -p peryx-ecosystem-pypi --bench parse
-just codspeed peryx-ecosystem-pypi
-ci/run-codspeed-local.sh peryx-ecosystem-pypi
-```
+The benchmark runner executes one workload against peryx and its competitors, then records process samples and reports.
+Cell colors rank each row. Parenthesized ratios compare each server with the no-proxy **direct** baseline. See
+[run the benchmarks](@/contributing/benchmarking.md) for source ownership and commands.
 
 ### Root-catalog synchronization
 
@@ -157,23 +145,9 @@ and runs the same streaming parser, 10,000-name transactions, and generation swa
 sync runs, another runtime worker repeatedly reads an unrelated project record. The report includes wall time, upstream
 request count, completed foreground reads, and their p99 latency.
 
-Build once before collecting samples, then run at least five measured rounds. Compare medians from the same machine and
-power state; do not compare a debug build, the first build, or results from hosts with different storage. On macOS,
-`/usr/bin/time -l` reports peak resident memory as `maximum resident set size`; GNU time reports it as
-`Maximum resident set size`:
-
-```shell
-CARGO_TARGET_DIR=.tox/target-catalog cargo build --release \
-  -p peryx-ecosystem-pypi --example catalog_million
-
-/usr/bin/time -l .tox/target-catalog/release/examples/catalog_million
-# Linux: /usr/bin/time -v .tox/target-catalog/release/examples/catalog_million
-```
-
-The fixture lives in the benchmark process, so peak RSS includes its generated JSON and the loopback server's response
-buffer. Compare deltas only between revisions of this benchmark. The one-request assertion catches accidental refetches;
-the project-count assertion catches partial publication. CI should use a fixed runner image and upload the raw stdout
-and time output rather than enforcing a cross-machine wall-time threshold.
+Peak RSS includes the generated JSON and the loopback server's response buffer. Compare deltas only between revisions of
+this benchmark. The one-request assertion catches accidental refetches; the project-count assertion catches partial
+publication.
 
 The table covers every alternative that can be started hermetically from a published package: peryx, devpi, proxpi,
 pypiserver (whose upstream fallback is a redirect rather than a cache), and pypicloud (archived upstream; it still runs,
@@ -184,10 +158,9 @@ configuration rather than a package, and [Artifactory](https://jfrog.com/artifac
 [Nexus](https://www.sonatype.com/products/nexus-repository), and the cloud registries need licenses or accounts, so none
 of them can be measured this way.
 
-The install workload is the top 51 most-downloaded PyPI packages (the snapshot is in
-`crates/peryx-ecosystem-pypi/src/bench/packages.rs`; torch included for one large wheel), installed with uv into a fresh
-virtualenv with a fresh client cache. **Cold** is the first install against a server with empty state; **warm** reruns
-it with the server's cache full and only the client reset.
+The install workload is the top 51 most-downloaded PyPI packages, including torch for one large wheel, installed with uv
+into a fresh virtual environment and client cache. **Cold** is the first install against a server with empty state;
+**warm** reruns it with the server's cache full and only the client reset.
 
 {{ bench(file="install-uv", owner="pypi") }}
 
@@ -263,5 +236,5 @@ Every server is measured the same way, on the same machine, in the same run, and
 
 ## Related
 
-- Benchmark controls and interpretation: [performance and methodology](@/core/performance.md)
+- Benchmark controls and interpretation: [performance and methodology](@/core/operations/performance.md)
 - Put the cache in front of CI: [the CI guide](@/guides/ci-cache.md)

@@ -5,8 +5,8 @@ weight = 7
 aliases = [ "/core/availability-contracts/"]
 +++
 
-The binary supports three availability modes. `none` skips distributed assembly; `dc` and `ha` use
-`peryx-ha-distributed`.
+The binary supports three availability modes. `none` skips distributed setup; `dc` and `ha` activate replication and
+coordination.
 
 | Mode   | Acknowledgement                                                            | Failure domain                 | Coordination                                                |
 | ------ | -------------------------------------------------------------------------- | ------------------------------ | ----------------------------------------------------------- |

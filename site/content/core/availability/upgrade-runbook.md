@@ -38,12 +38,12 @@ group below its durability policy or strand it too far ahead of a promotable rep
   `insufficient_members` block names a group that cannot acknowledge a write right now, so draining a further node would
   take quorum, not remove a spare.
 - **Replication lag.** `group_readiness.durable_frontier` is the serial the policy's members have all applied; compare
-  it against the writer's own committed `serial` and against [`peryx_ha_distributed_lag`](@/core/metrics.md) per
-  replica. A replica the roll may promote mid-hop should trail by no more than your lag budget, so it starts almost
+  it against the writer's own committed `serial` and against [`peryx_ha_distributed_lag`](@/core/operations/metrics.md)
+  per replica. A replica the roll may promote mid-hop should trail by no more than your lag budget, so it starts almost
   current rather than facing a long catch-up.
 - **Backup currency.** A step that fails recovers from a backup no further behind than you accept, so confirm the backup
   is current and reproven with `peryx backup verify` before you drain (see
-  [verify a backup](@/core/backup-restore.md#verify-a-backup)).
+  [verify a backup](@/core/operations/backup-restore.md#verify-a-backup)).
 
 ## Upgrade the cluster, one version at a time
 

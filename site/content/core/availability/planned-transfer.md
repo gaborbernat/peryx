@@ -13,8 +13,8 @@ Planned transfers use the [availability control listener](@/core/availability/li
 by the [availability contracts](@/core/availability/contracts.md). This contract covers start, cancellation, catch-up,
 state transitions, audit records, and recovery.
 
-The transfer engine treats authority and operation identities as opaque. The content owner supplies those identities;
-`peryx-ha-distributed` owns the catch-up barrier, epoch transition, and audit record.
+The transfer engine treats authority and operation identities as opaque. The selected ecosystem supplies those
+identities; Peryx enforces the catch-up barrier, epoch transition, and audit record.
 
 ## Starting a transfer
 

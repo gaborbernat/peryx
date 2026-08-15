@@ -13,7 +13,7 @@ user-owned indexes with inheritance, a web UI, primary/replica replication, and 
 [waitress](https://docs.pylonsproject.org/projects/waitress/) server, keeps its state in an
 [SQLite](https://www.sqlite.org/) key-value store with release files on the filesystem, and expects an
 [nginx](https://nginx.org/) and [supervisor](http://supervisord.org/) front for production (its own `devpi-gen-config`
-generates those files). peryx covers the same read-through core in one static Rust binary.
+generates those files). peryx covers the same read-through behavior in one process.
 
 ## Comparison against peryx
 
@@ -25,8 +25,8 @@ cached index. Their caching behavior overlaps in these areas:
 - **Read-through mirroring** of pypi.org (or any simple index), cached on first use.
 - **Private uploads** over the [twine](https://twine.readthedocs.io/) API, served from the same host as the cached
   index.
-- **Composition**: devpi's index inheritance (`bases`) maps onto peryx's [virtual indexes](@/core/indexes.md), and
-  hosted files shadow upstream ones in both.
+- **Composition**: devpi's index inheritance (`bases`) maps onto peryx's
+  [virtual indexes](@/core/repositories/indexes.md), and hosted files shadow upstream ones in both.
 - **Yank and delete** of hosted files.
 - **A web UI** for browsing packages (devpi-web; built into peryx at `/`).
 - **Streaming artifact downloads**: devpi's `FileStreamer` and peryx both tee a wheel to disk while the client reads it,
@@ -50,8 +50,8 @@ Migrating to peryx changes these areas:
 
 - **[PEP 658](https://peps.python.org/pep-0658/) metadata by default.** devpi 6.x ships core-metadata as experimental,
   behind `--enable-core-metadata`. peryx serves it out of the box and
-  [synthesizes it with HTTP byte-range reads](@/core/architecture.md) when an upstream lacks it, so resolution can beat
-  the upstream once metadata is cached.
+  [synthesizes it with HTTP byte-range reads](@/contributing/runtime-architecture.md) when an upstream lacks it, so
+  resolution can beat the upstream once metadata is cached.
 - **Correctness under a concurrent cold burst.** On the first parallel fetch of a project, devpi can evaluate the
   request against an as-yet-empty project list, return a `404`, and cache that "does not exist" for its 30-minute mirror
   window; [uv](https://docs.astral.sh/uv/) then fails the install. peryx single-flights concurrent misses onto one
@@ -63,8 +63,8 @@ Migrating to peryx changes these areas:
 
 ### Performance vs peryx
 
-The [benchmark suite](@/core/performance.md) runs both servers from their published packages against the same workload.
-Cold and warm installs through uv:
+The [benchmark suite](@/core/operations/performance.md) runs both servers from their published packages against the same
+workload. Cold and warm installs through uv:
 
 {{ bench(file="install-uv", only="peryx,devpi", owner="pypi") }}
 
@@ -100,7 +100,6 @@ packages need a `twine upload` pass into the new hosted index. Map the commands 
 - **ACLs move into configuration.** Create separate scoped access tokens or server-role grants for principals that must
   retain distinct permissions.
 - **No `push` between indexes.** Promoting a release is a re-upload into the target index.
-- **Pluggy hooks have no runtime counterpart.** Move custom hooks to a gateway, an owner crate built into peryx, or
-  automation against the HTTP API.
+- **Pluggy hooks have no runtime counterpart.** Move custom hooks to a gateway or automation against the HTTP API.
 - **Replication configuration must be rebuilt.** Configure peryx membership and roles; do not copy devpi changelog or
   replica state.

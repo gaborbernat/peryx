@@ -83,5 +83,5 @@ first match wins per file. With a real private upstream you would add credential
 ## Next steps
 
 - The provider-by-provider URL and credential reference: [proxy a private upstream](@/guides/private-mirror.md)
-- What layering means for security: [the index model](@/core/indexes.md)
+- What layering means for security: [the index model](@/core/repositories/indexes.md)
 - Coming from one of these providers? [Migration](@/migration/_index.md)

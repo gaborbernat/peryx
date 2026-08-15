@@ -61,9 +61,10 @@
   </summary>
   {% for subpath in sec.subsections %}
   {% set sub = get_section(path=subpath) %}
+  {% set in_subsection = current is starting_with(pat=sub.permalink) %}
   <div class="docs-nav-sub">
     <a class="docs-nav-subtitle{% if current == sub.permalink %} active{% endif %}" href="{{ sub.permalink }}">{{ sub.title }}</a>
-    {% if sub.pages %}
+    {% if in_subsection and sub.pages %}
     <ul>
       {% for p in sub.pages %}
       <li><a{% if current == p.permalink %} class="active" aria-current="page"{% endif %} href="{{ p.permalink }}">{{ p.title }}</a></li>

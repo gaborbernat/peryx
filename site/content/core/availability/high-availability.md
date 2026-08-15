@@ -5,8 +5,8 @@ weight = 7
 aliases = [ "/core/high-availability/"]
 +++
 
-One peryx binary contains `peryx-ha-distributed`. An omitted `[availability]` table or `mode = "none"` skips
-availability assembly. `dc` and `ha` construct only the distributed resources required by the resolved configuration.
+An omitted `[availability]` table or `mode = "none"` starts no distributed work. `dc` and `ha` start the replication,
+coordination, and recovery services required by the resolved configuration.
 
 In distributed modes, send mutation traffic to the writer. Managed workers copy committed metadata and artifact bytes to
 replicas, which reject mutation requests with `503 Service Unavailable`. The
@@ -14,20 +14,15 @@ replicas, which reject mutation requests with `503 Service Unavailable`. The
 
 ## Availability lifecycle
 
-Startup separates allocation from execution. `peryx-ha-distributed` first returns a prepared handle containing bound
-listeners, routes, metrics, and worker resources. Preparation starts no managed availability work. The process mounts
-the returned routes and finishes its other startup checks before consuming that handle to produce an active handle.
-Activation starts consensus, listeners, replication, and reconciliation as one transition. A failed transition stops
-every resource that started before returning the error.
+Startup validates settings and reserves listeners before it starts availability work. Modes `dc` and `ha` start
+consensus, replication, and reconciliation as one transition. If one service fails, startup stops the services it
+started and returns an error. The process does not accept artifact requests in this state.
 
-Prepared and active handles are distinct types, so startup cannot activate one handle twice or wait on a resource that
-has not started. The process owns the active handle until shutdown. It cancels work first, then joins the listener,
-consensus, and worker runtime within a bounded deadline. A resource that misses the deadline moves to the process
-reaper, which waits off the serving runtime. Dropping a handle requests cancellation but never blocks the dropping
-thread.
+During shutdown, Peryx stops accepting work, cancels background operations, and waits for availability services within a
+bounded deadline. It reports any service that misses the deadline. Mode `none` skips these steps and adds no
+availability work to artifact requests.
 
-Configuration `none` ends availability setup before assembly. It creates neither handle nor reaper and adds no
-availability branch to artifact requests.
+Contributors can read [runtime architecture](@/contributing/runtime-architecture.md) for startup ownership and cleanup.
 
 ## Read-only processes
 
@@ -194,12 +189,12 @@ paths.
 snapshot instead of traversing live membership and storage state. Distributed nodes mount the route; `none` does not.
 
 The snapshot names the `mode`, the `group`, and a `nodes` roster drawn from the
-[`[[availability.member]]`](@/core/configuration.md#availability) configuration. Each roster entry carries its `node`
-identity, `dc`, `role`, and a `local` flag marking the node that produced the snapshot. A `local` block reports this
-node's own live self-observation, which the process always knows: its `role`, its `liveness`, and the metadata
-`frontier` it has committed. `captured_at` dates the snapshot in Unix seconds, and `node_count` reports the full roster
-size when the `nodes` list is capped, so a stale or truncated render is visible rather than passing for a healthy,
-complete one.
+[`[[availability.member]]`](@/core/operations/configuration.md#availability) configuration. Each roster entry carries
+its `node` identity, `dc`, `role`, and a `local` flag marking the node that produced the snapshot. A `local` block
+reports this node's own live self-observation, which the process always knows: its `role`, its `liveness`, and the
+metadata `frontier` it has committed. `captured_at` dates the snapshot in Unix seconds, and `node_count` reports the
+full roster size when the `nodes` list is capped, so a stale or truncated render is visible rather than passing for a
+healthy, complete one.
 
 The topology snapshot reports live state only for the local node. Peer entries use `unknown` without a frontier. Read
 heartbeat-derived peer liveness from the writer's `/+replication/v1/ready` or `/+replication/v1/health` response. The
@@ -225,14 +220,6 @@ Selecting `none` removes distributed availability cost without disabling general
 The metadata store creates shared tables when it opens. Placement, reclamation, and reconciliation tables do not exist
 until their first write. Consensus opens its own state during distributed activation. A `none` process therefore creates
 no distributed persistence as a side effect of opening storage.
-
-## Implementation boundaries
-
-The `peryx` binary resolves configuration, mounts routes, and owns the prepared or active handle. `peryx-ha` defines
-mode, lifecycle, placement, reclamation, frontier, operation, and persistence contracts. `peryx-ha-distributed` owns
-consensus, replication, cross-datacenter copy, reconciliation, reclamation, authority transfer, metrics, and tasks.
-Storage implements atomic persistence traits without choosing policy. Content owners implement reference and operation
-traits without exposing their data models to availability crates.
 
 ## Blob reclamation
 
@@ -321,4 +308,4 @@ promotion, and do not start two writers against copies that can diverge.
 
 - Size and stand up each shape: [availability deployment and sizing](@/core/availability/deployment.md)
 - What each mode's acknowledgement promises: [availability contracts](@/core/availability/contracts.md)
-- The mode and replication keys: [`[availability]`](@/core/configuration.md#availability)
+- The mode and replication keys: [`[availability]`](@/core/operations/configuration.md#availability)

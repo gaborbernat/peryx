@@ -6,7 +6,7 @@ weight = 4
 
 An OCI index allows anonymous reads and authenticates writes by default. The examples restrict reads, issue
 repository-scoped tokens, and disable anonymous reads for the server. See
-[authentication and access control](@/core/authentication.md) for the shared access model.
+[authentication and access control](@/core/access/authentication.md) for the shared access model.
 
 ## Configure token signing
 
@@ -131,5 +131,5 @@ token_ttl_secs = 900
 ## See also
 
 - [Log in and push with a scoped token](../tutorials/scoped-token.md): the same setup as a walkthrough.
-- [Control access to an index](@/core/control-access.md): the neutral cookbook, PyPI and OCI alike.
+- [Control access to an index](@/core/access/control-access.md): the neutral cookbook, PyPI and OCI alike.
 - [Token authentication](../reference/token-auth.md): the endpoints and error codes.

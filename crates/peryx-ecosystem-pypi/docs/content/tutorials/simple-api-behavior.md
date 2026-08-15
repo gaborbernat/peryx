@@ -11,7 +11,7 @@ the served bytes.
 
 ## Prerequisites
 
-You need a peryx binary ([installation](@/core/installation.md) lists the channels), Python 3, and
+You need a peryx binary ([installation](@/core/start/installation.md) lists the channels), Python 3, and
 [curl](https://curl.se/). Work in a scratch directory. Each part below writes its own `peryx.toml`; stop the previous
 peryx before starting the next.
 

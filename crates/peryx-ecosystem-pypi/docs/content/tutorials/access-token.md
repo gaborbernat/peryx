@@ -6,7 +6,7 @@ weight = 2
 
 Add a named upload token to a hosted index, scope it with a project glob, and publish through it with twine. The checks
 use one accepted project and one rejected project. Allow ten minutes after completing
-[getting started](@/core/getting-started.md).
+[getting started](@/core/start/getting-started.md).
 
 HTTP Basic auth carries the token with the `__token__:<token>` convention used by pip, twine, and
 [pypi.org](https://pypi.org/). No separate login step is required.
@@ -61,9 +61,9 @@ peryx serve --config peryx.toml
 
 ## Publish a project the token covers
 
-Build a small package named `team-widgets` (reuse the steps from [getting started](@/core/getting-started.md), changing
-the project name), then publish it to the virtual index's route. peryx accepts any username; the token is the password,
-matching the `__token__` convention:
+Build a small package named `team-widgets` (reuse the steps from [getting started](@/core/start/getting-started.md),
+changing the project name), then publish it to the virtual index's route. peryx accepts any username; the token is the
+password, matching the `__token__` convention:
 
 ```shell
 twine upload --repository-url http://127.0.0.1:4433/root/pypi/ -u __token__ -p ci-secret dist/*
@@ -110,7 +110,8 @@ cannot gain fresh buckets by rotating invalid `Authorization` values.
 
 Leave `trusted_proxies` unset for this local run. Named principals use their verified subject. The proxy list controls
 the address bucket for anonymous or invalid credentials and which peers may set the public origin. For a proxy
-deployment, follow the [reverse-proxy recipe](@/core/control-access.md#preserve-client-buckets-behind-a-reverse-proxy).
+deployment, follow the
+[reverse-proxy recipe](@/core/access/control-access.md#preserve-client-buckets-behind-a-reverse-proxy).
 
 ## Single-token configuration
 
@@ -134,6 +135,7 @@ its keep.
 
 ## Related
 
-- Related recipes: [control access to an index](@/core/control-access.md)
-- Every key and its default: [authentication and access control](@/core/authentication.md)
-- Token storage and upstream authentication: [client auth versus upstream credentials](@/core/access-explained.md)
+- Related recipes: [control access to an index](@/core/access/control-access.md)
+- Every key and its default: [authentication and access control](@/core/access/authentication.md)
+- Token storage and upstream authentication:
+  [client auth versus upstream credentials](@/core/access/access-explained.md)

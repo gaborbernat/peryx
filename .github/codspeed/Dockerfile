@@ -37,6 +37,7 @@ RUN --mount=from=artifacts,source=/artifacts,target=/artifacts \
         git \
         jq \
         libc6-dbg \
+        passwd \
         pkg-config \
         util-linux \
         zstd \
@@ -53,3 +54,5 @@ RUN --mount=from=artifacts,source=/artifacts,target=/artifacts \
     && command -v cargo cargo-codspeed codspeed git jq perl sha256sum valgrind \
     && valgrind --version \
     && rm -rf /tmp/codspeed /tmp/rustup-init
+
+COPY .github/codspeed/entrypoint.sh /usr/local/bin/peryx-codspeed-entrypoint

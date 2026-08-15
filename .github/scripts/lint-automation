@@ -21,6 +21,8 @@ fi
 .github/scripts/tests/source-inventory.bash
 .github/scripts/tests/crate-contracts.bash
 .github/scripts/tests/codspeed-matrix.bash
+.github/scripts/tests/codspeed-launcher.bash
+.github/scripts/tests/codspeed-entrypoint.bash
 .github/scripts/tests/conformance.bash
 .github/scripts/tests/run-codspeed.bash
 .github/scripts/tests/ci-design.bash

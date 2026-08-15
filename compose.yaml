@@ -41,6 +41,9 @@ services:
     working_dir: /workspace
     environment:
       CARGO_HOME: /workspace/.tox/codspeed/cargo
+      HOME: /workspace/.tox/codspeed/home
+      PERYX_GID: ${PERYX_GID:-1000}
+      PERYX_UID: ${PERYX_UID:-1000}
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_TARGET_DIR: /workspace/.tox/codspeed/target
       CODSPEED_BUILD_ONLY:
@@ -73,7 +76,7 @@ services:
     volumes:
       - ${PWD:-.}:/workspace
       - ${PERYX_CODSPEED_EVENT_PATH:-/dev/null}:/github-event.json:ro
-    entrypoint: ["ci/run-codspeed.sh"]
+    entrypoint: ["peryx-codspeed-entrypoint", "ci/run-codspeed.sh"]
 
   test:
     <<: *test-service

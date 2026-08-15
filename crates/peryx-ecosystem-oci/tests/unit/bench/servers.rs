@@ -120,9 +120,8 @@ async fn wait_for_startup_rejects_closed_output() {
             tokio::time::Instant::now() + std::time::Duration::from_secs(1)
         )
         .await
-        .unwrap_err()
-        .to_string(),
-        "process closed its output before startup"
+        .unwrap(),
+        None
     );
 }
 

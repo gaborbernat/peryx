@@ -39,3 +39,9 @@ jq -e 'any(.include[]; .packages == "alpha" and .weight == 100) and any(.include
   <<<"$measured" >/dev/null
 fallback=$(cd "$repo" && scripts/ci/workspace-packages 2 contracts "$scratch/absent")
 jq -e '.include | length == 2' <<<"$fallback" >/dev/null
+printf 'alpha\ngamma\n' >"$scratch/selected"
+selected=$(cd "$repo" && scripts/ci/workspace-packages 2 contracts "$scratch/absent" "$scratch/selected")
+jq -e '[.include[].packages] | sort == ["alpha", "gamma"]' <<<"$selected" >/dev/null
+: >"$scratch/selected"
+empty=$(cd "$repo" && scripts/ci/workspace-packages 2 contracts "$scratch/absent" "$scratch/selected")
+jq -e '.include == []' <<<"$empty" >/dev/null

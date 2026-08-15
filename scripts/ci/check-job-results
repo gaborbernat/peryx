@@ -4,6 +4,7 @@ set -euo pipefail
 policy=${1:?policy is required}
 results=${2:?results are required}
 context=${3:?context is required}
+strict_skips=false
 
 case "$policy" in
     main)
@@ -14,7 +15,7 @@ case "$policy" in
           | {
               "changes": true,
               "coverage": (.rust or $common),
-              "crate-contracts": (.rust or $common),
+              "crate-contracts": (.contracts or $common),
               "docs": (.docs or $common),
               "frontend": (.rust or .frontend_tests or $common),
               "lint-automation": (.automation or $common),
@@ -41,6 +42,14 @@ case "$policy" in
           "operations": (.benchmarks and .image_available)
         }' <<<"$context")
         ;;
+    contracts)
+        expected=$(jq -c '
+          . as $context
+          | reduce .available[] as $package ({changes: true};
+              .["crate-contract-" + $package] = ($context.selected | index($package) != null))
+        ' <<<"$context")
+        strict_skips=true
+        ;;
     conformance)
         expected=$(jq -c '
           (.event == "push" or .event == "workflow_dispatch") as $common
@@ -57,12 +66,14 @@ case "$policy" in
         ;;
 esac
 
-issues=$(jq -cn --argjson results "$results" --argjson expected "$expected" '
+issues=$(jq -cn --argjson results "$results" --argjson expected "$expected" \
+  --argjson strict_skips "$strict_skips" '
   [($expected | to_entries[]) as $job
     | ($results[$job.key].result // "missing") as $result
     | select(
         ($job.value and $result != "success")
-        or ($job.value == false and $result != "success" and $result != "skipped")
+        or ($job.value == false and
+          (if $strict_skips then $result != "skipped" else $result != "success" and $result != "skipped" end))
       )
     | "\($job.key)=\($result)"]
   + [(($results | keys) - ($expected | keys))[] | "\(.)=unexpected"]

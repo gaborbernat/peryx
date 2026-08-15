@@ -1,4 +1,4 @@
-use std::sync::mpsc::channel;
+use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
 use anyhow::bail;
@@ -23,20 +23,17 @@ fn usage_reports_initial_failure() {
 
 #[test]
 fn usage_reports_terminal_sampling_failure() {
-    let (release, released) = channel();
-    let (sample, sampled) = channel();
+    let (sample_started, wait_for_sample) = sync_channel(0);
     let mut initial = true;
     let usage = Usage::watch_with(Duration::ZERO, move || {
         if std::mem::take(&mut initial) {
             return Ok((1, 1));
         }
-        sample.send(()).unwrap();
-        released.recv().unwrap();
+        sample_started.send(()).unwrap();
         bail!("later sample failed");
     })
     .unwrap();
-    sampled.recv().unwrap();
-    release.send(()).unwrap();
+    wait_for_sample.recv().unwrap();
     assert_eq!(
         usage.finish().unwrap_err().to_string(),
         "resource sampling failed: later sample failed"

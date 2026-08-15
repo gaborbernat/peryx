@@ -5,6 +5,12 @@ repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
 requested_output=${1:?pass an output path}
 shift
+packages_file=
+if [[ ${1:-} == --packages-file ]]; then
+  packages_file=${2:?pass a package list}
+  shift 2
+fi
+(($#)) || { printf 'pass at least one coverage input\n' >&2; exit 2; }
 output_parent=$(dirname -- "$requested_output")
 mkdir -p "$output_parent"
 output_parent=$(cd "$output_parent" && pwd -P)
@@ -26,7 +32,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-.github/scripts/check-coverage-contracts "$@"
+contract_args=()
+[[ -z $packages_file ]] || contract_args=(--packages-file "$packages_file")
+.github/scripts/check-coverage-contracts "${contract_args[@]}" "$@"
 .github/scripts/coverage-combine "$staged_output" "$@"
 .github/scripts/check-lcov-sources "$staged_output"
 env COVERAGE_REQUIRE_EXECUTABLE=1 .github/scripts/check-lcov-functions.awk "$staged_output"

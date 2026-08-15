@@ -38,7 +38,7 @@ was archived on August 27, 2023 ("Pypicloud has transitioned to maintenance mode
 - **It is maintained.** pypicloud is archived and pinned to a pre-2.0 SQLAlchemy stack.
 - **A streaming cold path.** pypicloud buffers a missed wheel fully into a `TemporaryFile`, writes it to storage and a
   cache row, and only then serves it, so the client waits for the whole download plus the disk write plus the DB commit.
-  peryx [streams the bytes to the client and into the store at once](@/core/architecture.md).
+  peryx [streams the bytes to the client and into the store at once](@/contributing/runtime-architecture.md).
 - **Concurrency correctness.** A cold burst of clients asking pypicloud for the same wheel each download it and race to
   insert the same primary key into single-writer [SQLite](https://www.sqlite.org/); the losers surface as `HTTP 500`.
   peryx single-flights the fetch, so all waiters tail one download.
@@ -47,7 +47,8 @@ was archived on August 27, 2023 ("Pypicloud has transitioned to maintenance mode
 
 ### Performance vs peryx
 
-The [benchmark suite](@/core/performance.md) runs both from their published packages. Cold and warm installs through uv:
+The [benchmark suite](@/core/operations/performance.md) runs both from their published packages. Cold and warm installs
+through uv:
 
 {{ bench(file="install-uv", only="peryx,pypicloud", owner="pypi") }}
 
@@ -63,7 +64,7 @@ the default. Your cached-index state refills on first use; only hosted uploads n
 
 | pypicloud                                | peryx                                                                     |
 | ---------------------------------------- | ------------------------------------------------------------------------- |
-| `ppc-make-config` + `pserve config.ini`  | a [TOML file](@/core/configuration.md) + `peryx serve`                    |
+| `ppc-make-config` + `pserve config.ini`  | a [TOML file](@/core/operations/configuration.md) + `peryx serve`         |
 | `pypi.fallback = cache`                  | the default cached-index behavior                                         |
 | `pypi.fallback = redirect` / `none`      | not offered; misses serve through the cache or 404 on hosted-only indexes |
 | `storage = s3`                           | `[blob] backend = "s3"`                                                   |
@@ -75,7 +76,7 @@ the default. Your cached-index state refills on first use; only hosted uploads n
 ## Gotchas
 
 - **S3 settings differ.** Configure the bucket under `[blob]`; the AWS SDK provider chain supplies credentials. The
-  [object-storage guide](@/core/object-storage.md) lists durability requirements and migration limits.
+  [object-storage guide](@/core/repositories/object-storage.md) lists durability requirements and migration limits.
 - **Permissions move to grants.** Set `anonymous_read = false` and add `read`, `write`, or `delete` actions to each
   `[[index.access_token]]` as needed.
 - **Metadata stays node-local.** Shared S3 stores blobs, not redb metadata. Use `dc` or `ha` for coordinated nodes.

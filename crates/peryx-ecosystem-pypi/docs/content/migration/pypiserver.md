@@ -32,18 +32,19 @@ maintainers.
 
 - **A real cached index.** pypiserver's fallback is a `302` redirect to pypi.org; the file never enters its directory,
   so every machine still needs pypi.org access and every miss pays full upstream latency. peryx's cached layer serves
-  misses through itself and keeps them: one egress point, [cold installs at upstream speed](@/core/performance.md), and
-  a content-addressed store that dedupes.
+  misses through itself and keeps them: one egress point,
+  [cold installs at upstream speed](@/core/operations/performance.md), and a content-addressed store that dedupes.
 - **Outage resilience.** An upstream outage takes pypiserver's fallback installs down with it. peryx serves the last
   good page while the upstream is unreachable, so a pypi.org blip degrades to stale-but-working.
-- **Shadowing.** Your uploads [shadow upstream names](@/core/indexes.md) instead of coexisting with a redirect.
+- **Shadowing.** Your uploads [shadow upstream names](@/core/repositories/indexes.md) instead of coexisting with a
+  redirect.
 - **[PEP 658](https://peps.python.org/pep-0658/) metadata.** pypiserver serves none; peryx serves it by default.
 
 ### Performance vs peryx
 
-The [benchmark suite](@/core/performance.md) runs both from their published packages. In the install rows, pypiserver's
-near-zero server CPU and flat cold-versus-warm columns are the redirect showing through: it does no work on a miss
-because it caches nothing.
+The [benchmark suite](@/core/operations/performance.md) runs both from their published packages. In the install rows,
+pypiserver's near-zero server CPU and flat cold-versus-warm columns are the redirect showing through: it does no work on
+a miss because it caches nothing.
 
 {{ bench(file="install-uv", only="peryx,pypiserver", owner="pypi") }}
 

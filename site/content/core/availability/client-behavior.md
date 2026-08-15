@@ -23,8 +23,8 @@ Ingress retains bounded records and bytes for work awaiting finalization. It ref
 The [readable frontier](@/core/availability/derived-views.md) bounds mutable reads. A replica withholds metadata until
 each required view has applied its serial. Content-addressed reads verify returned bytes against the requested digest.
 
-[Remote read-through](@/core/remote-read-through.md) can fetch missing local bytes from an eligible peer. Failed
-verification leaves no partial content in the local store.
+[Remote read-through](@/core/repositories/remote-read-through.md) can fetch missing local bytes from an eligible peer.
+Failed verification leaves no partial content in the local store.
 
 ## Failover
 

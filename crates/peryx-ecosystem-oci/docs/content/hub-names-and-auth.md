@@ -68,14 +68,14 @@ rejection. Check these causes:
 
 A `404` still means absent, and still reaches the client as `MANIFEST_UNKNOWN` or `BLOB_UNKNOWN`. A `403` also counts as
 absent, since a registry answers it for a repository it will not show anonymously, and a
-[virtual index](@/core/indexes.md) walks on to its next member.
+[virtual index](@/core/repositories/indexes.md) walks on to its next member.
 
 ## Cached-image fallback
 
 A tag is mutable, so a cached index revalidates it upstream once its freshness window (`cache_ttl_secs`) elapses. If
 that revalidation returns `401`, peryx has failed to confirm whether the tag changed. It serves the cached manifest and
 blobs within `max_stale_secs` past the freshness window, the same bound used when an upstream is unreachable (see
-[configuration](@/core/configuration.md)).
+[configuration](@/core/operations/configuration.md)).
 
 With an expired upstream credential, cached content remains available within `max_stale_secs`; uncached content returns
 `401`, and logs include the upstream status.

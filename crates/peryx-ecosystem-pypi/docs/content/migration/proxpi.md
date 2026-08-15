@@ -37,16 +37,16 @@ its file cache defaults to a temporary directory, and it has no uploads and no p
   `tempfile.mkdtemp()` that is deleted on shutdown, so without a configured `PROXPI_CACHE_DIR` nothing survives a
   restart. Under four gunicorn workers the in-memory index cache is duplicated per worker and never shared. peryx is one
   process with a persistent content-addressed store shared by everything it does.
-- **Private packages.** peryx hosts your own uploads [shadowing upstream names](@/core/indexes.md); proxpi is a proxy
-  only, with no upload path.
+- **Private packages.** peryx hosts your own uploads [shadowing upstream names](@/core/repositories/indexes.md); proxpi
+  is a proxy only, with no upload path.
 - **Verified caching.** peryx checks each artifact against the digest its index page advertised before caching it.
 - **No redirect to upstream.** When a download runs past `PROXPI_DOWNLOAD_TIMEOUT` (0.9 s default), proxpi redirects the
   client to pypi.org, so clients still need direct upstream access. peryx always serves through itself.
 
 ### Performance vs peryx
 
-The [benchmark suite](@/core/performance.md) runs both from their published packages against the same workload. Cold and
-warm installs through uv:
+The [benchmark suite](@/core/operations/performance.md) runs both from their published packages against the same
+workload. Cold and warm installs through uv:
 
 {{ bench(file="install-uv", only="peryx,proxpi", owner="pypi") }}
 
@@ -60,15 +60,15 @@ per-worker memory cost:
 The client change is one line: point your index URL at peryx. proxpi caches nothing you need to carry over; peryx
 refills on first use. Map the environment knobs across:
 
-| proxpi                                 | peryx                                                                                                       |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `http://host:5000/index/`              | `http://host:4433/{route}/simple/`                                                                          |
-| `PROXPI_INDEX_URL`                     | an `[[index.upstream]]` `url = "https://pypi.org/simple/"` on a cached index                                |
-| `PROXPI_EXTRA_INDEX_URLS`              | extra cached indexes, composed by a [virtual index](@/guides/compose-overlays.md)                           |
-| `PROXPI_INDEX_TTL`                     | upstream `Cache-Control`, with `cache_ttl_secs` as fallback ([how freshness works](@/core/architecture.md)) |
-| `PROXPI_CACHE_DIR` (default: temp dir) | `data_dir` (persistent)                                                                                     |
-| `PROXPI_CACHE_SIZE` eviction           | no size cap yet; the store grows with your working set                                                      |
-| `curl -X DELETE /cache/{project}`      | wait out the freshness window, or restart with a clean `data_dir`                                           |
+| proxpi                                 | peryx                                                                                                                       |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `http://host:5000/index/`              | `http://host:4433/{route}/simple/`                                                                                          |
+| `PROXPI_INDEX_URL`                     | an `[[index.upstream]]` `url = "https://pypi.org/simple/"` on a cached index                                                |
+| `PROXPI_EXTRA_INDEX_URLS`              | extra cached indexes, composed by a [virtual index](@/guides/compose-overlays.md)                                           |
+| `PROXPI_INDEX_TTL`                     | upstream `Cache-Control`, with `cache_ttl_secs` as fallback ([how freshness works](@/contributing/runtime-architecture.md)) |
+| `PROXPI_CACHE_DIR` (default: temp dir) | `data_dir` (persistent)                                                                                                     |
+| `PROXPI_CACHE_SIZE` eviction           | no size cap yet; the store grows with your working set                                                                      |
+| `curl -X DELETE /cache/{project}`      | wait out the freshness window, or restart with a clean `data_dir`                                                           |
 
 ## Gotchas
 

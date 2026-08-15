@@ -48,7 +48,7 @@ curl -X PUT -u __token__:<secret> http://127.0.0.1:4433/root/pypi/mypkg/restore 
 
 The content-addressed blob stays on disk after a delete; another index or a re-upload with the same digest reuses it.
 Responses are `200` with the number of files affected, or `404` when nothing matched. The project page's "Manage
-uploads" panel in the [web UI](@/core/web-ui.md) drives these same endpoints.
+uploads" panel in the [web UI](@/core/operations/web-ui.md) drives these same endpoints.
 
 ## Target a release by an equivalent version
 
@@ -173,13 +173,13 @@ curl -u admin:$PERYX_ADMIN_PASSWORD \
 ```
 
 The record remains restorable while the recovery deadline is open and retained content exists. The
-[`/admin/trash`](@/core/web-ui.md) page exposes the same filters and omits the deleting actor for repository-scoped
-credentials.
+[`/admin/trash`](@/core/operations/web-ui.md) page exposes the same filters and omits the deleting actor for
+repository-scoped credentials.
 
 ## Related
 
-- Yank vs delete vs hide, and why all three exist: [the index model](@/core/indexes.md)
-- The same actions from the browser: [the web UI](@/core/web-ui.md)
+- Yank vs delete vs hide, and why all three exist: [the index model](@/core/repositories/indexes.md)
+- The same actions from the browser: [the web UI](@/core/operations/web-ui.md)
 - The exact matching rule, and every path for a verb-named project:
   [version matching for admin operations](@/reference/uploads.md#version-matching-for-admin-operations) and
   [mutation paths for verb-named projects](@/reference/uploads.md#mutation-paths-for-verb-named-projects)

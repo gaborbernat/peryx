@@ -21,15 +21,15 @@ wire protocol. Update the endpoint and map the previous registry configuration a
 | Harbor project                                               | Index whose `route` provides the namespace                                                                        |
 | Harbor proxy-cache project                                   | Cached index                                                                                                      |
 | Harbor replication rule that pulls from another registry     | Cached index warmed on pull; peryx has no rule engine                                                             |
-| Multiple repositories served from one endpoint               | Virtual index with `layers = [...]`; see [index composition](@/core/indexes.md)                                   |
+| Multiple repositories served from one endpoint               | Virtual index with `layers = [...]`; see [index composition](@/core/repositories/indexes.md)                      |
 | `storage.filesystem.rootdirectory` or Harbor registry volume | Content-addressed blob store shared across indexes                                                                |
 | `htpasswd` or Harbor robot account on a push repository      | Write-granting `[[index.access_token]]` on each hosted index; reads remain open unless access rules restrict them |
 
 ## Configuration
 
 A `registry:2` pull-through cache is a small YAML file with a `proxy` block; a private registry drops the `proxy` block
-and gains `htpasswd` auth. Both collapse to `[[index]]` entries in one [peryx.toml](@/core/configuration.md). A Docker
-Hub cache plus a hosted store:
+and gains `htpasswd` auth. Both collapse to `[[index]]` entries in one [peryx.toml](@/core/operations/configuration.md).
+A Docker Hub cache plus a hosted store:
 
 ```toml
 # peryx.toml
@@ -66,9 +66,9 @@ layers = ["images", "dockerhub"]
 ```
 
 A pull of `all/library/alpine` you have never published falls through to Docker Hub; once you push `all/library/alpine`,
-your image wins. That is the [dependency-confusion defense](@/core/indexes.md#shadowing) for containers. Point the
-`[[index.upstream]]` `url` at [GHCR](https://docs.github.com/packages), [ECR](https://aws.amazon.com/ecr/), or a Harbor
-`/v2/` the same way; any registry that implements the spec.
+your image wins. That is the [dependency-confusion defense](@/core/repositories/indexes.md#shadowing) for containers.
+Point the `[[index.upstream]]` `url` at [GHCR](https://docs.github.com/packages), [ECR](https://aws.amazon.com/ecr/), or
+a Harbor `/v2/` the same way; any registry that implements the spec.
 
 ## Client changes
 

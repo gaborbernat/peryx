@@ -297,7 +297,7 @@ Validation failures return `400` with the field or archive check that failed. Co
 
 ## Related
 
-- Upstream-name shadowing: [the index model](@/core/indexes.md)
+- Upstream-name shadowing: [the index model](@/core/repositories/indexes.md)
 - Undo a bad release: [yank and delete](@/guides/remove.md)
 - The upload protocol itself: [HTTP endpoints](@/reference/endpoints.md)
 - The exact accept and reject rules, tables, and error strings: [upload rules](@/reference/uploads.md)

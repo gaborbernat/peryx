@@ -16,25 +16,14 @@ and one or more **layer** blobs. Each part is a **blob** addressed by the sha256
 ## Prerequisites
 
 You need a container client (`docker`, `podman`, or [`crane`](https://github.com/google/go-containerregistry)) and a
-peryx binary. Choose an [installation method](@/core/installation.md):
-
-{% tabs(names="installer, from source") %}
+peryx binary. Choose an [installation method](@/core/start/installation.md):
 
 ```shell
 # standalone binary, no toolchain involved
 curl -LsSf https://github.com/tox-dev/peryx/releases/latest/download/peryx-installer.sh | sh
 ```
 
-%%%
-
-```shell
-# needs a Rust toolchain (https://rustup.rs); rust-toolchain.toml pins the version
-git clone https://github.com/tox-dev/peryx.git
-cd peryx
-cargo build --release
-```
-
-{% end %}
+Contributors can [build from a checkout](@/contributing/build.md).
 
 ## Configure peryx
 
@@ -77,8 +66,8 @@ peryx is now listening on `127.0.0.1:4433`. Leave it running and use a second te
 
 `docker` and `podman` trust a **loopback** registry (`localhost`, `127.0.0.0/8`) over plain HTTP with no configuration,
 so on the same host the commands below work as written. Reaching peryx over the network (or from Docker Desktop, whose
-engine runs in a VM) needs either [TLS](@/core/configuration.md#tls) (the production path, no client flag) or the
-client's insecure-registry setting. `crane` and `podman` take a per-command flag; the snippets show it.
+engine runs in a VM) needs either [TLS](@/core/operations/configuration.md#tls) (the production path, no client flag) or
+the client's insecure-registry setting. `crane` and `podman` take a per-command flag; the snippets show it.
 
 ## Pull through the cache
 
@@ -169,4 +158,4 @@ The first command prints a dry-run plan. The second unlinks blobs that no regist
 - [Run a container registry](../guides/container-registry.md): add a virtual index so your hosted images shadow
   upstream, and delete images you no longer want.
 - [OCI performance](../performance.md): how peryx compares to distribution and zot as a Docker Hub cache.
-- [Configuration reference](@/core/configuration.md): TOML settings, including TLS configuration.
+- [Configuration reference](@/core/operations/configuration.md): TOML settings, including TLS configuration.

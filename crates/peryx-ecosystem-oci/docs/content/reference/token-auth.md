@@ -6,7 +6,7 @@ weight = 4
 
 peryx implements [distribution token authentication](https://distribution.github.io/distribution/spec/auth/token/) so
 `docker login` validates credentials and tokens carry repository scopes. See
-[authentication and access control](@/core/authentication.md) for principals and grants, and
+[authentication and access control](@/core/access/authentication.md) for principals and grants, and
 [Bearer token realm](../token-realm.md) for the protocol design.
 
 ## Enabling the realm
@@ -77,7 +77,7 @@ public repository still gets a `pull` token, and one for a private repository ge
 
 A repository scope is `repository:<name>:<actions>`. Include the index route prefix in the full `/v2/` repository name,
 such as `team/app` or `dockerhub/library/alpine`. `<actions>` is a comma-separated list; peryx maps each verb to a
-neutral [action](@/core/authentication.md):
+neutral [action](@/core/access/authentication.md):
 
 | Scope verb | Neutral action          | Granted for                   |
 | ---------- | ----------------------- | ----------------------------- |
@@ -138,7 +138,7 @@ Search inserts the resource globs into its query before counting and pagination.
 
 ## See also
 
-- [Authentication and access control](@/core/authentication.md): the neutral model these routes enforce.
-- [Client auth versus upstream credentials](@/core/access-explained.md): why a cached index never forwards a client's
-  token to its upstream.
+- [Authentication and access control](@/core/access/authentication.md): the neutral model these routes enforce.
+- [Client auth versus upstream credentials](@/core/access/access-explained.md): why a cached index never forwards a
+  client's token to its upstream.
 - [HTTP endpoints](endpoints.md): the full `/v2/` route table.

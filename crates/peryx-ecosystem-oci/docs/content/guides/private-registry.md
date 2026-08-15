@@ -50,13 +50,13 @@ Which you set depends on the upstream:
 The credential fields hold literal strings, so a token in `peryx.toml` is a secret at rest. Restrict the file
 (`chmod 600 peryx.toml`) and keep it out of version control. To avoid a plaintext token on disk, render the config from
 a template at deploy time, injecting the value from a `PERYX`-scoped environment variable or a secret manager. See
-[configuration](@/core/configuration.md) for the precedence tiers and file-loading rules.
+[configuration](@/core/operations/configuration.md) for the precedence tiers and file-loading rules.
 
 ## Pull
 
 Assume peryx runs at `127.0.0.1:4433`. [Docker](https://docs.docker.com/) and [Podman](https://podman.io/) trust a
 loopback registry over plain HTTP with no setup, so a pull on the same host needs no client configuration; `crane` and
-`podman` use an insecure flag. Over the network, serve [TLS](@/core/serve-https.md) so clients need no flag.
+`podman` use an insecure flag. Over the network, serve [TLS](@/core/operations/serve-https.md) so clients need no flag.
 
 Pull through peryx's route prefix; the upstream repository name follows it:
 
@@ -99,10 +99,10 @@ within `max_stale_secs`, so an expired credential degrades pulls of new images w
 
 The upstream credentials are separate from what clients present to peryx. A cached index does not require clients to
 authenticate; anyone who can reach the route can pull through it. Restrict who reaches peryx at the network layer, or
-front the cache with a [virtual index](@/core/indexes.md) when you need to combine it with a hosted store.
+front the cache with a [virtual index](@/core/repositories/indexes.md) when you need to combine it with a hosted store.
 
 ## Related
 
 - What cached, hosted, and virtual mean for containers: [the OCI ecosystem](../_index.md)
-- Serve trusted HTTPS so clients drop the insecure flag: [serve HTTPS](@/core/serve-https.md)
+- Serve trusted HTTPS so clients drop the insecure flag: [serve HTTPS](@/core/operations/serve-https.md)
 - The full walkthrough of a running registry: [run a container registry](container-registry.md)

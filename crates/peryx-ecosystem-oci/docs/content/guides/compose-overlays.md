@@ -6,9 +6,9 @@ weight = 2
 
 A virtual OCI index lists other indexes as `layers` and serves them under one route. Resolution walks the layers in
 order and keeps the first member that holds an image, so a hosted member listed ahead of a proxy shadows any same-named
-image upstream. This is the [shadowing](@/core/indexes.md#shadowing) rule, the dependency-confusion defense, applied to
-containers: a pull of a name you published serves your image, and anything you have not published falls through to the
-upstream. See [the index model](@/core/indexes.md) for the semantics.
+image upstream. This is the [shadowing](@/core/repositories/indexes.md#shadowing) rule, the dependency-confusion
+defense, applied to containers: a pull of a name you published serves your image, and anything you have not published
+falls through to the upstream. See [the index model](@/core/repositories/indexes.md) for the semantics.
 
 ## Configure the stack
 
@@ -59,8 +59,8 @@ route; when omitted, peryx selects the first hosted layer. A virtual index conta
 `docker` and `podman` trust a [loopback](local-transport.md) registry (`localhost`, `127.0.0.0/8`) over plain HTTP with
 no configuration, so on the same host the commands below work as written. Over the network (or from Docker Desktop,
 whose engine runs in a VM where the host's `localhost` is not the engine's), a client demands HTTPS. Give peryx a
-certificate ([serve HTTPS](@/core/serve-https.md)) or set the client's insecure-registry option. `crane` and `podman`
-take a per-command flag, shown below; `docker` needs `insecure-registries` in its daemon config.
+certificate ([serve HTTPS](@/core/operations/serve-https.md)) or set the client's insecure-registry option. `crane` and
+`podman` take a per-command flag, shown below; `docker` needs `insecure-registries` in its daemon config.
 
 ## Pull through the virtual route
 
@@ -137,7 +137,7 @@ Images you host remain pullable during a Docker Hub outage. A proxy with a warm 
 
 ## Related
 
-- The role and shadowing model: [the index model](@/core/indexes.md)
+- The role and shadowing model: [the index model](@/core/repositories/indexes.md)
 - The full three-role walkthrough: [run a container registry](container-registry.md)
 - The protocol and every client snippet: [OCI ecosystem](../_index.md)
-- Serve trusted HTTPS so clients need no insecure flag: [serve HTTPS](@/core/serve-https.md)
+- Serve trusted HTTPS so clients need no insecure flag: [serve HTTPS](@/core/operations/serve-https.md)

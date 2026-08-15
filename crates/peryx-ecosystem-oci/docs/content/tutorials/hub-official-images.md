@@ -5,7 +5,7 @@ weight = 3
 +++
 
 Configure a cached [Docker Hub](https://hub.docker.com/) index and pull `ubuntu` through it by its short name. Allow
-five minutes after [installing peryx](@/core/installation.md).
+five minutes after [installing peryx](@/core/start/installation.md).
 
 Docker Hub stores official images such as `ubuntu` under the `library` namespace. peryx resolves `ubuntu` to
 `library/ubuntu` before sending the upstream request.
@@ -37,8 +37,8 @@ peryx serve --config peryx.toml
 peryx listens on `127.0.0.1:4433`. Leave it running and open a second terminal.
 
 `docker` and `podman` trust a [loopback](../guides/local-transport.md) registry over plain HTTP with no configuration,
-so the commands below work as written on the same host. Over the network, serve [TLS](@/core/serve-https.md) or set the
-client's insecure-registry option.
+so the commands below work as written on the same host. Over the network, serve [TLS](@/core/operations/serve-https.md)
+or set the client's insecure-registry option.
 
 ## Pull the image by its short name
 

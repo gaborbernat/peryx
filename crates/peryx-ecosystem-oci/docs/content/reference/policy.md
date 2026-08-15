@@ -22,7 +22,7 @@ A blob upload, cross-repository mount, or manifest push reserves capacity before
 returns `403 DENIED` when a reservation would cross a limit. A digest is charged once per repository. Leaving every
 quota unset disables quota accounting.
 
-See [repository quotas](@/core/quotas.md) for reservation and transaction semantics.
+See [repository quotas](@/core/repositories/quotas.md) for reservation and transaction semantics.
 
 ## Preview decisions
 

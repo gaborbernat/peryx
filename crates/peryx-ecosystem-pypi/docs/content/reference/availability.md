@@ -57,8 +57,8 @@ which makes replay idempotent.
 ## Remote content and reclamation {#reclamation-references}
 
 Under `dc` or `ha`, a project file or metadata sibling that misses local storage can use
-[remote read-through](@/core/remote-read-through.md) when another datacenter has a verified placement. Mode `none` has
-no remote placements.
+[remote read-through](@/core/repositories/remote-read-through.md) when another datacenter has a verified placement. Mode
+`none` has no remote placements.
 
 The PyPI reclamation inventory retains digests named by cached file URL records, PEP 658 metadata siblings, hosted
 upload records, and PEP 740 provenance records. Trash and verified placements add the core references described in
@@ -73,5 +73,5 @@ Python repository security actions include `token_use`, `upload`, `yank`, `unyan
 Availability traces map Python package publication to `publish`, removal to `withdraw` or `delete`, upstream population
 to `cache-fill`, and visibility changes to `visibility`.
 
-See [Client behavior across availability modes](@/core/availability/client-behavior.md) and [Logging](@/core/logging.md)
-for fields emitted by every ecosystem.
+See [Client behavior across availability modes](@/core/availability/client-behavior.md) and
+[Logging](@/core/operations/logging.md) for fields emitted by every ecosystem.

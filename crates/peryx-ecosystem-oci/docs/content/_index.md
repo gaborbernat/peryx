@@ -22,22 +22,21 @@ gzip-compressed filesystem). Each **blob** uses the sha256 of its bytes as its a
 
 OCI routes use Distribution terms: registry, repository, manifest, tag, blob, pull, and push. Peryx configuration uses
 the shared index roles **cached**, **hosted**, and **virtual**. A cached OCI index proxies one registry; a hosted index
-accepts pushes; a virtual index composes other OCI indexes in order. See [the index model](@/core/indexes.md) for role
-and shadowing rules.
+accepts pushes; a virtual index composes other OCI indexes in order. See
+[the index model](@/core/repositories/indexes.md) for role and shadowing rules.
 
 ## Activation and ownership
 
-The binary includes the OCI implementation. An index with `ecosystem = "oci"` activates it during startup. If the
-resolved topology has no OCI index, the plugin installs no routes, services, or background work.
+The binary includes OCI support. An index with `ecosystem = "oci"` activates it during startup. If the resolved topology
+has no OCI index, Peryx installs no OCI routes, services, or background work.
 
-`peryx-ecosystem-oci` owns Distribution routing, manifest and repository metadata, `[index.settings]`, OCI event
-payloads, client discovery, search projection, quota accounting, and OCI mutation replay. It implements core capability
-traits; crates outside it do not parse manifests or repository records. `[availability]` selects `none`, `dc`, or `ha`
-for the process.
+OCI indexes provide Distribution routing, manifest and repository metadata, `[index.settings]`, event payloads, client
+discovery, search, quota accounting, and mutation replay. `[availability]` selects `none`, `dc`, or `ha` for the
+process.
 
 ## OCI index roles
 
-The three [index roles](@/core/indexes.md) map onto OCI like this:
+The three [index roles](@/core/repositories/indexes.md) map onto OCI like this:
 
 - **cached**: a read-through cache of an upstream registry. On a miss peryx pulls the manifest or blob from upstream
   (running the bearer-token handshake the registry requires), verifies its digest, stores it, and serves it; later pulls
@@ -46,7 +45,7 @@ The three [index roles](@/core/indexes.md) map onto OCI like this:
   it keeps manifests byte-for-byte so their digest remains stable. Pushing needs a token (below).
 - **virtual**: an ordered stack of members served under one name, where your hosted images shadow same-named upstream
   ones: a pull of a name you have published serves your image, and anything you have not published falls through to the
-  upstream. This is the [dependency-confusion defense](@/core/indexes.md#shadowing), applied to containers.
+  upstream. This is the [dependency-confusion defense](@/core/repositories/indexes.md#shadowing), applied to containers.
 
 A cached route retries upstream server errors, timeouts, and `429` responses with bounded backoff. A valid `Retry-After`
 delay or HTTP date takes precedence, capped at 30 seconds.
@@ -110,4 +109,4 @@ their trash recovery rules.
   [zot](https://zotregistry.dev/): [OCI performance](performance.md)
 - The full walkthrough: [run a container registry](guides/container-registry.md)
 - Front a registry that is not Docker Hub: point `cached` at GHCR (`https://ghcr.io`), ECR, or an Artifactory `/v2/`.
-- Serve trusted HTTPS so clients need no insecure flag: [configure TLS or ACME](@/core/configuration.md#tls).
+- Serve trusted HTTPS so clients need no insecure flag: [configure TLS or ACME](@/core/operations/configuration.md#tls).

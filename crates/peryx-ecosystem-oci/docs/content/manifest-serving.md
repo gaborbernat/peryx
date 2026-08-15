@@ -78,5 +78,5 @@ on `Accept`, the serve carries `Vary: Accept` so a shared cache keys on it.
 ## Operational checks
 
 - The manifest routes and their status codes: [HTTP endpoints](reference/endpoints.md)
-- How a repository shadows an upstream image: [the index model](@/core/indexes.md)
+- How a repository shadows an upstream image: [the index model](@/core/repositories/indexes.md)
 - Digest addressing and verification: [OCI](_index.md)

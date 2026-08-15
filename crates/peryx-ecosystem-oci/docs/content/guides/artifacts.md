@@ -6,14 +6,14 @@ weight = 7
 
 An OCI registry provides content-addressed storage for container images and other artifacts. Helm charts, WASM modules,
 config bundles, SBOMs, and signatures use OCI manifests with media types that peryx serves. A
-[hosted index](@/core/indexes.md#roles) can hold images and their supply-chain metadata; the referrers API attaches a
-signature or SBOM to the image digest it describes. Configure the hosted index and transport first; see
+[hosted index](@/core/repositories/indexes.md#roles) can hold images and their supply-chain metadata; the referrers API
+attaches a signature or SBOM to the image digest it describes. Configure the hosted index and transport first; see
 [run a container registry](container-registry.md).
 
 ## Configure a hosted index
 
-Referrers and artifact pushes need a writable index. A [cached](@/core/indexes.md#roles) proxy is read-only, so declare
-a `hosted` index with a write-granting `[[index.access_token]]`:
+Referrers and artifact pushes need a writable index. A [cached](@/core/repositories/indexes.md#roles) proxy is
+read-only, so declare a `hosted` index with a write-granting `[[index.access_token]]`:
 
 ```toml
 # peryx.toml
@@ -35,7 +35,7 @@ actions = ["write", "delete"]
 Run it with `peryx serve --config peryx.toml`. peryx accepts any username and treats the access token's secret as the
 Basic-auth password. The `--plain-http` flags below are what each client needs to talk HTTP to a
 [loopback](local-transport.md) registry; over the network give peryx a certificate
-([serve HTTPS](@/core/serve-https.md)) and drop them.
+([serve HTTPS](@/core/operations/serve-https.md)) and drop them.
 
 ## Push and pull a Helm chart
 
@@ -88,10 +88,10 @@ as it indexes the `oras attach` manifest above.
 
 ## Discover referrers when proxying
 
-A [cached](@/core/indexes.md#roles) index also serves referrers from its upstream. A registry that predates the API
-answers `404` on the `/referrers/` route and publishes a subject's referrers under a fallback tag derived from the
-subject digest, `sha256:<hex>` written as `sha256-<hex>`. On that `404` peryx fetches the fallback tag and merges its
-entries, so a signature or SBOM pushed before the API existed stays discoverable through the cache. If the upstream
+A [cached](@/core/repositories/indexes.md#roles) index also serves referrers from its upstream. A registry that predates
+the API answers `404` on the `/referrers/` route and publishes a subject's referrers under a fallback tag derived from
+the subject digest, `sha256:<hex>` written as `sha256-<hex>`. On that `404` peryx fetches the fallback tag and merges
+its entries, so a signature or SBOM pushed before the API existed stays discoverable through the cache. If the upstream
 serves the referrers API, peryx uses its response without asking for the tag.
 
 ## Pitfalls
@@ -114,4 +114,4 @@ A well-formed subject digest with no references returns `200` with an empty `man
 - The exact referrers response, filter header, and digest validation:
   [HTTP endpoints](../reference/endpoints.md#referrers) and
   [registry behavior](../reference/registry-behavior.md#referrers-subject-digest-validation)
-- Serve trusted HTTPS so clients need no `--plain-http`: [serve HTTPS](@/core/serve-https.md)
+- Serve trusted HTTPS so clients need no `--plain-http`: [serve HTTPS](@/core/operations/serve-https.md)

@@ -21,7 +21,8 @@ export PATH="$tools:$PATH"
 
 "$repo/site/scripts/stage.sh"
 mkdir -p "$repo/.tox/site/static"
-cargo run --quiet --manifest-path "$repo/Cargo.toml" --package peryx --bin peryx -- openapi \
+CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo run --quiet --manifest-path "$repo/Cargo.toml" --package peryx --bin peryx -- openapi \
   >"$repo/.tox/site/static/openapi.json"
 
 zola --root "$repo/.tox/site" build --base-url "$READTHEDOCS_CANONICAL_URL" --force

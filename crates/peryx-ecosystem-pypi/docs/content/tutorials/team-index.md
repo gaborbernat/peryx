@@ -6,7 +6,7 @@ weight = 2
 
 Replace the default configuration with a shared pypi.org cached index, two team indexes with their own uploads, and one
 route where a private package shadows its public namesake. You will see exactly what each index role contributes. It
-takes about fifteen minutes and builds on [getting started](@/core/getting-started.md).
+takes about fifteen minutes and builds on [getting started](@/core/start/getting-started.md).
 
 ## Target configuration
 
@@ -89,8 +89,8 @@ The cached layer fetched httpx from pypi.org and serves the `web` route from the
 
 ## Publish a private package
 
-Build any small package (or reuse the one from [getting started](@/core/getting-started.md)) and upload it to the `data`
-route:
+Build any small package (or reuse the one from [getting started](@/core/start/getting-started.md)) and upload it to the
+`data` route:
 
 ```shell
 twine upload --repository-url http://127.0.0.1:4433/data/ -u __token__ -p data-secret dist/*
@@ -117,11 +117,11 @@ curl -s -H "Accept: application/vnd.pypi.simple.v1+json" \
 
 Every URL points back at peryx, and the versions listed are yours alone. If someone registers `mypkg` on pypi.org
 tomorrow with version `99.0`, nothing changes: the hosted layer answers first, and the cached index is never consulted
-for a name the hosted layer has. [The index model](@/core/indexes.md) explains why this ordering is the
+for a name the hosted layer has. [The index model](@/core/repositories/indexes.md) explains why this ordering is the
 dependency-confusion defense.
 
 ## Next steps
 
 - Nest virtual indexes and route several upstreams: [compose virtual indexes](@/guides/compose-overlays.md)
 - Add an upstream that needs credentials: [proxy a private upstream](@/guides/private-mirror.md)
-- See what each team is installing: [monitoring](@/core/monitor.md)
+- See what each team is installing: [monitoring](@/core/operations/monitor.md)

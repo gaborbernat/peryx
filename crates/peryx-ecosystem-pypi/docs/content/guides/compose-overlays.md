@@ -84,6 +84,6 @@ warm cached index serves its stored copy.
 
 ## Related
 
-- The semantics behind layering and shadowing: [the index model](@/core/indexes.md)
-- Every `[[index]]` key: [configuration](@/core/configuration.md)
+- The semantics behind layering and shadowing: [the index model](@/core/repositories/indexes.md)
+- Every `[[index]]` key: [configuration](@/core/operations/configuration.md)
 - Publish into the virtual index you built: [publish](@/guides/publish.md)

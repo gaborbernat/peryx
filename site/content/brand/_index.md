@@ -14,7 +14,7 @@ peryx is an open-source artifact service for multiple ecosystems. Its mark is tr
 
 ## The name
 
-Two roots form the name and describe its traits. Say it **PERR-iks** and write it in lowercase.
+Two roots form the name and describe its character. Say it **PERR-iks** and write it in lowercase.
 
 - **per· · the peregrine:** the peregrine reaches over 380 km/h in a dive. Its Latin root, *peregrinus*, means "from
   every land".
@@ -30,12 +30,12 @@ selected ecosystem owners and availability mode; inactive implementations add no
 
 Use concise, technical language. State behavior directly. Controls name the action they perform.
 
-| Register | Line                                                         |
-| -------- | ------------------------------------------------------------ |
-| Lead     | Artifact storage across ecosystems.                          |
-| Sub      | Cache upstream artifacts and host private artifacts.         |
-| Dev      | One binary with protocol behavior in ecosystem owner crates. |
-| Security | Verify artifact digests before storage and service.          |
+| Register | Line                                                  |
+| -------- | ----------------------------------------------------- |
+| Lead     | Artifact storage across ecosystems.                   |
+| Sub      | Cache upstream artifacts and host private artifacts.  |
+| Dev      | One binary with protocol behavior for each ecosystem. |
+| Security | Verify artifact digests before storage and service.   |
 
 Avoid enterprise buzzwords, "revolutionary", exclamation marks, and jargon that a newcomer cannot decode.
 
@@ -101,7 +101,7 @@ show progress-bar values without animation.
 
 ## Colour
 
-One bold element, the rust-to-amber gradient, over neutral graphite. The signature gradient is
+One bold element, the ember-to-amber gradient, over neutral graphite. The signature gradient is
 `linear-gradient(115deg, #f74c00, #ffb600)`, the same direction on every mark.
 
 <div class="brand-gradient" aria-hidden="true"></div>

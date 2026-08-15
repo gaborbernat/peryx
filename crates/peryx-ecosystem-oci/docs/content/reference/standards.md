@@ -52,5 +52,5 @@ a write-granting `[[index.access_token]]` on the hosted index; `docker login` us
 
 ## Operational checks
 
-- Plugin and runtime boundaries: [architecture](@/core/architecture.md)
+- Plugin and runtime boundaries: [architecture](@/contributing/runtime-architecture.md)
 - OCI routes: [HTTP endpoints](endpoints.md)

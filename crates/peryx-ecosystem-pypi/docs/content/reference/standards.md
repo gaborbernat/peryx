@@ -84,7 +84,7 @@ data, are empty.
 
 ## Operational checks
 
-- The machinery that serves these: [architecture](@/core/architecture.md)
+- The machinery that serves these: [architecture](@/contributing/runtime-architecture.md)
 - The endpoints they map to: [HTTP endpoints](@/reference/endpoints.md)
 - How PEP 427/503/440 combine to match a wheel's `.dist-info` on upload:
   [wheel .dist-info matching](@/reference/uploads.md#wheel-dist-info-matching)

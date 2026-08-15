@@ -40,8 +40,9 @@ The executable contains all shipped ecosystem and availability implementations. 
 owners and availability mode to install. An inactive owner registers no runtime capabilities.
 `availability.mode = "none"` creates no distributed resource or background task.
 
-See [architecture](@/contributing/architecture.md) and [ecosystem boundaries](@/contributing/ecosystem-boundaries.md)
-before moving code between crates.
+See [build instructions](@/contributing/build.md), [architecture](@/contributing/architecture.md),
+[runtime architecture](@/contributing/runtime-architecture.md), [contributor terminology](@/contributing/glossary.md),
+and [ecosystem boundaries](@/contributing/ecosystem-boundaries.md) before moving code between crates.
 
 ## Test ownership
 
@@ -175,9 +176,9 @@ and nested Docker state.
 
 ## Documentation ownership
 
-Shared architecture and configuration belong under `site/content/core/`. Contributor policy belongs under
-`site/content/contributing/`. Ecosystem protocol, command, and configuration details belong under
-`crates/peryx-ecosystem-NAME/docs/`.
+End-user docs cover product behavior and operation, including failures. Put shared guidance under `site/content/core/`
+and ecosystem-specific protocols or configuration under the owner's `docs/content/` tree. Contributor docs own
+source-level concepts such as crate boundaries, Rust APIs, test structure, and internal ownership.
 
 ```shell
 just site-stage

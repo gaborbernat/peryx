@@ -10,8 +10,7 @@ a committed authority change needs. An administrator changes that roster through
 [availability control listener](@/core/availability/listener.md), never by editing a store. Every change commits as a
 Raft membership entry, so the group applies it in one order and a restart recovers it.
 
-`peryx-ha` defines membership and topology contracts. `peryx-ha-distributed` selects voters and promotion policy.
-Storage persists committed entries without interpreting them.
+Peryx selects voters and applies promotion policy. Storage persists committed entries without interpreting them.
 
 ## Onboarding and promotion
 

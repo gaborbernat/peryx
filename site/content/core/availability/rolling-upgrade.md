@@ -68,7 +68,7 @@ downgrade is an ordinary target and rolls by the same order and preflight as an 
 
 A step that fails leaves the drained node out of service and the rest of the group serving. Recovery is bounded by the
 two lag budgets the preflight held: the replication-lag budget kept a promotable replica close to the writer, and the
-backup-currency budget kept a [restorable image](@/core/backup-restore.md) close behind, so the group either promotes
-the replica or restores the backup without having acknowledged writes that neither holds. Once the failed node is
-repaired or replaced and rejoins, the preflight is re-run before the roll continues, so a step never resumes into a
+backup-currency budget kept a [restorable image](@/core/operations/backup-restore.md) close behind, so the group either
+promotes the replica or restores the backup without having acknowledged writes that neither holds. Once the failed node
+is repaired or replaced and rejoins, the preflight is re-run before the roll continues, so a step never resumes into a
 group that has not recovered its quorum, capacity, and currency.

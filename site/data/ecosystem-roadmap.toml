@@ -7,7 +7,7 @@ items = [
   { name = "Maven", subtitle = "Java", color = "#C71A36" },
   { name = "Gradle", subtitle = "JVM", color = "#02B9DF" },
   { name = "Go", subtitle = "Modules", color = "#00ADD8", chip = true },
-  { name = "Cargo", subtitle = "Rust", color = "#CE422B", chip = true },
+  { name = "Native", subtitle = "Compiled packages", color = "#CE422B", chip = true },
   { name = "NuGet", subtitle = ".NET", color = "#004880" },
   { name = "RubyGems", subtitle = "Ruby", color = "#CC342D" },
   { name = "Composer", subtitle = "PHP", color = "#777BB4" },

@@ -53,13 +53,13 @@ peryx stores a manifest byte-for-byte and addresses it by the sha256 of those ex
 `Docker-Content-Digest` a client verifies always matches what it pushed or pulled.
 
 `GET`/`HEAD /v2/<name>/manifests/<reference>` resolves the reference through the index's members hosted-first (a hosted
-image shadows the same name upstream, the [dependency-confusion defense](@/core/indexes.md#shadowing)). A hosted member
-reads its stored tag mapping; an online proxy member revalidates the tag against upstream and caches the result. A pull
-by digest is scoped to the requesting repository: peryx serves it from the content-addressed store only when a member
-records that digest under this repository, meaning a manifest pushed or tagged here, a child of an image index or
-manifest list it serves, or a referrer pushed here. A proxy member still pulls an unauthorized miss through its upstream
-under this repository, so a legitimate pull-through stays intact, but a digest that no member records and no proxy can
-fetch is `404 MANIFEST_UNKNOWN`, even when the same bytes sit in the store under another repository. See
+image shadows the same name upstream, the [dependency-confusion defense](@/core/repositories/indexes.md#shadowing)). A
+hosted member reads its stored tag mapping; an online proxy member revalidates the tag against upstream and caches the
+result. A pull by digest is scoped to the requesting repository: peryx serves it from the content-addressed store only
+when a member records that digest under this repository, meaning a manifest pushed or tagged here, a child of an image
+index or manifest list it serves, or a referrer pushed here. A proxy member still pulls an unauthorized miss through its
+upstream under this repository, so a legitimate pull-through stays intact, but a digest that no member records and no
+proxy can fetch is `404 MANIFEST_UNKNOWN`, even when the same bytes sit in the store under another repository. See
 [how peryx scopes and serves manifest reads](../manifest-serving.md) for the reasoning. The response carries the stored
 `Content-Type`, `Docker-Content-Digest`, and `Content-Length`; a `HEAD` returns those headers with an empty body. A
 reference no member can serve is `404 MANIFEST_UNKNOWN`.
@@ -278,7 +278,7 @@ the repository path.
 
 The `availability=local` filter keeps repositories with a manifest or blob stored on this instance. Run
 `peryx job reindex` after restoring metadata when the derived index needs a full rebuild. The
-[search API](@/core/search.md) defines matching, paging, and access rules.
+[search API](@/core/repositories/search.md) defines matching, paging, and access rules.
 
 ## Webhooks
 
@@ -303,7 +303,7 @@ operation has no corresponding tag, manifest digest, or blob digest.
 }
 ```
 
-The [webhook API](@/core/webhooks.md) defines signing, retries, and delivery identifiers.
+The [webhook API](@/core/operations/webhooks.md) defines signing, retries, and delivery identifiers.
 
 ## Trash inspection
 
@@ -323,7 +323,7 @@ curl -u admin:$PERYX_ADMIN_PASSWORD \
 ```
 
 An untagged manifest deletion omits `reference` and uses `digest` to identify the record. The shared
-[`/admin/trash`](@/core/web-ui.md) page exposes the same filters.
+[`/admin/trash`](@/core/operations/web-ui.md) page exposes the same filters.
 
 ## Repository management
 
@@ -336,7 +336,8 @@ curl -sS -u "$ADMIN" https://registry.example/+repositories \
 ```
 
 The response returns a stable repository ID and an `ETag`. Updates, disable, and enable operations send that value in
-`If-Match`; see the [repository management API](@/core/repositories.md) for conflict and authorization rules.
+`If-Match`; see the [repository management API](@/core/repositories/repositories.md) for conflict and authorization
+rules.
 
 ## Prometheus metrics
 
@@ -353,8 +354,8 @@ Process-wide request and limiter families are `peryx_requests_total`, `peryx_rat
 
 `availability.mode = "dc"` or `"ha"` adds scheduler, replica frontier, replica apply, availability worker, and
 datacenter durability families. Their names are `peryx_jobs_*`, `peryx_ha_distributed_*`, `peryx_availability_*`, and
-`peryx_dc_ack_*`. `none` installs none of these families. The [metric contract](@/core/metrics.md) defines their bounded
-labels and counting rules.
+`peryx_dc_ack_*`. `none` installs none of these families. The [metric contract](@/core/operations/metrics.md) defines
+their bounded labels and counting rules.
 
 Use `rate(peryx_artifacts_served_total{ecosystem="oci"}[5m])` for served artifacts and
 `rate(peryx_oci_quota_rejected_total[15m])` for quota rejections. Repository and image names stay out of labels; use

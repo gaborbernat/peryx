@@ -46,6 +46,7 @@ lint-source: _project-temp format-check clippy dead-public
 
 # Check rustdoc and Markdown.
 lint-docs: _project-temp
+    site/scripts/test_readthedocs.sh
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
     prek run mdformat --all-files
     prek run codespell --all-files

@@ -5,8 +5,8 @@ weight = 2
 +++
 
 Every configured index route serves the same surface; `{route}` below is the index's `route`, for example `root/pypi`.
-peryx resolves a request to the index with the longest matching route prefix. The [API explorer](@/core/api.md) breaks
-each endpoint down with copyable example requests and responses.
+peryx resolves a request to the index with the longest matching route prefix. The
+[API explorer](@/core/reference/api.md) breaks each endpoint down with copyable example requests and responses.
 
 - `GET /{route}/simple/`: project list, JSON or HTML by `Accept`.
 - `GET /{route}/simple/{project}/`: project detail, merged across virtual-index layers.
@@ -223,7 +223,7 @@ name, and a summary from project metadata when one exists.
 
 The `availability=local` filter keeps projects with at least one distribution stored on this instance. Run
 `peryx job reindex` after restoring metadata when the derived index needs a full rebuild. Search parameters and access
-rules live in the [search API](@/core/search.md).
+rules live in the [search API](@/core/repositories/search.md).
 
 Uploads accept wheels, `.tar.gz` sdists, and `.zip` sdists ([PEP 527](https://peps.python.org/pep-0527/)). The server
 validates the filename, form `name` and `version`, `filetype`, archive contents, and
@@ -277,8 +277,8 @@ values, upstream usernames, passwords, bearer tokens, URL query secrets, or URL 
 block includes `offline`, `true` when that cached index serves only cached data, and its summary scans metadata keys
 once without fetching upstreams or reading cached artifact bytes.
 
-Authenticate with a local user's Basic credential. The admin status page and dashboard render the same classes, so an
-unauthenticated page shows the routes but not the counters or the sensitive per-index fields.
+Authenticate with a local user's Basic credential. The admin status page and dashboard render the same access levels, so
+an unauthenticated page shows the routes but not the counters or the sensitive per-index fields.
 
 `GET /+stats` needs `operator:read` because its tree names repositories and projects; a repository token reads its own
 usage through `/+analytics/*` instead. It answers `no-store`, `401` without an operator credential, and `404` when the
@@ -334,7 +334,7 @@ Process and availability metric families can appear beside the PyPI families:
 - Datacenter durability: `peryx_dc_ack_durable_total`, `peryx_dc_ack_pending_total`, `peryx_dc_ack_unknown_total`,
   `peryx_dc_ack_quorum_acknowledged`, `peryx_dc_ack_quorum_required`, and `peryx_dc_ack_quorum_remaining`.
 
-The label vocabulary uses bounded request classes, registered ecosystem IDs, and index roles. Repository names, package
+The label vocabulary uses bounded request groups, registered ecosystem IDs, and index roles. Repository names, package
 names, user or actor identifiers, request paths, raw errors, credentials, tokens, and URLs never become metric names or
 labels. Use `/+stats` when repository, project, or file detail is required. Keep `/metrics` access-controlled as part of
 the operational surface even though these fields are absent.
@@ -378,4 +378,5 @@ curl -sS -u "$ADMIN" https://packages.example/+repositories \
 ```
 
 The response returns a stable repository ID and an `ETag`. Updates, disable, and enable operations send that value in
-`If-Match`; see the [repository management API](@/core/repositories.md) for conflict and authorization rules.
+`If-Match`; see the [repository management API](@/core/repositories/repositories.md) for conflict and authorization
+rules.

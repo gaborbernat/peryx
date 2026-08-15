@@ -11,6 +11,20 @@ if rg -n -- '--partition|partition:' .github/workflows/ci.yml; then
   printf 'platform CI uses hash partitions\n' >&2
   exit 1
 fi
+if rg -n 'actions/download-artifact' .github/workflows/ci.yml; then
+  printf 'CI uses the deprecated Node artifact extractor\n' >&2
+  exit 1
+fi
+download_actions=$(rg 'uses: actions/download-artifact@' .github/workflows/publish-pypi.yml .github/workflows/release.yml | wc -l | tr -d ' ')
+linked_suppressions=$(rg 'download-artifact/issues/484' .github/workflows/publish-pypi.yml .github/workflows/release.yml | wc -l | tr -d ' ')
+[[ $download_actions == "$linked_suppressions" ]]
+grep -Fq 'gh run download' .github/workflows/ci.yml
+grep -Fq 'Join-Path' .github/workflows/ci.yml
+if rg -n 'docker login' .github/codspeed/run.sh; then
+  printf 'CodSpeed runner manages registry credentials\n' >&2
+  exit 1
+fi
+[[ $(rg -c 'docker/login-action@' .github/workflows/codspeed.yml) == 2 ]]
 [[ $(rg -c 'just platform-contract' .github/workflows/ci.yml) == 1 ]]
 rg -q 'os: \[macos-26, windows-2025\]' .github/workflows/ci.yml
 rg -q 'just fuzz-package peryx-ecosystem-pypi 30' .github/workflows/ci.yml
@@ -49,6 +63,7 @@ if rg -n 'DISTRIBUTION_SPEC_REF|fcfba1ec' .github/workflows; then
   exit 1
 fi
 [[ $(find . -maxdepth 2 -type f -name 'compose*.yaml' -print | sort) == ./compose.yaml ]]
+rg -q '^[[:space:]]+GITHUB_ACTOR_ID:$' compose.yaml
 while IFS= read -r target; do
   if rg -Fn "$target" .github/workflows; then
     printf 'workflow contains owner fuzz target: %s\n' "$target" >&2

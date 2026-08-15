@@ -1020,7 +1020,7 @@ impl Node {
         self.await_ready()
     }
 
-    /// Wait for a child log event containing `expected`.
+    /// Wait for a child log event containing `expected`, including an event already persisted.
     ///
     /// # Errors
     /// Returns a signal error when the child exits or misses the deadline.
@@ -1028,6 +1028,7 @@ impl Node {
         let last = || format!("expected log event {expected:?}\n{}", self.log_tail());
         match wait_for_line(&self.process_events, within, |line| line.contains(expected)) {
             ProcessSignal::Matched => Ok(()),
+            _ if self.log().contains(expected) => Ok(()),
             ProcessSignal::Closed => Err(HarnessError::SignalClosed {
                 node: self.identity.clone(),
                 last: last(),

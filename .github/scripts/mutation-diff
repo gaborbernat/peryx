@@ -48,11 +48,12 @@ if ((part_index > shards)); then
   printf 'mutation candidates=%d budget=%d part=%s selected=0\n' "$candidates" "$budget" "$part"
   exit 0
 fi
+shard_index=$((part_index - 1))
 printf 'mutation candidates=%d budget=%d part=%s shard=%d/%d\n' \
-  "$candidates" "$budget" "$part" "$part_index" "$shards"
+  "$candidates" "$budget" "$part" "$shard_index" "$shards"
 args=("${selection[@]}" --test-tool=nextest --baseline skip --output .tox/mutants)
 if ((shards > 1)); then
-  args+=(--shard "$part_index/$shards" --sharding round-robin)
+  args+=(--shard "$shard_index/$shards" --sharding round-robin)
 fi
 if [[ $in_place == true ]]; then
   args+=(--in-place)

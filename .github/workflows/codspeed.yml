@@ -124,8 +124,8 @@ jobs:
           status=$(jq -r '.status // "missing"' <<< "$baseline")
           conclusion=$(jq -r '.conclusion // "missing"' <<< "$baseline")
           if [[ "$status" != completed || "$conclusion" != success ]]; then
-            printf 'exact base benchmark is not ready: %s/%s\n' "$status" "$conclusion" >&2
-            exit 1
+            printf 'exact base benchmark is unavailable: %s/%s; results will not be uploaded\n' "$status" "$conclusion"
+            exit 0
           fi
           echo "Found the exact base benchmark: $(jq -r '.url' <<< "$baseline")"
 
@@ -239,12 +239,15 @@ jobs:
         ${{ github.event_name == 'pull_request' &&
             (needs.changes.outputs.workflow_changed == 'true' || needs.baseline.outputs.compatible != 'true') }}
       PERYX_CODSPEED_IMAGE: ${{ needs.codspeed-image.outputs.image }}
-      PERYX_CODSPEED_REGISTRY_ACTOR: ${{ github.actor }}
-      PERYX_CODSPEED_REGISTRY_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: just

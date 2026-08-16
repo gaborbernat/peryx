@@ -248,6 +248,8 @@ impl EcosystemRegistration for PlainRegistration {
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new(PLAIN_DRIVER.clone()))
     }
+
+    fn register_capabilities(&self, _: &mut dyn peryx_driver::serving::CapabilityRegistrar) {}
 }
 
 struct TestConfig;

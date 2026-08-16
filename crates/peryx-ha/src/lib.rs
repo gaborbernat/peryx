@@ -5,6 +5,7 @@ mod placement;
 mod reclamation;
 mod reconcile;
 mod store;
+mod views;
 
 pub use blob::{
     BlobAvailability, BlobAvailabilityError, BlobAvailabilityFailure, BlobServices, BlobWriteDurability, CommittedBlob,
@@ -27,6 +28,9 @@ pub use reconcile::{NewReconcileEntry, ReconcileEnqueue, ReconcileEntry, Reconci
 pub use store::{
     ArtifactPlacementStore, BlobPlacementStore, CompareWrite, ReclaimGuardStore, ReclamationStore, ReconcileStore,
     TransferAudit, TransferAuditStore, VisibilitySnapshotStore,
+};
+pub use views::{
+    AvailabilityPageQuery, AvailabilityViewReader, BlobPlacementViewError, OperationsViewError, PlacementViewError,
 };
 
 use std::collections::BTreeSet;

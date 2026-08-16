@@ -1,5 +1,4 @@
 pub mod availability;
-pub mod contracts;
 pub mod ecosystem;
 pub mod lexicon;
 pub mod lifecycle;
@@ -18,7 +17,6 @@ pub use availability::{
     AnalyticsSnapshotStore, AvailabilityReadError, BlobDurability, BlobMetadata, Digest, DurabilityRequirement,
     JournalCommit, ObservedFrontier,
 };
-pub use contracts::EcosystemInstaller;
 pub use ecosystem::{Ecosystem, InvalidEcosystem};
 pub use lexicon::{Lexicon, LexiconRegistry};
 pub use lifecycle::{TRASH_GRACE_SECS, TrashInfo, TrashRecord, TrashState, UnknownTrashState};

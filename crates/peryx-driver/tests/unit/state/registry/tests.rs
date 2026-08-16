@@ -285,6 +285,8 @@ impl EcosystemRegistration for Registration {
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new(Driver))
     }
+
+    fn register_capabilities(&self, _: &mut dyn crate::serving::CapabilityRegistrar) {}
 }
 
 impl peryx_ha::AnalyticsCompleteness for Completeness {

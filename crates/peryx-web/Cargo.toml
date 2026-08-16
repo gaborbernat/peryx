@@ -19,9 +19,9 @@ ssr = [
     "dep:leptos_axum",
     "dep:peryx-driver",
     "dep:peryx-http",
+    "dep:peryx-ha",
     "dep:peryx-identity",
     "dep:peryx-search",
-    "dep:peryx-storage",
     "dep:axum",
     "dep:tower-http",
 ]
@@ -43,9 +43,9 @@ leptos_router.workspace = true
 leptos_axum = { workspace = true, optional = true }
 peryx-driver = { workspace = true, optional = true }
 peryx-http = { workspace = true, optional = true }
+peryx-ha = { workspace = true, optional = true }
 peryx-identity = { workspace = true, optional = true }
 peryx-search = { workspace = true, optional = true }
-peryx-storage = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true, features = ["fs"] }
 wasm-bindgen = { workspace = true, optional = true }
@@ -84,6 +84,7 @@ futures-util.workspace = true
 peryx-policy.workspace = true
 peryx-events.workspace = true
 peryx-test-support.workspace = true
+peryx-storage.workspace = true
 rstest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

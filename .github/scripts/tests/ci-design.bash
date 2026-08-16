@@ -28,8 +28,12 @@ fi
 [[ $(rg -c 'just platform-contract' .github/workflows/ci.yml) == 1 ]]
 coverage_job=$(sed -n '/^  coverage:/,/^  docs:/p' .github/workflows/ci.yml)
 grep -Fq "needs.changes.outputs.contracts == 'true'" <<<"$coverage_job"
-grep -Fq '      id-token: write' <<<"$coverage_job"
-grep -Fq '          use_oidc: true' <<<"$coverage_job"
+grep -Fq '          name: coverage-lcov' <<<"$coverage_job"
+grep -Fq '            .tox/coverage/lcov.info' <<<"$coverage_job"
+if rg -n 'codecov/codecov-action' .github/workflows; then
+  printf 'workflow sends coverage outside GitHub Actions\n' >&2
+  exit 1
+fi
 rg -q 'os: \[macos-26, windows-2025\]' .github/workflows/ci.yml
 rg -q 'just fuzz-package peryx-ecosystem-pypi 30' .github/workflows/ci.yml
 rg -q 'just fuzz-package peryx-ecosystem-oci 30' .github/workflows/ci.yml

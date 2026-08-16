@@ -864,7 +864,6 @@ jobs:
     permissions:
       actions: read
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -903,13 +902,6 @@ jobs:
             .tox/coverage/lcov.info
             .tox/coverage/lcov.contracts/*.contract.json
           if-no-files-found: error
-      - if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        with:
-          files: .tox/coverage/lcov.info
-          fail_ci_if_error: true
-          use_oidc: true
-
   docs:
     needs: changes
     if: >-

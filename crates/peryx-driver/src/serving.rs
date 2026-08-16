@@ -65,7 +65,7 @@ pub trait EcosystemRegistration: Send + Sync {
     fn ecosystem(&self) -> Ecosystem;
     fn default_indexes(&self) -> &'static [DefaultIndex];
     fn driver(&self) -> ProtocolDriver;
-    fn register_capabilities(&self, _registrar: &mut dyn CapabilityRegistrar) {}
+    fn register_capabilities(&self, registrar: &mut dyn CapabilityRegistrar);
 }
 
 pub trait EcosystemAuth: Send + Sync {

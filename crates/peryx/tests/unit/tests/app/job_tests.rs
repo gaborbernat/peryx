@@ -578,6 +578,8 @@ impl EcosystemRegistration for Registration {
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new((*self.driver).clone()))
     }
+
+    fn register_capabilities(&self, _: &mut dyn peryx_driver::serving::CapabilityRegistrar) {}
 }
 
 fn bounded_output(capacity: usize) -> Cursor<Box<[u8]>> {

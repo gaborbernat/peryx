@@ -851,7 +851,7 @@ jobs:
     needs: [changes, crate-contracts, frontend, fuzz-oci, fuzz-pypi, system]
     if: >-
       always() &&
-      (needs.changes.outputs.rust == 'true' || github.event_name == 'push' ||
+      (needs.changes.outputs.contracts == 'true' || github.event_name == 'push' ||
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
       (needs.crate-contracts.result == 'success' ||
       (needs.changes.outputs.contracts != 'true' && needs.crate-contracts.result == 'skipped')) &&
@@ -864,6 +864,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -907,6 +908,7 @@ jobs:
         with:
           files: .tox/coverage/lcov.info
           fail_ci_if_error: true
+          use_oidc: true
 
   docs:
     needs: changes

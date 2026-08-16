@@ -14,7 +14,7 @@ case "$policy" in
           | . as $context
           | {
               "changes": true,
-              "coverage": (.rust or $common),
+              "coverage": (.contracts or $common),
               "crate-contracts": (.contracts or $common),
               "docs": (.docs or $common),
               "frontend": (.rust or .frontend_tests or $common),

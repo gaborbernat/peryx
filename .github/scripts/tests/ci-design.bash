@@ -26,6 +26,10 @@ if rg -n 'docker login' .github/codspeed/run.sh; then
 fi
 [[ $(rg -c 'docker/login-action@' .github/workflows/codspeed.yml) == 2 ]]
 [[ $(rg -c 'just platform-contract' .github/workflows/ci.yml) == 1 ]]
+coverage_job=$(sed -n '/^  coverage:/,/^  docs:/p' .github/workflows/ci.yml)
+grep -Fq "needs.changes.outputs.contracts == 'true'" <<<"$coverage_job"
+grep -Fq '      id-token: write' <<<"$coverage_job"
+grep -Fq '          use_oidc: true' <<<"$coverage_job"
 rg -q 'os: \[macos-26, windows-2025\]' .github/workflows/ci.yml
 rg -q 'just fuzz-package peryx-ecosystem-pypi 30' .github/workflows/ci.yml
 rg -q 'just fuzz-package peryx-ecosystem-oci 30' .github/workflows/ci.yml

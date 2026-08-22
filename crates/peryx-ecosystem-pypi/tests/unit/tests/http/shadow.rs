@@ -1,4 +1,3 @@
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use peryx_identity::{GrantScope, Role};
 

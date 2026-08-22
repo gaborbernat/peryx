@@ -1,5 +1,3 @@
-use axum::extract::FromRef as _;
-
 use super::*;
 
 #[test]

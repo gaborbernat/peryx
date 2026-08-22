@@ -4,7 +4,7 @@ use std::path::Path;
 
 use clap::Command;
 use peryx_bench_core::context::BenchmarkContext;
-use peryx_bench_core::suite::{BenchmarkRun, BenchmarkSuite as _};
+use peryx_bench_core::suite::BenchmarkRun;
 use rstest::rstest;
 #[cfg(unix)]
 use wiremock::matchers::{header, method, path, query_param};

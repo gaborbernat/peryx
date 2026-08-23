@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use peryx_ecosystem_pypi::store::PypiStore as _;
 use peryx_ecosystem_pypi::upload::Uploaded;
 use peryx_ecosystem_pypi::{CoreMetadata, File, Provenance, Yanked};
 

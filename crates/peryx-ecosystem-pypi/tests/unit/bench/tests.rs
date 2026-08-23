@@ -1,7 +1,7 @@
 use clap::Command;
 use peryx_bench_core::context::BenchmarkContext;
 use peryx_bench_core::report::load;
-use peryx_bench_core::suite::{BenchmarkRun, BenchmarkSuite as _};
+use peryx_bench_core::suite::BenchmarkRun;
 
 use super::test_support::http_client;
 use super::*;

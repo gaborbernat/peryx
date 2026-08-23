@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use peryx_core::{NodeRole, TopologyMember};
-use peryx_ha::{AuthorityEpoch, BlobWriteDurability as _, ByteAckDecision, CommittedBlob, WriteDurability};
+use peryx_ha::{AuthorityEpoch, ByteAckDecision, CommittedBlob, WriteDurability};
 use peryx_storage::blob::{BlobDurability, Digest};
 use peryx_storage::meta::{MetaError, MetaStore};
 

@@ -42,7 +42,7 @@ impl BlobTransport for Peer {
     async fn fetch_blob(&self, request: BlobRequest) -> Result<Vec<u8>, TransportError> {
         if self
             .fail_first
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| remaining.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| remaining.checked_sub(1))
             .is_ok()
         {
             return Err(self.error.clone());

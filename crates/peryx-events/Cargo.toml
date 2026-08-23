@@ -17,7 +17,7 @@ peryx-ha.workspace = true
 peryx-storage.workspace = true
 futures-util.workspace = true
 http.workspace = true
-reqwest = { workspace = true, features = ["gzip", "http2", "rustls-native-certs", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["gzip", "http2", "rustls-no-provider", "stream"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true

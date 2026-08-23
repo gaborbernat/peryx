@@ -318,7 +318,9 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
         )
     });
     let mut release = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy readiness event");
+    release.read_exact(&mut [0]).expect("identify readiness gate");
     release.write_all(&[1]).expect("release readiness gate");
+    release.read_exact(&mut [0]).expect("observe control bind");
     assert!(request(control_address, "POST /proxies HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("500 test"));
     assert!(request(control_address, "GET /version HTTP/1.1\r\n\r\n").contains("200 test"));
     assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
@@ -339,7 +341,8 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
     let control_address = control.local_addr().expect("silent control address");
     let command_executable = executable.clone();
     let command = thread::spawn(move || run_toxiproxy(&command_executable, &[], Some(control)));
-    let startup_signal = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "silent startup event");
+    let mut startup_signal = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "silent startup event");
+    startup_signal.read_exact(&mut [0]).expect("identify startup gate");
     drop(startup_signal);
     assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
     assert_eq!(command.join().expect("join silent toxiproxy"), Ok(()));

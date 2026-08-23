@@ -28,6 +28,7 @@ fi
 .github/scripts/tests/ci-design.bash
 .github/scripts/tests/job-results.bash
 .github/scripts/tests/mutation.bash
+.github/scripts/tests/nightly-analysis.bash
 .github/scripts/tests/coverage-frontend.bash
 .github/scripts/tests/coverage-linux.bash
 .github/scripts/tests/owner-tools.bash

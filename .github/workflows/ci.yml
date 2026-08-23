@@ -173,7 +173,7 @@ jobs:
       - name: Install Hawk
         run: |
           curl -fsSL -o /tmp/cargo-hawk.tar.gz \
-            https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-x86_64-unknown-linux-gnu.tar.gz
+            https://github.com/astral-sh/hawk/releases/download/0.1.13/cargo-hawk-x86_64-unknown-linux-gnu.tar.gz
           tar -xzf /tmp/cargo-hawk.tar.gz -C /tmp
           chmod +x /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk-driver
           echo "/tmp/cargo-hawk-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
@@ -271,9 +271,19 @@ jobs:
           tool: cargo-hack,cargo-insta,cargo-nextest,cargo-semver-checks,just,ripgrep
       - name: Install cargo-dist
         run: curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location https://github.com/axodotdev/cargo-dist/releases/latest/download/cargo-dist-installer.sh | sh
-      - run: just lint-contracts "$BASE_REV"
+      - run: |
+          if [[ -n "$EVENT_BASE_REV" && ! "$EVENT_BASE_REV" =~ ^0+$ ]]; then
+            git fetch --no-tags --depth=1 "https://github.com/${EVENT_REPOSITORY}.git" "$EVENT_BASE_REV"
+            echo "BASE_REV=$EVENT_BASE_REV" >> "$GITHUB_ENV"
+          else
+            git fetch --no-tags --depth=1 "https://github.com/${BASE_REPOSITORY}.git" main:refs/remotes/baseline/main
+            echo "BASE_REV=refs/remotes/baseline/main" >> "$GITHUB_ENV"
+          fi
         env:
-          BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
+          BASE_REPOSITORY: ${{ github.event.repository.parent.full_name || github.repository }}
+          EVENT_BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT_REPOSITORY: ${{ github.repository }}
+      - run: just lint-contracts "$BASE_REV"
 
   platform-test:
     name: platform contract (${{ matrix.os }})
@@ -967,9 +977,18 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-mutants,cargo-nextest,just
+      - run: |
+          curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
+            https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64
+          chmod +x "${RUNNER_TEMP}/toxiproxy-server"
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
       - run: just mutation-full 2 "${{ matrix.shard }}/8"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
@@ -999,9 +1018,18 @@ jobs:
           NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
         with:
           cache-shared-key: mutation-diff
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-mutants,cargo-nextest,just
+      - run: |
+          curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
+            https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64
+          chmod +x "${RUNNER_TEMP}/toxiproxy-server"
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
       - run: just mutation "$BASE_REV" 1 true "${{ matrix.shard }}/8"
         env:
           BASE_REV: ${{ github.event.pull_request.base.sha }}

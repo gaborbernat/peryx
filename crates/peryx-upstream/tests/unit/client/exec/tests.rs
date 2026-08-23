@@ -24,7 +24,8 @@ async fn test_terminate_returns_promptly_when_the_child_already_exited() {
 
     tokio::time::timeout(Duration::from_secs(5), terminate(&mut child))
         .await
-        .expect("terminate returns without waiting on an already-exited child");
+        .expect("terminate returns without waiting on an already-exited child")
+        .expect("terminate accepts an already-exited child");
 
     assert_eq!(
         child
@@ -61,7 +62,8 @@ async fn test_terminate_kills_a_running_child() {
 
     tokio::time::timeout(Duration::from_secs(5), terminate(&mut child))
         .await
-        .expect("terminate kills and reaps the running child");
+        .expect("terminate kills and reaps the running child")
+        .expect("terminate succeeds");
 
     assert!(
         matches!(child.try_wait().expect("status is available after terminate"), Some(status) if !status.success())
@@ -78,10 +80,7 @@ async fn test_dropping_a_process_group_reaps_its_running_child() {
         .stderr(Stdio::null());
     let mut child = command.group().spawn().expect("the test shell is available");
     let mut output = child.inner().stdout.take().expect("stdout is piped");
-    drop(ProcessGroup {
-        child: Some(child),
-        direct_reaped: false,
-    });
+    drop(ProcessGroup { child: Some(child) });
 
     let mut bytes = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), output.read_to_end(&mut bytes))
@@ -97,4 +96,33 @@ async fn test_process_reaper_waits_for_child() {
         .await
         .expect("the reaper completes")
         .expect("the reaper task does not panic");
+}
+
+#[tokio::test]
+async fn test_direct_reaped_process_group_waits_for_descendants() {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "sleep 60 &"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut process = ProcessGroup::new(command.group().spawn().expect("the test shell is available"));
+    let mut output = process.child_mut().inner().stdout.take().expect("stdout is piped");
+    assert!(
+        process
+            .child_mut()
+            .inner()
+            .wait()
+            .await
+            .expect("group leader is reaped")
+            .success()
+    );
+    process.terminate().await.expect("terminate the process group");
+
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), output.read_to_end(&mut bytes))
+        .await
+        .expect("terminated descendants close stdout")
+        .expect("read child stdout");
+    assert!(bytes.is_empty());
 }

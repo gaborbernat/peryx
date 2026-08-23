@@ -1163,7 +1163,7 @@ impl MetadataMigration for TestMigration {
         self.name
     }
 
-    fn record_sets(&self) -> &'static [MetadataRecordSet] {
+    fn record_sets(&self) -> &[MetadataRecordSet] {
         &[MetadataRecordSet::QuotaUsage]
     }
 
@@ -1181,8 +1181,8 @@ fn migration(
     name: &'static str,
     result: MigrationResult,
     calls: Arc<Mutex<Vec<&'static str>>>,
-) -> &'static dyn MetadataMigration {
-    Box::leak(Box::new(TestMigration { name, result, calls }))
+) -> Arc<dyn MetadataMigration> {
+    Arc::new(TestMigration { name, result, calls })
 }
 
 fn metadata_store() -> (tempfile::TempDir, MetaStore) {

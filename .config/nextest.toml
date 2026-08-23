@@ -15,12 +15,13 @@ path = "junit.xml"
 [[profile.default.overrides]]
 platform = { host = 'cfg(target_os = "macos")' }
 filter = '''
-binary(/^(availability|bench_cli|bench_process_fixture|cli_entrypoint|cluster|e2e|sim_campaign)$/)
-| binary(/^(integration|observability|process_fixture|s3_upload|servers|ui)$/)
-| test(/(^|::)(bench::(servers|workloads)|client::exec(_tests)?|report)(::|$)/)
+binary(/^(availability|bench_cli|bench_process_fixture|cli_entrypoint|cluster|e2e|peryx_bench|peryx_test_support|sim_campaign)$/)
+| binary(/^(integration|observability|process_fixture|s3_backend|s3_upload|servers|ui)$/)
+| test(/(^|::)(bench|client::exec(_tests)?|machine::tests|report)(::|$)/)
 | test(/(^|::)process::tests::inherited_descriptor_errors_are_specific$/)
 | test(/(^|::)process::tests::inherited_descriptors_are_adopted$/)
 | test(/(^|::)process::tests::self_update_uses_an_install_receipt_and_formats_results$/)
+| test(/(^|::)server_tests::test_build_state_runs_an_exec_credential_provider$/)
 '''
 threads-required = "num-test-threads"
 

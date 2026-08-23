@@ -3,7 +3,8 @@ FROM ghcr.io/astral-sh/uv:latest AS uv
 FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble
 
 ARG RUST_VERSION=1.96.0
-ARG HAWK_RUST_VERSION=1.97.1
+ARG HAWK_RUST_VERSION=1.98.0
+ARG HAWK_VERSION=0.1.13
 ARG TOXIPROXY_VERSION=2.12.0
 ARG TARGETARCH
 
@@ -34,7 +35,7 @@ RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rust
     && chmod +x /usr/local/bin/toxiproxy-server \
     && case "${TARGETARCH}" in amd64) rust_target=x86_64 ;; arm64) rust_target=aarch64 ;; *) exit 2 ;; esac \
     && curl --fail --location \
-        "https://github.com/astral-sh/hawk/releases/latest/download/cargo-hawk-${rust_target}-unknown-linux-gnu.tar.gz" \
+        "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-${rust_target}-unknown-linux-gnu.tar.gz" \
         | tar -xz -C /tmp \
     && install -m 0755 "/tmp/cargo-hawk-${rust_target}-unknown-linux-gnu/cargo-hawk" /usr/local/bin/ \
     && install -m 0755 "/tmp/cargo-hawk-${rust_target}-unknown-linux-gnu/cargo-hawk-driver" /usr/local/bin/ \

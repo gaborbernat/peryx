@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! The OCI/Docker registry driver: the distribution-spec `/v2/` API served over peryx's
 //! content-addressed blob store and metadata store.
 //!
@@ -238,7 +240,7 @@ impl EcosystemOpenApi for OciPlugin {
 }
 
 #[must_use]
-pub const fn registration() -> peryx_plugin_registry::PluginRegistration {
+pub fn registration() -> peryx_plugin_registry::PluginRegistration {
     peryx_plugin_registry::PluginRegistration {
         registration: &OciPlugin,
         config: &OciPlugin,

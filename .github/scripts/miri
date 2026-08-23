@@ -8,7 +8,7 @@ if (($# == 0)); then
   exit 2
 fi
 rustup toolchain install nightly --profile minimal --component miri
-cargo +nightly miri setup
+TMPDIR="${RUNNER_TEMP:-/tmp}" cargo +nightly miri setup
 for package in "$@"; do
   cargo +nightly miri test --package "$package" --lib --tests
 done

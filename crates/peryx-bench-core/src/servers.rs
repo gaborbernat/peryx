@@ -173,18 +173,25 @@ impl Active {
         let probe = self.probe_url.clone();
         let deadline = Instant::now() + policy.timeout;
         while Instant::now() < deadline {
-            if let Some(process) = self.process.as_mut()
-                && let Some(status) = process.try_wait()?
-            {
-                bail!("server exited early with {status}");
-            }
+            self.ensure_running()?;
             // Any HTTP status means the server is up and routing; only transport errors retry.
-            match client.get(&probe).timeout(policy.request_timeout).send().await {
-                Ok(_) => return Ok(()),
-                Err(_) => tokio::time::sleep(policy.poll_interval).await,
+            if client.get(&probe).timeout(policy.request_timeout).send().await.is_ok() {
+                return Ok(());
             }
+            self.ensure_running()?;
+            tokio::time::sleep(policy.poll_interval).await;
         }
+        self.ensure_running()?;
         bail!("server never answered at {probe}")
+    }
+
+    fn ensure_running(&mut self) -> anyhow::Result<()> {
+        if let Some(process) = self.process.as_mut()
+            && let Some(status) = process.try_wait()?
+        {
+            bail!("server exited early with {status}");
+        }
+        Ok(())
     }
 }
 

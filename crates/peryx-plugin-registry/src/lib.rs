@@ -23,7 +23,7 @@ use utoipa::openapi::PathsBuilder;
 #[path = "../tests/unit.rs"]
 mod tests;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PluginRegistration {
     pub registration: &'static dyn EcosystemRegistration,
     pub config: &'static dyn EcosystemConfig,
@@ -35,7 +35,7 @@ pub struct PluginRegistration {
     pub auth: Option<&'static dyn EcosystemAuth>,
     pub browse: Option<&'static dyn EcosystemBrowse>,
     pub snippets: Option<&'static dyn EcosystemSnippet>,
-    pub metadata_migration: Option<&'static dyn peryx_storage::meta::MetadataMigration>,
+    pub metadata_migration: Option<Arc<dyn peryx_storage::meta::MetadataMigration>>,
     pub operator_jobs: &'static [&'static dyn OperatorJob],
     pub priority: u16,
 }
@@ -121,7 +121,7 @@ impl<'a> ActivatedPlugin<'a> {
 
 pub struct PluginRegistry {
     registrations: Vec<PluginRegistration>,
-    metadata_migrations: Vec<&'static dyn peryx_storage::meta::MetadataMigration>,
+    metadata_migrations: Vec<Arc<dyn peryx_storage::meta::MetadataMigration>>,
     operator_jobs: Vec<&'static dyn OperatorJob>,
     protocols: HashMap<Ecosystem, ProtocolDriver>,
     drivers: DriverSet,
@@ -159,8 +159,8 @@ impl PluginRegistry {
         Self::from_active_registrations(
             self.registrations
                 .iter()
-                .copied()
                 .filter(|registration| active.contains(&registration.registration.ecosystem()))
+                .cloned()
                 .collect(),
         )
     }
@@ -173,7 +173,7 @@ impl PluginRegistry {
             .collect::<Vec<_>>();
         let metadata_migrations = registrations
             .iter()
-            .filter_map(|registration| registration.metadata_migration)
+            .filter_map(|registration| registration.metadata_migration.clone())
             .collect();
         let mut seen = HashSet::new();
         let browse_paths = registrations
@@ -235,7 +235,7 @@ impl PluginRegistry {
     ) -> Result<Vec<peryx_storage::meta::MetadataMigrationReport>, peryx_storage::meta::MetadataMigrationError> {
         self.metadata_migrations
             .iter()
-            .map(|migration| store.migrate_metadata(*migration))
+            .map(|migration| store.migrate_metadata(migration.as_ref()))
             .collect()
     }
 

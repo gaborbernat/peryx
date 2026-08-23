@@ -26,7 +26,7 @@ tokio = { workspace = true, features = ["sync", "rt", "fs", "time"] }
 [dev-dependencies]
 async-trait.workspace = true
 jsonwebtoken.workspace = true
-reqwest = { workspace = true, features = ["gzip", "http2", "rustls-native-certs", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["gzip", "http2", "rustls-no-provider", "stream"] }
 url.workspace = true
 peryx-events = { workspace = true, features = ["test-util"] }
 peryx-upstream.workspace = true

@@ -43,9 +43,9 @@ pub struct MetadataRecord {
 
 pub trait MetadataMigration: Send + Sync {
     fn name(&self) -> &'static str;
-    fn record_sets(&self) -> &'static [MetadataRecordSet];
+    fn record_sets(&self) -> &[MetadataRecordSet];
 
-    fn legacy_sources(&self) -> &'static [LegacyMetadataSource] {
+    fn legacy_sources(&self) -> &[LegacyMetadataSource] {
         &[]
     }
 

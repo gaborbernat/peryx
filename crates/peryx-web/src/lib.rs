@@ -117,7 +117,7 @@ fn Header() -> impl IntoView {
 #[component]
 fn HeaderSearch() -> impl IntoView {
     let query_map = use_query_map();
-    let (query, set_query) = signal(query_map.read().get("q").unwrap_or_default());
+    let (query, set_query) = signal(query_map.read_untracked().get("q").unwrap_or_default());
     let suggestions = Resource::new(
         move || query.get(),
         |query| async move {

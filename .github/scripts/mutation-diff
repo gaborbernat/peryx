@@ -54,7 +54,6 @@ printf 'mutation candidates=%d budget=%d part=%s shard=%d/%d\n' \
 args=(
   "${selection[@]}"
   --test-tool=nextest
-  --baseline skip
   --timeout 120
   --build-timeout 300
   --output .tox/mutants

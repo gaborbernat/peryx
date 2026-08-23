@@ -485,11 +485,16 @@ impl Drop for Active {
 struct ChildGuard<'child> {
     child: &'child mut Child,
     process_group: bool,
+    armed: bool,
 }
 
 impl<'child> ChildGuard<'child> {
     const fn new(child: &'child mut Child, process_group: bool) -> Self {
-        Self { child, process_group }
+        Self {
+            child,
+            process_group,
+            armed: true,
+        }
     }
 
     const fn child_mut(&mut self) -> &mut Child {
@@ -498,24 +503,26 @@ impl<'child> ChildGuard<'child> {
 
     fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child_mut().wait()?;
-        std::mem::forget(self);
+        self.armed = false;
         Ok(status)
     }
 
-    const fn release(self) {
-        std::mem::forget(self);
+    fn release(mut self) {
+        self.armed = false;
     }
 
     fn terminate(mut self) {
         let process_group = self.process_group;
         terminate_child(self.child_mut(), process_group);
-        std::mem::forget(self);
+        self.armed = false;
     }
 }
 
 impl Drop for ChildGuard<'_> {
     fn drop(&mut self) {
-        terminate_child(&mut *self.child, self.process_group);
+        if self.armed {
+            terminate_child(&mut *self.child, self.process_group);
+        }
     }
 }
 

@@ -87,13 +87,13 @@ peryx-bench-core = { workspace = true, optional = true }
 peryx-bench = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-pep440_rs = "0.7"
-tl = "0.7"
-web_atoms = "0.2"
+pep440_rs = "0.7.3"
+tl = "0.7.8"
+web_atoms = "0.2.6"
 url.workspace = true
 percent-encoding.workspace = true
 sha2.workspace = true
-xml-rs = "0.8"
+xml-rs = "1.0"
 hdrhistogram = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
@@ -120,7 +120,7 @@ csv = { workspace = true, optional = true }
 spdx = { version = "0.13", optional = true }
 pep508_rs = { version = "0.9", optional = true }
 email_address = { version = "0.2", default-features = false, optional = true }
-reqwest = { workspace = true, features = ["gzip", "http2", "rustls-native-certs", "rustls-no-provider", "stream"], optional = true }
+reqwest = { workspace = true, features = ["gzip", "http2", "rustls-no-provider", "stream"], optional = true }
 thiserror = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }

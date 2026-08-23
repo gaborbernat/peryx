@@ -56,7 +56,6 @@ http-body.workspace = true
 http-body-util.workspace = true
 rstest.workspace = true
 testcontainers.workspace = true
-testcontainers-modules.workspace = true
 tracing-subscriber.workspace = true
 wiremock.workspace = true
 

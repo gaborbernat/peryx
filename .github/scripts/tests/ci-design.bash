@@ -35,8 +35,35 @@ if rg -n 'codecov/codecov-action' .github/workflows; then
   exit 1
 fi
 rg -q 'os: \[macos-26, windows-2025\]' .github/workflows/ci.yml
+grep -Fq 'peryx_test_support' .config/nextest.toml
+grep -Fq 'peryx_bench' .config/nextest.toml
+grep -Fq 'machine::tests' .config/nextest.toml
+grep -Fq 's3_backend' .config/nextest.toml
+grep -Fq 'test_build_state_runs_an_exec_credential_provider' .config/nextest.toml
 rg -q 'just fuzz-package peryx-ecosystem-pypi 30' .github/workflows/ci.yml
 rg -q 'just fuzz-package peryx-ecosystem-oci 30' .github/workflows/ci.yml
+contracts_job=$(sed -n '/^  lint-contracts:/,/^  platform-test:/p' .github/workflows/ci.yml)
+grep -Fq 'github.event.repository.parent.full_name || github.repository' <<<"$contracts_job"
+grep -Fq 'main:refs/remotes/baseline/main' <<<"$contracts_job"
+grep -Fq 'github.event.pull_request.base.sha || github.event.before' <<<"$contracts_job"
+grep -Fq 'BASE_REV=refs/remotes/baseline/main' <<<"$contracts_job"
+for range in \
+  '/^  scheduled-mutation:/,/^  mutation-diff:/p' \
+  '/^  mutation-diff:/,/^  fuzz-pypi:/p'; do
+  mutation_job=$(sed -n "$range" .github/workflows/ci.yml)
+  grep -Fq 'uses: actions/setup-python@' <<<"$mutation_job"
+  grep -Fq 'uses: astral-sh/setup-uv@' <<<"$mutation_job"
+  grep -Fq 'toxiproxy-server-linux-amd64' <<<"$mutation_job"
+done
+mutation_diff=$(sed -n '/^  mutation-diff:/,/^  fuzz-pypi:/p' .github/workflows/ci.yml)
+grep -Fq 'needs: changes' <<<"$mutation_diff"
+if grep -Fq -- '--baseline skip' .github/scripts/mutation-diff; then
+  printf 'mutation diff skips its baseline\n' >&2
+  exit 1
+fi
+while IFS= read -r config; do
+  grep -Fq '  retries: 0,' "$config"
+done < <(find crates -path '*/tests/frontend/playwright.config.mjs' -print)
 sed -n '/^  frontend:/,/^  coverage:/p' .github/workflows/ci.yml | grep -Fq 'sudo apt-get install --yes lcov'
 rg -Fq -- "- 'crates/*/docs/**'" .github/workflows/ci.yml
 rg -Fq -- "- '!crates/**/docs/**'" .github/workflows/ci.yml

@@ -11,7 +11,9 @@ use peryx_identity::{
     LdapLoginError, LdapLoginService, LdapProvider, LdapProviderError, LdapProviderSettings, MAX_EXTERNAL_GROUPS,
     ProviderId, Role, ServerUser, UserId, UserName, UserState,
 };
-use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+};
 use rstest::rstest;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
@@ -349,12 +351,12 @@ fn certificates() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::CrlSign,
     ];
-    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
     let server_key = KeyPair::generate().unwrap();
     let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
     server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     server_params.use_authority_key_identifier_extension = true;
-    let server = server_params.signed_by(&server_key, &ca, &ca_key).unwrap();
+    let server = server_params.signed_by(&server_key, &ca).unwrap();
     (
         ca.pem().into_bytes(),
         server.pem().into_bytes(),

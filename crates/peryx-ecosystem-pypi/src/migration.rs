@@ -15,7 +15,7 @@ impl MetadataMigration for PypiPlugin {
         "pypi-v1-metadata"
     }
 
-    fn record_sets(&self) -> &'static [MetadataRecordSet] {
+    fn record_sets(&self) -> &[MetadataRecordSet] {
         &[
             MetadataRecordSet::QuotaUsage,
             MetadataRecordSet::QuotaResource,
@@ -27,7 +27,7 @@ impl MetadataMigration for PypiPlugin {
         ]
     }
 
-    fn legacy_sources(&self) -> &'static [LegacyMetadataSource] {
+    fn legacy_sources(&self) -> &[LegacyMetadataSource] {
         &[
             LegacyMetadataSource {
                 table: "quota_project",

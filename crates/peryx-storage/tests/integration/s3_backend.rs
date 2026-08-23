@@ -24,8 +24,6 @@ use testcontainers::runners::AsyncRunner as _;
 #[cfg(feature = "container-tests")]
 use testcontainers::{ContainerAsync, GenericImage};
 #[cfg(feature = "container-tests")]
-use testcontainers_modules::minio::MinIO;
-#[cfg(feature = "container-tests")]
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
@@ -162,7 +160,7 @@ impl WireBehavior {
 #[cfg(feature = "container-tests")]
 struct Minio {
     _slot: tokio::sync::SemaphorePermit<'static>,
-    _container: ContainerAsync<MinIO>,
+    _container: ContainerAsync<GenericImage>,
     endpoint: String,
     network: String,
     name: String,
@@ -581,8 +579,10 @@ async fn minio() -> Minio {
     );
     let network = format!("peryx-s3-{suffix}");
     let name = format!("peryx-minio-{suffix}");
-    let container = MinIO::default()
-        .with_tag("RELEASE.2025-04-22T22-12-26Z")
+    let container = GenericImage::new("minio/minio", "RELEASE.2025-04-22T22-12-26Z")
+        .with_wait_for(WaitFor::message_on_stderr("API:"))
+        .with_cmd(["server", "/data"])
+        .with_env_var("MINIO_CONSOLE_ADDRESS", ":9001")
         .with_env_var("MINIO_ROOT_USER", ROOT_ACCESS_KEY)
         .with_env_var("MINIO_ROOT_PASSWORD", ROOT_SECRET_KEY)
         .with_network(&network)

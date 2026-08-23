@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 #[cfg(feature = "serving")]
 use std::sync::Arc;
 
@@ -379,7 +381,7 @@ static OPERATOR_JOBS: [&dyn peryx_plugin_registry::OperatorJob; 1] = [&catalog_j
 
 #[cfg(feature = "serving")]
 #[must_use]
-pub const fn registration() -> peryx_plugin_registry::PluginRegistration {
+pub fn registration() -> peryx_plugin_registry::PluginRegistration {
     peryx_plugin_registry::PluginRegistration {
         registration: &PypiPlugin,
         config: &PypiPlugin,
@@ -391,7 +393,7 @@ pub const fn registration() -> peryx_plugin_registry::PluginRegistration {
         auth: Some(&PypiPlugin),
         browse: Some(&PypiPlugin),
         snippets: Some(&PypiPlugin),
-        metadata_migration: Some(&PypiPlugin),
+        metadata_migration: Some(Arc::new(PypiPlugin)),
         operator_jobs: &OPERATOR_JOBS,
         priority: 0,
     }

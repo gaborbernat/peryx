@@ -190,7 +190,10 @@ fn join_runtime_thread(thread: thread::JoinHandle<()>) -> std::io::Result<()> {
 }
 
 fn reap_runtime_thread(thread: thread::JoinHandle<()>) {
-    crate::service_assembly::reap_process_resource("availability runtime", move || join_runtime_thread(thread));
+    drop(crate::service_assembly::reap_process_resource(
+        "availability runtime",
+        move || join_runtime_thread(thread),
+    ));
 }
 
 struct TrackedTask {

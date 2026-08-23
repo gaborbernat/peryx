@@ -4,7 +4,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -371,35 +371,54 @@ impl<T> From<Option<T>> for OwnedResource<T> {
     }
 }
 
-type ReapJob = Box<dyn FnOnce() + Send + 'static>;
-
-fn process_reaper() -> &'static std::sync::mpsc::Sender<ReapJob> {
-    static REAPER: OnceLock<std::sync::mpsc::Sender<ReapJob>> = OnceLock::new();
-    REAPER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::channel::<ReapJob>();
-        std::thread::Builder::new()
-            .name("peryx-resource-reaper".to_owned())
-            .spawn(move || {
-                while let Ok(job) = receiver.recv() {
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
-                        tracing::error!("resource reaper job panicked");
-                    }
-                }
-            })
-            .unwrap_or_else(|error| panic!("start the process resource reaper: {error}"));
-        sender
-    })
-}
-
-pub fn reap_process_resource<E>(name: &'static str, reap: impl FnOnce() -> Result<(), E> + Send + 'static)
+pub fn reap_process_resource<E>(
+    name: &'static str,
+    reap: impl FnOnce() -> Result<(), E> + Send + 'static,
+) -> Option<std::thread::JoinHandle<()>>
 where
     E: std::fmt::Display + Send + 'static,
 {
-    let job = Box::new(move || match reap() {
+    let reap = Arc::new(Mutex::new(Some(reap)));
+    let background_reap = Arc::clone(&reap);
+    match std::thread::Builder::new()
+        .name("peryx-resource-reaper".to_owned())
+        .spawn(move || {
+            run_reaper_job(
+                name,
+                background_reap
+                    .lock()
+                    .expect("resource reaper job mutex")
+                    .take()
+                    .expect("resource reaper job is available"),
+            );
+        }) {
+        Ok(thread) => Some(thread),
+        Err(error) => {
+            tracing::error!(resource = name, %error, "resource reaper did not start");
+            run_reaper_job(
+                name,
+                reap.lock()
+                    .expect("resource reaper job mutex")
+                    .take()
+                    .expect("resource reaper job is available"),
+            );
+            None
+        }
+    }
+}
+
+fn run_reaper_job<E>(name: &'static str, reap: impl FnOnce() -> Result<(), E>)
+where
+    E: std::fmt::Display,
+{
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match reap() {
         Ok(()) => tracing::debug!(resource = name, "resource shutdown completed"),
         Err(error) => tracing::error!(resource = name, %error, "resource shutdown failed"),
-    });
-    let _ = process_reaper().send(job);
+    }))
+    .is_err()
+    {
+        tracing::error!(resource = name, "resource reaper panicked");
+    }
 }
 
 type ShutdownWorker = (
@@ -452,13 +471,13 @@ impl ShutdownOwner {
 impl Drop for ShutdownOwner {
     fn drop(&mut self) {
         if let Some((result, thread)) = self.worker.take() {
-            reap_process_resource("availability shutdown", move || {
+            drop(reap_process_resource("availability shutdown", move || {
                 let result = result
                     .blocking_recv()
                     .unwrap_or_else(|_| Err(std::io::Error::other("shutdown owner stopped without reporting")));
                 thread.join().expect("shutdown owner catches task panics");
                 result
-            });
+            }));
         }
     }
 }
@@ -581,12 +600,12 @@ impl Drop for ActiveDistributed {
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 
 fn reap_thread<T: Send + 'static>(name: &'static str, thread: std::thread::JoinHandle<T>) {
-    reap_process_resource(name, move || {
+    drop(reap_process_resource(name, move || {
         thread
             .join()
             .map(|_| ())
             .map_err(|payload| std::io::Error::other(format!("thread panicked: {}", panic_message(payload.as_ref()))))
-    });
+    }));
 }
 
 #[async_trait::async_trait]

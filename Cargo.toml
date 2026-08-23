@@ -47,92 +47,91 @@ peryx-upstream = { version = "0.0.1", path = "crates/peryx-upstream" }
 peryx-http = { version = "0.0.1", path = "crates/peryx-http" }
 peryx-web = { version = "0.0.1", path = "crates/peryx-web" }
 peryx-test-support = { version = "0.0.1", path = "crates/peryx-test-support" }
-axum = { version = "0.8", features = ["multipart"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
-http = "1"
-http-body = "1"
-http-body-util = "0.1"
+axum = { version = "0.8.9", features = ["multipart"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.0", features = ["trace"] }
+http = "1.5"
+http-body = "1.1"
+http-body-util = "0.1.5"
 ipnet = { version = "2.12", features = ["serde"] }
 sha2 = "0.11"
-blake2 = "0.10"
+blake2 = "0.10.6"
 md-5 = "0.11"
 csv = "1"
 dashmap = "6.2"
-tempfile = "3"
+tempfile = "3.27"
 atomicwrites = "0.4"
-testcontainers = { version = "0.27", features = ["http_wait"] }
-testcontainers-modules = { version = "0.15", default-features = false, features = ["minio", "ring"] }
-mimalloc = "0.1"
-redb = "4.1"
-openraft = { version = "0.9", features = ["serde", "storage-v2"] }
-tokio = "1"
-reqwest = { version = "0.13", default-features = false }
-ring = "0.17"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+testcontainers = { version = "0.28", features = ["http_wait"] }
+mimalloc = "0.1.52"
+redb = "4.2"
+openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
+tokio = "1.53"
+reqwest = { version = "0.13.4", default-features = false }
+ring = "0.17.14"
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "axum", "tls12", "webpki-roots"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
-aws-smithy-http-client = { version = "1", default-features = false, features = ["test-util"] }
-bytes = "1"
+aws-sdk-s3 = { version = "1.143", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
+aws-smithy-http-client = { version = "1.4", default-features = false, features = ["test-util"] }
+bytes = "1.12.1"
 httpdate = "1"
-futures-core = "0.3"
+futures-core = "0.3.34"
 futures-util = "0.3"
-fs4 = "0.13"
+fs4 = "1.1.0"
 getrandom = "0.4"
 moka = { version = "0.12", features = ["sync"] }
-parking_lot = "0.12"
-tokio-util = { version = "0.7", features = ["io"] }
-base64 = "0.22"
-hex = "0.4"
+parking_lot = "0.12.5"
+tokio-util = { version = "0.7.19", features = ["io"] }
+base64 = "0.23.1"
+hex = "0.4.3"
 argon2 = { version = "0.5", features = ["std"] }
-jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs"] }
-url = "2"
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
+url = "2.5.8"
 wiremock = "0.6"
 rstest = "0.26"
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 unicode-normalization = "0.1"
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1.25", features = ["serde", "v4"] }
 tantivy = "0.26"
 toml = "1.1"
 insta = "1"
-thiserror = "2.0"
-async-trait = "0.1"
+thiserror = "2.0.20"
+async-trait = "0.1.92"
 bb8-ldap = { version = "0.4.1", default-features = false, features = ["tls-rustls-ring"] }
-arc-swap = "1.7"
+arc-swap = "1.9"
 command-group = { version = "5.0.1", features = ["with-tokio"] }
-anyhow = "1.0"
-tracing = "0.1"
+anyhow = "1.0.104"
+tracing = "0.1.44"
 sysinfo = "0.39"
 utoipa = "5.5"
-leptos = "0.8"
-leptos_axum = "0.8"
-leptos_meta = "0.8"
-leptos_router = "0.8"
-wasm-bindgen = "0.2"
+leptos = "0.8.20"
+leptos_axum = "0.8.10"
+leptos_meta = "0.8.6"
+leptos_router = "0.8.15"
+wasm-bindgen = "0.2.127"
 minicov = "0.3"
-rustls-native-certs = "0.8"
-rustix = { version = "1", features = ["process"] }
-regex = "1"
+rustls-native-certs = "0.8.4"
+rustix = { version = "1.1.4", features = ["process"] }
+regex = "1.13"
 zip = { version = "8", default-features = false, features = ["deflate"] }
-tar = "0.4"
-flate2 = "1"
+tar = "0.4.46"
+flate2 = "1.1"
 gloo-net = "0.7"
 console_error_panic_hook = "0.1"
 send_wrapper = "0.6"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "DomStringMap", "Navigator", "Clipboard", "MediaQueryList", "Storage"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+web-sys = { version = "0.3.104", features = ["Window", "Document", "Element", "HtmlElement", "DomStringMap", "Navigator", "Clipboard", "MediaQueryList", "Storage"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
 tracing-appender = "0.2"
-time = { version = "0.3", features = ["formatting", "parsing"] }
-percent-encoding = "2"
+time = { version = "0.3.55", features = ["formatting", "parsing"] }
+percent-encoding = "2.3.2"
 criterion = { package = "codspeed-criterion-compat", version = "5.0", default-features = false }
 stats_alloc = "0.1.10"
-statrs = "0.18"
-hdrhistogram = { version = "7.5", default-features = false }
-uv-netrc = "0.0.62"
+statrs = "0.19"
+hdrhistogram = { version = "7.6", default-features = false }
+uv-netrc = "0.0.72"
 
 [patch.crates-io]
 # https://github.com/GnomedDev/proc-macro-error-2/pull/14 fixes Rust 1.96 future incompatibility.

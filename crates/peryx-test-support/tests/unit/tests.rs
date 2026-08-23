@@ -1060,17 +1060,30 @@ fn toxiproxy_start_at_gate(
     )
     .expect("configure readiness gate");
     let binary = fixture.toxiproxy();
+    let gate_address = gate.local_addr().expect("readiness gate address");
     let (sender, receiver) = mpsc::sync_channel(1);
     let startup = thread::spawn(move || {
         sender
             .send(Toxiproxy::start_with(binary, TOXIPROXY_FAILURE_TIMEOUT))
             .expect("return startup result");
+        if let Ok(mut completion) = TcpStream::connect(gate_address) {
+            completion.write_all(&[0]).expect("identify startup completion");
+        }
     });
-    (
-        startup,
-        receiver,
-        accept_within(&gate, TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy startup event"),
-    )
+    let mut connection = gate.accept().expect("accept toxiproxy startup event").0;
+    let mut event = [0];
+    connection
+        .read_exact(&mut event)
+        .expect("identify toxiproxy startup event");
+    if event == [0] {
+        let result = receiver.recv().expect("receive startup result");
+        startup.join().expect("join startup thread");
+        match result {
+            Ok(_) => panic!("toxiproxy startup completed before the fixture gate"),
+            Err(error) => panic!("toxiproxy startup failed before the fixture gate: {error}"),
+        }
+    }
+    (startup, receiver, connection)
 }
 
 fn accept_within(listener: &TcpListener, timeout: Duration, event: &str) -> TcpStream {

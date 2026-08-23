@@ -41,7 +41,7 @@ peryx-identity.workspace = true
 peryx-policy.workspace = true
 peryx-storage.workspace = true
 peryx-test-support.workspace = true
-reqwest = { workspace = true, features = ["blocking", "gzip", "http2", "json", "rustls-native-certs", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["blocking", "gzip", "http2", "json", "rustls-no-provider", "stream"] }
 rstest.workspace = true
 serde_json.workspace = true
 tar.workspace = true

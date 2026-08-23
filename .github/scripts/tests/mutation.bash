@@ -35,7 +35,7 @@ grep -Fq 'mutation candidates=65 budget=32 part=1/1 shard=0/3' <<<"$output"
 (("$(wc -l <"$MUTATION_TEST_LOG")" == 2))
 grep -Fq -- '--workspace --all-features --in-diff' "$MUTATION_TEST_LOG"
 tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- \
-  '--no-shuffle --test-tool=nextest --baseline skip --timeout 120 --build-timeout 300 --output .tox/mutants --shard 0/3 --sharding round-robin --in-place'
+  '--no-shuffle --test-tool=nextest --timeout 120 --build-timeout 300 --output .tox/mutants --shard 0/3 --sharding round-robin --in-place'
 if tail -n 1 "$MUTATION_TEST_LOG" | grep -Fq -- '--jobs'; then
   printf 'in-place mutation passed a job count\n' >&2
   exit 1
@@ -75,4 +75,9 @@ fi
 
 : >"$MUTATION_TEST_LOG"
 (cd "$repo" && .github/scripts/mutation-full 2 3/8)
-grep -Fq -- '--jobs 2 --output .tox/mutants --shard 3/8 --sharding round-robin' "$MUTATION_TEST_LOG"
+grep -Fq -- '--jobs 2 --jobserver true --jobserver-tasks 2 --output .tox/mutants --shard 2/8 --sharding round-robin' \
+  "$MUTATION_TEST_LOG"
+if (cd "$repo" && .github/scripts/mutation-full 2 9/8); then
+  printf 'invalid full mutation shard passed\n' >&2
+  exit 1
+fi

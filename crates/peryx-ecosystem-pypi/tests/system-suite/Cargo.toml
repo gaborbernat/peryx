@@ -74,7 +74,7 @@ peryx-index.workspace = true
 peryx-test-support.workspace = true
 peryx-upstream.workspace = true
 redb.workspace = true
-reqwest = { workspace = true, features = ["blocking", "gzip", "http2", "json", "multipart", "rustls-native-certs", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["blocking", "gzip", "http2", "json", "multipart", "rustls-no-provider", "stream"] }
 rstest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -86,7 +86,7 @@ wiremock.workspace = true
 zip.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
-nix = { version = "0.31", features = ["fs"] }
+nix = { version = "0.31.3", features = ["fs"] }
 
 [lints]
 workspace = true

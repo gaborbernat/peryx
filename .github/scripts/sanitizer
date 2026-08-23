@@ -13,8 +13,30 @@ case "$target" in
   *-unknown-linux-gnu) ;;
   *) printf 'sanitizers require a Linux GNU target: %s\n' "$target" >&2; exit 2 ;;
 esac
-export RUSTFLAGS="-Zsanitizer=$sanitizer"
-export RUSTDOCFLAGS="$RUSTFLAGS"
-rustup toolchain install nightly --profile minimal --component rust-src
-cargo +nightly nextest run -Z build-std --workspace --target "$target" \
-  --lib --bins --tests --examples
+symbolizer=$(command -v llvm-symbolizer || true)
+if [[ -z $symbolizer ]]; then
+  for candidate in /usr/bin/llvm-symbolizer-* /usr/lib/llvm-*/bin/llvm-symbolizer; do
+    if [[ -x $candidate ]]; then
+      symbolizer=$candidate
+    fi
+  done
+fi
+if [[ ! -x $symbolizer ]]; then
+  printf 'llvm-symbolizer is unavailable\n' >&2
+  exit 2
+fi
+symbolizer_dir=$(dirname -- "$symbolizer")
+export PATH="$symbolizer_dir:$PATH"
+export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+if [[ $sanitizer == thread ]]; then
+  target=${target%-gnu}-gnutsan
+  rustup target add --toolchain nightly "$target"
+  cargo +nightly nextest run --workspace --target "$target" \
+    --lib --bins --tests --examples --build-jobs 1 --test-threads 1
+else
+  export RUSTFLAGS="-Zsanitizer=address"
+  export RUSTDOCFLAGS="$RUSTFLAGS"
+  rustup toolchain install nightly --profile minimal --component rust-src
+  cargo +nightly nextest run -Z build-std --workspace --target "$target" \
+    --lib --bins --tests --examples --build-jobs 1 --test-threads 1
+fi

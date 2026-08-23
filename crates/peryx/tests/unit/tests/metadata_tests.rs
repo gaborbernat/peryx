@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use peryx_storage::meta::{
     AccountingClass, MetadataMigration, MetadataRecord, MetadataRecordSet, NewQuotaReservation, QuotaLimits, QuotaUsage,
@@ -130,7 +131,7 @@ impl MetadataMigration for TestMigration {
         "test"
     }
 
-    fn record_sets(&self) -> &'static [MetadataRecordSet] {
+    fn record_sets(&self) -> &[MetadataRecordSet] {
         &[MetadataRecordSet::QuotaUsage]
     }
 
@@ -145,8 +146,8 @@ impl MetadataMigration for TestMigration {
     }
 }
 
-fn migration(result: MigrationResult) -> &'static dyn MetadataMigration {
-    Box::leak(Box::new(TestMigration(result)))
+fn migration(result: MigrationResult) -> Arc<dyn MetadataMigration> {
+    Arc::new(TestMigration(result))
 }
 
 fn seed(store: &peryx_storage::meta::MetaStore) {

@@ -24,7 +24,7 @@ peryx-identity.workspace = true
 peryx-storage.workspace = true
 peryx-upstream.workspace = true
 redb.workspace = true
-reqwest = { workspace = true, features = ["gzip", "http2", "rustls-native-certs", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["gzip", "http2", "rustls-no-provider", "stream"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Configuration activates all distributed workers and listeners through one gate. Shutdown cancels
 //! each owner before bounded joins. A replica verifies serial and blob continuity before committing
 //! metadata, journal entries, and its resume cursor in one transaction.

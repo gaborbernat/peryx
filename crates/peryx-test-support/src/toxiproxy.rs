@@ -94,12 +94,9 @@ impl Toxiproxy {
                 .send()
             {
                 Ok(response) if response.status().is_success() => return Ok(toxiproxy),
-                Ok(response) => {
-                    return Err(HarnessError::Toxiproxy(format!(
-                        "control API returned {} after its startup signal",
-                        response.status()
-                    )));
-                }
+                // The router answers 404 until every control route is mounted, so a status is as
+                // transient as a refused connection.
+                Ok(response) => last_failure = format!("control API returned {}", response.status()),
                 Err(error) => last_failure = error.to_string(),
             }
             let _ = wait_for_line(

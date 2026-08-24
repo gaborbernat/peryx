@@ -4,9 +4,12 @@ use reqwest::StatusCode;
 use serde_json::Value;
 
 use crate::harness::{Cluster, MemberSpec, Node, ProcessHarness, Role, Topology};
-use crate::pypi_support::{UPLOAD_TOKEN, WHEEL, WHEEL_FILENAME, config as fixture_config, download_wheel, publish};
+use crate::pypi_support::{
+    UPLOAD_TOKEN, WHEEL, WHEEL_FILENAME, config as fixture_config, download_wheel, publish, publish_payload,
+};
 
 const READ_ONLY_BODY: &str = r#"{"error":"read_only_replica","message":"this replica does not accept mutations"}"#;
+const REJECTED_UPLOAD_SIZE: usize = 2 * 1024 * 1024;
 
 fn pypi_config() -> String {
     fixture_config().replace("projects =", "resources =")
@@ -142,7 +145,7 @@ fn test_ha_replica_rejects_pypi_mutations_before_and_after_a_home_failure() {
 }
 
 fn assert_replica_refuses_mutations(replica: &Node) {
-    let (code, body) = publish(replica).expect("upload reaches the replica");
+    let (code, body) = publish_payload(replica, &vec![0; REJECTED_UPLOAD_SIZE]).expect("upload reaches the replica");
     assert_eq!(
         (code, body.as_str()),
         (StatusCode::SERVICE_UNAVAILABLE.as_u16(), READ_ONLY_BODY),

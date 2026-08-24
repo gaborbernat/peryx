@@ -12,7 +12,7 @@ install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
 features = ["self-update"]
 install-updater = false
 pr-run-mode = "plan"
-# dist formats its generated workflow.
+# release.yml hardens shell inputs beyond dist's generated workflow.
 allow-dirty = ["ci"]
 cargo-auditable = true
 cargo-cyclonedx = true

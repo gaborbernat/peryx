@@ -31,7 +31,9 @@ jobs:
           toolchain: nightly
           components: miri,rust-src
           tools: just cargo:cargo-hack
-      - run: just ${{ matrix.recipe }}
+      - run: just "$RECIPE"
+        env:
+          RECIPE: ${{ matrix.recipe }}
 
   sanitizer:
     name: ${{ matrix.recipe }}
@@ -51,7 +53,9 @@ jobs:
           targets: x86_64-unknown-linux-gnuasan,x86_64-unknown-linux-gnutsan
           tools: >-
             just uv cargo:cargo-nextest github:Shopify/toxiproxy
-      - run: just ${{ matrix.recipe }}
+      - run: just "$RECIPE"
+        env:
+          RECIPE: ${{ matrix.recipe }}
 
   mutation:
     name: mutation (${{ matrix.shard }}/8)
@@ -70,7 +74,9 @@ jobs:
           tools: >-
             just uv cargo:cargo-mutants cargo:cargo-nextest
             github:Shopify/toxiproxy
-      - run: just mutation "${{ matrix.shard }}/8" true
+      - run: just mutation "$SHARD/8" true
+        env:
+          SHARD: ${{ matrix.shard }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
@@ -100,7 +106,10 @@ jobs:
         with:
           toolchain: nightly
           tools: just cargo:cargo-fuzz
-      - run: just fuzz "${{ matrix.package }}" "${{ matrix.target }}" 60
+      - run: just fuzz "$PACKAGE" "$TARGET" 60
+        env:
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
 
   live-client:
     runs-on: ubuntu-24.04

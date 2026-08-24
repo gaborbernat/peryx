@@ -145,9 +145,10 @@ jobs:
     if: needs.changes.outputs.bench_matrix != '[]'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
+    # The job reads sources and publishes the content-addressed benchmark image.
     permissions:
       contents: read
-      packages: write
+      packages: write # Publish the benchmark runtime image.
     outputs:
       available: ${{ steps.image.outputs.available }}
       image: ${{ steps.image.outputs.image }}
@@ -229,11 +230,12 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.bench_matrix) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    # CodSpeed uses OIDC; the job reads sources, its image, and workflow artifacts.
     permissions:
-      actions: read
+      actions: read # Associate CodSpeed results with this run.
       contents: read
-      id-token: write
-      packages: read
+      id-token: write # Authenticate benchmark uploads to CodSpeed.
+      packages: read # Pull the benchmark runtime image.
     env:
       CODSPEED_SKIP_UPLOAD: >-
         ${{ github.event_name == 'pull_request' &&
@@ -272,10 +274,12 @@ jobs:
           CURRENT_KEY: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
           RESTORED_KEY: ${{ steps.benchmark-cache.outputs.cache-matched-key }}
         run: just codspeed-preserve-cache "$CURRENT_KEY" "$RESTORED_KEY"
-      - run: just codspeed ${{ matrix.package }} ${{ matrix.cargo_jobs }}
+      - run: just codspeed "$PACKAGE" "$CARGO_JOBS"
         env:
+          CARGO_JOBS: ${{ matrix.cargo_jobs }}
           GH_MATRIX: ${{ toJSON(matrix) }}
           GH_STRATEGY: ${{ toJSON(strategy) }}
+          PACKAGE: ${{ matrix.package }}
       - name: Record benchmark sources
         if: github.ref == 'refs/heads/main' && steps.benchmark-cache.outputs.cache-hit != 'true'
         run: just codspeed-record-sources

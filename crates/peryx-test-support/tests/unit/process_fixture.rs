@@ -100,7 +100,7 @@ fn fixture_serve_rejects_missing_and_invalid_configuration() {
 }
 
 #[test]
-fn fixture_execute_dispatches_from_the_invoked_name() {
+fn fixture_execute_dispatches_from_the_executable_name() {
     let directory = tempfile::tempdir().expect("create fixture directory");
     let executable = directory.path().join("peryx");
     fs::write(&executable, "").expect("create fixture executable");
@@ -108,31 +108,22 @@ fn fixture_execute_dispatches_from_the_invoked_name() {
     fs::write(&config, "accepted = true").expect("write accepted config");
     fs::write(directory.path().join("toxiproxy-server"), "").expect("create toxiproxy executable");
     fs::write(sibling(&executable, "toxi-mode"), "exit").expect("set toxiproxy exit mode");
-    let _lock = super::TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    temp_env::with_var(
-        "PATH",
-        Some(std::env::join_paths([directory.path()]).expect("fixture PATH")),
-        || {
-            assert_eq!(
-                execute([OsString::from("toxiproxy-server")].into_iter()),
-                std::process::ExitCode::SUCCESS,
-            );
-            assert_eq!(
-                execute(
-                    [
-                        OsString::from("peryx"),
-                        OsString::from("config"),
-                        OsString::from("check"),
-                        OsString::from("--config"),
-                        config.clone().into_os_string(),
-                    ]
-                    .into_iter(),
-                ),
-                std::process::ExitCode::SUCCESS,
-            );
-        },
+    assert_eq!(
+        execute(&directory.path().join("toxiproxy-server"), std::iter::empty()),
+        std::process::ExitCode::SUCCESS,
+    );
+    assert_eq!(
+        execute(
+            &executable,
+            [
+                OsString::from("config"),
+                OsString::from("check"),
+                OsString::from("--config"),
+                config.into_os_string(),
+            ]
+            .into_iter(),
+        ),
+        std::process::ExitCode::SUCCESS,
     );
 }
 

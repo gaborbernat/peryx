@@ -11,18 +11,20 @@ const AVAILABILITY_LISTENER_FD_ENV: &str = "PERYX_INHERITED_AVAILABILITY_LISTENE
 const ADMIN_PASSWORD: &str = "harness-admin-secret";
 
 fn main() -> ExitCode {
-    execute(std::env::args_os())
+    execute(
+        &std::env::current_exe().expect("resolve fixture executable"),
+        std::env::args_os().skip(1),
+    )
 }
 
-fn execute(mut arguments: impl Iterator<Item = OsString>) -> ExitCode {
-    let executable = invoked_executable(arguments.next().expect("fixture executable argument"));
+fn execute(executable: &Path, arguments: impl Iterator<Item = OsString>) -> ExitCode {
     let arguments = arguments
         .map(|argument| argument.into_string().expect("UTF-8 fixture argument"))
         .collect::<Vec<_>>();
     let result = if executable.file_stem().is_some_and(|name| name == "toxiproxy-server") {
-        run_toxiproxy(&executable, &arguments, None)
+        run_toxiproxy(executable, &arguments, None)
     } else {
-        run_peryx(&executable, &arguments, None)
+        run_peryx(executable, &arguments, None)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -31,14 +33,6 @@ fn execute(mut arguments: impl Iterator<Item = OsString>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn invoked_executable(argument: OsString) -> PathBuf {
-    let argument = PathBuf::from(argument);
-    std::env::split_paths(&std::env::var_os("PATH").expect("fixture PATH"))
-        .map(|directory| directory.join(&argument))
-        .find(|candidate| candidate.is_file())
-        .expect("resolve invoked fixture from PATH")
 }
 
 fn run_peryx(executable: &Path, args: &[String], public_listener: Option<TcpListener>) -> Result<(), String> {
@@ -182,10 +176,10 @@ fn serve_peryx(listener: &TcpListener, state_path: &Path, control: bool) {
             continue;
         }
         let (status, body, declared) = peryx_response(path, control, &state);
-        write_response(&mut stream, status, &body, declared);
         if let Some(leader) = state.strip_prefix("transfer:") {
             fs::write(state_path, format!("leader:{leader}")).expect("complete leader transfer");
         }
+        write_response(&mut stream, status, &body, declared);
     }
 }
 

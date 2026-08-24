@@ -1562,10 +1562,27 @@ pub fn process_alive(pid: u32) -> bool {
         let pid = nix::unistd::Pid::from_raw(pid);
         nix::sys::signal::kill(pid, None).is_ok()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        false
+        windows_process_alive(pid)
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "Windows exposes process status through raw handle APIs")]
+fn windows_process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let mut status = 0;
+        let active = GetExitCodeProcess(process, &raw mut status) != 0 && status == STILL_ACTIVE as u32;
+        CloseHandle(process);
+        active
     }
 }
 

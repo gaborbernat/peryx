@@ -23,6 +23,9 @@ thiserror.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["fs", "signal"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 peryx-storage.workspace = true
 temp-env = "0.3"

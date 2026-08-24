@@ -249,26 +249,8 @@ impl Glob {
 
     #[must_use]
     pub fn matches(&self, resource: &str) -> bool {
-        let (pattern, resource) = (self.0.as_bytes(), resource.as_bytes());
-        let (mut at, mut cursor) = (0, 0);
-        let (mut star, mut resume) = (None, 0);
-        while cursor < resource.len() {
-            if pattern.get(at) == Some(&b'*') {
-                star = Some(at);
-                resume = cursor;
-                at += 1;
-            } else if pattern.get(at) == Some(&resource[cursor]) {
-                at += 1;
-                cursor += 1;
-            } else if let Some(position) = star {
-                at = position + 1;
-                resume += 1;
-                cursor = resume;
-            } else {
-                return false;
-            }
-        }
-        pattern[at..].iter().all(|byte| *byte == b'*')
+        self.remainders_after(resource)
+            .any(|remainder| remainder.bytes().all(|byte| byte == b'*'))
     }
 }
 

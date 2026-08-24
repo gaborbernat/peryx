@@ -32,9 +32,7 @@ jobs:
           toolchain: nightly
           components: rust-src
           tools: just uv cargo:cargo-nextest
-      - run: >-
-          just sanitizer-leak peryx
-          'test(metadata::tests::copied_open_migrates_the_copy_without_mutating_source)'
+      - run: just sanitizer-leak peryx
 
   source:
     if: github.ref != 'refs/heads/diagnostic/asan-leak'

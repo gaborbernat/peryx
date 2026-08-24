@@ -141,6 +141,10 @@ jobs:
       - run: just lint-docs
       - run: just docs
 
+  nightly:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/nightly.yml
+
   required:
     if: always()
     needs: [automation, contracts, coverage, docs, frontend, platform, source]

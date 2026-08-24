@@ -221,7 +221,7 @@ site: docs
 
 # Validate the cargo-dist release plan.
 release-plan: _project-temp
-    cargo dist plan --output-format=json > /dev/null
+    dist plan --output-format=json > /dev/null
 
 # Run one package's external conformance suite.
 conformance package suite binary="": _project-temp

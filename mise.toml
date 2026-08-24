@@ -19,4 +19,4 @@ jq = "latest"
 "cargo:cargo-semver-checks" = "latest"
 "cargo:maturin" = "latest"
 "github:leptos-rs/cargo-leptos" = "latest"
-"github:Shopify/toxiproxy" = { version = "2.12.0", matching = "toxiproxy-server", bin = "toxiproxy-server" }
+"github:Shopify/toxiproxy" = { version = "2.12.0", matching = "toxiproxy-server", bin = "toxiproxy-server", github_attestations = false }

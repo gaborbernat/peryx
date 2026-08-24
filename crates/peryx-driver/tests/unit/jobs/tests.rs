@@ -343,6 +343,20 @@ where
     }
 }
 
+#[derive(Clone, Default)]
+struct SchedulerEvents(Arc<AtomicUsize>);
+
+impl<Subscriber> tracing_subscriber::Layer<Subscriber> for SchedulerEvents
+where
+    Subscriber: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: tracing_subscriber::layer::Context<'_, Subscriber>) {
+        if event.metadata().target() == "peryx_driver::jobs::scheduler" {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
     let (_dir, state) = serving();
@@ -549,6 +563,28 @@ async fn test_shutdown_cancels_a_running_job_and_skips_a_queued_one() {
         0,
         "a job admitted before shutdown never starts once cancelled"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_cancelled_jobs_emit_no_terminal_event() {
+    let (_dir, state) = serving();
+    let scheduler = Arc::new(JobScheduler::new(state, limits(1, 2, 1, 1)));
+    let job = TestJob::new("probe", "a", Action::UntilCancelled);
+    let events = SchedulerEvents::default();
+    let subscriber = tracing_subscriber::registry()
+        .with(LevelFilter::TRACE)
+        .with(events.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let run = tokio::spawn({
+        let scheduler = scheduler.clone();
+        let job = job.clone();
+        async move { scheduler.run(job).await }
+    });
+    job.started.notified().await;
+
+    scheduler.shutdown().await;
+    run.await.unwrap().unwrap();
+    assert_eq!(events.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1754,8 +1790,9 @@ async fn test_first_publish_home_claims_only_unowned_authorities(#[case] home: b
 }
 
 struct AdvancingJob {
-    epoch: Arc<std::sync::atomic::AtomicU64>,
-    leased: Arc<std::sync::atomic::AtomicU64>,
+    epoch: Arc<AtomicU64>,
+    leased: Arc<AtomicU64>,
+    failure: Option<&'static str>,
 }
 
 #[async_trait]
@@ -1779,7 +1816,10 @@ impl NodeJob for AdvancingJob {
     async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
         self.leased.store(ctx.authority_fence(), Ordering::SeqCst);
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        Ok(JobReport::default())
+        self.failure.map_or_else(
+            || Ok(JobReport::default()),
+            |message| Err(JobFailure::new("test", message)),
+        )
     }
 }
 
@@ -1795,6 +1835,7 @@ async fn test_a_run_whose_authority_advances_mid_run_is_fenced() {
             .run(Arc::new(AdvancingJob {
                 epoch,
                 leased: leased.clone(),
+                failure: None,
             }))
             .await
             .unwrap_err(),
@@ -1811,6 +1852,45 @@ async fn test_a_run_whose_authority_advances_mid_run_is_fenced() {
     assert_eq!(
         runs[0].error.as_deref(),
         Some("authority_fenced: a newer authority epoch superseded this run"),
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_failed_run_preserves_its_error_when_authority_advances() {
+    let epoch = Arc::new(AtomicU64::new(5));
+    let (_dir, state) = serving_with_authority(test_authority(epoch.clone(), 0));
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+
+    assert_eq!(
+        scheduler
+            .run(Arc::new(AdvancingJob {
+                epoch,
+                leased: Arc::new(AtomicU64::new(0)),
+                failure: Some("failed at boundary"),
+            }))
+            .await
+            .unwrap_err(),
+        "test: failed at boundary"
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_repository_job_at_epoch_zero_is_not_fenced() {
+    let (_dir, state) = serving_with_authority(test_authority(Arc::new(AtomicU64::new(0)), 0));
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+
+    assert_eq!(
+        scheduler
+            .run(TestJob::persisting_repository(
+                "steady",
+                "proj",
+                "proj",
+                Action::Return(Ok(JobReport::default())),
+            ))
+            .await,
+        Ok(JobReport::default())
     );
     scheduler.shutdown().await;
 }

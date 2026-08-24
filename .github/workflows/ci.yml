@@ -50,11 +50,11 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           tools: >-
-            just cargo:cargo-dist cargo:cargo-insta cargo:cargo-nextest
+            just uv cargo:cargo-dist cargo:cargo-insta cargo:cargo-nextest
             cargo:cargo-semver-checks
       - run: just lint-contracts "$BASE_REV"
         env:
-          BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
 
   platform:
     name: platform (${{ matrix.os }})

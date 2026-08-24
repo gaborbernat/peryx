@@ -76,7 +76,7 @@ benchmark: _project-temp
 
 platform-test: _project-temp
     cargo check --workspace --all-targets --all-features
-    cargo nextest run --package peryx --test cli_entrypoint --profile ci
+    cargo nextest run --package peryx --test cli_entrypoint --all-features --profile ci
     cargo nextest run --package peryx-upstream --all-features --profile ci
     cargo nextest run --package peryx-test-support --all-features --profile ci
     cargo nextest run --package peryx-storage --all-features --test integration \
@@ -142,9 +142,10 @@ sanitizer-thread: test-deps
       --test-threads 1 -E 'not(test(e2e_live))'
 
 fuzz package target seconds="60": _project-temp
-    cd "crates/{{ package }}/fuzz" && cargo +nightly fuzz run "{{ target }}" -- -max_total_time="{{ seconds }}"
+    cd "crates/{{ package }}/fuzz" && cargo +nightly fuzz run \
+      --target "$(rustc +nightly --print host-tuple)" "{{ target }}" -- -max_total_time="{{ seconds }}"
 
-mutation shard="1/1" in_place="false" jobs="2": test-deps
+mutation shard="0/1" in_place="false" jobs="2": test-deps
     #!/usr/bin/env bash
     args=(--workspace --all-features --test-tool nextest --shard "{{ shard }}" --output .tox/mutants)
     if [[ "{{ in_place }}" == true ]]; then

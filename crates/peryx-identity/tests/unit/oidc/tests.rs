@@ -14,6 +14,7 @@ use crate::tests::oidc_http::{
 };
 
 const NOW: i64 = 2_000_000_000;
+const MAX_MACHINE_TOKEN_BYTES: usize = 32_768;
 const MODULUS: &str = "yRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5_CYYi_cvI-SXVT9kPWSKXxJXBXd_4LkvcPuUakBoAkfh-eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG_AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi-yUod-j8MtvIj812dkS4QMiRVN_by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQ";
 const PRIVATE_KEY_DER: &str = "MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG/AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi+yUod+j8MtvIj812dkS4QMiRVN/by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQABAoIBAHREk0I0O9DvECKdWUpAmF3mY7oY9PNQiu44Yaf+AoSuyRpRUGTMIgc3u3eivOE8ALX0BmYUO5JtuRNZDpvt4SAwqCnVUinIf6C+eH/wSurCpapSM0BAHp4aOA7igptyOMgMPYBHNA1e9A7jE0dCxKWMl3DSWNyjQTk4zeRGEAEfbNjHrq6YCtjHSZSLmWiG80hnfnYos9hOr5JnLnyS7ZmFE/5P3XVrxLc/tQ5zum0R4cbrgzHiQP5RgfxGJaEi7XcgherCCOgurJSSbYH29Gz8u5fFbS+Yg8s+OiCss3cs1rSgJ9/eHZuzGEdUZVARH6hVMjSuwvqVTFaE8AgtleECgYEA+uLMn4kNqHlJS2A5uAnCkj90ZxEtNm3E8hAxUrhssktY5XSOAPBlxyf5RuRGIImGtUVIr4HuJSa5TX48n3Vdt9MYCprO/iYl6moNRSPt5qowIIOJmIjY2mqPDfDt/zw+fcDD3lmCJrFlzcnh0uea1CohxEbQnL3cypeLt+WbU6kCgYEAzSp19m1ajieFkqgoB0YTpt/OroDx38vvI5unInJlEeOjQ+oIAQdN2wpxBvTrRorMU6P07mFUbt1j+Co6CbNiw+X8HcCaqYLR5clbJOOWNR36PuzOpQLkfK8woupBxzW9B8gZmY8rB1mbJ+/WTPrEJy6YGmIEBkWylQ2VpW8O4O0CgYEApdbvvfFBlwD9YxbrcGz7MeNCFbMz+MucqQntIKoKJ91ImPxvtc0y6e/Rhnv0oyNlaUOwJVu0yNgNG117w0g4t/+Q38mvVC5xV7/cn7x9UMFk6MkqVir3dYGEqIl/OP1grY2Tq9HtB5iyG9L8NIamQOLMyUqqMUILxdthHyFmiGkCgYEAn9+PjpjGMPHxL0gj8Q8VbzsFtou6b1deIRRA2CHmSltltR1gYVTMwXxQeUhPMmgkMqUXzs4/WijgpthY44hK1TaZEKIuoxrS70nJ4WQLf5a9k1065fDsFZD6yGjdGxvwEmlGMZgTwqV7t1I4X0Ilqhav5hcs5apYL7gnPYPeRz0CgYALHCj/Ji8XSsDoF/MhVhnGdIs2P99NNdmo3R2Pv0CuZbDKMU559LJHUvrKS8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==";
 
@@ -27,6 +28,22 @@ struct Claims<'a> {
     nbf: i64,
     jti: &'a str,
     repository_id: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    padding: &'a str,
+}
+
+fn claims<'a>(issuer: &str, subject: &'a str, token_id: &'a str, padding: &'a str) -> Claims<'a> {
+    Claims {
+        iss: secure_origin(issuer),
+        aud: json!("peryx"),
+        sub: subject,
+        exp: NOW + 600,
+        iat: NOW,
+        nbf: NOW,
+        jti: token_id,
+        repository_id: "42",
+        padding,
+    }
 }
 
 async fn mount_issuer_with(server: &MockServer, keys: Value, content_type: &str, cache_control: Option<&str>) {
@@ -76,23 +93,47 @@ fn encoding_key() -> EncodingKey {
 }
 
 fn identity_with_audience(issuer: &str, kid: Option<&str>, jti: &str, audience: Value, expires_at: i64) -> String {
+    let mut claims = claims(issuer, "repo:org/app:ref:refs/heads/main", jti, "");
+    claims.aud = audience;
+    claims.exp = expires_at;
+    signed_identity(kid, &claims)
+}
+
+fn signed_identity(kid: Option<&str>, claims: &Claims<'_>) -> String {
+    signed_identity_with_type(kid, None, claims)
+}
+
+fn signed_identity_with_type(kid: Option<&str>, token_type: Option<&str>, claims: &Claims<'_>) -> String {
     let mut header = Header::new(Algorithm::RS256);
     header.kid = kid.map(str::to_owned);
-    jsonwebtoken::encode(
-        &header,
-        &Claims {
-            iss: secure_origin(issuer),
-            aud: audience,
-            sub: "repo:org/app:ref:refs/heads/main",
-            exp: expires_at,
-            iat: NOW,
-            nbf: NOW,
-            jti,
-            repository_id: "42",
-        },
-        &encoding_key(),
-    )
-    .unwrap()
+    header.typ = token_type.map(str::to_owned);
+    jsonwebtoken::encode(&header, claims, &encoding_key()).unwrap()
+}
+
+fn identity_with_length(issuer: &str, length: usize) -> String {
+    for type_length in 0..4 {
+        let token_type = "x".repeat(type_length);
+        let base = signed_identity_with_type(
+            Some("key-1"),
+            Some(&token_type),
+            &claims(issuer, "repo:org/app:ref:refs/heads/main", "sized", ""),
+        );
+        let estimate = (length - base.len()) * 3 / 4;
+        if let Some(token) = (estimate.saturating_sub(32)..=estimate + 32)
+            .map(|padding| {
+                let padding = "x".repeat(padding);
+                signed_identity_with_type(
+                    Some("key-1"),
+                    Some(&token_type),
+                    &claims(issuer, "repo:org/app:ref:refs/heads/main", "sized", &padding),
+                )
+            })
+            .find(|token| token.len() == length)
+        {
+            return token;
+        }
+    }
+    panic!("JWT padding cannot reach {length} bytes")
 }
 
 fn identity(issuer: &str, kid: &str, jti: &str) -> String {
@@ -134,6 +175,9 @@ fn test_public_verifier_accepts_an_https_issuer() {
 #[case::http(vec!["http://issuer.example".to_owned()], "peryx")]
 #[case::ftp(vec!["ftp://issuer.example".to_owned()], "peryx")]
 #[case::credentials(vec!["https://user@issuer.example".to_owned()], "peryx")]
+#[case::password(vec!["https://user:secret@issuer.example".to_owned()], "peryx")]
+#[case::query(vec!["https://issuer.example?tenant=one".to_owned()], "peryx")]
+#[case::fragment(vec!["https://issuer.example#tenant".to_owned()], "peryx")]
 fn test_public_verifier_rejects_invalid_configuration(#[case] issuers: Vec<String>, #[case] audience: &str) {
     assert_eq!(
         OidcVerifier::new(issuers, audience).err(),
@@ -339,8 +383,10 @@ async fn test_cold_issuer_failure_is_rate_limited() {
     let verifier = test_verifier(&server.uri());
     let token = identity(&server.uri(), "key-1", "cold");
     assert!(matches!(verifier.verify_identity(&token, NOW).await, Err(error) if error.unavailable()));
-    assert!(matches!(verifier.verify_identity(&token, NOW).await, Err(error) if error.unavailable()));
+    assert!(matches!(verifier.verify_identity(&token, NOW + 59).await, Err(error) if error.unavailable()));
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(matches!(verifier.verify_identity(&token, NOW + 60).await, Err(error) if error.unavailable()));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -361,125 +407,74 @@ async fn test_unknown_key_refresh_is_single_flight() {
 }
 
 #[tokio::test]
-async fn test_claim_time_and_shape_failures_are_closed() {
+async fn test_multiple_audiences_are_rejected() {
     let (server, verifier) = verifier().await;
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("key-1".to_owned());
-    let key = encoding_key();
-    for (jti, claims) in [
-        (
-            "multi-aud",
-            Claims {
-                iss: secure_origin(&server.uri()),
-                aud: json!(["peryx", "other"]),
-                sub: "repo:org/app:x",
-                exp: NOW + 10,
-                iat: NOW,
-                nbf: NOW,
-                jti: "multi-aud",
-                repository_id: "42",
-            },
-        ),
-        (
-            "future",
-            Claims {
-                iss: secure_origin(&server.uri()),
-                aud: json!("peryx"),
-                sub: "repo:org/app:x",
-                exp: NOW + 20,
-                iat: NOW + 10,
-                nbf: NOW + 10,
-                jti: "future",
-                repository_id: "42",
-            },
-        ),
-        (
-            "long",
-            Claims {
-                iss: secure_origin(&server.uri()),
-                aud: json!("peryx"),
-                sub: "repo:org/app:x",
-                exp: NOW + MAX_IDENTITY_LIFETIME_SECS + 1,
-                iat: NOW,
-                nbf: NOW,
-                jti: "long",
-                repository_id: "42",
-            },
-        ),
-        (
-            "overflow",
-            Claims {
-                iss: secure_origin(&server.uri()),
-                aud: json!("peryx"),
-                sub: "repo:org/app:x",
-                exp: i64::MAX,
-                iat: i64::MIN,
-                nbf: i64::MIN,
-                jti: "overflow",
-                repository_id: "42",
-            },
-        ),
-    ] {
-        let token = jsonwebtoken::encode(&header, &claims, &key).unwrap();
-        assert_eq!(
-            verifier.verify_identity(&token, NOW).await,
-            Err(OidcVerificationError::InvalidIdentity),
-            "{jti}"
-        );
-    }
-}
+    let mut claims = claims(&server.uri(), "repo:org/app:x", "multiple-audiences", "");
+    claims.aud = json!(["peryx", "other"]);
+    let token = signed_identity(Some("key-1"), &claims);
 
-#[tokio::test]
-async fn test_claim_text_bounds_are_closed() {
-    let (server, verifier) = verifier().await;
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("key-1".to_owned());
-    for (name, sub, jti) in [
-        ("subject", "s".repeat(MAX_SUBJECT_BYTES + 1), "jti".to_owned()),
-        ("jti", "subject".to_owned(), "j".repeat(MAX_JTI_BYTES + 1)),
-    ] {
-        let token = jsonwebtoken::encode(
-            &header,
-            &Claims {
-                iss: secure_origin(&server.uri()),
-                aud: json!("peryx"),
-                sub: &sub,
-                exp: NOW + 60,
-                iat: NOW,
-                nbf: NOW,
-                jti: &jti,
-                repository_id: "42",
-            },
-            &encoding_key(),
-        )
-        .unwrap();
-        assert_eq!(
-            verifier.verify_identity(&token, NOW).await,
-            Err(OidcVerificationError::InvalidIdentity),
-            "{name}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_token_size_and_algorithm_are_closed() {
-    let (server, verifier) = verifier().await;
     assert_eq!(
-        verifier.verify_identity(&"x".repeat(TOKEN_BODY_LIMIT + 1), NOW).await,
+        verifier.verify_identity(&token, NOW).await,
         Err(OidcVerificationError::InvalidIdentity)
     );
+}
+
+#[rstest]
+#[case::future_issued_at(NOW + 1, NOW, NOW + 60, false)]
+#[case::future_not_before(NOW, NOW + 1, NOW + 60, false)]
+#[case::maximum_lifetime(NOW, NOW, NOW + 3_600, true)]
+#[case::excessive_lifetime(NOW, NOW, NOW + 3_601, false)]
+#[case::zero_lifetime(NOW, NOW, NOW, false)]
+#[case::overflow(i64::MIN, i64::MIN, i64::MAX, false)]
+#[tokio::test]
+async fn test_claim_time_bounds(
+    #[case] issued_at: i64,
+    #[case] not_before: i64,
+    #[case] expires_at: i64,
+    #[case] accepted: bool,
+) {
+    let (server, verifier) = verifier().await;
+    let mut claims = claims(&server.uri(), "repo:org/app:x", "time-boundary", "");
+    claims.exp = expires_at;
+    claims.iat = issued_at;
+    claims.nbf = not_before;
+    let token = signed_identity(Some("key-1"), &claims);
+
+    assert_eq!(verifier.verify_identity(&token, NOW).await.is_ok(), accepted);
+}
+
+#[rstest]
+#[case::maximum_subject(2_048, 3, true)]
+#[case::oversized_subject(2_049, 3, false)]
+#[case::maximum_token_id(7, 256, true)]
+#[case::oversized_token_id(7, 257, false)]
+#[tokio::test]
+async fn test_claim_text_bounds(#[case] subject_length: usize, #[case] token_id_length: usize, #[case] accepted: bool) {
+    let (server, verifier) = verifier().await;
+    let subject = "s".repeat(subject_length);
+    let token_id = "j".repeat(token_id_length);
+    let token = signed_identity(Some("key-1"), &claims(&server.uri(), &subject, &token_id, ""));
+
+    assert_eq!(verifier.verify_identity(&token, NOW).await.is_ok(), accepted);
+}
+
+#[rstest]
+#[case::maximum(MAX_MACHINE_TOKEN_BYTES, true)]
+#[case::oversized(MAX_MACHINE_TOKEN_BYTES + 1, false)]
+#[tokio::test]
+async fn test_token_size_bound(#[case] length: usize, #[case] accepted: bool) {
+    let (server, verifier) = verifier().await;
+    let token = identity_with_length(&server.uri(), length);
+
+    assert_eq!(verifier.verify_identity(&token, NOW).await.is_ok(), accepted);
+}
+
+#[tokio::test]
+async fn test_token_algorithm_is_enforced() {
+    let (server, verifier) = verifier().await;
     let token = jsonwebtoken::encode(
         &Header::new(Algorithm::HS256),
-        &Claims {
-            iss: secure_origin(&server.uri()),
-            aud: json!("peryx"),
-            sub: "repo:org/app:x",
-            exp: NOW + 60,
-            iat: NOW,
-            nbf: NOW,
-            jti: "wrong-algorithm",
-            repository_id: "42",
-        },
+        &claims(&server.uri(), "repo:org/app:x", "wrong-algorithm", ""),
         &EncodingKey::from_secret(b"secret"),
     )
     .unwrap();
@@ -511,19 +506,40 @@ async fn test_malformed_token_shapes_are_rejected_before_fetching() {
     }
 }
 
+#[rstest]
+#[case::issuer(false, true)]
+#[case::algorithm(true, false)]
 #[tokio::test]
-async fn test_discovery_must_repeat_the_issuer_and_algorithm() {
+async fn test_discovery_must_repeat_the_issuer_and_algorithm(
+    #[case] issuer_matches: bool,
+    #[case] supports_rs256: bool,
+) {
     let server = MockServer::start().await;
+    let issuer = if issuer_matches {
+        secure_origin(&server.uri())
+    } else {
+        "https://other.example".to_owned()
+    };
+    let algorithm = if supports_rs256 { "RS256" } else { "ES256" };
     Mock::given(method("GET"))
         .and(path("/.well-known/openid-configuration"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "application/json")
                 .set_body_json(json!({
-                    "issuer": "https://other.example",
+                    "issuer": issuer,
                     "jwks_uri": format!("{}/keys", secure_origin(&server.uri())),
-                    "id_token_signing_alg_values_supported": ["ES256"]
+                    "id_token_signing_alg_values_supported": [algorithm]
                 })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/keys"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({"keys": [jwk("key-1")]})),
         )
         .mount(&server)
         .await;

@@ -182,6 +182,9 @@ versions: _project-temp
     node --version
     npm --version
 
+mise-lock:
+    mise lock --bump
+
 # Build and test the browser application.
 frontend: frontend-deps _project-temp
     just frontend-browser-deps

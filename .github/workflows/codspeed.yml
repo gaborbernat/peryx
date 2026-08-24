@@ -177,11 +177,22 @@ jobs:
           set -euo pipefail
           tag=$(just codspeed-image-tag "$IMAGE")
           definition=${tag##*:definition-}
-          digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-          if [[ "$digest" == sha256:* ]]; then
+          inspection=$(mktemp "$RUNNER_TEMP/codspeed-image-inspection.XXXXXX")
+          trap 'rm -f "$inspection"' EXIT
+          if digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>"$inspection"); then
+            [[ "$digest" == sha256:* ]] || {
+              printf 'registry returned an invalid image digest: %s\n' "$digest" >&2
+              exit 1
+            }
             echo "available=true" >> "$GITHUB_OUTPUT"
             echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
             exit 0
+          else
+            inspection_code=$?
+          fi
+          if ! grep -Fqx "ERROR: $tag: not found" "$inspection"; then
+            cat "$inspection" >&2
+            exit "$inspection_code"
           fi
 
           if [[ "$EVENT" == pull_request ]] && git cat-file -e "$BASE_SHA:.github/codspeed/Dockerfile"; then

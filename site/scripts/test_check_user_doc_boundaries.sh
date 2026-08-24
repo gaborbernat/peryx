@@ -71,3 +71,17 @@ for fixture in \
   IFS='|' read -r name path content <<<"$fixture"
   reject "$name" "$path" "$content"
 done
+
+mkdir "$scratch/bin"
+write "$scratch" bin/grep $'#!/usr/bin/env bash\nexit 2'
+chmod +x "$scratch/bin/grep"
+if output=$(PATH="$scratch/bin:$PATH" "$script_dir/check_user_doc_boundaries.sh" "$base" 2>&1); then
+  printf 'grep failure was accepted\n' >&2
+  exit 1
+else
+  checker_code=$?
+fi
+if ((checker_code != 2)); then
+  printf 'grep failure returned %s instead of 2:\n%s\n' "$checker_code" "$output" >&2
+  exit 1
+fi

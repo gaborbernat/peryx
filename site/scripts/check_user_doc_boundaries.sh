@@ -28,9 +28,17 @@ find "${roots[@]}" \
   \( -path 'site/content/contributing' -o -path 'site/content/contributing/*' \) -prune \
   -o -type f -print0 >"$scratch/sources"
 
-matches=$(xargs -0 grep -E -n -i -f "$scratch/patterns" -- <"$scratch/sources" || true)
-if [[ -n $matches ]]; then
-  printf '%s\n%s\n' "$matches" \
-    'user documentation contains implementation vocabulary outside site/content/contributing' >&2
+while IFS= read -r -d '' source; do
+  if grep -E -H -n -i -f "$scratch/patterns" -- "$source" >>"$scratch/matches"; then
+    continue
+  else
+    grep_code=$?
+  fi
+  ((grep_code == 1)) || exit "$grep_code"
+done <"$scratch/sources"
+
+if [[ -s $scratch/matches ]]; then
+  cat "$scratch/matches" >&2
+  printf '%s\n' 'user documentation contains implementation vocabulary outside site/content/contributing' >&2
   exit 1
 fi

@@ -59,7 +59,7 @@ jobs:
             runner:
               - '.github/codspeed/**'
               - '.github/workflows/codspeed.yml'
-              - 'ci/run-codspeed*.sh'
+              - 'ci/run-codspeed.sh'
               - 'scripts/ci/codspeed-*'
               - 'justfile'
             workflow:

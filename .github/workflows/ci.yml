@@ -19,7 +19,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  leak-diagnostic:
+    if: github.ref == 'refs/heads/diagnostic/asan-leak'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          toolchain: nightly
+          tools: just uv cargo:cargo-nextest
+      - run: >-
+          just sanitizer-leak peryx
+          'test(metadata::tests::copied_open_migrates_the_copy_without_mutating_source)'
+
   source:
+    if: github.ref != 'refs/heads/diagnostic/asan-leak'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -33,6 +50,7 @@ jobs:
       - run: just lint-deps
 
   automation:
+    if: github.ref != 'refs/heads/diagnostic/asan-leak'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -45,6 +63,7 @@ jobs:
       - run: just lint-automation
 
   contracts:
+    if: github.ref != 'refs/heads/diagnostic/asan-leak'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -62,6 +81,7 @@ jobs:
           BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
 
   platform:
+    if: github.ref != 'refs/heads/diagnostic/asan-leak'
     name: platform (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -81,6 +101,7 @@ jobs:
       - run: just platform-test
 
   coverage:
+    if: github.ref != 'refs/heads/diagnostic/asan-leak'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -101,6 +122,7 @@ jobs:
           if-no-files-found: error
 
   frontend:
+    if: github.ref != 'refs/heads/diagnostic/asan-leak'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -134,6 +156,7 @@ jobs:
           if-no-files-found: error
 
   docs:
+    if: github.ref != 'refs/heads/diagnostic/asan-leak'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -147,11 +170,13 @@ jobs:
       - run: just docs
 
   nightly:
-    if: github.event_name == 'workflow_dispatch' && inputs.nightly
+    if: >-
+      github.ref != 'refs/heads/diagnostic/asan-leak' &&
+      github.event_name == 'workflow_dispatch' && inputs.nightly
     uses: ./.github/workflows/nightly.yml
 
   required:
-    if: always()
+    if: github.ref != 'refs/heads/diagnostic/asan-leak' && always()
     needs: [automation, contracts, coverage, docs, frontend, platform, source]
     runs-on: ubuntu-24.04
     timeout-minutes: 5

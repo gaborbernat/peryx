@@ -63,6 +63,23 @@ fn test_replica_page_advances_search_view() {
 }
 
 #[test]
+fn test_replica_page_advances_the_readable_frontier() {
+    let (_dir, state, meta) = state();
+    meta.next_serial().unwrap();
+
+    state.apply(
+        ReplicaPage {
+            changes: 1,
+            serial: 1,
+            primary_serial: 1,
+        },
+        &["resource".to_owned()],
+    );
+
+    assert_eq!(peryx_ha::ReplicaViewApplier::readable_frontier(&state), 1);
+}
+
+#[test]
 fn test_blocked_replica_view_does_not_advance_the_frontier() {
     let (_dir, mut state, meta) = state();
     state.register_replicated_apply_driver(Ecosystem::new("example"), Arc::new(BlockedView));

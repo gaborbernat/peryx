@@ -768,6 +768,37 @@ fn test_index_summaries_report_a_driver_failure() {
     );
 }
 
+#[test]
+fn test_auth_install_context_exposes_the_configured_signer() {
+    let (_dir, mut state) = state();
+    state
+        .set_token_realm(peryx_identity::Signer::new(b"signing-key", "peryx"), 300)
+        .unwrap();
+
+    assert!(state.auth_install_context().unwrap().signer().is_some());
+}
+
+#[test]
+fn test_runtime_install_context_finds_a_configured_ecosystem() {
+    let dir = tempfile::tempdir().unwrap();
+    let ecosystem = Ecosystem::new("example");
+    let mut state = AppState::new(
+        MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
+        BlobStore::new(dir.path().join("blobs")),
+        60,
+        vec![Index {
+            name: "catalog".to_owned(),
+            route: "catalog".to_owned(),
+            ecosystem: ecosystem.clone(),
+            kind: IndexKind::Hosted { volatile: false },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        }],
+    );
+
+    assert!(state.runtime_install_context().unwrap().has_ecosystem(&ecosystem));
+}
+
 #[tokio::test]
 async fn test_install_contexts_publish_registered_behavior() {
     let (_dir, mut state) = state();

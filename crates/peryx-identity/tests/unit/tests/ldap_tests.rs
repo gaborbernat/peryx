@@ -115,6 +115,35 @@ fn test_ldap_provider_rejects_a_long_attribute() {
     );
 }
 
+#[test]
+fn test_ldap_provider_accepts_the_maximum_dn_length() {
+    let mut settings = settings();
+    settings.base_dn = "a".repeat(4_096);
+
+    assert!(LdapProvider::new(settings).is_ok());
+}
+
+#[test]
+fn test_ldap_provider_accepts_the_maximum_attribute_length() {
+    let mut settings = settings();
+    settings.subject_attribute = "a".repeat(128);
+
+    assert!(LdapProvider::new(settings).is_ok());
+}
+
+#[rstest]
+#[case::empty_component("1..2")]
+#[case::non_numeric_component("1.a")]
+fn test_ldap_provider_rejects_invalid_numeric_attributes(#[case] attribute: &str) {
+    let mut settings = settings();
+    settings.subject_attribute = attribute.to_owned();
+
+    assert_eq!(
+        LdapProvider::new(settings).unwrap_err(),
+        LdapProviderBuildError::InvalidAttribute
+    );
+}
+
 #[rstest]
 #[case::direct_attribute(LdapBindMode::Direct { dn_attribute: "uid_name".to_owned() }, LdapProviderBuildError::InvalidAttribute)]
 #[case::search_attribute(

@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use rstest::rstest;
+
 use super::{
     ArtifactFacts, ArtifactRule, Policy, PolicyAction, PolicyCapabilities, PolicyConfig, PolicyDecisionRecorder,
     PolicyDecisionState, PolicyDenial, PolicyEvaluation, PolicyLimits, ResourceRule,
@@ -163,6 +165,20 @@ fn a_protected_name_is_active() {
 }
 
 #[test]
+fn a_blocked_name_activates_the_policy() {
+    assert!(
+        Policy::compile(
+            &PolicyConfig {
+                block_resources: vec!["blocked".to_owned()],
+                ..PolicyConfig::default()
+            },
+            str::to_owned,
+        )
+        .active()
+    );
+}
+
+#[test]
 fn an_exact_protected_name_cannot_fall_back_upstream() {
     let denial = protecting!(&["acme-secrets"])
         .check_resource(PolicyAction::Cached, "acme-secrets")
@@ -247,6 +263,25 @@ fn quota_limits_read_back_and_activate_the_policy() {
         ),
         (Some(512), Some(8), Some(16), Some("strict"), true, true, true)
     );
+}
+
+#[rstest]
+#[case::accounted_bytes(PolicyLimits {
+    max_accounted_bytes: Some(1),
+    ..PolicyLimits::default()
+})]
+#[case::resources(PolicyLimits {
+    max_resources: Some(1),
+    ..PolicyLimits::default()
+})]
+#[case::groups_per_resource(PolicyLimits {
+    max_groups_per_resource: Some(1),
+    ..PolicyLimits::default()
+})]
+fn each_quota_limit_enforces_and_activates_policy(#[case] limits: PolicyLimits) {
+    let policy = Policy::default().with_capabilities(PolicyCapabilities::default().with_limits(limits));
+
+    assert_eq!((policy.enforces_quota(), policy.active()), (true, true));
 }
 
 #[test]

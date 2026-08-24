@@ -511,6 +511,11 @@ fn equal_rules_compile_to_one_version_and_distinct_rules_diverge() {
 }
 
 #[test]
+fn policy_versions_are_stable() {
+    assert_eq!(keeping(RetentionSelector::Cached).version(), 0xd77a_0944_ef4d_2cfd);
+}
+
+#[test]
 fn a_config_deserializes_every_selector_from_json() {
     let config: RetentionConfig = serde_json::from_str(
         r#"{

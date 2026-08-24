@@ -86,7 +86,7 @@ jobs:
         with:
           tools: >-
             just uv cargo:cargo-llvm-cov cargo:cargo-nextest
-            ubi:Shopify/toxiproxy
+            github:Shopify/toxiproxy
       - run: just coverage-native
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
@@ -108,7 +108,7 @@ jobs:
           targets: wasm32-unknown-unknown
           tools: >-
             just jq node cargo:cargo-llvm-cov cargo:cargo-nextest
-            ubi:leptos-rs/cargo-leptos
+            github:leptos-rs/cargo-leptos
       - run: just frontend-deps
       - run: just frontend-browser-deps --with-deps
       - name: Install matching LLVM

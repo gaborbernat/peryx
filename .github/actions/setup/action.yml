@@ -27,7 +27,7 @@ runs:
         cache: false
     - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
       with:
-        install_args: cargo-binstall ${{ inputs.tools }}
+        install_args: --locked cargo-binstall ${{ inputs.tools }}
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       env:
         NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331

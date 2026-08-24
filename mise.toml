@@ -1,6 +1,6 @@
 [tools]
 zola = "latest"
-node = "22"
+node = "22.23.2"
 uv = "latest"
 prek = "latest"
 cargo-binstall = "latest"
@@ -18,5 +18,5 @@ jq = "latest"
 "cargo:cargo-mutants" = "latest"
 "cargo:cargo-semver-checks" = "latest"
 "cargo:maturin" = "latest"
-"ubi:leptos-rs/cargo-leptos" = { version = "latest", exe = "cargo-leptos" }
-"ubi:Shopify/toxiproxy" = { version = "2.12.0", exe = "toxiproxy-server" }
+"github:leptos-rs/cargo-leptos" = "latest"
+"github:Shopify/toxiproxy" = { version = "2.12.0", matching = "toxiproxy-server", bin = "toxiproxy-server" }

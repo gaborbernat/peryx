@@ -30,6 +30,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           toolchain: nightly
+          components: rust-src
           tools: just uv cargo:cargo-nextest
       - run: >-
           just sanitizer-leak peryx

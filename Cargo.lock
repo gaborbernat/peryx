@@ -1141,20 +1141,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "457d7ed3f888dfd2c7af56d4975cade43c622f74bdcddfed6d4352f57acc6310"
 dependencies = [
  "futures-util",
- "parking_lot",
  "portable-atomic",
  "tokio",
-]
-
-[[package]]
-name = "bb8-ldap"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4e64dad015959b66d6f7f85edd66c6e171b593e04d30916726bdb41ab17771"
-dependencies = [
- "bb8",
- "ldap3",
- "url",
 ]
 
 [[package]]
@@ -5021,9 +5009,10 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64 0.23.1",
- "bb8-ldap",
+ "bb8",
  "getrandom 0.4.3",
  "jsonwebtoken",
+ "ldap3",
  "rcgen 0.14.9",
  "reqwest",
  "ring",

@@ -7,28 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[package.metadata.peryx-ci]
-kind = "system"
-
-[package.metadata.peryx-ci.tools]
-install = "scripts/install-clients"
-
-[package.metadata.peryx-ci.coverage.availability]
-tests = ["availability"]
-
-[package.metadata.peryx-ci.coverage.clients]
-features = ["e2e-live"]
-filter = "not(binary(availability))"
-
-[package.metadata.peryx-ci.coverage.e2e]
-features = ["e2e"]
-filter = "not(test(e2e_live)) & not(binary(availability))"
-
-[package.metadata.peryx-ci.coverage.e2e-live]
-features = ["e2e-live"]
-tests = ["e2e"]
-filter = "test(e2e_live)"
-
 [[bin]]
 name = "peryx-pypi-system-server"
 path = "src/main.rs"

@@ -1,4 +1,4 @@
-use leptos::either::{Either, EitherOf4, EitherOf5};
+use leptos::either::{Either, EitherOf5};
 use leptos::prelude::*;
 
 use super::human_size;
@@ -104,7 +104,7 @@ fn AnalyticsFilterFields(
     set_password: WriteSignal<String>,
     set_filters: WriteSignal<AnalyticsFilters>,
     loading: ReadSignal<bool>,
-) -> impl IntoView {
+) -> AnyView {
     let _ = (set_user, set_password, set_filters);
     view! {
         <label for="analytics-user">"Username"</label>
@@ -133,6 +133,7 @@ fn AnalyticsFilterFields(
         </select>
         <button type="submit" disabled=move || loading.get()>"Search"</button>
     }
+    .into_any()
 }
 
 #[component]
@@ -248,16 +249,14 @@ fn submit_query(state: AnalyticsState) {
     );
 }
 
-fn analytics_results(loading: bool, result: Option<Result<UiUsagePage, String>>) -> impl IntoView {
+fn analytics_results(loading: bool, result: Option<Result<UiUsagePage, String>>) -> AnyView {
     if loading {
-        return EitherOf4::A(
-            view! { <p class="dim" role="status" aria-live="polite">"Loading usage analytics..."</p> },
-        );
+        return view! { <p class="dim" role="status" aria-live="polite">"Loading usage analytics..."</p> }.into_any();
     }
     match result {
-        None => EitherOf4::B(view! { <p class="dim">"Enter credentials and search to load usage."</p> }),
-        Some(Err(error)) => EitherOf4::C(view! { <p class="error" role="alert">{error}</p> }),
-        Some(Ok(page)) => EitherOf4::D(usage_page(page)),
+        None => view! { <p class="dim">"Enter credentials and search to load usage."</p> }.into_any(),
+        Some(Err(error)) => view! { <p class="error" role="alert">{error}</p> }.into_any(),
+        Some(Ok(page)) => usage_page(page).into_any(),
     }
 }
 

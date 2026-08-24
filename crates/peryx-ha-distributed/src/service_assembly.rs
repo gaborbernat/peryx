@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -374,37 +374,14 @@ impl<T> From<Option<T>> for OwnedResource<T> {
 pub fn reap_process_resource<E>(
     name: &'static str,
     reap: impl FnOnce() -> Result<(), E> + Send + 'static,
-) -> Option<std::thread::JoinHandle<()>>
+) -> std::thread::JoinHandle<()>
 where
     E: std::fmt::Display + Send + 'static,
 {
-    let reap = Arc::new(Mutex::new(Some(reap)));
-    let background_reap = Arc::clone(&reap);
-    match std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("peryx-resource-reaper".to_owned())
-        .spawn(move || {
-            run_reaper_job(
-                name,
-                background_reap
-                    .lock()
-                    .expect("resource reaper job mutex")
-                    .take()
-                    .expect("resource reaper job is available"),
-            );
-        }) {
-        Ok(thread) => Some(thread),
-        Err(error) => {
-            tracing::error!(resource = name, %error, "resource reaper did not start");
-            run_reaper_job(
-                name,
-                reap.lock()
-                    .expect("resource reaper job mutex")
-                    .take()
-                    .expect("resource reaper job is available"),
-            );
-            None
-        }
-    }
+        .spawn(move || run_reaper_job(name, reap))
+        .expect("spawn process resource reaper")
 }
 
 fn run_reaper_job<E>(name: &'static str, reap: impl FnOnce() -> Result<(), E>)

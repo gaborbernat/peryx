@@ -255,15 +255,17 @@ impl ExecCredentialConfig {
                 }
             }
         };
-        if let Err(error) = process.terminate().await {
-            cleanup(&mut input_task, &mut output_task).await;
-            return Err(error);
-        }
+        let cleanup_result = process.terminate().await;
 
         match outcome {
-            Ok((status, output)) => finish(status, input_task.take().expect("input task is pending"), output).await,
+            Ok((status, output)) => {
+                let result = finish(status, input_task.take().expect("input task is pending"), output).await;
+                cleanup_result?;
+                result
+            }
             Err(error) => {
                 cleanup(&mut input_task, &mut output_task).await;
+                cleanup_result?;
                 Err(error)
             }
         }

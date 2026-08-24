@@ -786,6 +786,17 @@ fn toxiproxy_startup_waits_for_the_version_endpoint() {
 }
 
 #[test]
+fn toxiproxy_startup_waits_through_a_not_found_version_route() {
+    with_fixture(|fixture| {
+        fs::write(fixture.toxi_state(), "startup-not-found").expect("delay version route");
+        let mut toxiproxy = Toxiproxy::start_with(fixture.toxiproxy(), TOXIPROXY_FAILURE_TIMEOUT)
+            .expect("start after the version route is mounted");
+        assert!(toxiproxy.control_is_up());
+        toxiproxy.kill();
+    });
+}
+
+#[test]
 fn toxiproxy_startup_reports_exit_after_the_signal() {
     with_fixture(|fixture| {
         fs::write(fixture.toxi_mode(), "signal-exit").expect("exit after startup signal");
@@ -944,7 +955,7 @@ impl FixtureEnvironment {
         let dir = TempDir::new().expect("create fixture directory");
         let fixture = Self { dir };
         fs::create_dir(fixture.empty_path()).expect("create empty path");
-        install_fixture(&fixture.peryx());
+        fs::copy(env!("PERYX_TEST_FIXTURE"), fixture.peryx()).expect("install process fixture");
         fs::copy(fixture.peryx(), fixture.toxiproxy()).expect("install toxiproxy fixture");
         fs::write(fixture.state(), "leader:dc-a").expect("write state");
         fs::write(fixture.toxi_state(), "ok").expect("write toxiproxy state");
@@ -1060,29 +1071,13 @@ fn toxiproxy_start_at_gate(
     )
     .expect("configure readiness gate");
     let binary = fixture.toxiproxy();
-    let gate_address = gate.local_addr().expect("readiness gate address");
     let (sender, receiver) = mpsc::sync_channel(1);
     let startup = thread::spawn(move || {
         sender
             .send(Toxiproxy::start_with(binary, TOXIPROXY_FAILURE_TIMEOUT))
             .expect("return startup result");
-        if let Ok(mut completion) = TcpStream::connect(gate_address) {
-            completion.write_all(&[0]).expect("identify startup completion");
-        }
     });
-    let mut connection = gate.accept().expect("accept toxiproxy startup event").0;
-    let mut event = [0];
-    connection
-        .read_exact(&mut event)
-        .expect("identify toxiproxy startup event");
-    if event == [0] {
-        let result = receiver.recv().expect("receive startup result");
-        startup.join().expect("join startup thread");
-        match result {
-            Ok(_) => panic!("toxiproxy startup completed before the fixture gate"),
-            Err(error) => panic!("toxiproxy startup failed before the fixture gate: {error}"),
-        }
-    }
+    let connection = accept_within(&gate, TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy startup gate");
     (startup, receiver, connection)
 }
 
@@ -1103,20 +1098,6 @@ fn accept_within(listener: &TcpListener, timeout: Duration, event: &str) -> TcpS
         panic!("{event} not received within {timeout:?}");
     }
     connection
-}
-
-fn install_fixture(path: &Path) {
-    let _lock = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let compiler = Path::new(env!("CARGO")).with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX));
-    let output = Command::new(compiler)
-        .args(["--edition=2024", "--crate-name", "peryx_test_fixture_launcher"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/process.rs"))
-        .arg("-o")
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("compile process fixture");
-    assert!(output.status.success());
 }
 
 fn read_request(stream: &mut TcpStream) -> String {

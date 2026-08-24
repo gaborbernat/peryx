@@ -3,6 +3,7 @@ use std::time::SystemTime;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt;
 use peryx_core::path::{self};
 use peryx_driver::conditional::{applicable_range, http_date, if_modified_since, if_none_match, last_modified};
 use peryx_driver::not_found;
@@ -68,7 +69,7 @@ pub async fn pypi_dispatch_get(
     head: bool,
 ) -> Response {
     let authenticated = headers.contains_key(header::AUTHORIZATION);
-    let mut response = pypi_get(&state, position, rest, &headers, &uri, head).await;
+    let mut response = pypi_get(&state, position, rest, &headers, &uri, head).boxed().await;
     apply_revocation_cache_policy(&mut response, authenticated);
     response
 }
@@ -93,7 +94,7 @@ async fn pypi_get(
     head: bool,
 ) -> Response {
     let index = state.index_at(position);
-    if let Some(response) = legacy_json_route(state, index, rest).await {
+    if let Some(response) = legacy_json_route(state, index, rest).boxed().await {
         return response;
     }
     if rest == "simple" {
@@ -115,7 +116,10 @@ async fn pypi_get(
             resource: normalized.clone(),
         });
         if matches!(negotiate(headers), Format::Json) {
-            match Box::pin(cache::stream_detail(state.clone(), position, normalized.clone())).await {
+            match cache::stream_detail(state.clone(), position, normalized.clone())
+                .boxed()
+                .await
+            {
                 Ok(PageOutcome::Ready(bytes, last_serial)) => {
                     return json_bytes_response(bytes, last_serial);
                 }
@@ -145,7 +149,9 @@ async fn pypi_get(
             if let Some((bytes, last_serial)) = hot {
                 return html_bytes_response(bytes, last_serial);
             }
-            let detail = Box::pin(cache::resolve_detail_page(state, index, &normalized, &index.route)).await;
+            let detail = cache::resolve_detail_page(state, index, &normalized, &index.route)
+                .boxed()
+                .await;
             if let Ok(Some(found)) = &detail {
                 if holds_below_readable_frontier(state, index, found.last_serial) {
                     return not_found();
@@ -164,7 +170,9 @@ async fn pypi_get(
             }
             return detail_response(detail, &index.route, &normalized);
         }
-        let detail = Box::pin(cache::resolve_detail_page(state, index, &normalized, &index.route)).await;
+        let detail = cache::resolve_detail_page(state, index, &normalized, &index.route)
+            .boxed()
+            .await;
         if let Ok(Some(found)) = &detail
             && holds_below_readable_frontier(state, index, found.last_serial)
         {
@@ -173,10 +181,12 @@ async fn pypi_get(
         return detail_response(detail, &index.route, &normalized);
     }
     if let Some(file) = rest.strip_prefix("files/") {
-        return Box::pin(file_route(state, index, file, headers, head)).await;
+        return file_route(state, index, file, headers, head).boxed().await;
     }
     if let Some(target) = rest.strip_prefix("inspect/") {
-        return Box::pin(inspect_route(state.clone(), index.route.clone(), target, uri.query())).await;
+        return inspect_route(state.clone(), index.route.clone(), target, uri.query())
+            .boxed()
+            .await;
     }
     not_found()
 }
@@ -208,7 +218,9 @@ async fn legacy_json_route(state: &Arc<ServingState>, index: &Index, rest: &str)
     if let Some((bytes, last_serial)) = hot {
         return Some(legacy_bytes_response(bytes, last_serial));
     }
-    let detail = Box::pin(cache::resolve_detail_page(state, index, &target.project, &index.route)).await;
+    let detail = cache::resolve_detail_page(state, index, &target.project, &index.route)
+        .boxed()
+        .await;
     if let Ok(Some(found)) = &detail
         && let Some(body) = crate::legacy_json::render_legacy_json_with_serial(
             &found.detail,
@@ -324,7 +336,9 @@ async fn file_route(state: &Arc<ServingState>, index: &Index, file: &str, header
             family: PROVENANCE_FAMILY.key,
         });
         return provenance_response(
-            cache::provenance_bytes(state, index, &digest, artifact_filename).await,
+            cache::provenance_bytes(state, index, &digest, artifact_filename)
+                .boxed()
+                .await,
             CacheContext::provenance(&route, digest.as_str(), &filename),
         );
     }

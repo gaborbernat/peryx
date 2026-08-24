@@ -46,8 +46,6 @@ const STREAM_OPENED: &str = "PERYX_STREAM_OPENED";
 static CHILD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 #[cfg(feature = "container-tests")]
 static NEXT_CONTAINER: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "container-tests")]
-static CONTAINER_TEST_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[derive(Clone, Copy)]
 enum WireBehavior {
@@ -159,7 +157,6 @@ impl WireBehavior {
 
 #[cfg(feature = "container-tests")]
 struct Minio {
-    _slot: tokio::sync::SemaphorePermit<'static>,
     _container: ContainerAsync<GenericImage>,
     endpoint: String,
     network: String,
@@ -571,7 +568,6 @@ fn admin_client(endpoint: &str) -> aws_sdk_s3::Client {
 
 #[cfg(feature = "container-tests")]
 async fn minio() -> Minio {
-    let slot = CONTAINER_TEST_SLOTS.acquire().await.unwrap();
     let suffix = format!(
         "{}-{}",
         std::process::id(),
@@ -601,7 +597,6 @@ async fn minio() -> Minio {
         .await
         .unwrap();
     Minio {
-        _slot: slot,
         _container: container,
         endpoint,
         network,
@@ -1688,7 +1683,7 @@ async fn stream_failure(toxic: &str, attributes: &[&str], scenario: &str, after_
 
 #[cfg(feature = "container-tests")]
 #[tokio::test]
-async fn test_s3_uses_the_default_credential_chain() {
+async fn test_s3_container_uses_the_default_credential_chain() {
     let minio = minio().await;
     let staging = tempfile::tempdir().unwrap();
     assert_child_succeeded(
@@ -1706,7 +1701,7 @@ async fn test_s3_uses_the_default_credential_chain() {
 
 #[cfg(feature = "container-tests")]
 #[tokio::test]
-async fn test_s3_surfaces_invalid_credentials() {
+async fn test_s3_container_surfaces_invalid_credentials() {
     let minio = minio().await;
     let staging = tempfile::tempdir().unwrap();
     assert_child_succeeded(&child(&minio.endpoint, staging.path(), "invalid", "invalid", "invalid-secret").await);
@@ -1715,7 +1710,7 @@ async fn test_s3_surfaces_invalid_credentials() {
 
 #[cfg(feature = "container-tests")]
 #[tokio::test]
-async fn test_s3_surfaces_a_valid_readonly_principal() {
+async fn test_s3_container_surfaces_a_valid_readonly_principal() {
     let minio = minio().await;
     run_mc(
         &minio,
@@ -1790,13 +1785,13 @@ async fn test_s3_retries_after_a_truncated_response() {
 
 #[cfg(feature = "container-tests")]
 #[tokio::test]
-async fn test_s3_resumes_a_cancelled_multipart_upload() {
+async fn test_s3_container_resumes_a_cancelled_multipart_upload() {
     resume_upload(&interrupted_upload().await).await;
 }
 
 #[cfg(feature = "container-tests")]
 #[tokio::test]
-async fn test_s3_restarts_a_stale_multipart_journal() {
+async fn test_s3_container_restarts_a_stale_multipart_journal() {
     let upload = interrupted_upload().await;
     abort_upload(&upload).await;
     resume_upload(&upload).await;
@@ -2019,7 +2014,7 @@ async fn test_s3_reports_a_structural_journal_cleanup_failure(#[case] point: Jou
 
 #[cfg(feature = "container-tests")]
 #[tokio::test]
-async fn test_s3_coordinates_simultaneous_multipart_acquisition() {
+async fn test_s3_container_coordinates_simultaneous_multipart_acquisition() {
     let minio = minio().await;
     let staging = tempfile::tempdir().unwrap();
     assert_child_succeeded(
@@ -2046,7 +2041,7 @@ async fn test_s3_coordinates_simultaneous_multipart_acquisition() {
     false
 )]
 #[tokio::test]
-async fn test_s3_stream_failures(
+async fn test_s3_container_stream_failures(
     #[case] toxic: &str,
     #[case] attributes: &[&str],
     #[case] scenario: &str,

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use axum::extract::{Multipart, Request};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt;
 use peryx_core::Ecosystem;
 use peryx_core::Role;
 use peryx_core::path::{self, PathSafetyError};
@@ -50,7 +51,7 @@ mod web;
 pub(super) const BROWSE_PATHS: &[&str] = web::BROWSE_PATHS;
 
 pub(super) async fn browse_http(state: Arc<AppState>, request: Request) -> Response {
-    web::browse_http(state, request).await
+    web::browse_http(state, request).boxed().await
 }
 
 use changelog::{is_changelog_path, pypi_changelog};
@@ -295,19 +296,21 @@ impl IndexedProtocolDriver for PypiServing {
         headers: HeaderMap,
         method: Method,
     ) -> Response {
-        pypi_dispatch_get(state, position, &rest, uri, headers, method == Method::HEAD).await
+        pypi_dispatch_get(state, position, &rest, uri, headers, method == Method::HEAD)
+            .boxed()
+            .await
     }
 
     async fn post(&self, state: Arc<ServingState>, path: String, headers: HeaderMap, multipart: Multipart) -> Response {
-        pypi_dispatch_post(state, path, headers, multipart).await
+        pypi_dispatch_post(state, path, headers, multipart).boxed().await
     }
 
     async fn put(&self, state: Arc<ServingState>, uri: Uri, headers: HeaderMap) -> Response {
-        pypi_dispatch_put(state, uri, headers).await
+        pypi_dispatch_put(state, uri, headers).boxed().await
     }
 
     async fn delete(&self, state: Arc<ServingState>, uri: Uri, headers: HeaderMap) -> Response {
-        pypi_dispatch_delete(state, uri, headers).await
+        pypi_dispatch_delete(state, uri, headers).boxed().await
     }
 }
 

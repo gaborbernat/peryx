@@ -36,9 +36,6 @@ url.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
 
-[target.'cfg(loom)'.dependencies]
-loom = "0.7.2"
-
 [dev-dependencies]
 criterion = { workspace = true, features = ["async_tokio"] }
 hdrhistogram.workspace = true

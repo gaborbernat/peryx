@@ -330,7 +330,6 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
     assert_eq!(run_toxiproxy(&executable, &[], None), Ok(()));
     fs::write(sibling(&executable, "toxi-mode"), "signal-exit").expect("set signal exit mode");
     assert_eq!(run_toxiproxy(&executable, &[], None), Ok(()));
-
     let gate = TcpListener::bind("127.0.0.1:0").expect("bind silent startup gate");
     fs::write(
         sibling(&executable, "toxi-mode"),
@@ -348,6 +347,16 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
     assert_eq!(command.join().expect("join silent toxiproxy"), Ok(()));
 
     fs::write(sibling(&executable, "toxi-mode"), "ready").expect("set ready mode");
+    fs::write(sibling(&executable, "toxi-state"), "startup-not-found").expect("delay version route");
+    let control = TcpListener::bind("127.0.0.1:0").expect("bind delayed version listener");
+    let control_address = control.local_addr().expect("delayed version address");
+    let command_executable = executable.clone();
+    let command = thread::spawn(move || run_toxiproxy(&command_executable, &[], Some(control)));
+    assert!(request(control_address, "GET /version HTTP/1.1\r\n\r\n").contains("404 test"));
+    assert!(request(control_address, "GET /version HTTP/1.1\r\n\r\n").contains("200 test"));
+    assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
+    assert_eq!(command.join().expect("join delayed version fixture"), Ok(()));
+
     fs::write(sibling(&executable, "toxi-state"), "ok").expect("accept toxiproxy requests");
     let control = TcpListener::bind("127.0.0.1:0").expect("bind explicit control listener");
     let control_address = control.local_addr().expect("explicit control address");

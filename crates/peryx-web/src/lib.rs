@@ -1,16 +1,41 @@
-#![recursion_limit = "256"]
-
 use leptos::prelude::*;
 use leptos_meta::{MetaTags, Style, Title, provide_meta_context};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::hooks::use_query_map;
-use leptos_router::{SsrMode, path};
+use leptos_router::{SsrMode, StaticSegment};
 
 use crate::data::load_search;
 use crate::markdown::external_link_rel;
 use crate::model::UiSearchResult;
 use crate::url::browse_index_url;
 use crate::url::search_page_url;
+
+macro_rules! app_routes {
+    ($consumer:ident) => {
+        $consumer! {
+            ("/", StaticSegment("/"), Dashboard, Async),
+            ("/admin/status", (StaticSegment("/admin"), StaticSegment("status")), AdminStatus, Async),
+            ("/admin/topology", (StaticSegment("/admin"), StaticSegment("topology")), AvailabilityTopology, Async),
+            ("/admin/placements", (StaticSegment("/admin"), StaticSegment("placements")), ArtifactPlacements, Async),
+            ("/admin/operations", (StaticSegment("/admin"), StaticSegment("operations")), PendingOperations, Async),
+            (
+                "/admin/policy-decisions",
+                (StaticSegment("/admin"), StaticSegment("policy-decisions")),
+                PolicyDecisions,
+                OutOfOrder
+            ),
+            ("/admin/trash", (StaticSegment("/admin"), StaticSegment("trash")), Trash, OutOfOrder),
+            ("/admin/analytics", (StaticSegment("/admin"), StaticSegment("analytics")), UsageAnalytics, OutOfOrder),
+            ("/browse", StaticSegment("/browse"), Browse, Async),
+            ("/search", StaticSegment("/search"), Search, Async),
+            ("/stats", StaticSegment("/stats"), Stats, Async),
+            ("/login", StaticSegment("/login"), Login, Async),
+        }
+    };
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) use app_routes;
 
 pub mod data;
 pub mod markdown;
@@ -27,6 +52,24 @@ use pages::{
 };
 
 pub use app as App;
+
+macro_rules! app_view {
+    ($(($path:literal, $matcher:expr, $view:ident, $mode:ident)),+ $(,)?) => {
+        view! {
+            <Style>{style::CSS}</Style>
+            <Title text="peryx" />
+            <Router>
+                <Header />
+                <main>
+                    // In-order rendering prevents Suspense fallbacks from truncating responses under load.
+                    <Routes fallback=|| view! { <p class="dim">"not found"</p> }>
+                        $(<Route path=$matcher view=$view ssr=SsrMode::$mode />)+
+                    </Routes>
+                </main>
+            </Router>
+        }
+    };
+}
 
 #[must_use]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -55,30 +98,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 #[must_use]
 pub fn app() -> impl IntoView {
     provide_meta_context();
-    view! {
-        <Style>{style::CSS}</Style>
-        <Title text="peryx" />
-        <Router>
-            <Header />
-            <main>
-                // In-order rendering prevents Suspense fallbacks from truncating responses under load.
-                <Routes fallback=|| view! { <p class="dim">"not found"</p> }>
-                    <Route path=path!("/") view=Dashboard ssr=SsrMode::Async />
-                    <Route path=path!("/admin/status") view=AdminStatus ssr=SsrMode::Async />
-                    <Route path=path!("/admin/topology") view=AvailabilityTopology ssr=SsrMode::Async />
-                    <Route path=path!("/admin/placements") view=ArtifactPlacements ssr=SsrMode::Async />
-                    <Route path=path!("/admin/operations") view=PendingOperations ssr=SsrMode::Async />
-                    <Route path=path!("/admin/policy-decisions") view=PolicyDecisions />
-                    <Route path=path!("/admin/trash") view=Trash />
-                    <Route path=path!("/admin/analytics") view=UsageAnalytics />
-                    <Route path=path!("/browse") view=Browse ssr=SsrMode::Async />
-                    <Route path=path!("/search") view=Search ssr=SsrMode::Async />
-                    <Route path=path!("/stats") view=Stats ssr=SsrMode::Async />
-                    <Route path=path!("/login") view=Login ssr=SsrMode::Async />
-                </Routes>
-            </main>
-        </Router>
-    }
+    app_routes!(app_view)
 }
 
 const DOCS_URL: &str = "https://peryx.readthedocs.io/";

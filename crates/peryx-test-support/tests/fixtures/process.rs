@@ -264,21 +264,18 @@ fn run_toxiproxy(executable: &Path, args: &[String], control_listener: Option<Tc
         return Ok(());
     }
     if let Some(port) = mode.strip_prefix("silent-gate:") {
-        let mut gate = TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port")))
-            .expect("connect startup gate");
+        let mut gate =
+            TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port"))).expect("connect startup gate");
         gate.write_all(&[1]).expect("identify startup gate");
     }
     let mut readiness_gate = mode.strip_prefix("gate:").map(|port| {
         emit_toxiproxy_startup();
-        let mut gate = TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port")))
-            .expect("connect readiness gate");
+        let mut gate =
+            TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port"))).expect("connect readiness gate");
         gate.write_all(&[1]).expect("identify readiness gate");
         gate.read_exact(&mut [0]).expect("wait for readiness release");
         gate
     });
-    if mode == "ready" {
-        emit_toxiproxy_startup();
-    }
     let listener = control_listener.unwrap_or_else(|| {
         TcpListener::bind((
             "127.0.0.1",
@@ -286,6 +283,9 @@ fn run_toxiproxy(executable: &Path, args: &[String], control_listener: Option<Tc
         ))
         .expect("bind toxiproxy control")
     });
+    if mode == "ready" {
+        emit_toxiproxy_startup();
+    }
     if let Some(gate) = &mut readiness_gate {
         gate.write_all(&[1]).expect("acknowledge control bind");
     }
@@ -297,7 +297,10 @@ fn run_toxiproxy(executable: &Path, args: &[String], control_listener: Option<Tc
             return Ok(());
         }
         let state = fs::read_to_string(sibling(executable, "toxi-state")).expect("read toxiproxy state");
-        let status = if state == "startup-error" || state == "error" && !request.starts_with("GET /version ") {
+        let status = if state == "startup-not-found" && request.starts_with("GET /version ") {
+            fs::write(sibling(executable, "toxi-state"), "ok").expect("release toxiproxy readiness");
+            404
+        } else if state == "startup-error" || state == "error" && !request.starts_with("GET /version ") {
             500
         } else {
             200

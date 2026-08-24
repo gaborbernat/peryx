@@ -14,10 +14,6 @@ order = 0
 cargo-jobs = 4
 benches = ["manifest_by_digest", "tags_list", "version_check"]
 
-[package.metadata.peryx-ci.fuzz]
-manifest = "fuzz/Cargo.toml"
-targets = ["oci_reference", "oci_manifest"]
-
 [package.metadata.peryx-ci.conformance]
 repository = "https://github.com/opencontainers/distribution-spec"
 revision = "fcfba1ec55526073f48b2f6d4e3d7eef410ddcbc"

@@ -1,32 +1,21 @@
-# Nextest runs each test in a separate process. Leptos server rendering combines per-thread reactive
-# graphs with process-global arenas. Concurrent page renders in one process can deadlock after a lost
-# wakeup. Process isolation prevents overlap. See site/content/contributing/architecture.md.
-#
-# The timeout terminates and reports a wedged test instead of hanging the run.
-[profile.default]
+[profile.ci]
 fail-fast = false
+failure-output = "immediate-final"
+final-status-level = "slow"
+leak-timeout = { period = "1s", result = "fail" }
 slow-timeout = { period = "90s", terminate-after = 2 }
+status-level = "slow"
 
 [profile.ci.junit]
 path = "junit.xml"
 
-# On macOS, child launch can race with pipe setup and retain a sibling test's output descriptor.
-# Process tests and long instrumented simulations run alone.
-[[profile.default.overrides]]
-platform = { host = 'cfg(target_os = "macos")' }
-filter = '''
-binary(/^(availability|bench_cli|bench_process_fixture|cli_entrypoint|cluster|e2e|peryx_bench|peryx_test_support|sim_campaign)$/)
-| binary(/^(integration|observability|process_fixture|s3_backend|s3_upload|servers|ui)$/)
-| test(/(^|::)(bench|client::exec(_tests)?|machine::tests|report)(::|$)/)
-| test(/(^|::)process::tests::inherited_descriptor_errors_are_specific$/)
-| test(/(^|::)process::tests::inherited_descriptors_are_adopted$/)
-| test(/(^|::)process::tests::self_update_uses_an_install_receipt_and_formats_results$/)
-| test(/(^|::)server_tests::test_build_state_runs_an_exec_credential_provider$/)
-'''
-threads-required = "num-test-threads"
-
 [test-groups]
+containers = { max-threads = 1 }
 e2e-servers = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = "test(/(^|::)test_.*_container_/)"
+test-group = "containers"
 
 [[profile.default.overrides]]
 filter = "binary_id(peryx-pypi-system-tests::e2e)"

@@ -143,7 +143,7 @@ async fn wait_for_container_event_runs_docker_logs() {
         &environment,
         "mirror",
         "ready",
-        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        tokio::time::Instant::now() + environment.startup_timeout,
     )
     .await
     .unwrap();

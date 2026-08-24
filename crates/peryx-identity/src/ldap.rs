@@ -3,10 +3,10 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use bb8_ldap::LdapConnectionManager;
-use bb8_ldap::bb8::{ManageConnection, Pool};
-use bb8_ldap::ldap3::{
-    Ldap, LdapConnSettings, Scope, SearchEntry, SearchOptions, SearchResult, dn_escape, ldap_escape,
+use bb8::{ManageConnection, Pool};
+use ldap3::{
+    Ldap, LdapConnAsync, LdapConnSettings, LdapError, Scope, SearchEntry, SearchOptions, SearchResult, dn_escape,
+    ldap_escape,
 };
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, pem::PemObject as _};
@@ -139,11 +139,11 @@ impl LdapProvider {
             .set_starttls(true)
             .set_conn_timeout(settings.connect_timeout)
             .set_config(Arc::new(tls_config(settings.custom_ca_pem.as_deref())?));
-        let manager = LdapConnectionManager::new(settings.url.as_str())
-            .map_err(|_| LdapProviderBuildError::InvalidUrl)?
-            .with_connection_settings(connection_settings)
-            .with_connect_timeout(settings.connect_timeout)
-            .with_validation_timeout(settings.request_timeout.min(Duration::from_secs(1)));
+        let manager = SafeLdapManager {
+            url: settings.url.to_string(),
+            settings: connection_settings,
+            validation_timeout: settings.request_timeout.min(Duration::from_secs(1)),
+        };
         let bind = match settings.bind {
             LdapBindMode::Direct { dn_attribute } => RuntimeBindMode::Direct { dn_attribute },
             LdapBindMode::Search {
@@ -167,7 +167,7 @@ impl LdapProvider {
             group_attribute: settings.group_attribute,
             connect_timeout: settings.connect_timeout,
             request_timeout: settings.request_timeout,
-            manager: SafeLdapManager(manager),
+            manager,
             pool: Arc::new(OnceLock::new()),
             max_connections,
             custom_ca,
@@ -437,22 +437,34 @@ struct SafeLdap {
 }
 
 #[derive(Clone)]
-struct SafeLdapManager(LdapConnectionManager);
+struct SafeLdapManager {
+    url: String,
+    settings: LdapConnSettings,
+    validation_timeout: Duration,
+}
 
 impl ManageConnection for SafeLdapManager {
     type Connection = SafeLdap;
-    type Error = bb8_ldap::ldap3::LdapError;
+    type Error = LdapError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        self.0.connect().await.map(|ldap| SafeLdap { ldap, discard: false })
+        let (connection, ldap) = LdapConnAsync::with_settings(self.settings.clone(), &self.url).await?;
+        ldap3::drive!(connection);
+        Ok(SafeLdap { ldap, discard: false })
     }
 
     async fn is_valid(&self, connection: &mut Self::Connection) -> Result<(), Self::Error> {
-        self.0.is_valid(&mut connection.ldap).await
+        connection
+            .ldap
+            .with_timeout(self.validation_timeout)
+            .search("", Scope::Base, "(objectClass=*)", vec!["1.1"])
+            .await?
+            .success()?;
+        Ok(())
     }
 
     fn has_broken(&self, connection: &mut Self::Connection) -> bool {
-        connection.discard || self.0.has_broken(&mut connection.ldap)
+        connection.discard || connection.ldap.is_closed()
     }
 }
 

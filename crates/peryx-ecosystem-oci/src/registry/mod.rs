@@ -19,7 +19,7 @@ use axum::body::Body;
 use axum::extract::{ConnectInfo, Request};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt as _;
+use futures_util::{FutureExt as _, StreamExt as _};
 use parking_lot::RwLock;
 use peryx_driver::ServingState;
 use peryx_driver::serving::{
@@ -310,7 +310,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> AbsoluteProtocolDriver fo
         if matches!(request.method(), &Method::GET | &Method::HEAD) && (path == "/v2/" || path == "/v2") {
             return auth::negotiate_version(&state, request.headers());
         }
-        self.serve_request(state, request).await
+        self.serve_request(state, request).boxed().await
     }
 }
 
@@ -380,6 +380,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> BrowseDriver for OciRegis
                 &reference,
                 &digest,
                 self.layer_members(state, position, repository.clone(), digest.clone())
+                    .boxed()
                     .await?,
             )));
         };
@@ -397,6 +398,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> BrowseDriver for OciRegis
                 member.clone(),
                 query.offset,
             )
+            .boxed()
             .await?,
         )))
     }

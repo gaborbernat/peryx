@@ -7,18 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[package.metadata.peryx-ci]
-kind = "system"
-
-[package.metadata.peryx-ci.coverage.availability]
-tests = ["availability"]
-
-[package.metadata.peryx-ci.coverage.clients]
-filter = "not(binary(availability))"
-
-[package.metadata.peryx-ci.coverage.e2e]
-filter = "not(binary(availability))"
-
 [[bin]]
 name = "peryx-oci-system-server"
 path = "src/main.rs"

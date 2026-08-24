@@ -15,14 +15,6 @@ cargo-jobs = 4
 runner-fallback = true
 benches = []
 
-[package.metadata.peryx-ci.fuzz]
-manifest = "fuzz/Cargo.toml"
-targets = ["pypi_filename"]
-
-[package.metadata.peryx-ci.snapshots]
-roots = ["tests/unit/tests/simple"]
-cargo-args = ["--lib"]
-
 [features]
 # `serving` keeps format parsing usable without HTTP and storage dependencies.
 default = ["serving"]

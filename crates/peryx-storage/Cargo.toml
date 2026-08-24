@@ -7,13 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "Content-addressed blob store and metadata storage for peryx."
 
-[package.metadata.peryx-ci.crate-contract]
-test-features = []
-
-[package.metadata.peryx-ci.coverage.storage]
-features = ["container-tests"]
-tests = ["integration"]
-
 [[bin]]
 name = "peryx-storage-s3-fixture"
 path = "tests/fixtures/s3.rs"

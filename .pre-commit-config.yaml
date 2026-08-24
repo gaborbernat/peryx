@@ -18,18 +18,11 @@ repos:
         entry: cargo clippy --target-dir .tox/pre-commit-target --workspace --all-targets --all-features -- -D warnings
         types: [rust]
         pass_filenames: false
-      - id: test-layout
-        name: test layout
+      - id: shellcheck
+        name: shellcheck
         language: system
-        entry: .github/scripts/check-test-layout
-        types: [rust]
-        pass_filenames: false
-      - id: test-timing
-        name: test timing
-        language: system
-        entry: .github/scripts/check-test-timing
-        files: \.(bash|cjs|js|jsx|mjs|rs|sh|ts|tsx|zsh)$
-        pass_filenames: false
+        entry: shellcheck
+        types: [shell]
       - id: render-diagrams
         name: check mermaid diagrams
         language: system

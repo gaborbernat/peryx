@@ -5,8 +5,9 @@ package=${1:?Rust package to benchmark}
 jobs=${2:-4}
 
 mkdir -p .tox/codspeed/cargo .tox/codspeed/home
-export PERYX_UID="$(id -u)"
-export PERYX_GID="$(id -g)"
+PERYX_UID=$(id -u)
+PERYX_GID=$(id -g)
+export PERYX_UID PERYX_GID
 if [[ -n ${GITHUB_EVENT_PATH:-} ]]; then
   PERYX_CODSPEED_EVENT_PATH=$GITHUB_EVENT_PATH
 else

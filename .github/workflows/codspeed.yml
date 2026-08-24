@@ -290,24 +290,15 @@ jobs:
             .tox/codspeed/target
           key: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
 
-  # Branch protection requires an unconditional gate.
   codspeed-gate:
     if: always()
     needs: [changes, baseline, codspeed-image, operations]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just
-      - name: Verify required jobs
-        env:
-          CI_CONTEXT: >-
-            {"event":"${{ github.event_name }}",
-            "benchmarks":${{ needs.changes.outputs.bench_matrix != '[]' }},
-            "image_available":${{ needs.codspeed-image.outputs.available == 'true' }}}
-          CI_RESULTS: ${{ toJSON(needs) }}
-        run: just ci-gate codspeed
+      - if: >-
+          needs.changes.result != 'success' ||
+          (needs.baseline.result != 'success' && needs.baseline.result != 'skipped') ||
+          (needs.codspeed-image.result != 'success' && needs.codspeed-image.result != 'skipped') ||
+          (needs.operations.result != 'success' && needs.operations.result != 'skipped')
+        run: exit 1

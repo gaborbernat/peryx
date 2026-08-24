@@ -13,12 +13,11 @@ shellcheck = "latest"
 "cargo:cargo-dist" = "latest"
 "cargo:cargo-fuzz" = "latest"
 "cargo:cargo-hack" = "latest"
-"cargo:cargo-hawk" = "latest"
 "cargo:cargo-insta" = "latest"
 "cargo:cargo-nextest" = "latest"
 "cargo:cargo-llvm-cov" = "latest"
 "cargo:cargo-mutants" = "latest"
 "cargo:cargo-semver-checks" = "latest"
-"cargo:cargo-shear" = "latest"
 "cargo:maturin" = "latest"
 "ubi:leptos-rs/cargo-leptos" = { version = "latest", exe = "cargo-leptos" }
+"ubi:Shopify/toxiproxy" = { version = "2.12.0", exe = "toxiproxy-server" }

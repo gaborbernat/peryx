@@ -4,840 +4,111 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  CARGO_HTTP_MULTIPLEXING: "false"
-  CARGO_NET_RETRY: "10"
-  GIT_CONFIG_COUNT: "1"
-  GIT_CONFIG_KEY_0: init.defaultBranch
-  GIT_CONFIG_VALUE_0: main
-
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+  cancel-in-progress: true
 
 jobs:
-  changes:
+  source:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      contract_packages: ${{ steps.crates.outputs.packages }}
-      contract_packages_all: ${{ steps.crates.outputs.available }}
-      contracts: ${{ steps.crates.outputs.selected }}
-      automation: ${{ steps.filter.outputs.automation }}
-      shared: ${{ steps.filter.outputs.shared }}
-      pypi: ${{ steps.filter.outputs.pypi }}
-      oci: ${{ steps.filter.outputs.oci }}
-      frontend_tests: ${{ steps.filter.outputs.frontend_tests }}
-      docs: ${{ steps.filter.outputs.docs }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        id: filter
+      - uses: ./.github/actions/setup
         with:
-          predicate-quantifier: some-with-excludes
-          list-files: json
-          filters: |
-            contract_inputs:
-              - '**'
-            rust:
-              - 'crates/**'
-              - '!crates/**/docs/**'
-              - '!crates/**/*.md'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.cargo/**'
-              - 'rust-toolchain*'
-              - 'hawk.toml'
-              - 'justfile'
-              - 'compose.yaml'
-              - 'scripts/ci/Dockerfile'
-              - 'scripts/ci/**'
-              - '.github/scripts/**'
-              - '.pre-commit-config.yaml'
-              - 'mise.toml'
-            shared:
-              - 'crates/peryx-archive/**'
-              - 'crates/peryx-core/**'
-              - 'crates/peryx-storage/**'
-              - 'crates/peryx-http/**'
-              - 'crates/peryx-driver/**'
-              - 'crates/peryx-identity/**'
-              - 'crates/peryx-policy/**'
-              - 'crates/peryx-pql/**'
-              - 'crates/peryx-index/**'
-              - 'crates/peryx-events/**'
-              - 'crates/peryx-upstream/**'
-              - 'crates/peryx-search/**'
-              - 'crates/peryx-ha/**'
-              - 'crates/peryx-ha-distributed/**'
-              - 'crates/peryx-plugin-registry/**'
-              - 'crates/peryx-test-support/**'
-              - 'crates/peryx-bench-core/**'
-              - 'crates/peryx/**'
-              - 'crates/peryx-bench/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - '.cargo/**'
-              - 'rust-toolchain*'
-              - 'hawk.toml'
-              - 'justfile'
-              - 'compose.yaml'
-              - 'scripts/ci/Dockerfile'
-              - 'scripts/ci/**'
-              - '.github/scripts/**'
-              - '.github/workflows/ci.yml'
-              - '.pre-commit-config.yaml'
-              - 'mise.toml'
-            pypi:
-              - 'crates/peryx-ecosystem-pypi/**'
-            oci:
-              - 'crates/peryx-ecosystem-oci/**'
-            frontend_tests:
-              - 'crates/peryx-web/tests/frontend/**'
-            docs:
-              - 'README.md'
-              - 'CONTRIBUTING.md'
-              - 'crates/**/*.rs'
-              - 'crates/*/docs/**'
-              - 'site/**'
-              - '.pre-commit-config.yaml'
-              - '.github/workflows/ci.yml'
-            automation:
-              - '.github/**'
-              - '.pre-commit-config.yaml'
-              - 'compose.yaml'
-              - 'deny.toml'
-              - 'dist-workspace.toml'
-              - 'justfile'
-              - 'mise.toml'
-              - 'renovate.json'
-              - 'scripts/ci/Dockerfile'
-              - 'scripts/ci/**'
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          cache: false
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just,ripgrep
-      - id: crates
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PERYX_CHANGED_PATHS: ${{ steps.filter.outputs.contract_inputs_files }}
-        run: |
-          mkdir -p .tox
-          just affected-contract-packages "$EVENT_NAME" > .tox/affected-contract-packages
-          if [[ -s .tox/affected-contract-packages ]]; then selected=true; else selected=false; fi
-          {
-            echo "packages=$(jq -Rsc 'split("\n") | map(select(length > 0))' .tox/affected-contract-packages)"
-            echo "available=$(scripts/ci/workspace-package-list contracts | jq -Rsc 'split("\n") | map(select(length > 0))')"
-            echo "selected=$selected"
-          } >> "$GITHUB_OUTPUT"
-
-  lint-source:
-    needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Create Git Bash temp directory
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $gitRoot = Split-Path -Parent (Split-Path -Parent (Get-Command git).Source)
-          New-Item -ItemType Directory -Force (Join-Path $gitRoot tmp) | Out-Null
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just,ripgrep
-      - name: Install Hawk
-        run: |
-          curl -fsSL -o /tmp/cargo-hawk.tar.gz \
-            https://github.com/astral-sh/hawk/releases/download/0.1.13/cargo-hawk-x86_64-unknown-linux-gnu.tar.gz
-          tar -xzf /tmp/cargo-hawk.tar.gz -C /tmp
-          chmod +x /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk /tmp/cargo-hawk-x86_64-unknown-linux-gnu/cargo-hawk-driver
-          echo "/tmp/cargo-hawk-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+          tools: just cargo:cargo-deny
       - run: just lint-source
-
-  lint-docs:
-    needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || needs.changes.outputs.docs == 'true' ||
-      github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just,ripgrep
-      - run: uv tool install prek
-      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: just lint-docs
-
-  lint-automation:
-    needs: changes
-    if: >-
-      needs.changes.outputs.automation == 'true' || github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just,ripgrep
-      - run: uv tool install prek
-      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: just lint-automation
-
-  lint-deps:
-    needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || needs.changes.outputs.automation == 'true' ||
-      github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          cache: false
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-deny,cargo-shear,just
       - run: just lint-deps
 
-  lint-contracts:
-    needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || needs.changes.outputs.automation == 'true' ||
-      github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+  automation:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    permissions:
-      contents: read
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
+      - uses: ./.github/actions/setup
         with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-hack,cargo-insta,cargo-nextest,cargo-semver-checks,just,ripgrep
-      - name: Install cargo-dist
-        run: curl --proto '=https' --tlsv1.2 --silent --show-error --fail --location https://github.com/axodotdev/cargo-dist/releases/latest/download/cargo-dist-installer.sh | sh
-      - run: |
-          if [[ -n "$EVENT_BASE_REV" && ! "$EVENT_BASE_REV" =~ ^0+$ ]]; then
-            git fetch --no-tags --depth=1 "https://github.com/${EVENT_REPOSITORY}.git" "$EVENT_BASE_REV"
-            echo "BASE_REV=$EVENT_BASE_REV" >> "$GITHUB_ENV"
-          else
-            git fetch --no-tags --depth=1 "https://github.com/${BASE_REPOSITORY}.git" main:refs/remotes/baseline/main
-            echo "BASE_REV=refs/remotes/baseline/main" >> "$GITHUB_ENV"
-          fi
-        env:
-          BASE_REPOSITORY: ${{ github.event.repository.parent.full_name || github.repository }}
-          EVENT_BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before }}
-          EVENT_REPOSITORY: ${{ github.repository }}
-      - run: just lint-contracts "$BASE_REV"
+          tools: just node prek shellcheck
+      - run: just lint-automation
 
-  platform-test:
-    name: platform contract (${{ matrix.os }})
-    needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: >-
+            just cargo:cargo-dist cargo:cargo-insta cargo:cargo-nextest
+            cargo:cargo-semver-checks
+      - run: just lint-contracts "$BASE_REV"
+        env:
+          BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+
+  platform:
+    name: platform (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [macos-26, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    permissions:
-      contents: read
-    # Homebrew rejects the runner's preinstalled aws/tap as untrusted.
     env:
       HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+      - uses: ./.github/actions/setup
         with:
-          cache: false
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          # v0.17 exceeds Windows' response-file limit: https://github.com/mozilla/sccache/issues/2397
-          version: "v0.16.0"
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-nextest,just
-      - name: Verify sccache response files
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: just sccache-smoke
-      - run: just platform-contract
+          tools: just cargo:cargo-nextest
+      - run: just platform-test
 
-  crate-contract-peryx:
-    name: crate contract (peryx)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx')
+  coverage:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
+      - uses: ./.github/actions/setup
         with:
-          package: peryx
-
-  crate-contract-peryx-archive:
-    name: crate contract (peryx-archive)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-archive')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-archive
-
-  crate-contract-peryx-bench:
-    name: crate contract (peryx-bench)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-bench')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-bench
-
-  crate-contract-peryx-bench-core:
-    name: crate contract (peryx-bench-core)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-bench-core')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          build-jobs: 1
-          package: peryx-bench-core
-
-  crate-contract-peryx-core:
-    name: crate contract (peryx-core)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-core')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-core
-
-  crate-contract-peryx-driver:
-    name: crate contract (peryx-driver)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-driver')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-driver
-
-  crate-contract-peryx-ecosystem-oci:
-    name: crate contract (peryx-ecosystem-oci)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ecosystem-oci')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-ecosystem-oci
-
-  crate-contract-peryx-ecosystem-pypi:
-    name: crate contract (peryx-ecosystem-pypi)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ecosystem-pypi')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-ecosystem-pypi
-
-  crate-contract-peryx-events:
-    name: crate contract (peryx-events)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-events')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-events
-
-  crate-contract-peryx-ha:
-    name: crate contract (peryx-ha)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ha')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-ha
-
-  crate-contract-peryx-ha-distributed:
-    name: crate contract (peryx-ha-distributed)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-ha-distributed')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-ha-distributed
-
-  crate-contract-peryx-http:
-    name: crate contract (peryx-http)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-http')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-http
-
-  crate-contract-peryx-identity:
-    name: crate contract (peryx-identity)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-identity')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-identity
-
-  crate-contract-peryx-index:
-    name: crate contract (peryx-index)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-index')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-index
-
-  crate-contract-peryx-plugin-registry:
-    name: crate contract (peryx-plugin-registry)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-plugin-registry')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-plugin-registry
-
-  crate-contract-peryx-policy:
-    name: crate contract (peryx-policy)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-policy')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-policy
-
-  crate-contract-peryx-pql:
-    name: crate contract (peryx-pql)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-pql')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-pql
-
-  crate-contract-peryx-search:
-    name: crate contract (peryx-search)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-search')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-search
-
-  crate-contract-peryx-storage:
-    name: crate contract (peryx-storage)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-storage')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-storage
-
-  crate-contract-peryx-test-support:
-    name: crate contract (peryx-test-support)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-test-support')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-test-support
-
-  crate-contract-peryx-upstream:
-    name: crate contract (peryx-upstream)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-upstream')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-upstream
-
-  crate-contract-peryx-web:
-    name: crate contract (peryx-web)
-    needs: changes
-    if: contains(fromJSON(needs.changes.outputs.contract_packages), 'peryx-web')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/crate-contract
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        with:
-          package: peryx-web
-
-  crate-contracts:
-    name: crate contracts
-    needs:
-      - changes
-      - crate-contract-peryx
-      - crate-contract-peryx-archive
-      - crate-contract-peryx-bench
-      - crate-contract-peryx-bench-core
-      - crate-contract-peryx-core
-      - crate-contract-peryx-driver
-      - crate-contract-peryx-ecosystem-oci
-      - crate-contract-peryx-ecosystem-pypi
-      - crate-contract-peryx-events
-      - crate-contract-peryx-ha
-      - crate-contract-peryx-ha-distributed
-      - crate-contract-peryx-http
-      - crate-contract-peryx-identity
-      - crate-contract-peryx-index
-      - crate-contract-peryx-plugin-registry
-      - crate-contract-peryx-policy
-      - crate-contract-peryx-pql
-      - crate-contract-peryx-search
-      - crate-contract-peryx-storage
-      - crate-contract-peryx-test-support
-      - crate-contract-peryx-upstream
-      - crate-contract-peryx-web
-    if: >-
-      always() && needs.changes.result == 'success' &&
-      needs.changes.outputs.contracts == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just
-      - env:
-          CI_RESULTS: ${{ toJSON(needs) }}
-          CI_CONTEXT: >-
-            {"available":${{ needs.changes.outputs.contract_packages_all }},
-            "selected":${{ needs.changes.outputs.contract_packages }}}
-        run: just ci-gate contracts
-
-  system:
-    name: system coverage (${{ matrix.lane }})
-    needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - lane: clients
-            recipe: coverage-system-clients
-            report: .tox/coverage/system-clients.lcov
-            client_tools: true
-            proxy: false
-          - lane: distributed
-            recipe: coverage-system-distributed
-            report: .tox/coverage/system-distributed.lcov
-            client_tools: false
-            proxy: true
-          - lane: storage
-            recipe: coverage-system-storage
-            report: .tox/coverage/system-storage.lcov
-            client_tools: false
-            proxy: false
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
-        with:
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: matrix.client_tools
-        with:
-          python-version: "3.13"
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        if: matrix.client_tools
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-llvm-cov,cargo-nextest,just
-      - if: matrix.proxy
-        run: |
-          curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
-            https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64
-          chmod +x "${RUNNER_TEMP}/toxiproxy-server"
-          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
-      - run: just ${{ matrix.recipe }} "${{ matrix.report }}"
+          tools: >-
+            just uv cargo:cargo-llvm-cov cargo:cargo-nextest
+            ubi:Shopify/toxiproxy
+      - run: just coverage-native
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: coverage-system-${{ matrix.lane }}
-          path: ${{ matrix.report }}
+          name: coverage-native
+          path: .tox/coverage/native.lcov
           if-no-files-found: error
 
   frontend:
-    needs: changes
-    if: >-
-      needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend_tests == 'true' ||
-      github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
+      - uses: ./.github/actions/setup
         with:
-          cache-directories: .tox/coverage-target/frontend
-          cache-shared-key: frontend
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-          target: wasm32-unknown-unknown
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: |
-            crates/peryx-web/tests/frontend/package-lock.json
-            crates/peryx-ecosystem-pypi/tests/frontend/package-lock.json
-            crates/peryx-ecosystem-oci/tests/frontend/package-lock.json
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-leptos,cargo-llvm-cov,cargo-nextest,just
+          components: llvm-tools-preview
+          targets: wasm32-unknown-unknown
+          tools: >-
+            just jq node cargo:cargo-llvm-cov cargo:cargo-nextest
+            ubi:leptos-rs/cargo-leptos
       - run: just frontend-deps
       - run: just frontend-browser-deps --with-deps
       - name: Install matching LLVM
@@ -849,302 +120,36 @@ jobs:
           sudo apt-get install --yes lcov
           sudo ./llvm.sh "$llvm_major"
           echo "CLANG=clang-$llvm_major" >> "$GITHUB_ENV"
-      - name: Run instrumented frontend tests
-        run: just coverage-frontend
+      - run: just coverage-frontend
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
         with:
           name: coverage-frontend
           path: .tox/coverage/frontend-*.lcov
           if-no-files-found: error
 
-  coverage:
-    needs: [changes, crate-contracts, frontend, fuzz-oci, fuzz-pypi, system]
-    if: >-
-      always() &&
-      (needs.changes.outputs.contracts == 'true' || github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
-      (needs.crate-contracts.result == 'success' ||
-      (needs.changes.outputs.contracts != 'true' && needs.crate-contracts.result == 'skipped')) &&
-      needs.frontend.result == 'success' &&
-      needs.system.result == 'success' &&
-      (needs.fuzz-oci.result == 'success' || needs.fuzz-oci.result == 'skipped') &&
-      (needs.fuzz-pypi.result == 'success' || needs.fuzz-pypi.result == 'skipped')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Download coverage parts
-        run: gh run download "$GITHUB_RUN_ID" --pattern 'coverage-*' --dir .tox/coverage-parts
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - run: sudo apt-get update && sudo apt-get install --yes lcov
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just
-      - name: Restore selected crate packages
-        env:
-          CONTRACT_PACKAGES: ${{ needs.changes.outputs.contract_packages }}
-        run: jq -r '.[]' <<< "$CONTRACT_PACKAGES" > .tox/affected-contract-packages
-      - name: Merge executed coverage
-        run: |
-          mapfile -t parts < <(find .tox/coverage-parts -type f -name '*.lcov' -print | sort)
-          just coverage-merge-selected .tox/coverage/lcov.info \
-            .tox/affected-contract-packages "${parts[@]}"
-      - name: Preserve measured crate timings
-        run: |
-          mkdir -p .tox/ci-timings
-          mapfile -t timings < <(find .tox/coverage-parts -type f -name 'timings-*.jsonl' -print | sort)
-          cat "${timings[@]}" > .tox/ci-timings/timings.jsonl
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .tox/ci-timings/timings.jsonl
-          key: crate-timings-${{ github.sha }}
-      - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: coverage-lcov
-          path: |
-            .tox/coverage/lcov.info
-            .tox/coverage/lcov.contracts/*.contract.json
-          if-no-files-found: error
   docs:
-    needs: changes
-    if: >-
-      needs.changes.outputs.docs == 'true' || github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: ./.github/actions/setup
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: site/package-lock.json
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just,zola
+          tools: just node prek zola
+      - run: just lint-docs
       - run: just docs
 
-  scheduled-nightly:
-    name: nightly analysis (${{ matrix.recipe }})
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        recipe: [direct-minimum, miri, sanitizer-address, sanitizer-thread]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          toolchain: nightly
-          components: miri,rust-src
-          cache: false
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-nextest,just
-      - run: just ${{ matrix.recipe }}
-
-  scheduled-mutation:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          cache: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-mutants,cargo-nextest,just
-      - run: |
-          curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
-            https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64
-          chmod +x "${RUNNER_TEMP}/toxiproxy-server"
-          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
-      - run: just mutation-full 2 "${{ matrix.shard }}/8"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
-        with:
-          name: mutation-report-${{ matrix.shard }}
-          path: .tox/mutants
-          if-no-files-found: ignore
-
-  mutation-diff:
-    needs: changes
-    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 2
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
-        with:
-          cache-shared-key: mutation-diff
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-mutants,cargo-nextest,just
-      - run: |
-          curl -fsSL -o "${RUNNER_TEMP}/toxiproxy-server" \
-            https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-amd64
-          chmod +x "${RUNNER_TEMP}/toxiproxy-server"
-          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
-      - run: just mutation "$BASE_REV" 1 true "${{ matrix.shard }}/8"
-        env:
-          BASE_REV: ${{ github.event.pull_request.base.sha }}
-          CARGO_BUILD_JOBS: 2
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
-        with:
-          name: mutation-diff-report-${{ matrix.shard }}
-          path: .tox/mutants
-          if-no-files-found: ignore
-
-  fuzz-pypi:
-    needs: changes
-    if: >-
-      needs.changes.outputs.pypi == 'true' || needs.changes.outputs.shared == 'true' ||
-      github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
-        with:
-          toolchain: nightly
-          components: llvm-tools-preview
-          cache-directories: .tox/fuzz-target/peryx-ecosystem-pypi
-          cache-shared-key: fuzz-pypi
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-fuzz,cargo-llvm-cov,cargo-nextest,just
-      - run: just fuzz-package peryx-ecosystem-pypi 30 .tox/coverage/fuzz-pypi.lcov
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: coverage-fuzz-pypi
-          path: .tox/coverage/fuzz-pypi.lcov
-          if-no-files-found: error
-
-  fuzz-oci:
-    needs: changes
-    if: >-
-      needs.changes.outputs.oci == 'true' || needs.changes.outputs.shared == 'true' ||
-      github.event_name == 'push' ||
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        env:
-          NODE_OPTIONS: --no-deprecation # https://github.com/Swatinem/rust-cache/issues/331
-        with:
-          toolchain: nightly
-          components: llvm-tools-preview
-          cache-directories: .tox/fuzz-target/peryx-ecosystem-oci
-          cache-shared-key: fuzz-oci
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: cargo-fuzz,cargo-llvm-cov,cargo-nextest,just
-      - run: just fuzz-package peryx-ecosystem-oci 30 .tox/coverage/fuzz-oci.lcov
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: coverage-fuzz-oci
-          path: .tox/coverage/fuzz-oci.lcov
-          if-no-files-found: error
-
-  ci-gate:
+  required:
     if: always()
-    needs:
-      - changes
-      - coverage
-      - crate-contracts
-      - docs
-      - frontend
-      - fuzz-oci
-      - fuzz-pypi
-      - lint-automation
-      - lint-contracts
-      - lint-deps
-      - lint-docs
-      - lint-source
-      - mutation-diff
-      - platform-test
-      - scheduled-mutation
-      - scheduled-nightly
-      - system
+    needs: [automation, contracts, coverage, docs, frontend, platform, source]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just
-      - name: Verify required jobs
-        env:
-          CI_CONTEXT: >-
-            {"event":"${{ github.event_name }}","automation":${{ needs.changes.outputs.automation == 'true' }},
-            "contracts":${{ needs.changes.outputs.contracts == 'true' }},
-            "docs":${{ needs.changes.outputs.docs == 'true' }},
-            "frontend_tests":${{ needs.changes.outputs.frontend_tests == 'true' }},
-            "oci":${{ needs.changes.outputs.oci == 'true' }},"pypi":${{ needs.changes.outputs.pypi == 'true' }},
-            "rust":${{ needs.changes.outputs.rust == 'true' }},
-            "shared":${{ needs.changes.outputs.shared == 'true' }}}
-          CI_RESULTS: ${{ toJSON(needs) }}
-        run: just ci-gate main
+      - if: >-
+          needs.automation.result != 'success' || needs.contracts.result != 'success' ||
+          needs.coverage.result != 'success' || needs.docs.result != 'success' ||
+          needs.frontend.result != 'success' || needs.platform.result != 'success' ||
+          needs.source.result != 'success'
+        run: exit 1

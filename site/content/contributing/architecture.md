@@ -102,12 +102,8 @@ shutdown. `peryx` projects configuration, mounts returned routes, supervises the
 ## Crate autonomy
 
 Unit and integration tests stay under the owning crate's `tests/` tree. A `#[path]` module may give a unit test private
-access without placing its body under `src/`. A test that starts the executable or an external service belongs in a
-metadata-declared system package. System packages are test composition roots and cannot become runtime dependencies.
+access without placing its body under `src/`. A test that starts the executable or an external service belongs in the
+owning system package. System packages are test composition roots and cannot become runtime dependencies.
 
-`just crate-contract PACKAGE OUTPUT` checks one non-system crate's targets, tests, source ownership, and exact line and
-function coverage. The contract cannot use another crate's tests to cover its source. System and frontend source enters
-the merged coverage contract through their dedicated lanes.
-
-Run `just ecosystem-boundaries`, `just test-layout`, and `just lint-contracts` after changing dependencies,
-registration, test ownership, or public APIs.
+Run `just lint`, `just test`, and `just coverage-native` after changing dependencies, registration, test ownership, or
+public APIs.

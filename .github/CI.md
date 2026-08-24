@@ -1,110 +1,73 @@
 # Continuous integration
 
-GitHub Actions installs tools, selects work, and calls repository commands. The `justfile` and scripts own validation
-behavior, coverage policy, deadlines, and diagnostics. Workflow YAML owns events, permissions, runners, caches,
-artifacts, matrices, and dependencies.
+GitHub Actions owns triggers, permissions, runners, caches, artifacts, matrices, and job dependencies. Repository checks
+live in the `justfile`, so the same commands run locally and in CI.
 
-Keep test logic out of workflow YAML. Add or change a public `just` recipe first, run it from the checkout, then call it
-from the workflow.
+## Pull requests
 
-## Pull request graph
+The required workflow runs seven independent jobs:
 
-1. `changes` classifies paths and creates eight crate-contract shards. Prior timings set package weights; source size
-   supplies the initial estimate.
-1. `lint-source`, `lint-docs`, `lint-automation`, `lint-deps`, `lint-contracts`, `platform-test`, `crate-contracts`,
-   `system`, `frontend`, owner fuzz jobs, `mutation-diff`, and `docs` run from that classification.
-1. `coverage` downloads crate, system, frontend, and selected fuzz reports. It verifies their contracts before merging
-   them.
-1. `ci-gate` checks each required producer result against the event policy. Branch protection uses this stable job
-   instead of matrix-generated names.
+- `source`: formatting, `cargo check`, Clippy, and dependency policy
+- `automation`: repository hooks, workflow validation, ShellCheck, and Compose validation
+- `contracts`: snapshots, public API compatibility, and the release plan
+- `platform`: platform-boundary tests on macOS and Windows
+- `coverage`: the complete native workspace suite with all features
+- `frontend`: native and Wasm browser coverage
+- `docs`: rustdoc, Markdown, diagrams, and the assembled site
 
-Producer matrices set `fail-fast: false`, so one failed package or platform does not hide another failure. Scheduled
-jobs add full mutation, Miri, sanitizers, dependency lower-bound checks, and other long-running analysis. CodSpeed and
-external conformance use separate workflows with their own change selection and final gates.
+`coverage` replaces a separate Linux test job. It runs the tests once under `cargo llvm-cov` and requires 100% line,
+per-file line, function, and region coverage. The frontend job follows wasm-bindgen's LLVM coverage procedure and
+requires 100% line and function coverage across its native and Wasm reports.
 
-## Crate and system ownership
+The `required` job gives branch protection one stable check name. It only evaluates GitHub job results; test policy
+remains in `just` recipes and standard tool configuration.
 
-Each package without `package.metadata.peryx-ci.kind = "system"` enters the crate-contract matrix. One contract:
+## Nightly analysis
 
-- builds all targets with all features;
-- runs applicable doctests, libraries, binaries, examples, integration tests, and benchmarks;
-- inventories the package's source roots;
-- requires 100% executable line and function coverage, including test source;
-- writes an LCOV report, source digest, policy digest, and timing record.
+The nightly workflow runs work that is too expensive or specialized for every pull request:
 
-A crate must satisfy that contract without coverage from another crate's tests.
+- every feature combination
+- direct dependency lower bounds
+- Miri and Loom
+- AddressSanitizer and ThreadSanitizer
+- eight cargo-mutants shards
+- each cargo-fuzz target
+- the live PyPI client boundary
 
-Metadata-declared system packages start the executable or an external service. They contribute coverage through two
-lanes:
+Each matrix leg invokes a public `just` recipe. Nextest runs each test once, and each command propagates its exit
+status.
 
-- `coverage-system-clients`: ecosystem, package-client, and external-client boundaries
-- `coverage-system-distributed`: availability, replication, and simulation boundaries
+## Local commands
 
-`coverage-frontend` produces native, Wasm, and merged browser reports. Owner package metadata selects fuzz, conformance,
-and CodSpeed targets. The aggregate coverage job rejects missing reports, stale source digests, mismatched policy
-digests, unowned sources, and any line or function shortfall.
-
-## Local entry points
-
-Run the public recipe that matches the CI lane:
+Install the versions declared in `mise.toml`, then run the same entry points used by GitHub Actions:
 
 ```console
-just lint-source
-just lint-docs
-just lint-automation
-just lint-deps
-just lint-contracts origin/main
-just crate-contract peryx-core .tox/crate-contracts/peryx-core
-just coverage-system-clients .tox/coverage/system-clients.lcov
-just coverage-system-distributed .tox/coverage/system-distributed.lcov
-just coverage-frontend .tox/coverage/frontend-native.lcov .tox/coverage/frontend-wasm.lcov .tox/coverage/frontend.lcov
-just coverage
+mise install
+just lint
+just platform-test
+just coverage-native
+just frontend-deps
+just frontend-browser-deps
+just coverage-frontend
 just docs
-just pre-commit-ci
 ```
 
-`just test` runs workspace tests and benchmark harnesses. `just system-test` runs all default system lanes without
-coverage. `just coverage-native` runs all non-system crate contracts. `just lint` runs all lint lanes. `just all` runs
-linting, complete Linux coverage, docs, and CI-safe hooks without repeating uninstrumented tests.
+`just test` is hermetic. `just storage-s3` and `just coverage-native` require a running Docker daemon for the MinIO
+boundary tests and fail before compilation when Docker is unavailable.
 
-Run `just platform-contract` on each supported host. Use `just conformance`, `just fuzz-package`, `just mutation`, and
-`just codspeed` for their selected package or revision. `just --list` documents each argument.
-
-## Linux containers
-
-The single `compose.yaml` bind-mounts the checkout at `/workspace`; it does not copy source into an image. Cargo,
-target, temporary, browser, and nested Docker state remains under `.tox/` on the host.
-
-- `just linux RECIPE [ARGS]` uses the 8 GiB lightweight test service.
-- `just linux-analysis RECIPE [ARGS]` uses the Linux analysis profile.
-- `just linux-system RECIPE [ARGS]` adds nested Docker for system tests.
-- `just linux-16g RECIPE [ARGS]` uses the 16 GiB lightweight service.
-- `just linux-system-16g RECIPE [ARGS]` gives the system service 12 GiB and nested Docker 4 GiB.
-
-Examples:
+Nightly commands are also local:
 
 ```console
-just linux crate-contract peryx-core .tox/crate-contracts/peryx-core
-just linux-system coverage
-just linux-system system-test
-just linux-system-16g coverage
+just features
+just direct-minimum
+just miri
+just loom
+just sanitizer-address
+just sanitizer-thread
+just mutation 1/8
+just fuzz peryx-ecosystem-oci oci_reference 60
+just e2e-live
 ```
 
-Use a 16 GiB profile after an 8 GiB run records memory pressure. `just compose-check` validates all service definitions.
-`just linux-image` rebuilds from the configured upstream images and prints tool versions. `just linux-system-clean`
-stops nested Docker services after a system run.
-
-## Reports and diagnostics
-
-Local and CI runs write generated state under `.tox/`. Crate contracts emit LCOV, source contracts, and timings. System,
-frontend, and selected fuzz lanes emit LCOV for the aggregate job. CI marks required artifact uploads as errors when a
-report is absent.
-
-Use `just ci-diagnostics OUTPUT` to capture runner state. Use `just coverage-clean` to remove Rust coverage builds,
-`just clean` for transient state, or `just clean-all` to discard reusable project build state.
-
-## Failure policy
-
-Runner jobs have deadlines. Crate and system matrices continue after an individual leg fails. The coverage job waits for
-each required report, and `ci-gate` checks skipped and failed jobs against event and changed-path policy. A required
-skip, missing report, stale contract, coverage shortfall, or producer failure fails the pull request gate.
+Generated files stay under `.tox/`. `just coverage-clean`, `just clean`, and `just clean-all` remove progressively more
+local state.

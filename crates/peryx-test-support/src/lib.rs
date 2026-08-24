@@ -28,9 +28,7 @@ const TEST_TMPDIR_ENV: &str = "PERYX_TEST_TMPDIR";
 const PUBLIC_LISTENER_FD_ENV: &str = "PERYX_INHERITED_PUBLIC_LISTENER_FD";
 #[cfg(unix)]
 const AVAILABILITY_LISTENER_FD_ENV: &str = "PERYX_INHERITED_AVAILABILITY_LISTENER_FD";
-// A dead node refuses the connection at once, so this bounds only how long a live-but-slow response
-// may take. Under the parallel availability-e2e suite a loaded CI runner can push a first read past a
-// two-second ceiling, which then reads as a spurious unreachable; keep it well under READY_TIMEOUT.
+// Keep an individual request deadline inside the overall readiness deadline.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 type DataPreparation<'a> = &'a dyn Fn(&MemberSpec, &std::path::Path);
 

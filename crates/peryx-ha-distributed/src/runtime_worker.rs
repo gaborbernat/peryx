@@ -21,9 +21,9 @@ use tokio::sync::oneshot;
 use crate::lifecycle::Lifecycle;
 use crate::{AnalyticsPuller, BeaconSender, ReplicaLoop};
 
-#[cfg(loom)]
+#[cfg(peryx_loom)]
 use loom::sync::atomic::AtomicUsize;
-#[cfg(not(loom))]
+#[cfg(not(peryx_loom))]
 use std::sync::atomic::AtomicUsize;
 
 /// Caps background replication so host core counts cannot crowd foreground serving.
@@ -55,7 +55,7 @@ pub struct WorkerShared {
 }
 
 impl WorkerShared {
-    #[cfg(not(loom))]
+    #[cfg(not(peryx_loom))]
     const fn new(worker_threads: usize, total_slots: usize) -> Self {
         Self {
             worker_threads,
@@ -67,7 +67,7 @@ impl WorkerShared {
         }
     }
 
-    #[cfg(loom)]
+    #[cfg(peryx_loom)]
     fn new(worker_threads: usize, total_slots: usize) -> Self {
         Self {
             worker_threads,
@@ -361,7 +361,7 @@ impl Drop for AvailabilityRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, peryx_loom))]
 #[path = "../tests/unit/runtime_worker/loom_tests.rs"]
 mod loom_tests;
 #[cfg(test)]

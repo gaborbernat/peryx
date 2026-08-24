@@ -9,8 +9,8 @@ faults. `peryx-test-support` owns reusable process and proxy support. Neutral sc
 `crates/peryx/tests/{availability,cluster,observability}.rs`. Protocol requests and assertions stay in their ecosystem
 system packages.
 
-The neutral scenarios use the `availability-e2e` test feature. CI records them in the distributed system report and
-merges that report with crate-contract, client, storage, fuzz, and frontend reports.
+The neutral scenarios use the `availability-e2e` test feature. The native coverage job runs them with the rest of the
+all-features workspace suite.
 
 Install Toxiproxy for the host lane:
 
@@ -83,8 +83,5 @@ Run the focused suites before the full distributed report:
 ```shell
 just availability
 just simulation
-just coverage-system-distributed .tox/coverage/system-distributed.lcov
+just coverage-native
 ```
-
-`coverage-system-distributed` runs availability and simulation coverage in one lane. `just coverage` merges its report
-with the other required producers.

@@ -143,10 +143,10 @@ sanitizer-thread: test-deps
       --test-threads 1 -E 'not(test(e2e_live))'
 
 sanitizer-leak package filter="all()": test-deps
-    LSAN_OPTIONS=allow_addr2line=1 RUSTFLAGS="-Zsanitizer=leak" \
+    ASAN_OPTIONS=allow_addr2line=1 RUSTFLAGS="-Zsanitizer=address" RUSTDOCFLAGS="-Zsanitizer=address" \
       PATH="{{ tools_root }}/bin:$PATH" cargo +nightly nextest run \
       --package "{{ package }}" --lib --target x86_64-unknown-linux-gnu \
-      --profile ci --build-jobs 1 --test-threads 1 -E '{{ filter }}'
+      -Z build-std --profile ci --build-jobs 1 --test-threads 1 -E '{{ filter }}'
 
 fuzz package target seconds="60": _project-temp
     cd "crates/{{ package }}/fuzz" && cargo +nightly fuzz run \

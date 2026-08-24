@@ -7,7 +7,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
-use crate::tests::oidc_http::{MalformedDiscoveryBody, MalformedDiscoveryServer, secure_origin, transport};
+use crate::oidc_http::MAX_FRESH_SECS;
+use crate::tests::oidc_http::{DiscoveryResponseBody, DiscoveryServer, MAX_DISCOVERY_BYTES, secure_origin, transport};
 use crate::{ExternalIdentityResolution, ExternalLinkRequest, ServerUser, UserId, UserState};
 
 const NOW: i64 = 2_000_000_000;
@@ -562,14 +563,36 @@ async fn test_invalid_endpoint_url_is_rejected() {
     ));
 }
 
+#[rstest]
+#[case::json("application/json; charset=utf-8", true)]
+#[case::structured("application/openid-configuration+json", true)]
+#[case::wrong("text/json", false)]
 #[tokio::test]
-async fn test_non_json_discovery_is_rejected() {
+async fn test_discovery_content_type_is_enforced(#[case] content_type: &str, #[case] accepted: bool) {
     let server = MockServer::start().await;
-    mount_discovery(&server, json!({"issuer": secure_origin(&server.uri())}), "text/plain").await;
-    assert!(matches!(
-        provider(&server.uri()).authorization(NOW).await,
-        Err(OidcProviderError::InvalidProviderResponse)
-    ));
+    mount_discovery(
+        &server,
+        json!({
+            "issuer": issuer(&server),
+            "authorization_endpoint": format!("{}/authorize", secure_origin(&server.uri())),
+            "token_endpoint": format!("{}/token", secure_origin(&server.uri())),
+            "jwks_uri": format!("{}/jwks", secure_origin(&server.uri())),
+            "id_token_signing_alg_values_supported": ["RS256"],
+        }),
+        content_type,
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({"keys": [jwk("key-1")]})),
+        )
+        .mount(&server)
+        .await;
+
+    assert_eq!(provider(&server.uri()).authorization(NOW).await.is_ok(), accepted);
 }
 
 #[tokio::test]
@@ -577,7 +600,7 @@ async fn test_oversize_discovery_is_rejected() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/.well-known/openid-configuration"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw("x".repeat(DISCOVERY_BODY_LIMIT + 1), "application/json"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("x".repeat(MAX_DISCOVERY_BYTES + 1), "application/json"))
         .mount(&server)
         .await;
     assert!(matches!(
@@ -762,33 +785,17 @@ async fn test_verify_only_key_survives_alongside_incompatible_keys() {
 
 #[rstest]
 #[case::oversized_chunk(
-    MalformedDiscoveryBody::OversizedChunked { limit: DISCOVERY_BODY_LIMIT },
+    DiscoveryResponseBody::OversizedChunked { limit: MAX_DISCOVERY_BYTES },
     OidcProviderError::InvalidProviderResponse
 )]
-#[case::truncated(MalformedDiscoveryBody::Truncated, OidcProviderError::Unavailable)]
+#[case::truncated(DiscoveryResponseBody::Truncated, OidcProviderError::Unavailable)]
 #[tokio::test]
-async fn test_malformed_discovery_body(#[case] body: MalformedDiscoveryBody, #[case] expected: OidcProviderError) {
-    let server = MalformedDiscoveryServer::start(body);
+async fn test_malformed_discovery_body(#[case] body: DiscoveryResponseBody, #[case] expected: OidcProviderError) {
+    let server = DiscoveryServer::start(body);
     assert_eq!(
         provider(&server.origin()).authorization(NOW).await.unwrap_err(),
         expected
     );
-}
-
-#[rstest]
-#[case::json("application/json; charset=utf-8", true)]
-#[case::structured("application/jwk-set+json", true)]
-#[case::wrong("text/json", false)]
-fn test_json_content_type_classification(#[case] value: &str, #[case] accepted: bool) {
-    assert_eq!(is_json_content_type(value), accepted);
-}
-
-#[rstest]
-#[case::present("max-age=42", Some(42))]
-#[case::quoted("private, max-age=\"7\"", Some(7))]
-#[case::absent("no-store", None)]
-fn test_cache_max_age_parsing(#[case] value: &str, #[case] expected: Option<i64>) {
-    assert_eq!(cache_max_age(value), expected);
 }
 
 #[test]

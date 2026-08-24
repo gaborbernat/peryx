@@ -9,7 +9,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
-use crate::tests::oidc_http::{MalformedDiscoveryBody, MalformedDiscoveryServer, secure_origin, transport};
+use crate::tests::oidc_http::{
+    DiscoveryResponseBody, DiscoveryServer, MAX_DISCOVERY_BYTES, MAX_JWKS_BYTES, padded_json, secure_origin, transport,
+};
 
 const NOW: i64 = 2_000_000_000;
 const MODULUS: &str = "yRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5_CYYi_cvI-SXVT9kPWSKXxJXBXd_4LkvcPuUakBoAkfh-eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG_AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi-yUod-j8MtvIj812dkS4QMiRVN_by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQ";
@@ -226,22 +228,52 @@ async fn test_single_audience_array_is_accepted() {
     );
 }
 
+#[rstest]
+#[case::symmetric(json!({"kty": "oct", "k": "c2VjcmV0", "kid": "symmetric", "alg": "HS256"}))]
+#[case::wrong_algorithm(json!({"kty": "RSA", "n": MODULUS, "e": "AQAB", "kid": "key-1", "alg": "HS256"}))]
 #[tokio::test]
-async fn test_key_set_without_a_usable_key_is_rejected() {
+async fn test_key_set_without_a_usable_key_is_rejected(#[case] key: Value) {
     let server = MockServer::start().await;
-    mount_issuer(
-        &server,
-        json!({"keys": [
-            {"kty": "oct", "k": "c2VjcmV0", "kid": "symmetric", "alg": "HS256"}
-        ]}),
-    )
-    .await;
+    mount_issuer(&server, json!({"keys": [key]})).await;
     let verifier = test_verifier(&server.uri());
     assert_eq!(
         verifier
             .verify_identity(&identity(&server.uri(), "key-1", "jti"), NOW)
             .await,
         Err(OidcVerificationError::InvalidIssuerResponse)
+    );
+}
+
+#[tokio::test]
+async fn test_maximum_jwks_body_is_accepted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "issuer": secure_origin(&server.uri()),
+                    "jwks_uri": format!("{}/keys", secure_origin(&server.uri())),
+                    "id_token_signing_alg_values_supported": ["RS256"]
+                })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/keys"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            padded_json(json!({"keys": [jwk("key-1")]}), MAX_JWKS_BYTES),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+
+    assert!(
+        test_verifier(&server.uri())
+            .verify_identity(&identity(&server.uri(), "key-1", "maximum-jwks"), NOW)
+            .await
+            .is_ok()
     );
 }
 
@@ -572,23 +604,38 @@ async fn test_unavailable_key_set_endpoint_is_reported() {
 }
 
 #[rstest]
+#[case::exact_chunk(
+    DiscoveryResponseBody::ExactChunked { limit: MAX_DISCOVERY_BYTES },
+    "exact-chunk",
+    OidcVerificationError::IssuerUnavailable
+)]
 #[case::oversized_chunk(
-    MalformedDiscoveryBody::OversizedChunked { limit: DISCOVERY_BODY_LIMIT },
+    DiscoveryResponseBody::OversizedChunked { limit: MAX_DISCOVERY_BYTES },
     "large",
     OidcVerificationError::InvalidIssuerResponse
 )]
+#[case::exact_length(
+    DiscoveryResponseBody::ExactContentLength { limit: MAX_DISCOVERY_BYTES },
+    "exact-length",
+    OidcVerificationError::IssuerUnavailable
+)]
+#[case::oversized_length(
+    DiscoveryResponseBody::OversizedContentLength { limit: MAX_DISCOVERY_BYTES },
+    "large-length",
+    OidcVerificationError::InvalidIssuerResponse
+)]
 #[case::truncated(
-    MalformedDiscoveryBody::Truncated,
+    DiscoveryResponseBody::Truncated,
     "truncated",
     OidcVerificationError::IssuerUnavailable
 )]
 #[tokio::test]
 async fn test_malformed_issuer_body(
-    #[case] body: MalformedDiscoveryBody,
+    #[case] body: DiscoveryResponseBody,
     #[case] token_id: &str,
     #[case] expected: OidcVerificationError,
 ) {
-    let server = MalformedDiscoveryServer::start(body);
+    let server = DiscoveryServer::start(body);
     let issuer = server.origin();
     assert_eq!(
         test_verifier(&issuer)
@@ -645,6 +692,7 @@ async fn test_discovery_uses_the_configured_issuer_path() {
 
 #[rstest]
 #[case::quoted_zero(Some("private, max-age=\"0\", must-revalidate"), 60)]
+#[case::no_store(Some("no-store"), 300)]
 #[case::absent(None, 300)]
 #[tokio::test]
 async fn test_cache_control_sets_refresh_time(#[case] cache_control: Option<&str>, #[case] fresh_for: i64) {
@@ -677,6 +725,8 @@ async fn test_cache_control_sets_refresh_time(#[case] cache_control: Option<&str
 #[case::json("application/json; charset=utf-8", true)]
 #[case::structured("application/jwk-set+json", true)]
 #[case::case_insensitive("Application/JSON", true)]
+#[case::application_non_json("application/text", false)]
+#[case::non_application_json("text/example+json", false)]
 #[case::wrong_type("text/json", false)]
 #[tokio::test]
 async fn test_discovery_content_type_is_enforced(#[case] content_type: &str, #[case] accepted: bool) {

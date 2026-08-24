@@ -1,26 +1,23 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyOperations, PublicKeyUse};
+use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use reqwest::Client;
-use reqwest::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use url::Url;
 
-use crate::oidc_http::{OidcHttpTransport, ReqwestOidcHttpTransport};
+use crate::oidc_http::{
+    DISCOVERY_BODY_LIMIT, JWKS_BODY_LIMIT, MIN_FRESH_SECS, OidcHttpError, OidcHttpTransport, ReqwestOidcHttpTransport,
+    discovery_url, fetch, freshness, usable_keys,
+};
 
-const DISCOVERY_BODY_LIMIT: usize = 64 * 1024;
-const JWKS_BODY_LIMIT: usize = 1024 * 1024;
 const TOKEN_BODY_LIMIT: usize = 32 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const MIN_FRESH_SECS: i64 = 60;
-const DEFAULT_FRESH_SECS: i64 = 300;
-const MAX_FRESH_SECS: i64 = 900;
 const HARD_CACHE_SECS: i64 = 3600;
 const MAX_IDENTITY_LIFETIME_SECS: i64 = 3600;
 const MAX_JTI_BYTES: usize = 256;
@@ -193,10 +190,7 @@ impl OidcVerifier {
         }
         let jwks_uri = issuer_url(&discovery.jwks_uri).or(Err(OidcVerificationError::InvalidIssuerResponse))?;
         let (jwks, jwks_age) = self.fetch_json::<JwkSet>(&jwks_uri, JWKS_BODY_LIMIT).await?;
-        let fresh_for = discovery_age
-            .unwrap_or(DEFAULT_FRESH_SECS)
-            .min(jwks_age.unwrap_or(DEFAULT_FRESH_SECS))
-            .clamp(MIN_FRESH_SECS, MAX_FRESH_SECS);
+        let fresh_for = freshness(discovery_age, jwks_age);
         Ok(KeyCache {
             keys: usable_keys(jwks)?,
             fresh_until: now + fresh_for,
@@ -210,47 +204,9 @@ impl OidcVerifier {
         url: &Url,
         limit: usize,
     ) -> Result<(T, Option<i64>), OidcVerificationError> {
-        let request = self
-            .client
-            .get(url.clone())
-            .build()
-            .or(Err(OidcVerificationError::IssuerUnavailable))?;
-        let mut response = self
-            .transport
-            .execute(request)
+        let (body, max_age) = fetch(self.transport.as_ref(), self.client.get(url.clone()), limit)
             .await
-            .or(Err(OidcVerificationError::IssuerUnavailable))?;
-        if !response.status().is_success()
-            || response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_none_or(|value| !is_json_content_type(value))
-            || response
-                .headers()
-                .get(CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<usize>().ok())
-                .is_some_and(|length| length > limit)
-        {
-            return Err(OidcVerificationError::InvalidIssuerResponse);
-        }
-        let max_age = response
-            .headers()
-            .get(CACHE_CONTROL)
-            .and_then(|value| value.to_str().ok())
-            .and_then(cache_max_age);
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| OidcVerificationError::IssuerUnavailable)?
-        {
-            if body.len() + chunk.len() > limit {
-                return Err(OidcVerificationError::InvalidIssuerResponse);
-            }
-            body.extend_from_slice(&chunk);
-        }
+            .map_err(OidcVerificationError::from)?;
         serde_json::from_slice(&body)
             .map(|value| (value, max_age))
             .map_err(|_| OidcVerificationError::InvalidIssuerResponse)
@@ -293,6 +249,15 @@ impl OidcVerificationError {
             self,
             Self::IssuerUnavailable | Self::InvalidIssuerResponse | Self::UnknownKey
         )
+    }
+}
+
+impl From<OidcHttpError> for OidcVerificationError {
+    fn from(error: OidcHttpError) -> Self {
+        match error {
+            OidcHttpError::Unavailable => Self::IssuerUnavailable,
+            OidcHttpError::InvalidResponse => Self::InvalidIssuerResponse,
+        }
     }
 }
 
@@ -380,76 +345,6 @@ fn oidc_client() -> Result<Client, OidcVerificationError> {
         .timeout(REQUEST_TIMEOUT)
         .build()
         .or(Err(OidcVerificationError::Configuration))
-}
-
-fn discovery_url(issuer: &Url) -> Url {
-    let mut discovery = issuer.clone();
-    discovery.set_path(&format!(
-        "{}/.well-known/openid-configuration",
-        issuer.path().trim_end_matches('/')
-    ));
-    discovery
-}
-
-fn usable_keys(jwks: JwkSet) -> Result<HashMap<String, DecodingKey>, OidcVerificationError> {
-    let mut ids = HashSet::new();
-    if jwks.keys.is_empty()
-        || jwks.keys.iter().any(|key| {
-            let Some(id) = key.common.key_id.as_deref().filter(|id| !id.is_empty()) else {
-                return true;
-            };
-            !ids.insert(id)
-        })
-    {
-        return Err(OidcVerificationError::InvalidIssuerResponse);
-    }
-    let mut keys = HashMap::new();
-    for key in jwks.keys.into_iter().filter(|key| {
-        matches!(key.algorithm, AlgorithmParameters::RSA(_))
-            && key
-                .common
-                .key_algorithm
-                .is_none_or(|algorithm| algorithm.to_string() == "RS256")
-            && key
-                .common
-                .public_key_use
-                .as_ref()
-                .is_none_or(|usage| usage == &PublicKeyUse::Signature)
-            && key
-                .common
-                .key_operations
-                .as_ref()
-                .is_none_or(|operations| operations.contains(&KeyOperations::Verify))
-    }) {
-        let id = key.common.key_id.clone().expect("key IDs were validated");
-        keys.insert(
-            id,
-            DecodingKey::from_jwk(&key).map_err(|_| OidcVerificationError::InvalidIssuerResponse)?,
-        );
-    }
-    if keys.is_empty() {
-        return Err(OidcVerificationError::InvalidIssuerResponse);
-    }
-    Ok(keys)
-}
-
-fn is_json_content_type(value: &str) -> bool {
-    let media = value
-        .split(';')
-        .next()
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    media == "application/json" || media.starts_with("application/") && media.ends_with("+json")
-}
-
-fn cache_max_age(value: &str) -> Option<i64> {
-    value.split(',').find_map(|directive| {
-        let (name, value) = directive.trim().split_once('=')?;
-        name.eq_ignore_ascii_case("max-age")
-            .then(|| value.trim_matches('"').parse().ok())
-            .flatten()
-    })
 }
 
 #[cfg(test)]

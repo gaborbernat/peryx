@@ -637,7 +637,12 @@ elif [ "$1" = rm ]; then
   name=$3
   port=${name##*-}
   pidfile=${TMPDIR:-/tmp}/peryx-oci-pid-$port
-  [ -e "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null || true
+  if [ -e "$pidfile" ]; then
+    pid=$(cat "$pidfile")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" || exit
+    fi
+  fi
   rm -f "$pidfile"
 fi
 "#;

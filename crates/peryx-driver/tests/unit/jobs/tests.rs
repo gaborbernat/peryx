@@ -869,6 +869,76 @@ async fn test_metrics_expose_a_kinds_full_lifecycle_series() {
     assert!(body.contains("peryx_jobs_running{kind=\"probe\"} 0"));
 }
 
+#[tokio::test]
+async fn test_metrics_accumulate_failed_jobs() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+    for scope in ["a", "b"] {
+        assert_eq!(
+            scheduler
+                .run(TestJob::new("probe", scope, Action::Return(Err("boom".to_owned()))))
+                .await
+                .unwrap_err(),
+            "test: boom"
+        );
+    }
+    scheduler.shutdown().await;
+
+    assert!(rendered_metrics(&scheduler).contains("peryx_jobs_finished_total{kind=\"probe\",outcome=\"failed\"} 2"));
+}
+
+#[tokio::test]
+async fn test_metrics_accumulate_cancelled_jobs() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(1, 4, 2, 2));
+    let running = TestJob::new("probe", "a", Action::UntilCancelled);
+    assert_eq!(scheduler.submit(running.clone()), Submit::Queued);
+    assert_eq!(
+        scheduler.submit(TestJob::new("probe", "b", Action::Return(Ok(JobReport::default())),)),
+        Submit::Queued
+    );
+    running.started.notified().await;
+    scheduler.shutdown().await;
+
+    assert!(rendered_metrics(&scheduler).contains("peryx_jobs_finished_total{kind=\"probe\",outcome=\"cancelled\"} 2"));
+}
+
+#[tokio::test]
+async fn test_metrics_accumulate_admission_rejections() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(1, 1, 1, 1));
+    let release = Arc::new(Notify::new());
+    let running = TestJob::new("probe", "a", Action::Block(release.clone()));
+    assert_eq!(scheduler.submit(running.clone()), Submit::Queued);
+    running.started.notified().await;
+    for scope in ["a", "a"] {
+        assert_eq!(
+            scheduler.submit(TestJob::new("probe", scope, Action::Return(Ok(JobReport::default())),)),
+            Submit::Conflict
+        );
+    }
+    for scope in ["b", "c"] {
+        assert_eq!(
+            scheduler.submit(TestJob::new("probe", scope, Action::Return(Ok(JobReport::default())),)),
+            Submit::QueueFull
+        );
+    }
+    release.notify_one();
+    scheduler.shutdown().await;
+
+    let body = rendered_metrics(&scheduler);
+    assert!(
+        body.contains("peryx_jobs_rejected_total{kind=\"probe\",reason=\"conflict\"} 2")
+            && body.contains("peryx_jobs_rejected_total{kind=\"probe\",reason=\"queue_full\"} 2")
+    );
+}
+
+fn rendered_metrics(scheduler: &JobScheduler) -> String {
+    let mut body = String::new();
+    crate::state::PrometheusSource::write_metrics(scheduler.metrics().as_ref(), &mut body);
+    body
+}
+
 fn context(state: Arc<ServingState>, cancel: CancellationToken) -> JobContext {
     JobContext {
         state,

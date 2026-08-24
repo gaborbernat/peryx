@@ -1303,17 +1303,41 @@ fn cache_schedule(secs: u64) -> Vec<Schedule> {
     }]
 }
 
+fn schedule_settings(value: &str) -> toml::Table {
+    toml::Table::from_iter([("mode".to_owned(), toml::Value::String(value.to_owned()))])
+}
+
 struct TestScheduleFactory {
+    kind: &'static str,
+    settings: toml::Table,
     job: Result<Arc<dyn NodeJob>, String>,
+}
+
+impl TestScheduleFactory {
+    fn new(job: Result<Arc<dyn NodeJob>, String>) -> Self {
+        Self {
+            kind: "plugin_sync",
+            settings: toml::Table::new(),
+            job,
+        }
+    }
+
+    fn identity(kind: &'static str, setting: &str) -> Self {
+        Self {
+            kind,
+            settings: schedule_settings(setting),
+            job: Ok(TestJob::new(kind, "identity", Action::Return(Ok(JobReport::default())))),
+        }
+    }
 }
 
 impl ScheduledJobFactory for TestScheduleFactory {
     fn kind(&self) -> &'static str {
-        "plugin_sync"
+        self.kind
     }
 
     fn settings(&self) -> toml::Table {
-        toml::Table::new()
+        self.settings.clone()
     }
 
     fn create(&self, _app: &AppState) -> Result<Arc<dyn NodeJob>, String> {
@@ -1325,7 +1349,7 @@ fn plugin_schedule(secs: u64, job: Result<Arc<dyn NodeJob>, String>) -> Vec<Sche
     vec![Schedule {
         job: ScheduledJob::Plugin(PluginScheduledJob::new(
             Ecosystem::new("example"),
-            Arc::new(TestScheduleFactory { job }),
+            Arc::new(TestScheduleFactory::new(job)),
         )),
         interval: Duration::from_secs(secs),
     }]
@@ -1335,39 +1359,54 @@ fn plugin_schedule(secs: u64, job: Result<Arc<dyn NodeJob>, String>) -> Vec<Sche
 fn test_plugin_schedule_equality_uses_its_public_identity() {
     let left = PluginScheduledJob::new(
         Ecosystem::new("example"),
-        Arc::new(TestScheduleFactory {
-            job: Ok(TestJob::new(
-                "plugin_sync",
-                "alpha",
-                Action::Return(Ok(JobReport::default())),
-            )),
-        }),
+        Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+            "plugin_sync",
+            "alpha",
+            Action::Return(Ok(JobReport::default())),
+        )))),
     );
     let right = PluginScheduledJob::new(
         Ecosystem::new("example"),
-        Arc::new(TestScheduleFactory {
-            job: Ok(TestJob::new(
-                "plugin_sync",
-                "beta",
-                Action::Return(Ok(JobReport::default())),
-            )),
-        }),
+        Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+            "plugin_sync",
+            "beta",
+            Action::Return(Ok(JobReport::default())),
+        )))),
     );
 
     assert_eq!(left, right);
+}
+
+#[rstest]
+#[case::ecosystem("other", "plugin_sync", "stable")]
+#[case::kind("example", "other", "stable")]
+#[case::settings("example", "plugin_sync", "fast")]
+fn test_plugin_schedule_equality_rejects_each_identity_difference(
+    #[case] ecosystem: &'static str,
+    #[case] kind: &'static str,
+    #[case] setting: &str,
+) {
+    let left = PluginScheduledJob::new(
+        Ecosystem::new("example"),
+        Arc::new(TestScheduleFactory::identity("plugin_sync", "stable")),
+    );
+    let right = PluginScheduledJob::new(
+        Ecosystem::new(ecosystem),
+        Arc::new(TestScheduleFactory::identity(kind, setting)),
+    );
+
+    assert_ne!(left, right);
 }
 
 #[test]
 fn test_plugin_schedule_debug_names_its_public_identity() {
     let schedule = PluginScheduledJob::new(
         Ecosystem::new("example"),
-        Arc::new(TestScheduleFactory {
-            job: Ok(TestJob::new(
-                "plugin_sync",
-                "alpha",
-                Action::Return(Ok(JobReport::default())),
-            )),
-        }),
+        Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+            "plugin_sync",
+            "alpha",
+            Action::Return(Ok(JobReport::default())),
+        )))),
     );
     let debug = format!("{schedule:?}");
 
@@ -1382,13 +1421,11 @@ fn test_plugin_schedule_debug_names_its_public_identity() {
 #[test]
 fn test_registered_schedule_exposes_its_public_identity() {
     let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
-    let factory = Arc::new(TestScheduleFactory {
-        job: Ok(TestJob::new(
-            "plugin_sync",
-            "alpha",
-            Action::Return(Ok(JobReport::default())),
-        )),
-    });
+    let factory = Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+        "plugin_sync",
+        "alpha",
+        Action::Return(Ok(JobReport::default())),
+    ))));
     let left = RegisteredScheduledJob::new(factory.clone());
     let right = RegisteredScheduledJob::new(factory);
 
@@ -1404,22 +1441,33 @@ fn test_registered_schedule_exposes_its_public_identity() {
     );
 }
 
+#[rstest]
+#[case::kind("other", "stable")]
+#[case::settings("plugin_sync", "fast")]
+fn test_registered_schedule_equality_rejects_each_identity_difference(
+    #[case] kind: &'static str,
+    #[case] setting: &str,
+) {
+    let left = RegisteredScheduledJob::new(Arc::new(TestScheduleFactory::identity("plugin_sync", "stable")));
+    let right = RegisteredScheduledJob::new(Arc::new(TestScheduleFactory::identity(kind, setting)));
+
+    assert_ne!(left, right);
+}
+
 #[test]
 fn test_scheduled_job_settings_follow_the_selected_factory() {
-    let factory = Arc::new(TestScheduleFactory {
-        job: Ok(TestJob::new(
-            "plugin_sync",
-            "alpha",
-            Action::Return(Ok(JobReport::default())),
-        )),
-    });
+    let factory = Arc::new(TestScheduleFactory::identity("plugin_sync", "fast"));
     let jobs = [
-        ScheduledJob::CacheMaintenance,
         ScheduledJob::Plugin(PluginScheduledJob::new(Ecosystem::new("example"), factory.clone())),
         ScheduledJob::Registered(RegisteredScheduledJob::new(factory)),
     ];
 
-    assert!(jobs.into_iter().all(|job| job.settings().is_empty()));
+    assert!(jobs.into_iter().all(|job| job.settings() == schedule_settings("fast")));
+}
+
+#[test]
+fn test_cache_maintenance_has_no_settings() {
+    assert!(ScheduledJob::CacheMaintenance.settings().is_empty());
 }
 
 #[test]
@@ -1477,22 +1525,15 @@ async fn test_a_supported_scheduled_job_is_submitted() {
     assert_eq!(job.ran.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn test_reschedule_steps_from_the_due_instant_when_on_time() {
+#[rstest]
+#[case::on_time(0, 60)]
+#[case::within_interval(30, 60)]
+#[case::past_interval(200, 260)]
+fn test_reschedule_maintains_cadence_or_collapses_missed_runs(#[case] wake_secs: u64, #[case] expected_secs: u64) {
     let base = tokio::time::Instant::now();
     assert_eq!(
-        super::timer::reschedule(base, base, Duration::from_mins(1)),
-        base + Duration::from_mins(1)
-    );
-}
-
-#[test]
-fn test_reschedule_steps_from_the_wake_instant_when_it_woke_late() {
-    let base = tokio::time::Instant::now();
-    let woke = base + Duration::from_secs(200);
-    assert_eq!(
-        super::timer::reschedule(base, woke, Duration::from_mins(1)),
-        woke + Duration::from_mins(1)
+        super::timer::reschedule(base, base + Duration::from_secs(wake_secs), Duration::from_mins(1)),
+        base + Duration::from_secs(expected_secs)
     );
 }
 

@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
-          tools: just node prek shellcheck
+          tools: just node prek
       - run: just lint-automation
 
   contracts:

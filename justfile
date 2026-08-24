@@ -132,12 +132,13 @@ loom: _project-temp
     RUSTFLAGS="--cfg peryx_loom" cargo test --package peryx-ha-distributed --lib runtime_worker::loom_tests
 
 sanitizer-address: test-deps
-    PATH="{{ tools_root }}/bin:$PATH" cargo +nightly nextest run --workspace \
+    ASAN_OPTIONS=allow_addr2line=1 PATH="{{ tools_root }}/bin:$PATH" cargo +nightly nextest run --workspace \
       --target x86_64-unknown-linux-gnuasan --profile ci --build-jobs 1 \
       --test-threads 1 -E 'not(test(e2e_live))'
 
 sanitizer-thread: test-deps
-    PATH="{{ tools_root }}/bin:$PATH" cargo +nightly nextest run --workspace \
+    TSAN_OPTIONS=allow_addr2line=1:halt_on_error=1 PATH="{{ tools_root }}/bin:$PATH" \
+      cargo +nightly nextest run --workspace \
       --target x86_64-unknown-linux-gnutsan --profile ci --build-jobs 1 \
       --test-threads 1 -E 'not(test(e2e_live))'
 

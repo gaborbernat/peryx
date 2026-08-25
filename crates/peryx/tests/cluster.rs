@@ -3,9 +3,8 @@
 mod harness;
 
 use std::collections::HashMap;
-use std::time::Duration;
 
-use harness::{ADMIN_PASSWORD, ADMIN_USER, Cluster, MemberSpec, ProcessHarness, Role, Topology};
+use harness::{ADMIN_PASSWORD, ADMIN_USER, Cluster, MemberSpec, ProcessHarness, Role, Topology, cargo_binary};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -49,7 +48,7 @@ fn test_a_three_node_ha_cluster_forms_and_reports_its_leader() {
             MemberSpec::new("node-c", "south", Role::Replica),
         ],
     )
-    .with_process_harness(ProcessHarness::new(env!("CARGO_BIN_EXE_peryx")))
+    .with_process_harness(ProcessHarness::new(cargo_binary("peryx")))
     .with_admin()
     .start()
     .expect("the three-node ha cluster starts");
@@ -72,7 +71,7 @@ fn test_killing_the_home_leader_fails_authority_over_to_a_survivor() {
             MemberSpec::new("node-c", "south", Role::Replica),
         ],
     )
-    .with_process_harness(ProcessHarness::new(env!("CARGO_BIN_EXE_peryx")))
+    .with_process_harness(ProcessHarness::new(cargo_binary("peryx")))
     .with_admin()
     .start()
     .expect("the three-node ha cluster starts");
@@ -90,7 +89,7 @@ fn test_killing_the_home_leader_fails_authority_over_to_a_survivor() {
 
 fn await_leader_change(cluster: &Cluster, old: FixtureNode) -> FixtureNode {
     cluster
-        .await_topology_signal(Duration::from_secs(90), |cluster| {
+        .await_topology_event(|cluster| {
             let leader = quorum_leader(cluster)
                 .map(|(leader, _)| leader)
                 .filter(|leader| *leader != old);
@@ -108,7 +107,7 @@ fn await_leader_change(cluster: &Cluster, old: FixtureNode) -> FixtureNode {
 
 fn await_quorum_leader(cluster: &Cluster) -> (FixtureNode, Value) {
     cluster
-        .await_topology_signal(Duration::from_secs(90), |cluster| {
+        .await_topology_event(|cluster| {
             (
                 quorum_leader(cluster),
                 format!(

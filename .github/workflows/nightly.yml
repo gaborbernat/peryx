@@ -9,8 +9,15 @@ on:
 permissions:
   contents: read
 
+env:
+  # mise-action hashes the sorted tool arguments into its cache key.
+  # https://github.com/jdx/mise-action/blob/3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518/src/index.ts#L1079-L1127
+  MUTATION_TOOLS: >-
+    just jq uv cargo:cargo-mutants cargo:cargo-nextest
+    github:Shopify/toxiproxy
+
 concurrency:
-  group: nightly
+  group: nightly-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -96,9 +103,9 @@ jobs:
           PARTITION: ${{ matrix.partition }}
           RECIPE: ${{ matrix.recipe }}
 
-  mutation-baseline:
+  mutation-baseline-build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 180
     outputs:
       shard_count: ${{ steps.shards.outputs.count }}
       shards: ${{ steps.shards.outputs.indices }}
@@ -108,25 +115,59 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
-          tools: >-
-            just jq uv cargo:cargo-mutants cargo:cargo-nextest
-            github:Shopify/toxiproxy
-      - run: just mutation-baseline
+          tools: ${{ env.MUTATION_TOOLS }}
+      - run: just mutation-baseline-archive .tox/mutation-baseline.tar.zst
       - id: shards
         run: |
           mutants=$(just mutation-count)
+          # cargo-mutants recommends 8 to 32 shards to bound clean-build and CI-capacity costs.
+          # https://mutants.rs/shards.html#choosing-a-number-of-shards
           shards=$(( (mutants + 255) / 256 ))
+          shards=$(( shards < 32 ? shards : 32 ))
           echo "Planning $mutants mutants across $shards shards"
           echo "count=$shards" >> "$GITHUB_OUTPUT"
           echo "indices=$(jq --null-input --compact-output --argjson count "$shards" '[range(0; $count)]')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mutation-baseline
+          path: .tox/mutation-baseline.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
-  mutation:
-    name: mutation (${{ matrix.shard }}/${{ needs.mutation-baseline.outputs.shard_count }})
-    needs: mutation-baseline
+  mutation-baseline:
+    name: mutation baseline (${{ matrix.partition }}/8)
+    needs: mutation-baseline-build
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.mutation-baseline.outputs.shards) }}
+        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          tools: >-
+            just uv cargo:cargo-nextest github:Shopify/toxiproxy
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: mutation-baseline
+          path: .tox/mutation-baseline
+      - run: just mutation-baseline-run .tox/mutation-baseline/mutation-baseline.tar.zst "slice:$PARTITION/8"
+        env:
+          PARTITION: ${{ matrix.partition }}
+
+  mutation:
+    name: mutation (${{ matrix.shard }}/${{ needs.mutation-baseline-build.outputs.shard_count }})
+    needs: [mutation-baseline-build, mutation-baseline]
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: ${{ fromJSON(needs.mutation-baseline-build.outputs.shards) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -135,17 +176,15 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
         with:
-          tools: >-
-            just uv cargo:cargo-mutants cargo:cargo-nextest
-            github:Shopify/toxiproxy
+          tools: ${{ env.MUTATION_TOOLS }}
       - run: just mutation "$SHARD/$SHARD_COUNT" true 2 skip 500
         env:
           SHARD: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ needs.mutation-baseline.outputs.shard_count }}
+          SHARD_COUNT: ${{ needs.mutation-baseline-build.outputs.shard_count }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: mutation-${{ matrix.shard }}-${{ needs.mutation-baseline.outputs.shard_count }}
+          name: mutation-${{ matrix.shard }}-${{ needs.mutation-baseline-build.outputs.shard_count }}
           path: .tox/mutants
           if-no-files-found: error
 

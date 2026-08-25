@@ -5,10 +5,12 @@ mod harness;
 
 use std::time::Duration;
 
-use harness::{HarnessError, MemberSpec, Node, OwnershipControl, ProcessHarness, Role, Topology, Toxiproxy};
+use harness::{
+    HarnessError, MemberSpec, Node, OwnershipControl, ProcessHarness, Role, Topology, Toxiproxy, cargo_binary,
+};
 
 fn process_harness() -> ProcessHarness {
-    ProcessHarness::new(env!("CARGO_BIN_EXE_peryx"))
+    ProcessHarness::new(cargo_binary("peryx"))
 }
 
 #[test]
@@ -261,7 +263,7 @@ fn metric(body: &str, series: &str) -> Option<u64> {
 }
 
 fn await_sync_error(node: &Node) {
-    node.await_topology_signal(Duration::from_secs(30), |node| {
+    node.await_topology_event(|node| {
         let (status, body) = node.metrics().expect("metrics reachable");
         assert_eq!(status, 200, "metrics scrape failed: {body}\n{}", node.diagnostics());
         assert!(
@@ -286,7 +288,7 @@ fn await_sync_error(node: &Node) {
 }
 
 fn await_caught_up(node: &Node) {
-    node.await_topology_signal(Duration::from_secs(30), |node| {
+    node.await_topology_event(|node| {
         let (status, body) = node.metrics().expect("metrics reachable");
         assert_eq!(status, 200, "metrics scrape failed: {body}\n{}", node.diagnostics());
         let caught_up = metric(&body, "peryx_ha_distributed_caught_up ").expect("caught-up metric is present");

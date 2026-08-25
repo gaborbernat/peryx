@@ -226,6 +226,23 @@ fn test_query_job_runs_paginates_newest_first_with_a_stable_cursor() {
 }
 
 #[test]
+fn test_query_job_runs_has_no_cursor_when_the_page_is_exactly_full() {
+    let (_dir, store) = store();
+    let first = start_job(&store, "first", 10);
+    let second = start_job(&store, "second", 20);
+
+    let page = store.query_job_runs(&JobRunQuery { cursor: None, limit: 2 }).unwrap();
+
+    assert_eq!(
+        (
+            page.runs.into_iter().map(|run| run.id).collect::<Vec<_>>(),
+            page.next_cursor,
+        ),
+        (vec![second, first], None)
+    );
+}
+
+#[test]
 fn test_query_job_runs_accepts_a_canonical_hex_cursor() {
     let (_dir, store) = store();
     for serial in 1..=11 {

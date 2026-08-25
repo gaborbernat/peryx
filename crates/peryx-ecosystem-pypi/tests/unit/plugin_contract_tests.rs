@@ -21,6 +21,7 @@ use peryx_policy::{
 };
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
+use rstest::rstest;
 use utoipa::openapi::PathsBuilder;
 
 use super::{
@@ -43,8 +44,25 @@ fn plugin_exposes_capabilities_and_validates_snippet_formats() {
     assert!(registry.drivers().get_policy(&ECOSYSTEM).is_some());
     assert!(registry.drivers().get_policy_dry_run(&ECOSYSTEM).is_some());
     assert!(registry.drivers().get_retention(&ECOSYSTEM).is_some());
-    assert!(plugin.text(&base, "pypi", true, "pip.conf").unwrap().is_some());
     assert!(plugin.text(&base, "pypi", true, "unknown").is_err());
+}
+
+#[rstest]
+#[case::pip("pip.conf", "[global]")]
+#[case::uv("uv.toml", "[[index]]")]
+#[case::upload(".pypirc", "[distutils]")]
+fn plugin_renders_each_snippet_format(#[case] format: &str, #[case] marker: &str) {
+    let text = PypiPlugin
+        .text(
+            &BaseUrl::parse("https://packages.example/").unwrap(),
+            "pypi",
+            true,
+            format,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert!(text.contains(marker), "{text}");
 }
 
 #[test]

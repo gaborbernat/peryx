@@ -43,6 +43,9 @@ snapshots: _project-temp
     cargo insta test --package peryx-ecosystem-pypi --lib --all-features \
       --unreferenced reject --test-runner nextest --nextest-profile ci
 
+publishable-packages: _project-temp
+    cargo metadata --no-deps --format-version 1 | jq -c '[.packages[] | select(.publish != []) | .name]'
+
 semver base="origin/main": _project-temp
     cargo semver-checks check-release --workspace --default-features --baseline-rev "{{ base }}"
 
@@ -87,8 +90,9 @@ platform-test: _project-temp
 e2e: _project-temp
     cargo nextest run -p peryx-pypi-system-tests --features e2e --test e2e -E 'not(test(e2e_live))'
 
-e2e-live: _project-temp
-    cargo nextest run -p peryx-pypi-system-tests --features e2e-live --test e2e -E 'test(e2e_live)'
+e2e-live: test-deps
+    PATH="{{ tools_root }}/bin:$PATH" cargo nextest run -p peryx-pypi-system-tests \
+      --features e2e-live --test e2e -E 'test(e2e_live)'
 
 pypi-system: _project-temp
     cargo nextest run -p peryx-pypi-system-tests --tests \
@@ -129,26 +133,49 @@ miri: _project-temp
 loom: _project-temp
     RUSTFLAGS="--cfg peryx_loom" cargo test --package peryx-ha-distributed --lib runtime_worker::loom_tests
 
-sanitizer-address: test-deps
-    ASAN_OPTIONS=allow_addr2line=1 PATH="{{ tools_root }}/bin:$PATH" cargo +nightly nextest run --workspace \
-      --target x86_64-unknown-linux-gnuasan --profile ci --build-jobs 1 \
-      --test-threads 1 -E 'not(test(e2e_live))'
+sanitizer-address partition="slice:1/1":
+    just sanitizer address "{{ partition }}"
 
-sanitizer-thread: test-deps
-    TSAN_OPTIONS=allow_addr2line=1:halt_on_error=1 PATH="{{ tools_root }}/bin:$PATH" \
-      cargo +nightly nextest run --workspace \
-      --target x86_64-unknown-linux-gnutsan --profile ci --build-jobs 1 \
-      --test-threads 1 -E 'not(test(e2e_live))'
+sanitizer-thread partition="slice:1/1":
+    just sanitizer thread "{{ partition }}"
+
+# TSan needs the standard library's synchronization operations instrumented.
+# https://doc.rust-lang.org/beta/unstable-book/compiler-flags/sanitizer.html#threadsanitizer
+sanitizer sanitizer partition="slice:1/1": test-deps
+    ASAN_OPTIONS=allow_addr2line=1 TSAN_OPTIONS=allow_addr2line=1:halt_on_error=1:io_sync=2 \
+      RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zsanitizer={{ sanitizer }}" PATH="{{ tools_root }}/bin:$PATH" \
+      cargo +nightly nextest run -Z build-std --workspace --target x86_64-unknown-linux-gnu \
+      --profile ci --build-jobs 1 --test-threads 1 --partition "{{ partition }}" -E 'not(test(e2e_live))'
+
+sanitizer-archive sanitizer archive: _project-temp
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zsanitizer={{ sanitizer }}" PATH="{{ tools_root }}/bin:$PATH" \
+      cargo +nightly nextest archive -Z build-std --workspace --target x86_64-unknown-linux-gnu \
+      --profile ci --build-jobs 1 --archive-file "{{ archive }}"
+
+sanitizer-run archive partition="slice:1/1": test-deps
+    ASAN_OPTIONS=allow_addr2line=1 TSAN_OPTIONS=allow_addr2line=1:halt_on_error=1:io_sync=2 \
+      PATH="{{ tools_root }}/bin:$PATH" cargo +nightly nextest run --archive-file "{{ archive }}" \
+      --workspace-remap "{{ justfile_directory() }}" --profile ci --test-threads 1 \
+      --partition "{{ partition }}" -E 'not(test(e2e_live))'
 
 fuzz package target seconds="60": _project-temp
     cd "crates/{{ package }}/fuzz" && cargo +nightly fuzz run \
       --target "$(rustc +nightly --print host-tuple)" "{{ target }}" -- -max_total_time="{{ seconds }}"
 
-mutation shard="0/1" in_place="false" jobs="2": test-deps
+mutation shard="0/1" in_place="false" jobs="2" baseline="run" timeout="500": test-deps
     PATH="{{ tools_root }}/bin:$PATH" cargo mutants --workspace --all-features --test-tool nextest \
-      --shard "{{ shard }}" --output .tox/mutants \
-      {{ if in_place == "true" { "--in-place" } else { "--jobs " + jobs + " --jobserver-tasks " + jobs } }} \
-      -- -E 'not(test(e2e_live))'
+      --no-shuffle --shard "{{ shard }}" --output .tox/mutants \
+      {{ if in_place == "true" { "--in-place" } else { "--jobs " + jobs } }} \
+      --jobserver-tasks "{{ jobs }}" --baseline "{{ baseline }}" \
+      --timeout "{{ timeout }}" --build-timeout "{{ timeout }}" \
+      -- --profile ci -E 'not(test(e2e_live))'
+
+mutation-baseline: test-deps
+    INSTA_UPDATE=no INSTA_FORCE_PASS=0 PATH="{{ tools_root }}/bin:$PATH" cargo nextest run --verbose \
+      --workspace --all-features --profile ci -E 'not(test(e2e_live))'
+
+mutation-count: _project-temp
+    cargo mutants --list --workspace --all-features | wc -l
 
 # Install browser-test dependencies for the shared and owner suites.
 frontend-deps: _project-temp
@@ -296,17 +323,17 @@ conformance suite binary="": _project-temp
       OCI_PASSWORD=conformance OCI_DATA_SHA512=false "$suite")
 
 # Build one package's CodSpeed benchmarks.
-codspeed-build package: _project-temp
-    cargo codspeed build --locked -m simulation --package "{{ package }}"
+codspeed-build package mode="simulation": _project-temp
+    cargo codspeed build --locked -m "{{ mode }}" --package "{{ package }}"
 
 # Run one package's built CodSpeed benchmarks.
 codspeed-run package: _project-temp
     cargo codspeed run --package "{{ package }}"
 
 # Build and run one package's CodSpeed benchmarks locally.
-codspeed package: _project-temp
-    just codspeed-build "{{ package }}"
-    codspeed run --mode simulation -- just codspeed-run "{{ package }}"
+codspeed package mode="simulation": _project-temp
+    just codspeed-build "{{ package }}" "{{ mode }}"
+    codspeed run --mode "{{ mode }}" -- just codspeed-run "{{ package }}"
 
 # Build a local Python wheel.
 package-wheel +args: _project-temp

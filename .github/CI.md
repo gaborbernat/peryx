@@ -23,9 +23,9 @@ its merged native and Wasm report.
 The `ci-gate` job gives branch protection one stable check name. It only evaluates GitHub job results; test policy
 remains in `just` recipes and standard tool configuration.
 
-CodSpeed runs both ecosystem benchmark packages in parallel. Each leg builds through `just codspeed-build` and uses
-CodSpeed's official action to run and upload the result. `just codspeed` provides the equivalent local command on a
-supported Linux host.
+CodSpeed runs both ecosystem benchmark packages in parallel on its stable bare-metal runners. Each leg builds through
+`just codspeed-build` and uses CodSpeed's official action in walltime mode. `just codspeed` provides the equivalent
+local command and accepts the measurement mode as its second argument.
 
 ## Nightly analysis
 
@@ -34,13 +34,21 @@ The nightly workflow runs work that is too expensive or specialized for every pu
 - every feature combination
 - direct dependency lower bounds
 - Miri and Loom
-- AddressSanitizer and ThreadSanitizer
-- eight cargo-mutants shards
+- AddressSanitizer and ThreadSanitizer, each built once and split evenly with Nextest
+- one mutation baseline on the same runner with cargo-mutants' test command, followed by shards of at most 256 mutants
 - each cargo-fuzz target
 - the live PyPI client boundary
 
 Each matrix leg invokes a public `just` recipe. Nextest runs each test once, and each command propagates its exit
-status.
+status. Sanitizer builds use [Nextest archives][nextest-archives], so partition jobs transfer the instrumented test
+binaries instead of rebuilding them. We build on the standard Linux target with
+[Rust's documented `-Zsanitizer` and `-Zbuild-std` invocation][rust-sanitizers]. During archive restore, Nextest 0.9.143
+[classifies Rust's `gnuasan` and `gnutsan` targets as custom targets][nextest-sanitizer-target] and requires custom
+target JSON. Rust does not provide custom JSON for these built-in targets.
+
+ThreadSanitizer uses its [documented global I/O synchronization model][tsan-io] because Tokio registers sources and
+consumes epoll events through different descriptors. Reports still halt the affected test; no test or function is
+suppressed.
 
 ## Local commands
 
@@ -69,6 +77,8 @@ just miri
 just loom
 just sanitizer-address
 just sanitizer-thread
+just sanitizer-archive address .tox/address.tar.zst
+just sanitizer-run .tox/address.tar.zst slice:1/8
 just mutation 1/8
 just fuzz peryx-ecosystem-oci oci_reference 60
 just e2e-live
@@ -76,3 +86,8 @@ just e2e-live
 
 Generated files stay under `.tox/`. `just coverage-clean`, `just clean`, and `just clean-all` remove progressively more
 local state.
+
+[nextest-archives]: https://nexte.st/docs/ci-features/archiving/
+[nextest-sanitizer-target]: https://github.com/nextest-rs/nextest/blob/cargo-nextest-0.9.143/nextest-runner/src/cargo_config/target_triple.rs#L32-L44
+[rust-sanitizers]: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/sanitizer.html
+[tsan-io]: https://github.com/google/sanitizers/wiki/ThreadSanitizerFlags#runtime-flags

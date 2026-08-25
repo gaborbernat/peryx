@@ -150,7 +150,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.nightly
     uses: ./.github/workflows/nightly.yml
 
-  required:
+  ci-gate:
     if: always()
     needs: [automation, contracts, coverage, docs, frontend, platform, source]
     runs-on: ubuntu-24.04

@@ -266,6 +266,25 @@ fn quota_limits_read_back_and_activate_the_policy() {
 }
 
 #[rstest]
+#[case::config_stricter(512, 1_024)]
+#[case::capability_stricter(1_024, 512)]
+fn quota_limit_merge_keeps_the_stricter_bound(#[case] config: u64, #[case] capability: u64) {
+    let policy = Policy::compile(
+        &PolicyConfig {
+            max_accounted_bytes: Some(config),
+            ..PolicyConfig::default()
+        },
+        str::to_owned,
+    )
+    .with_capabilities(PolicyCapabilities::default().with_limits(PolicyLimits {
+        max_accounted_bytes: Some(capability),
+        ..PolicyLimits::default()
+    }));
+
+    assert_eq!(policy.max_accounted_bytes(), Some(512));
+}
+
+#[rstest]
 #[case::accounted_bytes(PolicyLimits {
     max_accounted_bytes: Some(1),
     ..PolicyLimits::default()

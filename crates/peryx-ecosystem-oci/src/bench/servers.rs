@@ -287,12 +287,7 @@ impl BenchServer {
         let deadline = tokio::time::Instant::now() + environment.startup_timeout;
         match wait_for_startup(receiver, deadline).await {
             Ok(Some(())) => {}
-            Ok(None) => {
-                let Some(status) = active.process.as_mut().context("server process")?.try_wait()? else {
-                    bail!("{} closed its output before its startup event", self.name);
-                };
-                bail!("{} exited before its startup event with {status}", self.name);
-            }
+            Ok(None) => bail!("{} ended its output before its startup event", self.name),
             Err(_) => {
                 let tail = std::fs::read_to_string(&log).unwrap_or_default();
                 bail!("{} did not emit its startup event; server log tail:\n{tail}", self.name);

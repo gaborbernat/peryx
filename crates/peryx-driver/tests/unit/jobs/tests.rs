@@ -575,6 +575,8 @@ async fn test_cancelled_jobs_emit_no_terminal_event() {
         .with(LevelFilter::TRACE)
         .with(events.clone());
     let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::trace!(target: "peryx_driver::jobs::scheduler", "observer probe");
+    assert_eq!(events.0.swap(0, Ordering::SeqCst), 1);
     let run = tokio::spawn({
         let scheduler = scheduler.clone();
         let job = job.clone();

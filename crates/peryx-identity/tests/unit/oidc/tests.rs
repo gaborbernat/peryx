@@ -111,29 +111,27 @@ fn signed_identity_with_type(kid: Option<&str>, token_type: Option<&str>, claims
 }
 
 fn identity_with_length(issuer: &str, length: usize) -> String {
-    for type_length in 0..4 {
-        let token_type = "x".repeat(type_length);
-        let base = signed_identity_with_type(
-            Some("key-1"),
-            Some(&token_type),
-            &claims(issuer, "repo:org/app:ref:refs/heads/main", "sized", ""),
-        );
-        let estimate = (length - base.len()) * 3 / 4;
-        if let Some(token) = (estimate.saturating_sub(32)..=estimate + 32)
-            .map(|padding| {
-                let padding = "x".repeat(padding);
-                signed_identity_with_type(
-                    Some("key-1"),
-                    Some(&token_type),
-                    &claims(issuer, "repo:org/app:ref:refs/heads/main", "sized", &padding),
-                )
-            })
-            .find(|token| token.len() == length)
-        {
-            return token;
-        }
-    }
-    panic!("JWT padding cannot reach {length} bytes")
+    (0..4)
+        .find_map(|type_length| {
+            let token_type = "x".repeat(type_length);
+            let base = signed_identity_with_type(
+                Some("key-1"),
+                Some(&token_type),
+                &claims(issuer, "repo:org/app:ref:refs/heads/main", "sized", ""),
+            );
+            let estimate = (length - base.len()) * 3 / 4;
+            (estimate.saturating_sub(32)..=estimate + 32)
+                .map(|padding| {
+                    let padding = "x".repeat(padding);
+                    signed_identity_with_type(
+                        Some("key-1"),
+                        Some(&token_type),
+                        &claims(issuer, "repo:org/app:ref:refs/heads/main", "sized", &padding),
+                    )
+                })
+                .find(|token| token.len() == length)
+        })
+        .expect("JWT padding reaches the requested length")
 }
 
 fn identity(issuer: &str, kid: &str, jti: &str) -> String {

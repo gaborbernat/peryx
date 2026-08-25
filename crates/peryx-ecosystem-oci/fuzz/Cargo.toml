@@ -11,7 +11,7 @@ repository = "https://github.com/tox-dev/peryx"
 cargo-fuzz = true
 
 [dependencies]
-axum = "0.8"
+axum = "0.8.9"
 libfuzzer-sys = "0.4"
 peryx-core = { version = "0.0.1", path = "../../peryx-core" }
 peryx-driver = { version = "0.0.1", path = "../../peryx-driver" }
@@ -21,8 +21,8 @@ peryx-index = { version = "0.0.1", path = "../../peryx-index" }
 peryx-policy = { version = "0.0.1", path = "../../peryx-policy" }
 peryx-plugin-registry = { version = "0.0.1", path = "../../peryx-plugin-registry" }
 peryx-storage = { version = "0.0.1", path = "../../peryx-storage" }
-tempfile = "3"
-tokio = { version = "1", features = ["rt"] }
+tempfile = "3.27"
+tokio = { version = "1.53", features = ["rt"] }
 
 [[bin]]
 name = "oci_reference"

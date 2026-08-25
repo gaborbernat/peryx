@@ -151,7 +151,7 @@ fn validate_record_hash<R: Read + Seek>(
 
 fn digest_reader<D: sha2::Digest>(mut reader: impl Read) -> Result<Vec<u8>, ArchiveError> {
     let mut hasher = D::new();
-    let mut buffer = [0; 16 * 1024];
+    let mut buffer = [0; 16_384];
     loop {
         let read = reader.read(&mut buffer).map_err(read_error)?;
         if read == 0 {

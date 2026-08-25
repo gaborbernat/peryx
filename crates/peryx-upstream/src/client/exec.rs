@@ -220,7 +220,6 @@ impl ExecCredentialConfig {
         let deadline = tokio::time::Instant::now() + self.0.timeout;
         let mut status = None;
         let mut output = None;
-        let mut direct_reaped = false;
         let outcome = {
             let wait = process.child_mut().inner().wait();
             tokio::pin!(wait);
@@ -238,7 +237,6 @@ impl ExecCredentialConfig {
                     }
                 }
                 result = &mut wait, if status.is_none() => {
-                    direct_reaped = true;
                     status = Some(result.expect("owned child is waited once"));
                     None
                 }
@@ -257,15 +255,17 @@ impl ExecCredentialConfig {
                 }
             }
         };
-        if direct_reaped {
-            process.mark_direct_reaped();
-        }
-        process.terminate().await;
+        let cleanup_result = process.terminate().await;
 
         match outcome {
-            Ok((status, output)) => finish(status, input_task.take().expect("input task is pending"), output).await,
+            Ok((status, output)) => {
+                let result = finish(status, input_task.take().expect("input task is pending"), output).await;
+                cleanup_result?;
+                result
+            }
             Err(error) => {
                 cleanup(&mut input_task, &mut output_task).await;
+                cleanup_result?;
                 Err(error)
             }
         }
@@ -291,32 +291,23 @@ fn helper_command(settings: &ExecCredentialSettings) -> Command {
 
 struct ProcessGroup {
     child: Option<AsyncGroupChild>,
-    direct_reaped: bool,
 }
 
 impl ProcessGroup {
     const fn new(child: AsyncGroupChild) -> Self {
-        Self {
-            child: Some(child),
-            direct_reaped: false,
-        }
+        Self { child: Some(child) }
     }
 
     const fn child_mut(&mut self) -> &mut AsyncGroupChild {
         self.child.as_mut().expect("process group is active")
     }
 
-    const fn mark_direct_reaped(&mut self) {
-        self.direct_reaped = true;
-    }
-
-    async fn terminate(&mut self) {
-        if self.direct_reaped {
-            let _ = self.child_mut().start_kill();
-        } else {
-            terminate(self.child_mut()).await;
-        }
+    async fn terminate(&mut self) -> Result<(), CredentialError> {
+        terminate(self.child_mut())
+            .await
+            .map_err(|_| CredentialError::new("credential helper cleanup failed"))?;
         drop(self.child.take());
+        Ok(())
     }
 }
 
@@ -370,12 +361,10 @@ fn validate_output(output: &[u8]) -> Result<(), CredentialError> {
     Ok(())
 }
 
-async fn terminate(child: &mut command_group::AsyncGroupChild) {
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+async fn terminate(child: &mut command_group::AsyncGroupChild) -> std::io::Result<()> {
+    // The leader can exit before the signal; waiting for the whole group is the cleanup proof.
+    let _ = child.start_kill();
+    child.wait().await.map(|_| ())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

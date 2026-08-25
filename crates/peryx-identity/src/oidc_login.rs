@@ -2,15 +2,15 @@
 //! nonce, and PKCE bind each browser attempt. The provider pins the configured issuer and caches signing
 //! keys, so authenticated requests do not depend on provider availability.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyOperations, PublicKeyUse};
+use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use reqwest::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -18,18 +18,16 @@ use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 
 use crate::oidc::Audience;
-use crate::oidc_http::{OidcHttpTransport, ReqwestOidcHttpTransport};
+use crate::oidc_http::{
+    DISCOVERY_BODY_LIMIT, JWKS_BODY_LIMIT, MIN_FRESH_SECS, OidcHttpError, OidcHttpTransport, ReqwestOidcHttpTransport,
+    discovery_url, fetch, freshness, usable_keys,
+};
 use crate::{
     ExternalGroup, ExternalGroupGrant, ExternalIdentity, ExternalIdentityLinker, ExternalIdentityResolution,
     ExternalIdentityStore, ExternalLogin, ExternalSubject, ProviderId, UserName,
 };
 
-const DISCOVERY_BODY_LIMIT: usize = 64 * 1024;
-const JWKS_BODY_LIMIT: usize = 1024 * 1024;
 const TOKEN_BODY_LIMIT: usize = 64 * 1024;
-const MIN_FRESH_SECS: i64 = 60;
-const DEFAULT_FRESH_SECS: i64 = 300;
-const MAX_FRESH_SECS: i64 = 900;
 const HARD_CACHE_SECS: i64 = 3600;
 const RANDOM_BYTES: usize = 32;
 const OPENID_SCOPE: &str = "openid";
@@ -351,10 +349,7 @@ impl OidcLoginProvider {
         let jwks =
             serde_json::from_slice::<JwkSet>(&jwks_body).map_err(|_| OidcProviderError::InvalidProviderResponse)?;
         let keys = usable_keys(jwks)?;
-        let fresh_for = discovery_age
-            .unwrap_or(DEFAULT_FRESH_SECS)
-            .min(jwks_age.unwrap_or(DEFAULT_FRESH_SECS))
-            .clamp(MIN_FRESH_SECS, MAX_FRESH_SECS);
+        let fresh_for = freshness(discovery_age, jwks_age);
         Ok(Cache {
             endpoints: Some(Endpoints { authorization, token }),
             keys,
@@ -376,40 +371,9 @@ impl OidcLoginProvider {
         request: reqwest::RequestBuilder,
         limit: usize,
     ) -> Result<(Vec<u8>, Option<i64>), OidcProviderError> {
-        let request = request.build().map_err(|_| OidcProviderError::Unavailable)?;
-        let mut response = self
-            .transport
-            .execute(request)
+        fetch(self.transport.as_ref(), request, limit)
             .await
-            .map_err(|_| OidcProviderError::Unavailable)?;
-        if !response.status().is_success()
-            || response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_none_or(|value| !is_json_content_type(value))
-            || response
-                .headers()
-                .get(CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<usize>().ok())
-                .is_some_and(|length| length > limit)
-        {
-            return Err(OidcProviderError::InvalidProviderResponse);
-        }
-        let max_age = response
-            .headers()
-            .get(CACHE_CONTROL)
-            .and_then(|value| value.to_str().ok())
-            .and_then(cache_max_age);
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| OidcProviderError::Unavailable)? {
-            if body.len() + chunk.len() > limit {
-                return Err(OidcProviderError::InvalidProviderResponse);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok((body, max_age))
+            .map_err(OidcProviderError::from)
     }
 }
 
@@ -543,6 +507,15 @@ impl OidcProviderError {
     }
 }
 
+impl From<OidcHttpError> for OidcProviderError {
+    fn from(error: OidcHttpError) -> Self {
+        match error {
+            OidcHttpError::Unavailable => Self::Unavailable,
+            OidcHttpError::InvalidResponse => Self::InvalidProviderResponse,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OidcLoginError<E> {
     #[error("OIDC provider failed: {0}")]
@@ -638,79 +611,6 @@ fn oidc_client(request_timeout: Duration) -> Result<reqwest::Client, OidcProvide
         .timeout(request_timeout)
         .build()
         .or(Err(OidcProviderBuildError::InvalidTimeout))
-}
-
-fn discovery_url(issuer: &Url) -> Url {
-    let mut discovery = issuer.clone();
-    let path = format!(
-        "{}/.well-known/openid-configuration",
-        issuer.path().trim_end_matches('/')
-    );
-    discovery.set_path(&path);
-    discovery
-}
-
-fn usable_keys(jwks: JwkSet) -> Result<HashMap<String, DecodingKey>, OidcProviderError> {
-    let mut ids = HashSet::new();
-    if jwks.keys.is_empty()
-        || jwks.keys.iter().any(|key| {
-            let Some(id) = key.common.key_id.as_deref().filter(|id| !id.is_empty()) else {
-                return true;
-            };
-            !ids.insert(id)
-        })
-    {
-        return Err(OidcProviderError::InvalidProviderResponse);
-    }
-    let mut keys = HashMap::new();
-    for key in jwks.keys.into_iter().filter(|key| {
-        matches!(key.algorithm, AlgorithmParameters::RSA(_))
-            && key
-                .common
-                .key_algorithm
-                .is_none_or(|algorithm| algorithm.to_string() == "RS256")
-            && key
-                .common
-                .public_key_use
-                .as_ref()
-                .is_none_or(|usage| usage == &PublicKeyUse::Signature)
-            && key
-                .common
-                .key_operations
-                .as_ref()
-                .is_none_or(|operations| operations.contains(&KeyOperations::Verify))
-    }) {
-        let id = key
-            .common
-            .key_id
-            .clone()
-            .expect("key IDs were validated before filtering");
-        let decoding = DecodingKey::from_jwk(&key).map_err(|_| OidcProviderError::InvalidProviderResponse)?;
-        keys.insert(id, decoding);
-    }
-    if keys.is_empty() {
-        return Err(OidcProviderError::InvalidProviderResponse);
-    }
-    Ok(keys)
-}
-
-fn is_json_content_type(value: &str) -> bool {
-    let media = value
-        .split(';')
-        .next()
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    media == "application/json" || media.starts_with("application/") && media.ends_with("+json")
-}
-
-fn cache_max_age(value: &str) -> Option<i64> {
-    value.split(',').find_map(|directive| {
-        let (name, value) = directive.trim().split_once('=')?;
-        name.eq_ignore_ascii_case("max-age")
-            .then(|| value.trim_matches('"').parse().ok())
-            .flatten()
-    })
 }
 
 #[cfg(test)]

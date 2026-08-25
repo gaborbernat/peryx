@@ -188,6 +188,21 @@ fn test_a_new_key_that_would_cross_the_byte_ceiling_is_rejected() {
 }
 
 #[test]
+fn test_a_new_key_at_the_byte_ceiling_is_admitted() {
+    let (_dir, store) = store();
+
+    assert_eq!(
+        store
+            .stage_intent(adm("auth", "key-1", "digest-a", 10, b"intent"), limits(8, 10), 1,)
+            .unwrap(),
+        IntentStageResult {
+            outcome: IntentStageOutcome::Admitted,
+            pressure: BackpressureState::Backpressured,
+        }
+    );
+}
+
+#[test]
 fn test_stage_reports_nominal_below_the_soft_threshold() {
     let (_dir, store) = store();
     let bound = limits(5, 1 << 20);

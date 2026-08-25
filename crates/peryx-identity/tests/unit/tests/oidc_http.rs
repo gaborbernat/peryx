@@ -4,9 +4,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use async_trait::async_trait;
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::OidcHttpTransport;
+
+pub const MAX_DISCOVERY_BYTES: usize = 65_536;
+pub const MAX_JWKS_BYTES: usize = 1_048_576;
 
 pub fn transport(destination: &str) -> Arc<dyn OidcHttpTransport> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -28,23 +32,26 @@ pub fn secure_origin(origin: &str) -> String {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum MalformedDiscoveryBody {
+pub enum DiscoveryResponseBody {
+    ExactChunked { limit: usize },
     OversizedChunked { limit: usize },
+    ExactContentLength { limit: usize },
+    OversizedContentLength { limit: usize },
     Truncated,
 }
 
-pub struct MalformedDiscoveryServer {
+pub struct DiscoveryServer {
     address: SocketAddr,
     thread: Option<JoinHandle<()>>,
 }
 
-impl MalformedDiscoveryServer {
-    pub fn start(body: MalformedDiscoveryBody) -> Self {
+impl DiscoveryServer {
+    pub fn start(body: DiscoveryResponseBody) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         Self {
             address,
-            thread: Some(std::thread::spawn(move || serve_once(&listener, body))),
+            thread: Some(std::thread::spawn(move || serve_once(&listener, address, body))),
         }
     }
 
@@ -53,7 +60,7 @@ impl MalformedDiscoveryServer {
     }
 }
 
-impl Drop for MalformedDiscoveryServer {
+impl Drop for DiscoveryServer {
     fn drop(&mut self) {
         let _ = TcpStream::connect(self.address);
         if let Some(thread) = self.thread.take() {
@@ -62,24 +69,56 @@ impl Drop for MalformedDiscoveryServer {
     }
 }
 
-fn serve_once(listener: &TcpListener, body: MalformedDiscoveryBody) {
+fn serve_once(listener: &TcpListener, address: SocketAddr, body: DiscoveryResponseBody) {
     let (mut socket, _) = listener.accept().unwrap();
     let mut request = [0; 1024];
     let _ = socket.read(&mut request);
     let response = match body {
-        MalformedDiscoveryBody::OversizedChunked { limit } => {
-            let body = "x".repeat(limit + 1);
+        DiscoveryResponseBody::ExactChunked { limit } | DiscoveryResponseBody::OversizedChunked { limit } => {
+            let size = if matches!(body, DiscoveryResponseBody::ExactChunked { .. }) {
+                limit
+            } else {
+                limit + 1
+            };
+            let body = padded_json(
+                json!({
+                    "issuer": format!("https://{address}"),
+                    "jwks_uri": format!("https://{address}/keys"),
+                    "id_token_signing_alg_values_supported": ["RS256"],
+                }),
+                size,
+            );
             format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:X}\r\n{body}\r\n0\r\n\r\n",
                 body.len()
             )
         }
-        MalformedDiscoveryBody::Truncated => {
+        DiscoveryResponseBody::ExactContentLength { limit }
+        | DiscoveryResponseBody::OversizedContentLength { limit } => {
+            let length = if matches!(body, DiscoveryResponseBody::ExactContentLength { .. }) {
+                limit
+            } else {
+                limit + 1
+            };
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {length}\r\nconnection: close\r\n\r\n{{}}"
+            )
+        }
+        DiscoveryResponseBody::Truncated => {
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 8\r\nconnection: close\r\n\r\n{}"
                 .to_owned()
         }
     };
     let _ = socket.write_all(response.as_bytes());
+}
+
+pub fn padded_json(mut value: Value, size: usize) -> String {
+    value["padding"] = Value::String(String::new());
+    let base = serde_json::to_string(&value).unwrap();
+    value["padding"] = Value::String("x".repeat(size - base.len()));
+    let body = serde_json::to_string(&value).unwrap();
+    assert_eq!(body.len(), size);
+    body
 }
 
 #[derive(Debug)]

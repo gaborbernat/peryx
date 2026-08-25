@@ -287,12 +287,7 @@ impl BenchServer {
         let deadline = tokio::time::Instant::now() + environment.startup_timeout;
         match wait_for_startup(receiver, deadline).await {
             Ok(Some(())) => {}
-            Ok(None) => {
-                let Some(status) = active.process.as_mut().context("server process")?.try_wait()? else {
-                    bail!("{} closed its output before its startup event", self.name);
-                };
-                bail!("{} exited before its startup event with {status}", self.name);
-            }
+            Ok(None) => bail!("{} ended its output before its startup event", self.name),
             Err(_) => {
                 let tail = std::fs::read_to_string(&log).unwrap_or_default();
                 bail!("{} did not emit its startup event; server log tail:\n{tail}", self.name);
@@ -485,11 +480,16 @@ impl Drop for Active {
 struct ChildGuard<'child> {
     child: &'child mut Child,
     process_group: bool,
+    armed: bool,
 }
 
 impl<'child> ChildGuard<'child> {
     const fn new(child: &'child mut Child, process_group: bool) -> Self {
-        Self { child, process_group }
+        Self {
+            child,
+            process_group,
+            armed: true,
+        }
     }
 
     const fn child_mut(&mut self) -> &mut Child {
@@ -498,24 +498,26 @@ impl<'child> ChildGuard<'child> {
 
     fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child_mut().wait()?;
-        std::mem::forget(self);
+        self.armed = false;
         Ok(status)
     }
 
-    const fn release(self) {
-        std::mem::forget(self);
+    fn release(mut self) {
+        self.armed = false;
     }
 
     fn terminate(mut self) {
         let process_group = self.process_group;
         terminate_child(self.child_mut(), process_group);
-        std::mem::forget(self);
+        self.armed = false;
     }
 }
 
 impl Drop for ChildGuard<'_> {
     fn drop(&mut self) {
-        terminate_child(&mut *self.child, self.process_group);
+        if self.armed {
+            terminate_child(&mut *self.child, self.process_group);
+        }
     }
 }
 

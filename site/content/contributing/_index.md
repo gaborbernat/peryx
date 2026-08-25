@@ -70,33 +70,23 @@ files.
 ### System tests
 
 A system test starts the `peryx` executable or an external service and observes a public boundary. Neutral process and
-availability scenarios live in the `peryx` package. Ecosystem scenarios live in that ecosystem's system package. A
-system package declares `package.metadata.peryx-ci.kind = "system"`; CI covers it through the system lanes rather than a
-crate contract.
+availability scenarios live in the `peryx` package. Ecosystem scenarios live in that ecosystem's system package. Cargo
+discovers these packages as workspace members, so they run through the same workspace test and coverage commands.
 
 Use system tests for process lifecycle, client compatibility, failover, and service faults. Keep parsing and state
 transition cases in unit tests.
 
-Run the test policy checks after changing test infrastructure:
-
-```shell
-just test-layout
-just test-timing
-just test-processes
-```
-
-`test-layout` rejects test bodies in production source. `test-timing` rejects blind sleeps and polling. `test-processes`
-requires ownership and cleanup for spawned tasks, servers, and child processes.
+Run `just test` after changing test infrastructure. Process and server tests must wait for observable readiness and own
+cleanup for every spawned task, listener, and child process.
 
 ## Local validation
 
 `just --list` describes the public recipes. Common gates are:
 
 - `just test`: crate tests and benchmark harnesses
-- `just system-test`: client, ecosystem, availability, simulation, and browser tests
-- `just crate-contract PACKAGE .tox/crate-contracts/PACKAGE`: one crate's build, tests, targets, and exact coverage
-- `just coverage-native`: all non-system crate contracts
-- `just coverage`: complete Linux coverage and report merge
+- `just coverage-native`: complete native workspace coverage
+- `just coverage-frontend`: native and Wasm browser coverage
+- `just coverage`: complete native and frontend coverage
 - `just lint`: source, documentation, automation, dependency, and contract lint lanes
 - `just docs`: staged owner documentation and site build
 - `just site-links`: site build and external-link check
@@ -107,46 +97,27 @@ requires ownership and cleanup for spawned tasks, servers, and child processes.
 Nextest provides process isolation used by several suites. Use the recipes instead of substituting raw `cargo test` for
 repository validation.
 
-## Coverage contracts
+## Coverage
 
-Each non-system workspace crate has a coverage contract:
-
-```shell
-just crate-contract peryx-core .tox/crate-contracts/peryx-core
-```
-
-The contract checks applicable library, binary, example, doctest, integration-test, and benchmark targets. It then
-requires 100% executable line and function coverage for each declared source root, including test source. Run all
-non-system contracts with:
+The native coverage command compiles every workspace target with all features, runs the hermetic test suite and
+benchmark harnesses, and checks the report with cargo-llvm-cov:
 
 ```shell
 just coverage-native .tox/coverage/native.lcov
 ```
 
-System, frontend, and owner fuzz packages produce separate reports. `just coverage-merge` verifies their provenance,
-ownership, input digests, and policy digests before enforcing exact workspace and package coverage. A merged total
-cannot hide a package shortfall.
+The command requires 100% line, per-file line, function, and region coverage. Browser coverage combines native and Wasm
+reports and requires 100% line and function coverage.
 
 Test observable behavior for each executable path. A coverage exclusion requires a path that the language or target
 makes impossible to execute, with the reason beside the exclusion.
 
 ## CI structure
 
-GitHub Actions delegates checks to the same `just` recipes and repository scripts used locally. Workflow YAML owns event
-filters, runner setup, caches, matrices, artifacts, and job dependencies.
-
-- Planning classifies changed paths and balances eight crate-contract shards from recorded timings.
-- Lint jobs separate Rust source, documentation, automation, dependencies, and package contracts.
-- Platform jobs compile and test operating-system boundaries.
-- Crate-contract shards build, test, and cover the non-system packages selected by the plan.
-- System jobs cover client, storage, availability, and simulation boundaries; the frontend job covers native and Wasm
-  code plus browser behavior.
-- Owner fuzz jobs contribute coverage reports. Pull requests mutate up to 32 changed production candidates across eight
-  jobs, sampling larger sets with deterministic round-robin shards.
-- The coverage job verifies and merges lane reports. The documentation job builds the staged site.
-- The gate reads job results and rejects a missing, skipped, cancelled, or failed required lane.
-
-Scheduled jobs run full mutation across eight shards, plus minimum-dependency, Miri, and sanitizer checks.
+GitHub Actions owns event handling, runner setup, caching, artifacts, matrices, and job dependencies. The `justfile`
+owns validation. Pull requests run source, automation, contract, platform, native coverage, frontend coverage, and
+documentation jobs. Nightly CI adds feature powersets, direct dependency lower bounds, Miri, Loom, sanitizers, mutation,
+fuzzing, and the live client boundary.
 
 Run the recipe named by a failed job before changing workflow YAML. Change the workflow only when the fault concerns CI
 orchestration.
@@ -165,7 +136,6 @@ Cargo state, target files, browser state, temporary files, and nested Docker dat
 Examples:
 
 ```shell
-just linux crate-contract peryx-core .tox/crate-contracts/peryx-core
 just linux-system availability
 just linux-system coverage
 ```

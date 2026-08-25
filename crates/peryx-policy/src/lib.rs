@@ -173,7 +173,10 @@ impl From<Vec<Arc<dyn ArtifactRule>>> for PolicyCapabilities {
 
 const fn minimum(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
-        (Some(left), Some(right)) => Some(if left < right { left } else { right }),
+        (Some(left), Some(right)) => Some(match left.checked_sub(right) {
+            Some(_) => right,
+            None => left,
+        }),
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     }

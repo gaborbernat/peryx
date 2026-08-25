@@ -11,18 +11,20 @@ const AVAILABILITY_LISTENER_FD_ENV: &str = "PERYX_INHERITED_AVAILABILITY_LISTENE
 const ADMIN_PASSWORD: &str = "harness-admin-secret";
 
 fn main() -> ExitCode {
-    execute(std::env::args_os())
+    execute(
+        &std::env::current_exe().expect("resolve fixture executable"),
+        std::env::args_os().skip(1),
+    )
 }
 
-fn execute(mut arguments: impl Iterator<Item = OsString>) -> ExitCode {
-    let executable = invoked_executable(arguments.next().expect("fixture executable argument"));
+fn execute(executable: &Path, arguments: impl Iterator<Item = OsString>) -> ExitCode {
     let arguments = arguments
         .map(|argument| argument.into_string().expect("UTF-8 fixture argument"))
         .collect::<Vec<_>>();
     let result = if executable.file_stem().is_some_and(|name| name == "toxiproxy-server") {
-        run_toxiproxy(&executable, &arguments, None)
+        run_toxiproxy(executable, &arguments, None)
     } else {
-        run_peryx(&executable, &arguments, None)
+        run_peryx(executable, &arguments, None)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -31,14 +33,6 @@ fn execute(mut arguments: impl Iterator<Item = OsString>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn invoked_executable(argument: OsString) -> PathBuf {
-    let argument = PathBuf::from(argument);
-    std::env::split_paths(&std::env::var_os("PATH").expect("fixture PATH"))
-        .map(|directory| directory.join(&argument))
-        .find(|candidate| candidate.is_file())
-        .expect("resolve invoked fixture from PATH")
 }
 
 fn run_peryx(executable: &Path, args: &[String], public_listener: Option<TcpListener>) -> Result<(), String> {
@@ -182,10 +176,10 @@ fn serve_peryx(listener: &TcpListener, state_path: &Path, control: bool) {
             continue;
         }
         let (status, body, declared) = peryx_response(path, control, &state);
-        write_response(&mut stream, status, &body, declared);
         if let Some(leader) = state.strip_prefix("transfer:") {
             fs::write(state_path, format!("leader:{leader}")).expect("complete leader transfer");
         }
+        write_response(&mut stream, status, &body, declared);
     }
 }
 
@@ -263,6 +257,19 @@ fn run_toxiproxy(executable: &Path, args: &[String], control_listener: Option<Tc
         emit_toxiproxy_startup();
         return Ok(());
     }
+    if let Some(port) = mode.strip_prefix("silent-gate:") {
+        let mut gate =
+            TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port"))).expect("connect startup gate");
+        gate.write_all(&[1]).expect("identify startup gate");
+    }
+    let mut readiness_gate = mode.strip_prefix("gate:").map(|port| {
+        emit_toxiproxy_startup();
+        let mut gate =
+            TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port"))).expect("connect readiness gate");
+        gate.write_all(&[1]).expect("identify readiness gate");
+        gate.read_exact(&mut [0]).expect("wait for readiness release");
+        gate
+    });
     let listener = control_listener.unwrap_or_else(|| {
         TcpListener::bind((
             "127.0.0.1",
@@ -270,18 +277,11 @@ fn run_toxiproxy(executable: &Path, args: &[String], control_listener: Option<Tc
         ))
         .expect("bind toxiproxy control")
     });
-    if let Some(port) = mode.strip_prefix("silent-gate:") {
-        TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port"))).expect("connect startup gate");
-    }
-    if let Some(port) = mode.strip_prefix("gate:") {
-        emit_toxiproxy_startup();
-        TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port")))
-            .expect("connect readiness gate")
-            .read_exact(&mut [0])
-            .expect("wait for readiness release");
-    }
     if mode == "ready" {
         emit_toxiproxy_startup();
+    }
+    if let Some(gate) = &mut readiness_gate {
+        gate.write_all(&[1]).expect("acknowledge control bind");
     }
     loop {
         let (mut stream, _) = listener.accept().expect("accept toxiproxy request");
@@ -291,7 +291,10 @@ fn run_toxiproxy(executable: &Path, args: &[String], control_listener: Option<Tc
             return Ok(());
         }
         let state = fs::read_to_string(sibling(executable, "toxi-state")).expect("read toxiproxy state");
-        let status = if state == "startup-error" || state == "error" && !request.starts_with("GET /version ") {
+        let status = if state == "startup-not-found" && request.starts_with("GET /version ") {
+            fs::write(sibling(executable, "toxi-state"), "ok").expect("release toxiproxy readiness");
+            404
+        } else if state == "startup-error" || state == "error" && !request.starts_with("GET /version ") {
             500
         } else {
             200

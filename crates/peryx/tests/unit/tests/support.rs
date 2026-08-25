@@ -42,14 +42,12 @@ pub fn plugins_without_retention() -> PluginRegistry {
     plugin_registry(&PLAIN_REGISTRATION, &PLAIN_RUNTIME, &PLAIN_RUNTIME, &PLAIN_DRIVER, None)
 }
 
-pub fn plugins_with_metadata_migration(
-    migration: &'static dyn peryx_storage::meta::MetadataMigration,
-) -> PluginRegistry {
+pub fn plugins_with_metadata_migration(migration: Arc<dyn peryx_storage::meta::MetadataMigration>) -> PluginRegistry {
     registry_with_migration(&REGISTRATION, Some(migration))
 }
 
 pub fn plugins_with_inactive_owner(
-    migration: Option<&'static dyn peryx_storage::meta::MetadataMigration>,
+    migration: Option<Arc<dyn peryx_storage::meta::MetadataMigration>>,
 ) -> PluginRegistry {
     PluginRegistry::new(vec![
         plugin_registration(&REGISTRATION, &RUNTIME, &RUNTIME, &DRIVER, None, 1),
@@ -80,7 +78,7 @@ fn registry(registration: &'static Registration) -> PluginRegistry {
 
 fn registry_with_migration(
     registration: &'static Registration,
-    metadata_migration: Option<&'static dyn peryx_storage::meta::MetadataMigration>,
+    metadata_migration: Option<Arc<dyn peryx_storage::meta::MetadataMigration>>,
 ) -> PluginRegistry {
     plugin_registry(
         registration,
@@ -96,7 +94,7 @@ fn plugin_registry(
     runtime: &'static dyn EcosystemRuntime,
     distributed_runtime: &'static dyn DistributedRuntime,
     client_discovery: &'static dyn ClientDiscovery,
-    metadata_migration: Option<&'static dyn peryx_storage::meta::MetadataMigration>,
+    metadata_migration: Option<Arc<dyn peryx_storage::meta::MetadataMigration>>,
 ) -> PluginRegistry {
     PluginRegistry::new(vec![plugin_registration(
         registration,
@@ -114,7 +112,7 @@ fn plugin_registration(
     runtime: &'static dyn EcosystemRuntime,
     distributed_runtime: &'static dyn DistributedRuntime,
     client_discovery: &'static dyn ClientDiscovery,
-    metadata_migration: Option<&'static dyn peryx_storage::meta::MetadataMigration>,
+    metadata_migration: Option<Arc<dyn peryx_storage::meta::MetadataMigration>>,
     priority: u16,
 ) -> PluginRegistration {
     PluginRegistration {

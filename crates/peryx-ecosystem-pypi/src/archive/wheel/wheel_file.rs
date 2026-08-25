@@ -74,7 +74,7 @@ fn parse_wheel_version(value: &str) -> Result<Vec<u64>, ArchiveError> {
     let parts = value
         .split('.')
         .map(|part| {
-            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            if !part.bytes().all(|byte| byte.is_ascii_digit()) {
                 return Err(invalid_wheel(format!("invalid Wheel-Version {value:?}")));
             }
             part.parse::<u64>()

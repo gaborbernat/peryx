@@ -28,9 +28,7 @@ const TEST_TMPDIR_ENV: &str = "PERYX_TEST_TMPDIR";
 const PUBLIC_LISTENER_FD_ENV: &str = "PERYX_INHERITED_PUBLIC_LISTENER_FD";
 #[cfg(unix)]
 const AVAILABILITY_LISTENER_FD_ENV: &str = "PERYX_INHERITED_AVAILABILITY_LISTENER_FD";
-// A dead node refuses the connection at once, so this bounds only how long a live-but-slow response
-// may take. Under the parallel availability-e2e suite a loaded CI runner can push a first read past a
-// two-second ceiling, which then reads as a spurious unreachable; keep it well under READY_TIMEOUT.
+// Keep an individual request deadline inside the overall readiness deadline.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 type DataPreparation<'a> = &'a dyn Fn(&MemberSpec, &std::path::Path);
 
@@ -1564,10 +1562,27 @@ pub fn process_alive(pid: u32) -> bool {
         let pid = nix::unistd::Pid::from_raw(pid);
         nix::sys::signal::kill(pid, None).is_ok()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        false
+        windows_process_alive(pid)
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code, reason = "Windows exposes process status through raw handle APIs")]
+fn windows_process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let mut status = 0;
+        let active = GetExitCodeProcess(process, &raw mut status) != 0 && status == STILL_ACTIVE as u32;
+        CloseHandle(process);
+        active
     }
 }
 

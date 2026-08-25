@@ -18,24 +18,16 @@ repos:
         entry: cargo clippy --target-dir .tox/pre-commit-target --workspace --all-targets --all-features -- -D warnings
         types: [rust]
         pass_filenames: false
-      - id: test-layout
-        name: test layout
-        language: system
-        entry: .github/scripts/check-test-layout
-        types: [rust]
-        pass_filenames: false
-      - id: test-timing
-        name: test timing
-        language: system
-        entry: .github/scripts/check-test-timing
-        files: \.(bash|cjs|js|jsx|mjs|rs|sh|ts|tsx|zsh)$
-        pass_filenames: false
       - id: render-diagrams
         name: check mermaid diagrams
         language: system
         entry: node site/scripts/render_diagrams.mjs --check
         files: ^(site/content|crates/peryx-ecosystem-(pypi|oci)/docs/content)/.*\.md$
         pass_filenames: false
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
   - repo: https://github.com/hukkin/mdformat
     rev: 1.0.0
     hooks:

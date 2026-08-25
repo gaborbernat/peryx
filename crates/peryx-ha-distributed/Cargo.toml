@@ -24,7 +24,7 @@ peryx-identity.workspace = true
 peryx-storage.workspace = true
 peryx-upstream.workspace = true
 redb.workspace = true
-reqwest = { workspace = true, features = ["gzip", "http2", "rustls-native-certs", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["gzip", "http2", "rustls-no-provider", "stream"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,9 +35,6 @@ utoipa.workspace = true
 url.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "rt", "sync", "time"] }
 tokio-util.workspace = true
-
-[target.'cfg(loom)'.dependencies]
-loom = "0.7.2"
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["async_tokio"] }

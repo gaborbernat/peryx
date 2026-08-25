@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use axum::Router;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -36,21 +36,21 @@ impl TestPki {
             KeyUsagePurpose::DigitalSignature,
             KeyUsagePurpose::CrlSign,
         ];
-        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
 
         let server_key = KeyPair::generate().unwrap();
         let mut server_params = CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
         server_params.distinguished_name = distinguished_name("peryx test server");
         server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         server_params.use_authority_key_identifier_extension = true;
-        let server = server_params.signed_by(&server_key, &ca, &ca_key).unwrap();
+        let server = server_params.signed_by(&server_key, &ca).unwrap();
 
         let client_key = KeyPair::generate().unwrap();
         let mut client_params = CertificateParams::default();
         client_params.distinguished_name = distinguished_name("peryx test client");
         client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         client_params.use_authority_key_identifier_extension = true;
-        let client = client_params.signed_by(&client_key, &ca, &ca_key).unwrap();
+        let client = client_params.signed_by(&client_key, &ca).unwrap();
 
         Self {
             ca_pem: ca.pem(),

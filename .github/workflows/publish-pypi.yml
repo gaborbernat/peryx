@@ -10,9 +10,9 @@ on:
 
 permissions: {}
 
-env:
-  CARGO_HTTP_MULTIPLEXING: "false"
-  CARGO_NET_RETRY: "10"
+concurrency:
+  group: publish-pypi-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   wheels:
@@ -51,7 +51,8 @@ jobs:
         if: matrix.platform.host == true
         env:
           RUSTC_WRAPPER: sccache
-        run: just package-wheel --target ${{ matrix.platform.rust_target }}
+          RUST_TARGET: ${{ matrix.platform.rust_target }}
+        run: just package-wheel --target "$RUST_TARGET"
       - name: Build wheel
         if: matrix.platform.host != true
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -100,10 +101,9 @@ jobs:
     timeout-minutes: 10
     environment: pypi
     permissions:
-      # OIDC avoids a long-lived PyPI token.
-      attestations: write
-      contents: read
-      id-token: write
+      attestations: write # Sign the Python packages.
+      contents: read # Read release metadata.
+      id-token: write # Authenticate to PyPI without a stored token.
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         env:

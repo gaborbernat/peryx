@@ -58,7 +58,7 @@ impl Fault {
 
     fn pass(&self) -> io::Result<()> {
         self.0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| match remaining {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| match remaining {
                 -1 => Some(-1),
                 0 => None,
                 _ => Some(remaining - 1),

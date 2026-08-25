@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use axum::Extension;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::{any, delete, get, post, put};
+use http_body_util::BodyExt as _;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
 use crate::handlers;
@@ -142,6 +144,7 @@ async fn reject_replica_mutation(State(state): State<Arc<AppState>>, request: Re
     {
         return next.run(request).await;
     }
+    discard_body(request.into_body());
     (
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         axum::Json(serde_json::json!({
@@ -150,6 +153,17 @@ async fn reject_replica_mutation(State(state): State<Arc<AppState>>, request: Re
         })),
     )
         .into_response()
+}
+
+fn discard_body(mut body: Body) {
+    tokio::spawn(async move {
+        while let Some(frame) = body.frame().await {
+            if let Err(error) = frame {
+                tracing::debug!(%error, "rejected request body closed before it was discarded");
+                break;
+            }
+        }
+    });
 }
 
 /// Whether a POST is a read that a read-only replica may serve: the neutral `POST /+query` surface,

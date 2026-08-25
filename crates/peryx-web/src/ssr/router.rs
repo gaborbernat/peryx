@@ -3,10 +3,22 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::FromRef;
 use leptos::prelude::*;
-use leptos_axum::{LeptosRoutes as _, generate_route_list};
+use leptos_axum::{AxumRouteListing, LeptosRoutes as _};
+use leptos_router::{Method, SsrMode};
 use peryx_driver::AppState;
 
-use crate::{App, shell};
+use crate::shell;
+
+macro_rules! axum_routes {
+    ($(($path:literal, $matcher:expr, $view:ident, $mode:ident)),+ $(,)?) => {
+        vec![$(AxumRouteListing::new(
+            $path.to_owned(),
+            SsrMode::$mode,
+            [Method::Get],
+            Vec::new(),
+        )),+]
+    };
+}
 
 #[derive(Clone)]
 pub struct UiState {
@@ -20,9 +32,8 @@ impl FromRef<UiState> for LeptosOptions {
     }
 }
 
-fn route_list() -> Vec<leptos_axum::AxumRouteListing> {
-    static ROUTES: std::sync::OnceLock<Vec<leptos_axum::AxumRouteListing>> = std::sync::OnceLock::new();
-    ROUTES.get_or_init(|| generate_route_list(App)).clone()
+fn route_list() -> Vec<AxumRouteListing> {
+    crate::app_routes!(axum_routes)
 }
 
 pub fn ui_router(app: Arc<AppState>) -> Router {

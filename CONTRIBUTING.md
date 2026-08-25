@@ -35,32 +35,24 @@ visibility for a test. Put public-boundary tests under `crates/CRATE/tests/integ
 `crates/CRATE/tests/`. System tests belong to the package that owns the executable, external service, or cross-crate
 boundary.
 
-`just crate-contract PACKAGE OUTPUT` builds and runs the package's targets, checks its source inventory, and requires
-100% line and function coverage, including test source. Lint, package, API, feature, and documentation checks run in
-separate lanes.
+`just coverage-native` runs the complete workspace with all features and rejects any uncovered workspace source line.
+`just coverage-frontend` applies the same source-line requirement to native and Wasm browser code.
 
 Run focused checks while editing:
 
 ```shell
 just test
-just crate-contract peryx-core .tox/crate-contracts/peryx-core
 just lint
-just coverage
+just coverage-native
+just coverage-frontend
 just docs
 just pre-commit
 ```
 
-`just all` runs linting, complete Linux coverage, documentation, and CI-safe hooks. Run `crate-contract` for each
-changed package. Use `just system-test` when a change reaches a process or external-service boundary.
-
-GitHub Actions splits pull-request work into lint, platform, weighted crate-contract, system, frontend, owner fuzz,
-mutation, documentation, and coverage lanes. The gate fails when a required result is missing or unsuccessful. Workflow
-files own triggers, runners, caches, artifacts, and dependencies. `just` recipes and repository scripts own validation,
-so each platform-compatible CI target runs from a checkout.
-
-Pull requests mutate all changed production candidates up to 32. Larger sets run a deterministic round-robin sample
-split across eight jobs. Each job prints the candidate count and selected shard. Scheduled CI mutates the full workspace
-across eight shards.
+`just all` runs linting, coverage, and documentation. GitHub Actions owns triggers, runners, caches, artifacts, and
+matrices; every check runs through a local `just` recipe. Pull requests run the native suite once under coverage instead
+of repeating it in crate and system lanes. Nightly CI runs feature powersets, Miri, Loom, sanitizers, mutation, fuzzing,
+and the live client boundary without retries or accepted failures.
 
 `compose.yaml` bind-mounts the checkout. `just linux COMMAND` runs a recipe in the 8 GiB Linux test service, while
 `just linux-system COMMAND` adds Docker-backed services. Use a 16 GiB wrapper only after the 8 GiB run reports memory

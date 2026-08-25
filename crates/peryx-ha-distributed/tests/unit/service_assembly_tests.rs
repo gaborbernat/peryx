@@ -1120,10 +1120,10 @@ async fn bounded_shutdown_reports_an_owner_panic() {
 
 #[tokio::test]
 async fn process_reaper_survives_panics_and_errors() {
-    reap_process_resource("panic", || -> Result<(), std::io::Error> { panic!("reaper panic") });
-    reap_process_resource("error", || Err(std::io::Error::other("reaper error")));
+    let panic = reap_process_resource("panic", || -> Result<(), std::io::Error> { panic!("reaper panic") });
+    let error = reap_process_resource("error", || Err(std::io::Error::other("reaper error")));
     let (completed, completion) = tokio::sync::oneshot::channel();
-    reap_process_resource("signal", move || {
+    let signal = reap_process_resource("signal", move || {
         completed.send(()).unwrap();
         Ok::<_, std::io::Error>(())
     });
@@ -1132,4 +1132,7 @@ async fn process_reaper_survives_panics_and_errors() {
         .await
         .unwrap()
         .unwrap();
+    panic.join().unwrap();
+    error.join().unwrap();
+    signal.join().unwrap();
 }

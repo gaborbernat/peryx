@@ -59,7 +59,7 @@ jobs:
             runner:
               - '.github/codspeed/**'
               - '.github/workflows/codspeed.yml'
-              - 'ci/run-codspeed*.sh'
+              - 'ci/run-codspeed.sh'
               - 'scripts/ci/codspeed-*'
               - 'justfile'
             workflow:
@@ -145,9 +145,10 @@ jobs:
     if: needs.changes.outputs.bench_matrix != '[]'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
+    # The job reads sources and publishes the content-addressed benchmark image.
     permissions:
       contents: read
-      packages: write
+      packages: write # Publish the benchmark runtime image.
     outputs:
       available: ${{ steps.image.outputs.available }}
       image: ${{ steps.image.outputs.image }}
@@ -176,11 +177,22 @@ jobs:
           set -euo pipefail
           tag=$(just codspeed-image-tag "$IMAGE")
           definition=${tag##*:definition-}
-          digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-          if [[ "$digest" == sha256:* ]]; then
+          inspection=$(mktemp "$RUNNER_TEMP/codspeed-image-inspection.XXXXXX")
+          trap 'rm -f "$inspection"' EXIT
+          if digest=$(docker buildx imagetools inspect "$tag" --format '{{.Manifest.Digest}}' 2>"$inspection"); then
+            [[ "$digest" == sha256:* ]] || {
+              printf 'registry returned an invalid image digest: %s\n' "$digest" >&2
+              exit 1
+            }
             echo "available=true" >> "$GITHUB_OUTPUT"
             echo "image=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
             exit 0
+          else
+            inspection_code=$?
+          fi
+          if ! grep -Fqx "ERROR: $tag: not found" "$inspection"; then
+            cat "$inspection" >&2
+            exit "$inspection_code"
           fi
 
           if [[ "$EVENT" == pull_request ]] && git cat-file -e "$BASE_SHA:.github/codspeed/Dockerfile"; then
@@ -229,11 +241,12 @@ jobs:
         include: ${{ fromJSON(needs.changes.outputs.bench_matrix) }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    # CodSpeed uses OIDC; the job reads sources, its image, and workflow artifacts.
     permissions:
-      actions: read
+      actions: read # Associate CodSpeed results with this run.
       contents: read
-      id-token: write
-      packages: read
+      id-token: write # Authenticate benchmark uploads to CodSpeed.
+      packages: read # Pull the benchmark runtime image.
     env:
       CODSPEED_SKIP_UPLOAD: >-
         ${{ github.event_name == 'pull_request' &&
@@ -272,10 +285,12 @@ jobs:
           CURRENT_KEY: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
           RESTORED_KEY: ${{ steps.benchmark-cache.outputs.cache-matched-key }}
         run: just codspeed-preserve-cache "$CURRENT_KEY" "$RESTORED_KEY"
-      - run: just codspeed ${{ matrix.package }} ${{ matrix.cargo_jobs }}
+      - run: just codspeed "$PACKAGE" "$CARGO_JOBS"
         env:
+          CARGO_JOBS: ${{ matrix.cargo_jobs }}
           GH_MATRIX: ${{ toJSON(matrix) }}
           GH_STRATEGY: ${{ toJSON(strategy) }}
+          PACKAGE: ${{ matrix.package }}
       - name: Record benchmark sources
         if: github.ref == 'refs/heads/main' && steps.benchmark-cache.outputs.cache-hit != 'true'
         run: just codspeed-record-sources
@@ -290,24 +305,15 @@ jobs:
             .tox/codspeed/target
           key: codspeed-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.package }}-${{ steps.source.outputs.key }}
 
-  # Branch protection requires an unconditional gate.
   codspeed-gate:
     if: always()
     needs: [changes, baseline, codspeed-image, operations]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
-        with:
-          tool: just
-      - name: Verify required jobs
-        env:
-          CI_CONTEXT: >-
-            {"event":"${{ github.event_name }}",
-            "benchmarks":${{ needs.changes.outputs.bench_matrix != '[]' }},
-            "image_available":${{ needs.codspeed-image.outputs.available == 'true' }}}
-          CI_RESULTS: ${{ toJSON(needs) }}
-        run: just ci-gate codspeed
+      - if: >-
+          needs.changes.result != 'success' ||
+          (needs.baseline.result != 'success' && needs.baseline.result != 'skipped') ||
+          (needs.codspeed-image.result != 'success' && needs.codspeed-image.result != 'skipped') ||
+          (needs.operations.result != 'success' && needs.operations.result != 'skipped')
+        run: exit 1

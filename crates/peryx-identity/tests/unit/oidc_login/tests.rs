@@ -7,10 +7,17 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
-use crate::tests::oidc_http::{MalformedDiscoveryBody, MalformedDiscoveryServer, secure_origin, transport};
+use crate::tests::oidc_http::{
+    DiscoveryResponseBody, DiscoveryServer, MAX_DISCOVERY_BYTES, padded_json, secure_origin, transport,
+};
 use crate::{ExternalIdentityResolution, ExternalLinkRequest, ServerUser, UserId, UserState};
 
 const NOW: i64 = 2_000_000_000;
+const FAILED_REFRESH_BACKOFF_SECS: i64 = 60;
+const METADATA_FRESH_SECS: i64 = 120;
+const MAX_METADATA_FRESH_SECS: i64 = 900;
+const HARD_CACHE_SECS: i64 = 3_600;
+const MAX_TOKEN_RESPONSE_BYTES: usize = 65_536;
 const MODULUS: &str = "yRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5_CYYi_cvI-SXVT9kPWSKXxJXBXd_4LkvcPuUakBoAkfh-eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG_AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi-yUod-j8MtvIj812dkS4QMiRVN_by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQ";
 const PRIVATE_KEY_DER: &str = "MIIEpAIBAAKCAQEAyRE6rHuNR0QbHO3H3Kt2pOKGVhQqGZXInOduQNxXzuKlvQTLUTv4l4sggh5/CYYi/cvI+SXVT9kPWSKXxJXBXd/4LkvcPuUakBoAkfh+eiFVMh2VrUyWyj3MFl0HTVF9KwRXLAcwkREiS3npThHRyIxuy0ZMeZfxVL5arMhw1SRELB8HoGfG/AtH89BIE9jDBHZ9dLelK9a184zAf8LwoPLxvJb3Il5nncqPcSfKDDodMFBIMc4lQzDKL5gvmiXLXB1AGLm8KBjfE8s3L5xqi+yUod+j8MtvIj812dkS4QMiRVN/by2h3ZY8LYVGrqZXZTcgn2ujn8uKjXLZVD5TdQIDAQABAoIBAHREk0I0O9DvECKdWUpAmF3mY7oY9PNQiu44Yaf+AoSuyRpRUGTMIgc3u3eivOE8ALX0BmYUO5JtuRNZDpvt4SAwqCnVUinIf6C+eH/wSurCpapSM0BAHp4aOA7igptyOMgMPYBHNA1e9A7jE0dCxKWMl3DSWNyjQTk4zeRGEAEfbNjHrq6YCtjHSZSLmWiG80hnfnYos9hOr5JnLnyS7ZmFE/5P3XVrxLc/tQ5zum0R4cbrgzHiQP5RgfxGJaEi7XcgherCCOgurJSSbYH29Gz8u5fFbS+Yg8s+OiCss3cs1rSgJ9/eHZuzGEdUZVARH6hVMjSuwvqVTFaE8AgtleECgYEA+uLMn4kNqHlJS2A5uAnCkj90ZxEtNm3E8hAxUrhssktY5XSOAPBlxyf5RuRGIImGtUVIr4HuJSa5TX48n3Vdt9MYCprO/iYl6moNRSPt5qowIIOJmIjY2mqPDfDt/zw+fcDD3lmCJrFlzcnh0uea1CohxEbQnL3cypeLt+WbU6kCgYEAzSp19m1ajieFkqgoB0YTpt/OroDx38vvI5unInJlEeOjQ+oIAQdN2wpxBvTrRorMU6P07mFUbt1j+Co6CbNiw+X8HcCaqYLR5clbJOOWNR36PuzOpQLkfK8woupBxzW9B8gZmY8rB1mbJ+/WTPrEJy6YGmIEBkWylQ2VpW8O4O0CgYEApdbvvfFBlwD9YxbrcGz7MeNCFbMz+MucqQntIKoKJ91ImPxvtc0y6e/Rhnv0oyNlaUOwJVu0yNgNG117w0g4t/+Q38mvVC5xV7/cn7x9UMFk6MkqVir3dYGEqIl/OP1grY2Tq9HtB5iyG9L8NIamQOLMyUqqMUILxdthHyFmiGkCgYEAn9+PjpjGMPHxL0gj8Q8VbzsFtou6b1deIRRA2CHmSltltR1gYVTMwXxQeUhPMmgkMqUXzs4/WijgpthY44hK1TaZEKIuoxrS70nJ4WQLf5a9k1065fDsFZD6yGjdGxvwEmlGMZgTwqV7t1I4X0Ilqhav5hcs5apYL7gnPYPeRz0CgYALHCj/Ji8XSsDoF/MhVhnGdIs2P99NNdmo3R2Pv0CuZbDKMU559LJHUvrKS8WkuWRDuKrz1W/EQKApFjDGpdqToZqriUFQzwy7mR3ayIiogzNtHcvbDHx8oFnGY0OFksX/ye0/XGpy2SFxYRwGU98HPYeBvAQQrVjdkzfy7BmXQQ==";
 
@@ -99,6 +106,10 @@ async fn mount_metadata(server: &MockServer, keys: Value) {
         "application/json",
     )
     .await;
+    mount_jwks(server, keys).await;
+}
+
+async fn mount_jwks(server: &MockServer, keys: Value) {
     Mock::given(method("GET"))
         .and(path("/jwks"))
         .respond_with(
@@ -132,6 +143,16 @@ async fn mount_token(server: &MockServer, body: Value) {
         )
         .mount(server)
         .await;
+}
+
+async fn discovery_requests(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path() == "/.well-known/openid-configuration")
+        .count()
 }
 
 async fn ready() -> (MockServer, OidcLoginProvider) {
@@ -200,12 +221,18 @@ async fn test_callback_rejects_a_mismatched_state() {
 }
 
 #[rstest]
-#[case::wrong_issuer(json!("https://evil.example"), "iss")]
-#[case::wrong_audience(json!("other-client"), "aud")]
-#[case::expired(json!(NOW - 3600), "exp")]
-#[case::future_issued(json!(NOW + 7200), "iat")]
+#[case::wrong_issuer(json!("https://evil.example"), "iss", false)]
+#[case::wrong_audience(json!("other-client"), "aud", false)]
+#[case::expiration_at_skew(json!(NOW - 60), "exp", true)]
+#[case::expiration_beyond_skew(json!(NOW - 61), "exp", false)]
+#[case::issued_at_skew(json!(NOW + 60), "iat", true)]
+#[case::issued_beyond_skew(json!(NOW + 61), "iat", false)]
 #[tokio::test]
-async fn test_id_token_registered_claims_are_enforced(#[case] value: Value, #[case] claim: &str) {
+async fn test_id_token_registered_claims_are_enforced(
+    #[case] value: Value,
+    #[case] claim: &str,
+    #[case] accepted: bool,
+) {
     let server = MockServer::start().await;
     mount_metadata(&server, json!({"keys": [jwk("key-1")]})).await;
     let provider = provider(&server.uri());
@@ -216,10 +243,7 @@ async fn test_id_token_registered_claims_are_enforced(#[case] value: Value, #[ca
         json!({"id_token": mint("key-1", &claims), "token_type": "Bearer"}),
     )
     .await;
-    assert!(matches!(
-        provider.callback(&response(), &pending(), NOW).await,
-        Err(OidcProviderError::InvalidToken)
-    ));
+    assert_eq!(provider.callback(&response(), &pending(), NOW).await.is_ok(), accepted);
 }
 
 #[tokio::test]
@@ -465,6 +489,27 @@ async fn test_token_response_without_an_id_token_is_rejected() {
     ));
 }
 
+#[rstest]
+#[case::maximum(MAX_TOKEN_RESPONSE_BYTES, true)]
+#[case::oversized(MAX_TOKEN_RESPONSE_BYTES + 1, false)]
+#[tokio::test]
+async fn test_token_response_size_bound(#[case] size: usize, #[case] accepted: bool) {
+    let (server, provider) = ready().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            padded_json(
+                json!({"id_token": mint("key-1", &base_claims(&server)), "token_type": "Bearer"}),
+                size,
+            ),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+
+    assert_eq!(provider.callback(&response(), &pending(), NOW).await.is_ok(), accepted);
+}
+
 #[tokio::test]
 async fn test_token_exchange_transport_failure_stays_unavailable() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -513,6 +558,7 @@ async fn test_discovery_pins_the_issuer() {
         "application/json",
     )
     .await;
+    mount_jwks(&server, json!({"keys": [jwk("key-1")]})).await;
     let provider = provider(&server.uri());
     assert!(matches!(
         provider.authorization(NOW).await,
@@ -535,6 +581,7 @@ async fn test_discovery_requires_rs256_support() {
         "application/json",
     )
     .await;
+    mount_jwks(&server, json!({"keys": [jwk("key-1")]})).await;
     assert!(matches!(
         provider(&server.uri()).authorization(NOW).await,
         Err(OidcProviderError::InvalidProviderResponse)
@@ -562,14 +609,36 @@ async fn test_invalid_endpoint_url_is_rejected() {
     ));
 }
 
+#[rstest]
+#[case::json("application/json; charset=utf-8", true)]
+#[case::structured("application/openid-configuration+json", true)]
+#[case::wrong("text/json", false)]
 #[tokio::test]
-async fn test_non_json_discovery_is_rejected() {
+async fn test_discovery_content_type_is_enforced(#[case] content_type: &str, #[case] accepted: bool) {
     let server = MockServer::start().await;
-    mount_discovery(&server, json!({"issuer": secure_origin(&server.uri())}), "text/plain").await;
-    assert!(matches!(
-        provider(&server.uri()).authorization(NOW).await,
-        Err(OidcProviderError::InvalidProviderResponse)
-    ));
+    mount_discovery(
+        &server,
+        json!({
+            "issuer": issuer(&server),
+            "authorization_endpoint": format!("{}/authorize", secure_origin(&server.uri())),
+            "token_endpoint": format!("{}/token", secure_origin(&server.uri())),
+            "jwks_uri": format!("{}/jwks", secure_origin(&server.uri())),
+            "id_token_signing_alg_values_supported": ["RS256"],
+        }),
+        content_type,
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({"keys": [jwk("key-1")]})),
+        )
+        .mount(&server)
+        .await;
+
+    assert_eq!(provider(&server.uri()).authorization(NOW).await.is_ok(), accepted);
 }
 
 #[tokio::test]
@@ -577,7 +646,7 @@ async fn test_oversize_discovery_is_rejected() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/.well-known/openid-configuration"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw("x".repeat(DISCOVERY_BODY_LIMIT + 1), "application/json"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("x".repeat(MAX_DISCOVERY_BYTES + 1), "application/json"))
         .mount(&server)
         .await;
     assert!(matches!(
@@ -613,7 +682,7 @@ async fn test_cold_provider_network_failure_is_unavailable() {
 }
 
 #[tokio::test]
-async fn test_signing_key_rotation_succeeds_after_refresh() {
+async fn test_signing_key_rotation_refreshes_a_fresh_cache() {
     let (server, provider) = ready().await;
     mount_token(
         &server,
@@ -630,14 +699,17 @@ async fn test_signing_key_rotation_succeeds_after_refresh() {
     .await;
     assert!(
         provider
-            .callback(&response(), &pending(), NOW + MAX_FRESH_SECS)
+            .callback(&response(), &pending(), NOW + FAILED_REFRESH_BACKOFF_SECS)
             .await
             .is_ok()
     );
 }
 
+#[rstest]
+#[case::successful(true)]
+#[case::failed(false)]
 #[tokio::test]
-async fn test_unknown_key_refresh_is_rate_limited() {
+async fn test_unknown_key_refresh_is_rate_limited(#[case] refresh_succeeds: bool) {
     let (server, provider) = ready().await;
     mount_token(
         &server,
@@ -646,20 +718,41 @@ async fn test_unknown_key_refresh_is_rate_limited() {
     .await;
     provider.callback(&response(), &pending(), NOW).await.unwrap();
     server.reset().await;
-    mount_metadata(&server, json!({"keys": [jwk("key-1")]})).await;
+    if refresh_succeeds {
+        mount_metadata(&server, json!({"keys": [jwk("key-1")]})).await;
+    } else {
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+    }
     mount_token(
         &server,
         json!({"id_token": mint("key-2", &base_claims(&server)), "token_type": "Bearer"}),
     )
     .await;
     assert!(matches!(
-        provider.callback(&response(), &pending(), NOW).await,
+        provider
+            .callback(&response(), &pending(), NOW + FAILED_REFRESH_BACKOFF_SECS)
+            .await,
         Err(OidcProviderError::UnknownKey)
     ));
+    assert_eq!(discovery_requests(&server).await, 1);
     assert!(matches!(
-        provider.callback(&response(), &pending(), NOW + MIN_FRESH_SECS).await,
+        provider
+            .callback(&response(), &pending(), NOW + 2 * FAILED_REFRESH_BACKOFF_SECS - 1)
+            .await,
         Err(OidcProviderError::UnknownKey)
     ));
+    assert_eq!(discovery_requests(&server).await, 1);
+    assert!(matches!(
+        provider
+            .callback(&response(), &pending(), NOW + 2 * FAILED_REFRESH_BACKOFF_SECS)
+            .await,
+        Err(OidcProviderError::UnknownKey)
+    ));
+    assert_eq!(discovery_requests(&server).await, 2);
 }
 
 #[tokio::test]
@@ -684,7 +777,7 @@ async fn test_metadata_outage_keeps_the_cached_key_then_hard_expires() {
     .await;
     assert!(
         provider
-            .callback(&response(), &pending(), NOW + MAX_FRESH_SECS)
+            .callback(&response(), &pending(), NOW + MAX_METADATA_FRESH_SECS)
             .await
             .is_ok()
     );
@@ -703,15 +796,16 @@ async fn test_warm_cache_serves_without_refetching() {
     )
     .await;
     provider.callback(&response(), &pending(), NOW).await.unwrap();
-    provider.callback(&response(), &pending(), NOW + 1).await.unwrap();
-    let discovery = server
-        .received_requests()
+    provider
+        .callback(&response(), &pending(), NOW + METADATA_FRESH_SECS - 1)
         .await
-        .unwrap()
-        .into_iter()
-        .filter(|request| request.url.path() == "/.well-known/openid-configuration")
-        .count();
-    assert_eq!(discovery, 1);
+        .unwrap();
+    assert_eq!(discovery_requests(&server).await, 1);
+    provider
+        .callback(&response(), &pending(), NOW + METADATA_FRESH_SECS)
+        .await
+        .unwrap();
+    assert_eq!(discovery_requests(&server).await, 2);
 }
 
 #[rstest]
@@ -762,33 +856,17 @@ async fn test_verify_only_key_survives_alongside_incompatible_keys() {
 
 #[rstest]
 #[case::oversized_chunk(
-    MalformedDiscoveryBody::OversizedChunked { limit: DISCOVERY_BODY_LIMIT },
+    DiscoveryResponseBody::OversizedChunked { limit: MAX_DISCOVERY_BYTES },
     OidcProviderError::InvalidProviderResponse
 )]
-#[case::truncated(MalformedDiscoveryBody::Truncated, OidcProviderError::Unavailable)]
+#[case::truncated(DiscoveryResponseBody::Truncated, OidcProviderError::Unavailable)]
 #[tokio::test]
-async fn test_malformed_discovery_body(#[case] body: MalformedDiscoveryBody, #[case] expected: OidcProviderError) {
-    let server = MalformedDiscoveryServer::start(body);
+async fn test_malformed_discovery_body(#[case] body: DiscoveryResponseBody, #[case] expected: OidcProviderError) {
+    let server = DiscoveryServer::start(body);
     assert_eq!(
         provider(&server.origin()).authorization(NOW).await.unwrap_err(),
         expected
     );
-}
-
-#[rstest]
-#[case::json("application/json; charset=utf-8", true)]
-#[case::structured("application/jwk-set+json", true)]
-#[case::wrong("text/json", false)]
-fn test_json_content_type_classification(#[case] value: &str, #[case] accepted: bool) {
-    assert_eq!(is_json_content_type(value), accepted);
-}
-
-#[rstest]
-#[case::present("max-age=42", Some(42))]
-#[case::quoted("private, max-age=\"7\"", Some(7))]
-#[case::absent("no-store", None)]
-fn test_cache_max_age_parsing(#[case] value: &str, #[case] expected: Option<i64>) {
-    assert_eq!(cache_max_age(value), expected);
 }
 
 #[test]

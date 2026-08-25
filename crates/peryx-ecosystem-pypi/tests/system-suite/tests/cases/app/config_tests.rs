@@ -44,9 +44,7 @@ fn test_config_check_summarizes_the_listener(
     let dir = tempfile::tempdir().unwrap();
     let mut config = config_at(&dir);
     config.tls = tls;
-    if single_index {
-        config.indexes.truncate(1);
-    }
+    config.indexes.truncate(if single_index { 1 } else { 3 });
     let mut out = Vec::new();
 
     config_check(&config, &mut out).unwrap();

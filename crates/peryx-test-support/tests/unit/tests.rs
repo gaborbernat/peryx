@@ -786,6 +786,17 @@ fn toxiproxy_startup_waits_for_the_version_endpoint() {
 }
 
 #[test]
+fn toxiproxy_startup_waits_through_a_not_found_version_route() {
+    with_fixture(|fixture| {
+        fs::write(fixture.toxi_state(), "startup-not-found").expect("delay version route");
+        let mut toxiproxy = Toxiproxy::start_with(fixture.toxiproxy(), TOXIPROXY_FAILURE_TIMEOUT)
+            .expect("start after the version route is mounted");
+        assert!(toxiproxy.control_is_up());
+        toxiproxy.kill();
+    });
+}
+
+#[test]
 fn toxiproxy_startup_reports_exit_after_the_signal() {
     with_fixture(|fixture| {
         fs::write(fixture.toxi_mode(), "signal-exit").expect("exit after startup signal");
@@ -944,7 +955,7 @@ impl FixtureEnvironment {
         let dir = TempDir::new().expect("create fixture directory");
         let fixture = Self { dir };
         fs::create_dir(fixture.empty_path()).expect("create empty path");
-        install_fixture(&fixture.peryx());
+        fs::copy(env!("PERYX_TEST_FIXTURE"), fixture.peryx()).expect("install process fixture");
         fs::copy(fixture.peryx(), fixture.toxiproxy()).expect("install toxiproxy fixture");
         fs::write(fixture.state(), "leader:dc-a").expect("write state");
         fs::write(fixture.toxi_state(), "ok").expect("write toxiproxy state");
@@ -1066,11 +1077,8 @@ fn toxiproxy_start_at_gate(
             .send(Toxiproxy::start_with(binary, TOXIPROXY_FAILURE_TIMEOUT))
             .expect("return startup result");
     });
-    (
-        startup,
-        receiver,
-        accept_within(&gate, TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy startup event"),
-    )
+    let connection = accept_within(&gate, TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy startup gate");
+    (startup, receiver, connection)
 }
 
 fn accept_within(listener: &TcpListener, timeout: Duration, event: &str) -> TcpStream {
@@ -1090,20 +1098,6 @@ fn accept_within(listener: &TcpListener, timeout: Duration, event: &str) -> TcpS
         panic!("{event} not received within {timeout:?}");
     }
     connection
-}
-
-fn install_fixture(path: &Path) {
-    let _lock = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let compiler = Path::new(env!("CARGO")).with_file_name(format!("rustc{}", std::env::consts::EXE_SUFFIX));
-    let output = Command::new(compiler)
-        .args(["--edition=2024", "--crate-name", "peryx_test_fixture_launcher"])
-        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/process.rs"))
-        .arg("-o")
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("compile process fixture");
-    assert!(output.status.success());
 }
 
 fn read_request(stream: &mut TcpStream) -> String {

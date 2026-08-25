@@ -10,10 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::stream;
 use http_body_util::BodyExt as _;
 use peryx_driver::state::{AppState, ServingState};
 use peryx_identity::{GrantScope, Role};
@@ -285,4 +286,22 @@ async fn test_read_only_replica_refuses_mutations_but_preserves_read_authorizati
     assert_eq!(status, StatusCode::OK);
     assert_eq!(status_doc["role"], "replica");
     assert_eq!(status_doc["health"]["accepting_writes"], json!(false));
+}
+
+#[tokio::test]
+async fn test_read_only_replica_polls_a_rejected_body_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, router, _runtime) = replica_node(&dc_replica_config(&dir, "http://writer.invalid/"));
+    let (polled, observed) = tokio::sync::oneshot::channel();
+    let body = Body::from_stream(stream::once(async move {
+        polled.send(()).expect("body poll remains observable");
+        Err::<Bytes, _>(std::io::Error::other("broken request body"))
+    }));
+    let response = router
+        .oneshot(Request::post("/+grants").body(body).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    observed.await.expect("the rejected body is polled");
 }

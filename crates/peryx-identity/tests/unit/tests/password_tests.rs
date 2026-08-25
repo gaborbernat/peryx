@@ -1,3 +1,5 @@
+use rstest::rstest;
+
 use crate::{PasswordCheck, PasswordError, PasswordPolicy, PasswordVerifier};
 
 fn cheap() -> PasswordPolicy {
@@ -28,13 +30,16 @@ fn test_each_enrollment_uses_a_fresh_salt() {
     assert_ne!(policy.hash("same").unwrap(), policy.hash("same").unwrap());
 }
 
-#[test]
-fn test_check_reports_stale_when_the_policy_tightens() {
-    let verifier = cheap().hash("correct horse").unwrap();
-    let tighter = PasswordPolicy::new(16, 2, 1).unwrap();
+#[rstest]
+#[case::memory(24, 1, 2)]
+#[case::iterations(16, 2, 2)]
+#[case::lanes(16, 1, 1)]
+fn test_check_reports_each_stale_cost(#[case] memory_kib: u32, #[case] iterations: u32, #[case] lanes: u32) {
+    let verifier = PasswordPolicy::new(16, 1, 2).unwrap().hash("correct horse").unwrap();
+    let changed = PasswordPolicy::new(memory_kib, iterations, lanes).unwrap();
 
     assert_eq!(
-        verifier.check("correct horse", &tighter),
+        verifier.check("correct horse", &changed),
         PasswordCheck::Accepted { stale: true }
     );
 }

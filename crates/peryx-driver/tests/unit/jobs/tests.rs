@@ -343,6 +343,20 @@ where
     }
 }
 
+#[derive(Clone, Default)]
+struct SchedulerEvents(Arc<AtomicUsize>);
+
+impl<Subscriber> tracing_subscriber::Layer<Subscriber> for SchedulerEvents
+where
+    Subscriber: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: tracing_subscriber::layer::Context<'_, Subscriber>) {
+        if event.metadata().target() == "peryx_driver::jobs::scheduler" {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
     let (_dir, state) = serving();
@@ -549,6 +563,30 @@ async fn test_shutdown_cancels_a_running_job_and_skips_a_queued_one() {
         0,
         "a job admitted before shutdown never starts once cancelled"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_cancelled_jobs_emit_no_terminal_event() {
+    let (_dir, state) = serving();
+    let scheduler = Arc::new(JobScheduler::new(state, limits(1, 2, 1, 1)));
+    let job = TestJob::new("probe", "a", Action::UntilCancelled);
+    let events = SchedulerEvents::default();
+    let subscriber = tracing_subscriber::registry()
+        .with(LevelFilter::TRACE)
+        .with(events.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+    tracing::trace!(target: "peryx_driver::jobs::scheduler", "observer probe");
+    assert_eq!(events.0.swap(0, Ordering::SeqCst), 1);
+    let run = tokio::spawn({
+        let scheduler = scheduler.clone();
+        let job = job.clone();
+        async move { scheduler.run(job).await }
+    });
+    job.started.notified().await;
+
+    scheduler.shutdown().await;
+    run.await.unwrap().unwrap();
+    assert_eq!(events.0.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -867,6 +905,76 @@ async fn test_metrics_expose_a_kinds_full_lifecycle_series() {
     assert!(body.contains("peryx_jobs_started_total{kind=\"probe\"} 1"));
     assert!(body.contains("peryx_jobs_finished_total{kind=\"probe\",outcome=\"succeeded\"} 1"));
     assert!(body.contains("peryx_jobs_running{kind=\"probe\"} 0"));
+}
+
+#[tokio::test]
+async fn test_metrics_accumulate_failed_jobs() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+    for scope in ["a", "b"] {
+        assert_eq!(
+            scheduler
+                .run(TestJob::new("probe", scope, Action::Return(Err("boom".to_owned()))))
+                .await
+                .unwrap_err(),
+            "test: boom"
+        );
+    }
+    scheduler.shutdown().await;
+
+    assert!(rendered_metrics(&scheduler).contains("peryx_jobs_finished_total{kind=\"probe\",outcome=\"failed\"} 2"));
+}
+
+#[tokio::test]
+async fn test_metrics_accumulate_cancelled_jobs() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(1, 4, 2, 2));
+    let running = TestJob::new("probe", "a", Action::UntilCancelled);
+    assert_eq!(scheduler.submit(running.clone()), Submit::Queued);
+    assert_eq!(
+        scheduler.submit(TestJob::new("probe", "b", Action::Return(Ok(JobReport::default())),)),
+        Submit::Queued
+    );
+    running.started.notified().await;
+    scheduler.shutdown().await;
+
+    assert!(rendered_metrics(&scheduler).contains("peryx_jobs_finished_total{kind=\"probe\",outcome=\"cancelled\"} 2"));
+}
+
+#[tokio::test]
+async fn test_metrics_accumulate_admission_rejections() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(1, 1, 1, 1));
+    let release = Arc::new(Notify::new());
+    let running = TestJob::new("probe", "a", Action::Block(release.clone()));
+    assert_eq!(scheduler.submit(running.clone()), Submit::Queued);
+    running.started.notified().await;
+    for scope in ["a", "a"] {
+        assert_eq!(
+            scheduler.submit(TestJob::new("probe", scope, Action::Return(Ok(JobReport::default())),)),
+            Submit::Conflict
+        );
+    }
+    for scope in ["b", "c"] {
+        assert_eq!(
+            scheduler.submit(TestJob::new("probe", scope, Action::Return(Ok(JobReport::default())),)),
+            Submit::QueueFull
+        );
+    }
+    release.notify_one();
+    scheduler.shutdown().await;
+
+    let body = rendered_metrics(&scheduler);
+    assert!(
+        body.contains("peryx_jobs_rejected_total{kind=\"probe\",reason=\"conflict\"} 2")
+            && body.contains("peryx_jobs_rejected_total{kind=\"probe\",reason=\"queue_full\"} 2")
+    );
+}
+
+fn rendered_metrics(scheduler: &JobScheduler) -> String {
+    let mut body = String::new();
+    crate::state::PrometheusSource::write_metrics(scheduler.metrics().as_ref(), &mut body);
+    body
 }
 
 fn context(state: Arc<ServingState>, cancel: CancellationToken) -> JobContext {
@@ -1197,17 +1305,41 @@ fn cache_schedule(secs: u64) -> Vec<Schedule> {
     }]
 }
 
+fn schedule_settings(value: &str) -> toml::Table {
+    toml::Table::from_iter([("mode".to_owned(), toml::Value::String(value.to_owned()))])
+}
+
 struct TestScheduleFactory {
+    kind: &'static str,
+    settings: toml::Table,
     job: Result<Arc<dyn NodeJob>, String>,
+}
+
+impl TestScheduleFactory {
+    fn new(job: Result<Arc<dyn NodeJob>, String>) -> Self {
+        Self {
+            kind: "plugin_sync",
+            settings: toml::Table::new(),
+            job,
+        }
+    }
+
+    fn identity(kind: &'static str, setting: &str) -> Self {
+        Self {
+            kind,
+            settings: schedule_settings(setting),
+            job: Ok(TestJob::new(kind, "identity", Action::Return(Ok(JobReport::default())))),
+        }
+    }
 }
 
 impl ScheduledJobFactory for TestScheduleFactory {
     fn kind(&self) -> &'static str {
-        "plugin_sync"
+        self.kind
     }
 
     fn settings(&self) -> toml::Table {
-        toml::Table::new()
+        self.settings.clone()
     }
 
     fn create(&self, _app: &AppState) -> Result<Arc<dyn NodeJob>, String> {
@@ -1219,7 +1351,7 @@ fn plugin_schedule(secs: u64, job: Result<Arc<dyn NodeJob>, String>) -> Vec<Sche
     vec![Schedule {
         job: ScheduledJob::Plugin(PluginScheduledJob::new(
             Ecosystem::new("example"),
-            Arc::new(TestScheduleFactory { job }),
+            Arc::new(TestScheduleFactory::new(job)),
         )),
         interval: Duration::from_secs(secs),
     }]
@@ -1229,39 +1361,54 @@ fn plugin_schedule(secs: u64, job: Result<Arc<dyn NodeJob>, String>) -> Vec<Sche
 fn test_plugin_schedule_equality_uses_its_public_identity() {
     let left = PluginScheduledJob::new(
         Ecosystem::new("example"),
-        Arc::new(TestScheduleFactory {
-            job: Ok(TestJob::new(
-                "plugin_sync",
-                "alpha",
-                Action::Return(Ok(JobReport::default())),
-            )),
-        }),
+        Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+            "plugin_sync",
+            "alpha",
+            Action::Return(Ok(JobReport::default())),
+        )))),
     );
     let right = PluginScheduledJob::new(
         Ecosystem::new("example"),
-        Arc::new(TestScheduleFactory {
-            job: Ok(TestJob::new(
-                "plugin_sync",
-                "beta",
-                Action::Return(Ok(JobReport::default())),
-            )),
-        }),
+        Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+            "plugin_sync",
+            "beta",
+            Action::Return(Ok(JobReport::default())),
+        )))),
     );
 
     assert_eq!(left, right);
+}
+
+#[rstest]
+#[case::ecosystem("other", "plugin_sync", "stable")]
+#[case::kind("example", "other", "stable")]
+#[case::settings("example", "plugin_sync", "fast")]
+fn test_plugin_schedule_equality_rejects_each_identity_difference(
+    #[case] ecosystem: &'static str,
+    #[case] kind: &'static str,
+    #[case] setting: &str,
+) {
+    let left = PluginScheduledJob::new(
+        Ecosystem::new("example"),
+        Arc::new(TestScheduleFactory::identity("plugin_sync", "stable")),
+    );
+    let right = PluginScheduledJob::new(
+        Ecosystem::new(ecosystem),
+        Arc::new(TestScheduleFactory::identity(kind, setting)),
+    );
+
+    assert_ne!(left, right);
 }
 
 #[test]
 fn test_plugin_schedule_debug_names_its_public_identity() {
     let schedule = PluginScheduledJob::new(
         Ecosystem::new("example"),
-        Arc::new(TestScheduleFactory {
-            job: Ok(TestJob::new(
-                "plugin_sync",
-                "alpha",
-                Action::Return(Ok(JobReport::default())),
-            )),
-        }),
+        Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+            "plugin_sync",
+            "alpha",
+            Action::Return(Ok(JobReport::default())),
+        )))),
     );
     let debug = format!("{schedule:?}");
 
@@ -1276,13 +1423,11 @@ fn test_plugin_schedule_debug_names_its_public_identity() {
 #[test]
 fn test_registered_schedule_exposes_its_public_identity() {
     let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
-    let factory = Arc::new(TestScheduleFactory {
-        job: Ok(TestJob::new(
-            "plugin_sync",
-            "alpha",
-            Action::Return(Ok(JobReport::default())),
-        )),
-    });
+    let factory = Arc::new(TestScheduleFactory::new(Ok(TestJob::new(
+        "plugin_sync",
+        "alpha",
+        Action::Return(Ok(JobReport::default())),
+    ))));
     let left = RegisteredScheduledJob::new(factory.clone());
     let right = RegisteredScheduledJob::new(factory);
 
@@ -1298,22 +1443,33 @@ fn test_registered_schedule_exposes_its_public_identity() {
     );
 }
 
+#[rstest]
+#[case::kind("other", "stable")]
+#[case::settings("plugin_sync", "fast")]
+fn test_registered_schedule_equality_rejects_each_identity_difference(
+    #[case] kind: &'static str,
+    #[case] setting: &str,
+) {
+    let left = RegisteredScheduledJob::new(Arc::new(TestScheduleFactory::identity("plugin_sync", "stable")));
+    let right = RegisteredScheduledJob::new(Arc::new(TestScheduleFactory::identity(kind, setting)));
+
+    assert_ne!(left, right);
+}
+
 #[test]
 fn test_scheduled_job_settings_follow_the_selected_factory() {
-    let factory = Arc::new(TestScheduleFactory {
-        job: Ok(TestJob::new(
-            "plugin_sync",
-            "alpha",
-            Action::Return(Ok(JobReport::default())),
-        )),
-    });
+    let factory = Arc::new(TestScheduleFactory::identity("plugin_sync", "fast"));
     let jobs = [
-        ScheduledJob::CacheMaintenance,
         ScheduledJob::Plugin(PluginScheduledJob::new(Ecosystem::new("example"), factory.clone())),
         ScheduledJob::Registered(RegisteredScheduledJob::new(factory)),
     ];
 
-    assert!(jobs.into_iter().all(|job| job.settings().is_empty()));
+    assert!(jobs.into_iter().all(|job| job.settings() == schedule_settings("fast")));
+}
+
+#[test]
+fn test_cache_maintenance_has_no_settings() {
+    assert!(ScheduledJob::CacheMaintenance.settings().is_empty());
 }
 
 #[test]
@@ -1371,22 +1527,15 @@ async fn test_a_supported_scheduled_job_is_submitted() {
     assert_eq!(job.ran.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn test_reschedule_steps_from_the_due_instant_when_on_time() {
+#[rstest]
+#[case::on_time(0, 60)]
+#[case::within_interval(30, 60)]
+#[case::past_interval(200, 260)]
+fn test_reschedule_maintains_cadence_or_collapses_missed_runs(#[case] wake_secs: u64, #[case] expected_secs: u64) {
     let base = tokio::time::Instant::now();
     assert_eq!(
-        super::timer::reschedule(base, base, Duration::from_mins(1)),
-        base + Duration::from_mins(1)
-    );
-}
-
-#[test]
-fn test_reschedule_steps_from_the_wake_instant_when_it_woke_late() {
-    let base = tokio::time::Instant::now();
-    let woke = base + Duration::from_secs(200);
-    assert_eq!(
-        super::timer::reschedule(base, woke, Duration::from_mins(1)),
-        woke + Duration::from_mins(1)
+        super::timer::reschedule(base, base + Duration::from_secs(wake_secs), Duration::from_mins(1)),
+        base + Duration::from_secs(expected_secs)
     );
 }
 
@@ -1684,8 +1833,9 @@ async fn test_first_publish_home_claims_only_unowned_authorities(#[case] home: b
 }
 
 struct AdvancingJob {
-    epoch: Arc<std::sync::atomic::AtomicU64>,
-    leased: Arc<std::sync::atomic::AtomicU64>,
+    epoch: Arc<AtomicU64>,
+    leased: Arc<AtomicU64>,
+    failure: Option<&'static str>,
 }
 
 #[async_trait]
@@ -1709,7 +1859,10 @@ impl NodeJob for AdvancingJob {
     async fn run(&self, ctx: &JobContext) -> Result<JobReport, JobFailure> {
         self.leased.store(ctx.authority_fence(), Ordering::SeqCst);
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        Ok(JobReport::default())
+        self.failure.map_or_else(
+            || Ok(JobReport::default()),
+            |message| Err(JobFailure::new("test", message)),
+        )
     }
 }
 
@@ -1725,6 +1878,7 @@ async fn test_a_run_whose_authority_advances_mid_run_is_fenced() {
             .run(Arc::new(AdvancingJob {
                 epoch,
                 leased: leased.clone(),
+                failure: None,
             }))
             .await
             .unwrap_err(),
@@ -1741,6 +1895,45 @@ async fn test_a_run_whose_authority_advances_mid_run_is_fenced() {
     assert_eq!(
         runs[0].error.as_deref(),
         Some("authority_fenced: a newer authority epoch superseded this run"),
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_failed_run_preserves_its_error_when_authority_advances() {
+    let epoch = Arc::new(AtomicU64::new(5));
+    let (_dir, state) = serving_with_authority(test_authority(epoch.clone(), 0));
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+
+    assert_eq!(
+        scheduler
+            .run(Arc::new(AdvancingJob {
+                epoch,
+                leased: Arc::new(AtomicU64::new(0)),
+                failure: Some("failed at boundary"),
+            }))
+            .await
+            .unwrap_err(),
+        "test: failed at boundary"
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_a_repository_job_at_epoch_zero_is_not_fenced() {
+    let (_dir, state) = serving_with_authority(test_authority(Arc::new(AtomicU64::new(0)), 0));
+    let scheduler = JobScheduler::new(state, limits(2, 4, 2, 2));
+
+    assert_eq!(
+        scheduler
+            .run(TestJob::persisting_repository(
+                "steady",
+                "proj",
+                "proj",
+                Action::Return(Ok(JobReport::default())),
+            ))
+            .await,
+        Ok(JobReport::default())
     );
     scheduler.shutdown().await;
 }

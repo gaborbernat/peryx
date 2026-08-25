@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt;
 use peryx_core::path::{self};
 use peryx_driver::not_found;
 use peryx_driver::state::ServingState;
@@ -79,13 +80,19 @@ pub async fn pypi_dispatch_put(state: Arc<ServingState>, uri: axum::http::Uri, h
     };
     let actor = peryx_events::security::actor(&identity);
     if let Some(spec) = strip_action_segment(spec, "promote") {
-        return promote_request(&state, index, hosted, spec, uri.query(), &headers, actor.as_deref()).await;
+        return promote_request(&state, index, hosted, spec, uri.query(), &headers, actor.as_deref())
+            .boxed()
+            .await;
     }
     if let Some(spec) = strip_action_segment(spec, "yank") {
-        return yank_request(&state, index, hosted, spec, uri.query(), &headers, actor.as_deref()).await;
+        return yank_request(&state, index, hosted, spec, uri.query(), &headers, actor.as_deref())
+            .boxed()
+            .await;
     }
     if let Some(spec) = strip_action_segment(spec, "restore") {
-        return restore_request(&state, index, hosted, spec, &headers, actor.as_deref()).await;
+        return restore_request(&state, index, hosted, spec, &headers, actor.as_deref())
+            .boxed()
+            .await;
     }
     not_found()
 }

@@ -277,6 +277,47 @@ async fn test_none_mode_has_no_distributed_runtime() {
 }
 
 #[tokio::test]
+async fn test_readiness_rejects_uninitialized_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    drop(redb::Database::create(&path).unwrap());
+    let state = AppState::new(
+        MetaStore::open_existing_read_only(path).unwrap(),
+        BlobStore::new(dir.path().join("blobs")),
+        60,
+        Vec::new(),
+    );
+
+    assert!(!state.serving.is_ready(false).await);
+}
+
+#[tokio::test]
+async fn test_readiness_rejects_an_unusable_blob_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let blob_root = dir.path().join("blobs");
+    std::fs::write(&blob_root, b"not a directory").unwrap();
+    let state = AppState::new(
+        MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
+        BlobStore::new(blob_root),
+        60,
+        Vec::new(),
+    );
+
+    assert!(!state.serving.is_ready(false).await);
+}
+
+#[rstest::rstest]
+#[case(false, true)]
+#[case(true, false)]
+#[tokio::test]
+async fn test_read_only_readiness_distinguishes_requests(#[case] writes: bool, #[case] expected: bool) {
+    let (_dir, mut state) = local_state();
+    state.set_read_only(true).unwrap();
+
+    assert_eq!(state.serving.is_ready(writes).await, expected);
+}
+
+#[tokio::test]
 async fn test_distributed_state_without_remote_blob_availability_stays_local() {
     let (_dir, state) = state_with(TopologyConfig::default());
     let serial = state.serving.meta.current_serial().unwrap();

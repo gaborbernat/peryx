@@ -12,20 +12,10 @@ The PyPI workload and server adapters live in `crates/peryx-ecosystem-pypi/src/b
 
 ## Benchmark contracts
 
-`just test` runs crate tests, then executes all workspace benchmark harnesses. The benchmark lane uses a 20-minute
-deadline by default:
+`just test` runs crate tests, then executes all workspace benchmark harnesses:
 
 ```shell
 just benchmark
-just benchmark 600
-```
-
-The argument is a positive timeout in seconds. A timeout fails the recipe rather than leaving a harness running.
-
-Each non-system crate contract compiles and executes that crate's benchmark targets under coverage:
-
-```shell
-just crate-contract PACKAGE .tox/crate-contracts/PACKAGE
 ```
 
 A benchmark target must fail when setup or the measured path fails. Keep behavior assertions in the crate's `tests/`

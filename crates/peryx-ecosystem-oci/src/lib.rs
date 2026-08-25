@@ -14,6 +14,7 @@ use axum::Json;
 use axum::extract::{ConnectInfo, Request};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use futures_util::FutureExt as _;
 use peryx_core::{Ecosystem, Lexicon};
 use peryx_driver::AppState;
 use peryx_driver::access::ReadAccess;
@@ -227,7 +228,7 @@ impl EcosystemBrowse for OciPlugin {
     }
 
     async fn dispatch(&self, state: Arc<AppState>, request: Request) -> Response {
-        browse_http(state, request).await
+        browse_http(state, request).boxed().await
     }
 }
 
@@ -238,7 +239,7 @@ impl EcosystemOpenApi for OciPlugin {
 }
 
 #[must_use]
-pub const fn registration() -> peryx_plugin_registry::PluginRegistration {
+pub fn registration() -> peryx_plugin_registry::PluginRegistration {
     peryx_plugin_registry::PluginRegistration {
         registration: &OciPlugin,
         config: &OciPlugin,
@@ -305,6 +306,7 @@ async fn browse_http(state: Arc<AppState>, request: Request) -> Response {
             index_access: &index_access,
         },
     )
+    .boxed()
     .await
     .unwrap_or_else(std::convert::identity)
 }
@@ -384,6 +386,7 @@ async fn browse_resource_response(
             };
             driver
                 .layer_members(state.serving.clone(), position, repository, digest)
+                .boxed()
                 .await
                 .map(|members| Json(members).into_response())
                 .map_err(browse_error)
@@ -403,6 +406,7 @@ async fn browse_resource_response(
                     member,
                     request.query.offset,
                 )
+                .boxed()
                 .await
                 .map(|chunk| Json(chunk).into_response())
                 .map_err(browse_error)
@@ -503,6 +507,7 @@ impl<S: std::hash::BuildHasher + Send + Sync> MirrorDriver for registry::OciRegi
         };
         let settings = IndexSettings::compile(request.settings)?;
         let rows = mirror(&state.serving, index, settings, &images, mode)
+            .boxed()
             .await
             .map_err(error_message)?;
         let mut errors = 0_u64;

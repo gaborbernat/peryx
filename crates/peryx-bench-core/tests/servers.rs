@@ -56,8 +56,18 @@ impl Drop for FixtureThreadGuard {
 }
 
 fn exit_early(_: &BenchmarkContext, _: u16, _: &Path) -> Command {
-    let mut command = Command::new("rustc");
-    command.arg("--peryx-invalid-argument");
+    #[cfg(unix)]
+    let command = {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf %s peryx-invalid-argument >&2; exit 2"]);
+        command
+    };
+    #[cfg(windows)]
+    let command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "echo peryx-invalid-argument 1>&2 & exit /b 2"]);
+        command
+    };
     command
 }
 

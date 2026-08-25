@@ -138,6 +138,14 @@ fn remove_pending_with(
     }
 }
 
+fn lease_lock_available(result: Result<(), fs4::TryLockError>) -> Result<bool, std::io::Error> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(fs4::TryLockError::WouldBlock) => Ok(false),
+        Err(fs4::TryLockError::Error(error)) => Err(error),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobEntry {
     pub path: PathBuf,
@@ -218,7 +226,7 @@ impl BlobStore {
             .write(true)
             .truncate(false)
             .open(lease_dir.join(".cleanup.lock"))?;
-        fs4::fs_std::FileExt::lock_exclusive(&coordination)?;
+        fs4::FileExt::lock(&coordination)?;
         for entry in std::fs::read_dir(lease_dir)? {
             let entry = entry?;
             if !entry.file_name().to_string_lossy().starts_with(".peryx-lease-") {
@@ -229,8 +237,8 @@ impl BlobStore {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            if fs4::fs_std::FileExt::try_lock_exclusive(&file)? {
-                fs4::fs_std::FileExt::unlock(&file)?;
+            if lease_lock_available(fs4::FileExt::try_lock(&file))? {
+                fs4::FileExt::unlock(&file)?;
                 drop(file);
                 std::fs::remove_file(entry.path())?;
             }
@@ -625,3 +633,7 @@ impl StagedBlob {
 #[cfg(test)]
 #[path = "../../tests/unit/blob/store/stage_tests.rs"]
 mod stage_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/blob/store/lease_tests.rs"]
+mod lease_tests;

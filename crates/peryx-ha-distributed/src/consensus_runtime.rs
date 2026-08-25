@@ -138,7 +138,10 @@ fn join_raft_thread(thread: std::thread::JoinHandle<anyhow::Result<()>>) -> anyh
 }
 
 fn spawn_raft_reaper(thread: std::thread::JoinHandle<anyhow::Result<()>>) {
-    crate::service_assembly::reap_process_resource("ownership consensus", move || join_raft_thread(thread));
+    drop(crate::service_assembly::reap_process_resource(
+        "ownership consensus",
+        move || join_raft_thread(thread),
+    ));
 }
 
 impl ConsensusPlan {

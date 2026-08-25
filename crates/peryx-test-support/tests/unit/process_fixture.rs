@@ -100,7 +100,7 @@ fn fixture_serve_rejects_missing_and_invalid_configuration() {
 }
 
 #[test]
-fn fixture_execute_dispatches_from_the_invoked_name() {
+fn fixture_execute_dispatches_from_the_executable_name() {
     let directory = tempfile::tempdir().expect("create fixture directory");
     let executable = directory.path().join("peryx");
     fs::write(&executable, "").expect("create fixture executable");
@@ -108,31 +108,22 @@ fn fixture_execute_dispatches_from_the_invoked_name() {
     fs::write(&config, "accepted = true").expect("write accepted config");
     fs::write(directory.path().join("toxiproxy-server"), "").expect("create toxiproxy executable");
     fs::write(sibling(&executable, "toxi-mode"), "exit").expect("set toxiproxy exit mode");
-    let _lock = super::TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    temp_env::with_var(
-        "PATH",
-        Some(std::env::join_paths([directory.path()]).expect("fixture PATH")),
-        || {
-            assert_eq!(
-                execute([OsString::from("toxiproxy-server")].into_iter()),
-                std::process::ExitCode::SUCCESS,
-            );
-            assert_eq!(
-                execute(
-                    [
-                        OsString::from("peryx"),
-                        OsString::from("config"),
-                        OsString::from("check"),
-                        OsString::from("--config"),
-                        config.clone().into_os_string(),
-                    ]
-                    .into_iter(),
-                ),
-                std::process::ExitCode::SUCCESS,
-            );
-        },
+    assert_eq!(
+        execute(&directory.path().join("toxiproxy-server"), std::iter::empty()),
+        std::process::ExitCode::SUCCESS,
+    );
+    assert_eq!(
+        execute(
+            &executable,
+            [
+                OsString::from("config"),
+                OsString::from("check"),
+                OsString::from("--config"),
+                config.into_os_string(),
+            ]
+            .into_iter(),
+        ),
+        std::process::ExitCode::SUCCESS,
     );
 }
 
@@ -318,7 +309,9 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
         )
     });
     let mut release = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy readiness event");
+    release.read_exact(&mut [0]).expect("identify readiness gate");
     release.write_all(&[1]).expect("release readiness gate");
+    release.read_exact(&mut [0]).expect("observe control bind");
     assert!(request(control_address, "POST /proxies HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("500 test"));
     assert!(request(control_address, "GET /version HTTP/1.1\r\n\r\n").contains("200 test"));
     assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
@@ -328,7 +321,6 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
     assert_eq!(run_toxiproxy(&executable, &[], None), Ok(()));
     fs::write(sibling(&executable, "toxi-mode"), "signal-exit").expect("set signal exit mode");
     assert_eq!(run_toxiproxy(&executable, &[], None), Ok(()));
-
     let gate = TcpListener::bind("127.0.0.1:0").expect("bind silent startup gate");
     fs::write(
         sibling(&executable, "toxi-mode"),
@@ -339,12 +331,23 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
     let control_address = control.local_addr().expect("silent control address");
     let command_executable = executable.clone();
     let command = thread::spawn(move || run_toxiproxy(&command_executable, &[], Some(control)));
-    let startup_signal = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "silent startup event");
+    let mut startup_signal = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "silent startup event");
+    startup_signal.read_exact(&mut [0]).expect("identify startup gate");
     drop(startup_signal);
     assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
     assert_eq!(command.join().expect("join silent toxiproxy"), Ok(()));
 
     fs::write(sibling(&executable, "toxi-mode"), "ready").expect("set ready mode");
+    fs::write(sibling(&executable, "toxi-state"), "startup-not-found").expect("delay version route");
+    let control = TcpListener::bind("127.0.0.1:0").expect("bind delayed version listener");
+    let control_address = control.local_addr().expect("delayed version address");
+    let command_executable = executable.clone();
+    let command = thread::spawn(move || run_toxiproxy(&command_executable, &[], Some(control)));
+    assert!(request(control_address, "GET /version HTTP/1.1\r\n\r\n").contains("404 test"));
+    assert!(request(control_address, "GET /version HTTP/1.1\r\n\r\n").contains("200 test"));
+    assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
+    assert_eq!(command.join().expect("join delayed version fixture"), Ok(()));
+
     fs::write(sibling(&executable, "toxi-state"), "ok").expect("accept toxiproxy requests");
     let control = TcpListener::bind("127.0.0.1:0").expect("bind explicit control listener");
     let control_address = control.local_addr().expect("explicit control address");

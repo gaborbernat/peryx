@@ -650,7 +650,7 @@ impl BlobLease {
             .write(true)
             .truncate(false)
             .open(lease_dir.join(".cleanup.lock"))?;
-        fs4::fs_std::FileExt::lock_shared(&coordination)?;
+        fs4::FileExt::lock_shared(&coordination)?;
         let mut source = std::fs::File::open(path)?;
         let temporary = tempfile::Builder::new()
             .prefix(".peryx-lease-")
@@ -668,8 +668,8 @@ impl BlobLease {
             std::io::copy(&mut source, &mut copy)?;
             copy
         };
-        fs4::fs_std::FileExt::lock_shared(&lock)?;
-        fs4::fs_std::FileExt::unlock(&coordination)?;
+        fs4::FileExt::lock_shared(&lock)?;
+        fs4::FileExt::unlock(&coordination)?;
         Ok(Self {
             path: temporary.to_path_buf(),
             guard: LeaseGuard::Filesystem {
@@ -690,10 +690,10 @@ impl BlobLease {
 impl Drop for BlobLease {
     fn drop(&mut self) {
         if let LeaseGuard::Filesystem { lock, coordination, .. } = &self.guard {
-            let _ = fs4::fs_std::FileExt::lock_shared(coordination);
-            let _ = fs4::fs_std::FileExt::unlock(lock);
+            let _ = fs4::FileExt::lock_shared(coordination);
+            let _ = fs4::FileExt::unlock(lock);
             let _ = std::fs::remove_file(&self.path);
-            let _ = fs4::fs_std::FileExt::unlock(coordination);
+            let _ = fs4::FileExt::unlock(coordination);
         }
     }
 }

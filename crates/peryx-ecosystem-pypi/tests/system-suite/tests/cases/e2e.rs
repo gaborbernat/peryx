@@ -756,16 +756,11 @@ fn http_verb(port: u16, verb: &str, path: &str) -> (u16, String) {
 }
 
 #[cfg(feature = "e2e-live")]
-fn live() -> Peryx {
-    Peryx::start_against("https://pypi.org/simple/")
-}
-
-#[cfg(feature = "e2e-live")]
 #[rstest]
 #[case::pip(Client::Pip)]
 #[case::uv(Client::Uv)]
 fn e2e_live_client_installs_from_pypi_via_pep658(#[case] client: Client) {
-    let peryx = live();
+    let peryx = Peryx::start_against("https://pypi.org/simple/");
     let venv = uv_venv();
     client.install(&venv, &peryx, "certifi");
     assert_importable(&venv, "certifi");

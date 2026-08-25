@@ -64,15 +64,15 @@ fail before runtime installation.
 1. Install behavior through the narrowest bounded context.
 1. Export one `PluginRegistration` with a unique ID and priority.
 1. Link the registration from the `peryx` composition root.
-1. Put process and external-service tests in the owner's metadata-declared system package.
+1. Put process and external-service tests in the owner's system package.
 1. Declare documentation staging in `docs/ecosystem.toml`.
 
-Run the owner contract and boundary checks:
+Run the workspace checks:
 
 ```shell
-just crate-contract peryx-ecosystem-NAME .tox/crate-contracts/peryx-ecosystem-NAME
-just ecosystem-boundaries
-just lint-contracts
+just lint
+just test
+just coverage-native
 ```
 
 ## Review rules

@@ -70,6 +70,25 @@ fn test_validate_rejects_bad_limit_cursor_and_repository() {
 }
 
 #[test]
+fn test_validate_accepts_maximum_cursor_and_repository_lengths() {
+    assert_eq!(
+        [
+            TrashQuery {
+                cursor: Some("x".repeat(1_024)),
+                ..query(25)
+            }
+            .validate(),
+            TrashQuery {
+                repository: Some("r".repeat(512)),
+                ..query(25)
+            }
+            .validate(),
+        ],
+        [Ok(()), Ok(())]
+    );
+}
+
+#[test]
 fn test_error_display_reports_bounds_and_store_detail() {
     assert_eq!(
         TrashQueryError::InvalidLimit.to_string(),
@@ -309,7 +328,7 @@ fn test_trash_service_surfaces_driver_failure() {
 
 #[test]
 fn test_trash_service_filters_drivers_before_collecting() {
-    let (_dir, state) = app(false);
+    let (_dir, state) = app(true);
     let service = TrashServices::for_state(&state);
 
     assert!(

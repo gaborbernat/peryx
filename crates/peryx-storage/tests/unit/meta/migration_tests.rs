@@ -18,9 +18,9 @@ enum Rewrite {
     Skip,
 }
 
-struct Migration {
-    record_sets: &'static [MetadataRecordSet],
-    legacy_sources: &'static [LegacyMetadataSource],
+struct Migration<'a> {
+    record_sets: &'a [MetadataRecordSet],
+    legacy_sources: &'a [LegacyMetadataSource],
     rewrite: Rewrite,
 }
 
@@ -31,7 +31,7 @@ impl MetadataMigration for DefaultSourcesMigration {
         "default-sources"
     }
 
-    fn record_sets(&self) -> &'static [MetadataRecordSet] {
+    fn record_sets(&self) -> &[MetadataRecordSet] {
         &[MetadataRecordSet::QuotaUsage]
     }
 
@@ -47,16 +47,16 @@ impl MetadataMigration for DefaultSourcesMigration {
     }
 }
 
-impl MetadataMigration for Migration {
+impl MetadataMigration for Migration<'_> {
     fn name(&self) -> &'static str {
         "neutral-test"
     }
 
-    fn record_sets(&self) -> &'static [MetadataRecordSet] {
+    fn record_sets(&self) -> &[MetadataRecordSet] {
         self.record_sets
     }
 
-    fn legacy_sources(&self) -> &'static [LegacyMetadataSource] {
+    fn legacy_sources(&self) -> &[LegacyMetadataSource] {
         self.legacy_sources
     }
 
@@ -145,23 +145,22 @@ fn test_metadata_migration_recognizes_current_tables(
     #[case] table: &'static str,
 ) {
     let (_directory, store) = store();
+    let legacy_sources = [LegacyMetadataSource {
+        table,
+        value_kind: match record_set {
+            MetadataRecordSet::PolicyDecisionCurrent | MetadataRecordSet::PolicyDecisionCurrentById => {
+                MetadataValueKind::Text
+            }
+            _ => MetadataValueKind::Bytes,
+        },
+        target: record_set,
+    }];
 
     assert_eq!(
         store
             .migrate_metadata(&Migration {
                 record_sets: &[],
-                legacy_sources: Box::leak(
-                    vec![LegacyMetadataSource {
-                        table,
-                        value_kind: match record_set {
-                            MetadataRecordSet::PolicyDecisionCurrent | MetadataRecordSet::PolicyDecisionCurrentById =>
-                                MetadataValueKind::Text,
-                            _ => MetadataValueKind::Bytes,
-                        },
-                        target: record_set,
-                    }]
-                    .into_boxed_slice(),
-                ),
+                legacy_sources: &legacy_sources,
                 rewrite: Rewrite::Skip,
             })
             .unwrap(),
@@ -359,11 +358,12 @@ fn test_metadata_migration_rewrites_current_record_sets(
         MetadataValueKind::Text => write_text(&database_path(&directory), table, &[("key", "old")]),
     }
     let store = MetaStore::open_existing(database_path(&directory)).unwrap();
+    let record_sets = [record_set];
 
     assert_eq!(
         store
             .migrate_metadata(&Migration {
-                record_sets: Box::leak(vec![record_set].into_boxed_slice()),
+                record_sets: &record_sets,
                 legacy_sources: &[],
                 rewrite: Rewrite::Append,
             })
@@ -484,10 +484,11 @@ fn test_metadata_migration_moves_bytes_and_text(#[case] source: LegacyMetadataSo
         MetadataValueKind::Text => write_text(&database_path(&directory), source.table, &[("key", "old")]),
     }
     let store = MetaStore::open_existing(database_path(&directory)).unwrap();
+    let legacy_sources = [source];
     store
         .migrate_metadata(&Migration {
             record_sets: &[],
-            legacy_sources: Box::leak(vec![source].into_boxed_slice()),
+            legacy_sources: &legacy_sources,
             rewrite: Rewrite::Append,
         })
         .unwrap();

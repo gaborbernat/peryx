@@ -7,18 +7,6 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[package.metadata.peryx-ci]
-kind = "system"
-
-[package.metadata.peryx-ci.coverage.availability]
-tests = ["availability"]
-
-[package.metadata.peryx-ci.coverage.clients]
-filter = "not(binary(availability))"
-
-[package.metadata.peryx-ci.coverage.e2e]
-filter = "not(binary(availability))"
-
 [[bin]]
 name = "peryx-oci-system-server"
 path = "src/main.rs"
@@ -41,7 +29,7 @@ peryx-identity.workspace = true
 peryx-policy.workspace = true
 peryx-storage.workspace = true
 peryx-test-support.workspace = true
-reqwest = { workspace = true, features = ["blocking", "gzip", "http2", "json", "rustls-native-certs", "rustls-no-provider", "stream"] }
+reqwest = { workspace = true, features = ["blocking", "gzip", "http2", "json", "rustls-no-provider", "stream"] }
 rstest.workspace = true
 serde_json.workspace = true
 tar.workspace = true

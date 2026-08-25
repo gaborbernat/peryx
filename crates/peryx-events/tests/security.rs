@@ -2,10 +2,11 @@ use std::io::{Read as _, Seek as _};
 use std::sync::Mutex;
 
 use http::{HeaderMap, HeaderValue, header};
+use peryx_events::security::{
+    AuthorizationDenial, Event, RoleGrantChange, actor, authorization_denied, role_grant_change,
+};
 use peryx_identity::{Identity, Principal};
 use rstest::rstest;
-
-use super::{AuthorizationDenial, RoleGrantChange};
 
 #[rstest]
 #[case::grant(RoleGrantChange::Grant, "grant")]
@@ -23,7 +24,7 @@ fn test_role_grant_event_records_only_bounded_delegation_context(
     let target = peryx_identity::UserId::random();
 
     tracing::subscriber::with_default(subscriber, || {
-        super::role_grant_change(
+        role_grant_change(
             Some("alice"),
             change,
             &target,
@@ -64,12 +65,12 @@ fn presenting(user: &str) -> Identity {
 
 #[test]
 fn test_actor_uses_the_presented_username() {
-    assert_eq!(super::actor(&presenting("alice")).as_deref(), Some("alice"));
+    assert_eq!(actor(&presenting("alice")).as_deref(), Some("alice"));
 }
 
 #[test]
 fn test_actor_calls_an_empty_username_unknown() {
-    assert_eq!(super::actor(&presenting("")).as_deref(), Some("unknown"));
+    assert_eq!(actor(&presenting("")).as_deref(), Some("unknown"));
 }
 
 #[test]
@@ -80,7 +81,7 @@ fn test_actor_falls_back_to_the_principal_when_no_username_was_presented() {
         },
         user: None,
     };
-    assert_eq!(super::actor(&bearer).as_deref(), Some("ci"));
+    assert_eq!(actor(&bearer).as_deref(), Some("ci"));
 }
 
 #[test]
@@ -89,7 +90,7 @@ fn test_actor_is_none_for_an_anonymous_request() {
         principal: Principal::Anonymous,
         user: None,
     };
-    assert_eq!(super::actor(&anonymous), None);
+    assert_eq!(actor(&anonymous), None);
 }
 
 #[rstest]
@@ -108,7 +109,7 @@ fn test_authorization_denial_event_contains_only_bounded_context(
     let user = peryx_identity::UserId::random();
 
     tracing::subscriber::with_default(subscriber, || {
-        super::authorization_denied(&user, peryx_identity::Scope::OperatorRead, denial);
+        authorization_denied(&user, peryx_identity::Scope::OperatorRead, denial);
     });
 
     capture.rewind().unwrap();
@@ -142,7 +143,7 @@ fn test_index_action_event_records_all_bounded_context() {
     headers.insert(header::USER_AGENT, HeaderValue::from_static("client/1"));
 
     tracing::subscriber::with_default(subscriber, || {
-        super::Event::new("write", "allowed")
+        Event::new("write", "allowed")
             .actor(Some("alice"))
             .token_id("token-1")
             .index("virtual")
@@ -201,7 +202,7 @@ fn test_index_action_event_discards_non_text_headers() {
     headers.insert("x-request-id", HeaderValue::from_bytes(&[0xff]).unwrap());
 
     tracing::subscriber::with_default(subscriber, || {
-        super::Event::new("delete", "denied").request(&headers).emit();
+        Event::new("delete", "denied").request(&headers).emit();
     });
 
     capture.rewind().unwrap();

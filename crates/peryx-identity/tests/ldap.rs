@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -11,7 +12,9 @@ use peryx_identity::{
     LdapLoginError, LdapLoginService, LdapProvider, LdapProviderError, LdapProviderSettings, MAX_EXTERNAL_GROUPS,
     ProviderId, Role, ServerUser, UserId, UserName, UserState,
 };
-use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+};
 use rstest::rstest;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _};
@@ -75,6 +78,31 @@ async fn test_ldap_login_crosses_starttls_bind_and_store_boundaries() {
     drop(direct_provider);
     drop(search_provider);
     drop(server);
+}
+
+#[tokio::test]
+async fn test_ldap_login_discards_user_bound_connections() {
+    let server = TestLdapServer::start();
+    let provider = LdapProvider::new(openldap_settings(server.port(), server.ca().to_vec(), search_bind())).unwrap();
+
+    assert!(provider.authenticate("fry", "fry").await.unwrap().is_some());
+    assert!(provider.authenticate("bender", "bender").await.unwrap().is_some());
+    assert_eq!(server.connection_count(), 2);
+}
+
+#[tokio::test]
+async fn test_ldap_login_accepts_maximum_display_name() {
+    let server = TestLdapServer::start();
+    let mut settings = openldap_settings(server.port(), server.ca().to_vec(), search_bind());
+    settings.display_name_attribute = "departmentNumber".to_owned();
+    let login = LdapProvider::new(settings)
+        .unwrap()
+        .authenticate("fry", "fry")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(login.display_name.display().len(), 1_024);
 }
 
 async fn assert_service_link(search_provider: LdapProvider, fry: &ExternalLogin) {
@@ -256,6 +284,7 @@ fn openldap_settings(port: u16, certificate: Vec<u8>, bind: LdapBindMode) -> Lda
 struct TestLdapServer {
     port: u16,
     ca: Vec<u8>,
+    connections: Arc<AtomicUsize>,
     guard: LdapServerGuard,
 }
 
@@ -276,6 +305,8 @@ impl TestLdapServer {
         let (ready, readiness) = mpsc::sync_channel(0);
         let sockets = Arc::new(Mutex::new(Vec::new()));
         let active_sockets = Arc::clone(&sockets);
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted_connections = Arc::clone(&connections);
         let listener = thread::spawn(move || {
             let mut workers = Vec::new();
             ready.send(()).unwrap();
@@ -284,6 +315,7 @@ impl TestLdapServer {
                 if stopped.try_recv().is_ok() {
                     break;
                 }
+                accepted_connections.fetch_add(1, Ordering::Relaxed);
                 active_sockets.lock().unwrap().push(stream.try_clone().unwrap());
                 let config = Arc::clone(&config);
                 workers.push(thread::spawn(move || handle_connection(stream, config)));
@@ -296,6 +328,7 @@ impl TestLdapServer {
         Self {
             port,
             ca,
+            connections,
             guard: LdapServerGuard {
                 port,
                 stop,
@@ -311,6 +344,10 @@ impl TestLdapServer {
 
     fn ca(&self) -> &[u8] {
         &self.ca
+    }
+
+    fn connection_count(&self) -> usize {
+        self.connections.load(Ordering::Relaxed)
     }
 }
 
@@ -349,12 +386,12 @@ fn certificates() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::CrlSign,
     ];
-    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
     let server_key = KeyPair::generate().unwrap();
     let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
     server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     server_params.use_authority_key_identifier_extension = true;
-    let server = server_params.signed_by(&server_key, &ca, &ca_key).unwrap();
+    let server = server_params.signed_by(&server_key, &ca).unwrap();
     (
         ca.pem().into_bytes(),
         server.pem().into_bytes(),
@@ -556,6 +593,9 @@ impl DirectoryEntry {
         }
         if name.eq_ignore_ascii_case("title") {
             return Some(vec!["x".repeat(1_025)]);
+        }
+        if name.eq_ignore_ascii_case("departmentNumber") {
+            return Some(vec!["x".repeat(1_024)]);
         }
         if name.eq_ignore_ascii_case("description") {
             let mut descriptions = String::new();

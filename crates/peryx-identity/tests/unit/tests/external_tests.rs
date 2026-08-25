@@ -87,6 +87,11 @@ fn test_subject_is_case_sensitive_and_not_normalized() {
     assert_eq!(String::from(composed), "Élodie");
 }
 
+#[test]
+fn test_subject_accepts_its_maximum_length() {
+    assert!(ExternalSubject::new(&"a".repeat(1_024)).is_ok());
+}
+
 #[rstest]
 #[case::empty("", ExternalIdentityError::EmptySubject)]
 #[case::long(&"a".repeat(1_025), ExternalIdentityError::SubjectTooLong)]
@@ -115,6 +120,11 @@ fn test_group_preserves_exact_spelling() {
         group
     );
     assert_eq!(String::from(group), "Platform Engineers");
+}
+
+#[test]
+fn test_group_accepts_its_maximum_length() {
+    assert!(ExternalGroup::new(&"a".repeat(256)).is_ok());
 }
 
 #[rstest]

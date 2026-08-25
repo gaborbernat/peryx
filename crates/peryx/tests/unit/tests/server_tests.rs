@@ -35,7 +35,7 @@ impl MetadataMigration for InactiveMigration {
         "inactive"
     }
 
-    fn record_sets(&self) -> &'static [MetadataRecordSet] {
+    fn record_sets(&self) -> &[MetadataRecordSet] {
         INACTIVE_MIGRATION_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         &[MetadataRecordSet::QuotaUsage]
     }
@@ -179,7 +179,7 @@ fn inactive_owner_migrations_and_ha_references_do_not_run() {
         "inactive migration ran"
     );
     INACTIVE_MIGRATION_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
-    let plugins = plugins_with_inactive_owner(Some(&INACTIVE_MIGRATION));
+    let plugins = plugins_with_inactive_owner(Some(Arc::new(InactiveMigration)));
     let directory = tempfile::tempdir().unwrap();
     let config = Config {
         data_dir: directory.path().to_path_buf(),

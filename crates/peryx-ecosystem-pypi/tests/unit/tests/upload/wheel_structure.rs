@@ -208,6 +208,16 @@ fn test_prepare_rejects_invalid_wheel_file() {
         "does not match filename build tag",
     );
 }
+
+#[test]
+fn test_prepare_rejects_an_empty_wheel_version_part() {
+    assert_wheel_invalid(
+        &wheel_with_wheel_file(
+            b"Wheel-Version: 1..0\nGenerator: peryx-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        ),
+        "invalid Wheel-Version \"1..0\"",
+    );
+}
 #[test]
 fn test_prepare_rejects_invalid_entry_points() {
     let metadata = b"Metadata-Version: 2.1\nName: Flask\nVersion: 1.0\nRequires-Python: >=3.8\n";

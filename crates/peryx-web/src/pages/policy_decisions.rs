@@ -1,4 +1,4 @@
-use leptos::either::{Either, EitherOf4};
+use leptos::either::Either;
 use leptos::prelude::*;
 
 use crate::model::PolicyDecisionFilters;
@@ -87,16 +87,14 @@ pub fn PolicyDecisions() -> impl IntoView {
     }
 }
 
-fn policy_decision_results(loading: bool, result: Option<Result<UiPolicyDecisionPage, String>>) -> impl IntoView {
+fn policy_decision_results(loading: bool, result: Option<Result<UiPolicyDecisionPage, String>>) -> AnyView {
     if loading {
-        return EitherOf4::A(
-            view! { <p class="dim" role="status" aria-live="polite">"Loading policy decisions..."</p> },
-        );
+        return view! { <p class="dim" role="status" aria-live="polite">"Loading policy decisions..."</p> }.into_any();
     }
     match result {
-        None => EitherOf4::B(view! { <p class="dim">"Enter credentials and search to load decisions."</p> }),
-        Some(Err(error)) => EitherOf4::C(view! { <p class="error" role="alert">{error}</p> }),
-        Some(Ok(page)) => EitherOf4::D(policy_decision_page(page)),
+        None => view! { <p class="dim">"Enter credentials and search to load decisions."</p> }.into_any(),
+        Some(Err(error)) => view! { <p class="error" role="alert">{error}</p> }.into_any(),
+        Some(Ok(page)) => policy_decision_page(page).into_any(),
     }
 }
 
@@ -107,7 +105,7 @@ fn PolicyDecisionFilterFields(
     set_password: WriteSignal<String>,
     set_filters: WriteSignal<PolicyDecisionFilters>,
     loading: ReadSignal<bool>,
-) -> impl IntoView {
+) -> AnyView {
     let _ = (set_user, set_password, set_filters);
     view! {
         <label for="policy-user">"Username"</label>
@@ -135,6 +133,7 @@ fn PolicyDecisionFilterFields(
         </select>
         <button type="submit" disabled=move || loading.get()>"Search"</button>
     }
+    .into_any()
 }
 
 #[component]

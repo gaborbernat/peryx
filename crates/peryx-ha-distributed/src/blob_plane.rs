@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 
 use bytes::Bytes;
+use futures_util::FutureExt as _;
 use peryx_ha::{ArtifactSource, PlacementEvent};
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
@@ -158,9 +159,13 @@ pub async fn pull_outstanding<T: BlobTransport>(
             BlobDisposition::Whole => simple.push((digest.clone(), *size)),
         }
     }
-    let mut report = pull_referenced(sources.simple, blobs, meta, &simple, concurrency).await?;
+    let mut report = pull_referenced(sources.simple, blobs, meta, &simple, concurrency)
+        .boxed()
+        .await?;
     for (digest, size, plan) in ranged {
-        pull_one_ranged(meta, blobs, sources, &digest, size, &plan, &mut report).await?;
+        pull_one_ranged(meta, blobs, sources, &digest, size, &plan, &mut report)
+            .boxed()
+            .await?;
     }
     Ok(report)
 }

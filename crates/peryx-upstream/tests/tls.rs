@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use peryx_upstream::{Auth, UpstreamClient, UpstreamTls};
-use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose,
+};
 use rstest::rstest;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
@@ -147,7 +150,7 @@ fn tls_fixture(include_ca: bool, include_identity: bool) -> TlsFixture {
         KeyUsagePurpose::KeyCertSign,
         KeyUsagePurpose::CrlSign,
     ];
-    let ca = ca_parameters.self_signed(&ca_key).unwrap();
+    let ca = CertifiedIssuer::self_signed(ca_parameters, ca_key).unwrap();
     let client_key = KeyPair::generate().unwrap();
     let mut client_parameters = CertificateParams::new(Vec::<String>::new()).unwrap();
     client_parameters
@@ -156,7 +159,7 @@ fn tls_fixture(include_ca: bool, include_identity: bool) -> TlsFixture {
     client_parameters.use_authority_key_identifier_extension = true;
     client_parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     client_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-    let client = client_parameters.signed_by(&client_key, &ca, &ca_key).unwrap();
+    let client = client_parameters.signed_by(&client_key, &ca).unwrap();
     let server_key = KeyPair::generate().unwrap();
     let mut server_parameters = CertificateParams::new(vec!["127.0.0.1".to_owned()]).unwrap();
     server_parameters
@@ -165,7 +168,7 @@ fn tls_fixture(include_ca: bool, include_identity: bool) -> TlsFixture {
     server_parameters.use_authority_key_identifier_extension = true;
     server_parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     server_parameters.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    let server_certificate = server_parameters.signed_by(&server_key, &ca, &ca_key).unwrap();
+    let server_certificate = server_parameters.signed_by(&server_key, &ca).unwrap();
     let directory = TempDir::new().unwrap();
     let certificate_path = directory.path().join("client.crt");
     let key_path = directory.path().join("client.key");

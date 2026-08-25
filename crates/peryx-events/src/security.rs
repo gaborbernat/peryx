@@ -28,14 +28,18 @@ pub fn role_grant_change(
     result: &'static str,
     reason: &'static str,
 ) {
+    let action = change.as_str();
+    let actor = text(actor);
+    let target = target.as_str();
+    let role = role.as_str();
     tracing::info!(
         target: "peryx::security",
         security_event = true,
         event = "role_grant",
-        action = change.as_str(),
-        actor = text(actor),
-        target = target.as_str(),
-        role = role.as_str(),
+        action,
+        actor,
+        target,
+        role,
         reach,
         result,
         reason,
@@ -60,14 +64,17 @@ impl AuthorizationDenial {
 
 /// Excludes unbounded resource paths and query strings.
 pub fn authorization_denied(user: &UserId, scope: Scope, denial: AuthorizationDenial) {
+    let user = user.as_str();
+    let scope = scope.as_str();
+    let reason = denial.as_str();
     tracing::info!(
         target: "peryx::security",
         security_event = true,
         event = "authorization",
-        user = user.as_str(),
-        scope = scope.as_str(),
+        user,
+        scope,
         result = "denied",
-        reason = denial.as_str(),
+        reason,
         "role authorization denied"
     );
 }
@@ -194,26 +201,38 @@ impl<'a> Event<'a> {
     }
 
     pub fn emit(&self) {
+        let actor = text(self.actor);
+        let token_id = text(self.token_id);
+        let index = text(self.index);
+        let source_index = text(self.source_index);
+        let hosted_index = text(self.hosted_index);
+        let resource = text(self.resource);
+        let group = text(self.group);
+        let artifact = text(self.artifact);
+        let digest = text(self.digest);
+        let reason = text(self.reason);
+        let request_id = text(self.request_id);
+        let user_agent = text(self.user_agent);
         tracing::info!(
             target: "peryx::security",
             security_event = true,
             event = "index_action",
             action = self.action,
             result = self.result,
-            actor = text(self.actor),
-            token_id = text(self.token_id),
-            index = text(self.index),
-            source_index = text(self.source_index),
-            hosted_index = text(self.hosted_index),
-            resource = text(self.resource),
-            group = text(self.group),
-            artifact = text(self.artifact),
-            digest = text(self.digest),
+            actor,
+            token_id,
+            index,
+            source_index,
+            hosted_index,
+            resource,
+            group,
+            artifact,
+            digest,
             count = self.count,
             changed = self.changed,
-            reason = text(self.reason),
-            request_id = text(self.request_id),
-            user_agent = text(self.user_agent),
+            reason,
+            request_id,
+            user_agent,
             "index security event"
         );
     }
@@ -250,7 +269,3 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 fn text(value: Option<&str>) -> &str {
     value.unwrap_or("")
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/security/tests.rs"]
-mod tests;

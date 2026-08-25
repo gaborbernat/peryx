@@ -2,14 +2,18 @@ use peryx_identity::IndexAcl;
 use std::convert::Infallible;
 
 use peryx_index::{Index, IndexKind};
-use peryx_policy::Policy;
-use peryx_storage::blob::{BlobStore, Digest};
+use peryx_policy::{Policy, PolicyConfig};
+use peryx_storage::blob::{BlobStorage, BlobStore, Digest};
 use peryx_storage::meta::{MetaError, MetaScanError, MetaStore};
+use rstest::rstest;
 
 use super::*;
 use crate::store::CachedIndex;
 use crate::upload::Uploaded;
 use crate::{CoreMetadata, File, Provenance, Yanked};
+
+const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn store() -> (tempfile::TempDir, MetaStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -49,6 +53,26 @@ fn seed_valid_page(meta: &MetaStore) {
     .unwrap();
 }
 
+fn upload_record(filename: &str, digest: &str) -> Uploaded {
+    Uploaded {
+        version: "1.0".to_owned(),
+        file: File {
+            filename: filename.to_owned(),
+            url: "u".to_owned(),
+            hashes: std::collections::BTreeMap::from([("sha256".to_owned(), digest.to_owned())]),
+            requires_python: None,
+            size: None,
+            upload_time: None,
+            yanked: Yanked::No,
+            core_metadata: CoreMetadata::Absent,
+            dist_info_metadata: CoreMetadata::Absent,
+            gpg_sig: None,
+            provenance: Provenance::Absent,
+        },
+        trashed: None,
+    }
+}
+
 #[test]
 fn test_error_message_renders_store_and_visit_scan_faults() {
     let decode = serde_json::from_str::<u8>("x").unwrap_err();
@@ -67,6 +91,28 @@ fn test_cache_pages_lists_the_stored_pages_split_by_index() {
     let pages = cache_pages(&meta, &["pypi"]).unwrap();
     assert_eq!(pages.len(), 1);
     assert_eq!((pages[0].index.as_str(), pages[0].resource.as_str()), ("pypi", "flask"));
+}
+
+#[test]
+fn test_cache_pages_splits_an_unconfigured_index_key() {
+    let (_dir, meta) = store();
+    seed_valid_page(&meta);
+    meta.put_index("root", &meta.get_index("pypi/flask").unwrap().unwrap())
+        .unwrap();
+
+    let pages = cache_pages(&meta, &[])
+        .unwrap()
+        .into_iter()
+        .map(|page| (page.index, page.resource))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(
+        pages,
+        std::collections::BTreeSet::from([
+            ("pypi".to_owned(), "flask".to_owned()),
+            ("root".to_owned(), String::new()),
+        ])
+    );
 }
 
 #[test]
@@ -133,18 +179,30 @@ fn test_referenced_blob_digests_includes_the_provenance_blob() {
     assert!(referenced_blob_digests(&meta).unwrap().contains(&provenance_blob));
 }
 
-#[test]
-fn test_referenced_blob_digests_rejects_a_corrupt_provenance_record() {
+#[rstest]
+#[case::artifact("not-hex", DIGEST_B, "16")]
+#[case::provenance(DIGEST_A, "not-hex", "16")]
+#[case::size(DIGEST_A, DIGEST_B, "invalid")]
+fn test_referenced_blob_digests_rejects_each_corrupt_provenance_field(
+    #[case] artifact_digest: &str,
+    #[case] provenance_digest: &str,
+    #[case] size: &str,
+) {
     let (_dir, meta) = store();
 
-    meta.put_driver_value("pypi\u{0}a\u{0}not-hex", b"abc\n16").unwrap();
+    meta.put_driver_value(
+        &format!("pypi\u{0}a\u{0}{artifact_digest}"),
+        format!("{provenance_digest}\n{size}").as_bytes(),
+    )
+    .unwrap();
+
     assert!(referenced_blob_digests(&meta).is_err());
 }
 
 #[test]
 fn test_fsck_metadata_reports_every_invalid_record_kind() {
     let (dir, meta) = store();
-    let blobs = BlobStore::new(dir.path().join("blobs")).into();
+    let blobs: BlobStorage = BlobStore::new(dir.path().join("blobs")).into();
     meta.put_driver_value("pypi\u{0}i\u{0}pypi/flask", b"garbage").unwrap();
     meta.put_driver_value("pypi\u{0}f\u{0}not-hex", b"u\npypi").unwrap();
     meta.put_driver_value("pypi\u{0}d\u{0}not-hex", b"u\nm\npypi").unwrap();
@@ -158,6 +216,51 @@ fn test_fsck_metadata_reports_every_invalid_record_kind() {
     let mut out = Vec::new();
     let problems = fsck_metadata(&meta, &blobs, &mut out).unwrap();
     assert_eq!(problems, 7, "{}", String::from_utf8_lossy(&out));
+}
+
+#[rstest]
+#[case::pep658_artifact('d', "not-hex", format!("url\n{DIGEST_B}\npypi"), "pep658")]
+#[case::pep658_metadata('d', DIGEST_A, "url\nnot-hex\npypi".to_owned(), "pep658")]
+#[case::project_index('p', "/flask", "Flask".to_owned(), "project")]
+#[case::project_name('p', "pypi/", "Flask".to_owned(), "project")]
+#[case::project_display('p', "pypi/flask", String::new(), "project")]
+#[case::override_filename('o', "hosted/demo/", "hidden".to_owned(), "override")]
+#[case::override_kind('o', "hosted/demo/demo.whl", "invalid".to_owned(), "override")]
+fn test_fsck_metadata_rejects_each_invalid_field(
+    #[case] table: char,
+    #[case] key: &str,
+    #[case] value: String,
+    #[case] record: &str,
+) {
+    let (dir, meta) = store();
+    let blobs = BlobStore::new(dir.path().join("blobs")).into();
+    meta.put_driver_value(&format!("pypi\u{0}{table}\u{0}{key}"), value.as_bytes())
+        .unwrap();
+    let mut output = Vec::new();
+
+    assert_eq!(fsck_metadata(&meta, &blobs, &mut output).unwrap(), 1);
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .starts_with(&format!("metadata\t{record}\t{key}\t"))
+    );
+}
+
+#[test]
+fn test_fsck_metadata_rejects_an_invalid_upload_key_with_present_blobs() {
+    let (dir, meta) = store();
+    let blobs: BlobStorage = BlobStore::new(dir.path().join("blobs")).into();
+    let digest = blobs.blocking().put_bytes(b"artifact").unwrap();
+    let uploaded = upload_record("demo.whl", digest.as_str());
+    meta.put_driver_value("pypi\u{0}u\u{0}hosted/demo/", crate::to_json(&uploaded).as_bytes())
+        .unwrap();
+    let mut output = Vec::new();
+
+    assert_eq!(fsck_metadata(&meta, &blobs, &mut output).unwrap(), 1);
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "metadata\tupload\thosted/demo/\tinvalid key\n"
+    );
 }
 
 #[test]
@@ -207,23 +310,7 @@ fn test_purge_project_counts_the_removed_records() {
     let (_dir, meta) = store();
     seed_valid_page(&meta);
     let digest = Digest::of(b"preserved upload");
-    let uploaded = Uploaded {
-        version: "1.0".to_owned(),
-        file: File {
-            filename: "other-1.0.tar.gz".to_owned(),
-            url: "https://files/other.tar.gz".to_owned(),
-            hashes: std::collections::BTreeMap::from([("sha256".to_owned(), digest.as_str().to_owned())]),
-            requires_python: None,
-            size: Some(16),
-            upload_time: None,
-            yanked: Yanked::No,
-            core_metadata: CoreMetadata::Absent,
-            dist_info_metadata: CoreMetadata::Absent,
-            gpg_sig: None,
-            provenance: Provenance::Absent,
-        },
-        trashed: None,
-    };
+    let uploaded = upload_record("other-1.0.tar.gz", digest.as_str());
     meta.put_upload(
         "hosted",
         "other",
@@ -307,48 +394,11 @@ fn test_purge_project_rejects_a_corrupt_preserved_upload() {
 }
 
 #[test]
-fn test_admin_key_helpers_cover_fallback_and_filters() {
-    assert_eq!(split_page_key("root/demo", &[]), ("root".to_owned(), "demo".to_owned()));
-    assert_eq!(split_page_key("root", &[]), ("root".to_owned(), String::new()));
-    let indexes = [pypi_index()];
-    assert!(matching_index(&indexes, "missing", None).is_none());
-    assert!(matching_index(&indexes, "pypi", Some("other")).is_none());
-    let denial = PolicyDenial::new(
-        PolicyAction::Upload,
-        "demo",
-        None,
-        None,
-        "rule",
-        "field",
-        "reason".to_owned(),
-    );
-    let mut output = Vec::new();
-    write_denial(&mut output, "pypi", &denial).unwrap();
-    assert!(String::from_utf8(output).unwrap().contains("reason"));
-}
-
-#[test]
 fn test_fsck_reports_invalid_upload_keys_and_missing_blobs() {
     let (dir, meta) = store();
     let blobs = BlobStore::new(dir.path().join("blobs")).into();
     let digest = Digest::of(b"missing");
-    let uploaded = Uploaded {
-        version: "1.0".to_owned(),
-        file: File {
-            filename: "demo.whl".to_owned(),
-            url: "u".to_owned(),
-            hashes: std::collections::BTreeMap::from([("sha256".to_owned(), digest.as_str().to_owned())]),
-            requires_python: None,
-            size: None,
-            upload_time: None,
-            yanked: Yanked::No,
-            core_metadata: CoreMetadata::Absent,
-            dist_info_metadata: CoreMetadata::Absent,
-            gpg_sig: None,
-            provenance: Provenance::Absent,
-        },
-        trashed: None,
-    };
+    let uploaded = upload_record("demo.whl", digest.as_str());
     meta.put_driver_value("pypi\u{0}u\u{0}bad", crate::to_json(&uploaded).as_bytes())
         .unwrap();
     meta.put_upload("hosted", "demo", "demo.whl", crate::to_json(&uploaded).as_bytes())
@@ -380,6 +430,40 @@ fn hosted_index() -> Index {
         policy: Policy::default(),
         acl: IndexAcl::default(),
     }
+}
+
+fn blocked_index() -> Index {
+    Index {
+        route: "root/pypi".to_owned(),
+        policy: Policy::compile(
+            &PolicyConfig {
+                block_resources: vec!["flask".to_owned()],
+                ..PolicyConfig::default()
+            },
+            crate::normalize_name,
+        ),
+        ..pypi_index()
+    }
+}
+
+#[rstest]
+#[case::index_name(Some("pypi"), None, true)]
+#[case::index_route(Some("root/pypi"), None, true)]
+#[case::project(None, Some("Flask"), true)]
+#[case::other_index(Some("other"), None, false)]
+#[case::other_project(None, Some("other"), false)]
+fn test_policy_dry_run_filters_by_index_name_route_and_project(
+    #[case] index: Option<&str>,
+    #[case] project: Option<&str>,
+    #[case] denied: bool,
+) {
+    let (_dir, meta) = store();
+    seed_valid_page(&meta);
+    let mut output = Vec::new();
+
+    policy_dry_run(&meta, &[blocked_index()], index, project, &mut output).unwrap();
+
+    assert_eq!(!output.is_empty(), denied);
 }
 
 #[test]
@@ -417,23 +501,7 @@ fn test_policy_dry_run_filters_cached_pages() {
 #[test]
 fn test_policy_dry_run_reports_upload_denials() {
     let (_dir, meta) = store();
-    let uploaded = Uploaded {
-        version: "1.0".to_owned(),
-        file: File {
-            filename: "demo-1.0-py3-none-any.whl".to_owned(),
-            url: "u".to_owned(),
-            hashes: std::collections::BTreeMap::from([("sha256".to_owned(), "a".repeat(64))]),
-            requires_python: None,
-            size: None,
-            upload_time: None,
-            yanked: Yanked::No,
-            core_metadata: CoreMetadata::Absent,
-            dist_info_metadata: CoreMetadata::Absent,
-            gpg_sig: None,
-            provenance: Provenance::Absent,
-        },
-        trashed: None,
-    };
+    let uploaded = upload_record("demo-1.0-py3-none-any.whl", DIGEST_A);
     meta.put_upload(
         "hosted",
         "demo",
@@ -457,23 +525,7 @@ fn test_policy_dry_run_reports_upload_denials() {
 #[test]
 fn test_policy_dry_run_accepts_allowed_uploads() {
     let (_dir, meta) = store();
-    let uploaded = Uploaded {
-        version: "1.0".to_owned(),
-        file: File {
-            filename: "demo-1.0.tar.gz".to_owned(),
-            url: "u".to_owned(),
-            hashes: std::collections::BTreeMap::from([("sha256".to_owned(), "a".repeat(64))]),
-            requires_python: None,
-            size: None,
-            upload_time: None,
-            yanked: Yanked::No,
-            core_metadata: CoreMetadata::Absent,
-            dist_info_metadata: CoreMetadata::Absent,
-            gpg_sig: None,
-            provenance: Provenance::Absent,
-        },
-        trashed: None,
-    };
+    let uploaded = upload_record("demo-1.0.tar.gz", DIGEST_A);
     meta.put_upload(
         "hosted",
         "demo",

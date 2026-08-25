@@ -83,69 +83,67 @@ enum AttestationSource {
     },
 }
 
-async fn find_attestation_source(
-    state: &Arc<ServingState>,
-    index: &Index,
-    artifact_sha256: &str,
-    filename: &str,
-) -> Result<Option<AttestationSource>, CacheError> {
-    match &index.kind {
-        IndexKind::Hosted { .. } => {
-            layer_has_attestation(state, index, &artifact_project(filename), artifact_sha256, filename)
-                .await
-                .and_then(|visible| {
-                    if !visible {
-                        return Ok(None);
-                    }
-                    state
-                        .meta
-                        .get_provenance(artifact_sha256)
-                        .map_err(CacheError::from)
-                        .map(|record| record.map(|(digest, _size)| AttestationSource::Hosted(digest)))
-                })
-        }
-        IndexKind::Cached { .. } => {
-            let project = artifact_project(filename);
-            layer_has_attestation(state, index, &project, artifact_sha256, filename)
-                .await
-                .and_then(|visible| {
-                    if !visible {
-                        return Ok(None);
-                    }
-                    state
-                        .meta
-                        .get_upstream_attestation(&index.name, &project, artifact_sha256, filename)
-                        .map_err(CacheError::from)
-                        .map(|record| {
-                            record.map(|record| AttestationSource::Upstream {
-                                source: index.name.clone(),
-                                record: Box::new(record),
+fn find_attestation_source<'a>(
+    state: &'a Arc<ServingState>,
+    index: &'a Index,
+    artifact_sha256: &'a str,
+    filename: &'a str,
+) -> BoxFuture<'a, Result<Option<AttestationSource>, CacheError>> {
+    async move {
+        match &index.kind {
+            IndexKind::Hosted { .. } => {
+                layer_has_attestation(state, index, &artifact_project(filename), artifact_sha256, filename)
+                    .await
+                    .and_then(|visible| {
+                        if !visible {
+                            return Ok(None);
+                        }
+                        state
+                            .meta
+                            .get_provenance(artifact_sha256)
+                            .map_err(CacheError::from)
+                            .map(|record| record.map(|(digest, _size)| AttestationSource::Hosted(digest)))
+                    })
+            }
+            IndexKind::Cached { .. } => {
+                let project = artifact_project(filename);
+                layer_has_attestation(state, index, &project, artifact_sha256, filename)
+                    .await
+                    .and_then(|visible| {
+                        if !visible {
+                            return Ok(None);
+                        }
+                        state
+                            .meta
+                            .get_upstream_attestation(&index.name, &project, artifact_sha256, filename)
+                            .map_err(CacheError::from)
+                            .map(|record| {
+                                record.map(|record| AttestationSource::Upstream {
+                                    source: index.name.clone(),
+                                    record: Box::new(record),
+                                })
                             })
-                        })
-                })
-        }
-        IndexKind::Virtual { layers, .. } => {
-            layer_has_attestation(state, index, &artifact_project(filename), artifact_sha256, filename)
-                .and_then(|visible| async move {
-                    if !visible {
-                        return Ok(None);
-                    }
-                    futures_util::stream::iter(peryx_index::shadow_order(&state.indexes, layers))
-                        .then(|position| {
-                            Box::pin(find_attestation_source(
-                                state,
-                                state.index_at(position),
-                                artifact_sha256,
-                                filename,
-                            ))
-                        })
-                        .try_filter_map(|source| futures_util::future::ready(Ok::<_, CacheError>(source)))
-                        .try_next()
-                        .await
-                })
-                .await
+                    })
+            }
+            IndexKind::Virtual { layers, .. } => {
+                layer_has_attestation(state, index, &artifact_project(filename), artifact_sha256, filename)
+                    .and_then(|visible| async move {
+                        if !visible {
+                            return Ok(None);
+                        }
+                        futures_util::stream::iter(peryx_index::shadow_order(&state.indexes, layers))
+                            .then(|position| {
+                                find_attestation_source(state, state.index_at(position), artifact_sha256, filename)
+                            })
+                            .try_filter_map(|source| futures_util::future::ready(Ok::<_, CacheError>(source)))
+                            .try_next()
+                            .await
+                    })
+                    .await
+            }
         }
     }
+    .boxed()
 }
 
 fn artifact_project(filename: &str) -> String {

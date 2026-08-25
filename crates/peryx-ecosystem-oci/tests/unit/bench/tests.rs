@@ -142,15 +142,11 @@ async fn peryx_server_writes_oci_configuration() {
     true,
     "did not emit its startup event"
 )]
-#[case(
-    Some("#!/bin/sh\nexit 7\n"),
-    false,
-    "exited before its startup event with exit status: 7"
-)]
+#[case(Some("#!/bin/sh\nexit 7\n"), false, "ended its output before its startup event")]
 #[case(
     Some("#!/bin/sh\nexec python3 -c 'import os, signal; os.close(1); os.close(2); signal.pause()'\n"),
     false,
-    "closed its output before its startup event"
+    "ended its output before its startup event"
 )]
 #[case(
     Some("#!/bin/sh\nprintf 'peryx listening\\n'\nexit 7\n"),
@@ -179,16 +175,14 @@ async fn peryx_server_classifies_startup_failures(
         environment.startup_timeout = std::time::Duration::ZERO;
     }
 
-    assert!(
-        servers::all()
-            .remove(0)
-            .start(&environment, &context(directory.path()), directory.path())
-            .await
-            .err()
-            .unwrap()
-            .to_string()
-            .contains(expected)
-    );
+    let error = servers::all()
+        .remove(0)
+        .start(&environment, &context(directory.path()), directory.path())
+        .await
+        .err()
+        .expect("fixture must fail")
+        .to_string();
+    assert!(error.contains(expected), "{error}");
 }
 
 #[cfg(unix)]
@@ -637,7 +631,12 @@ elif [ "$1" = rm ]; then
   name=$3
   port=${name##*-}
   pidfile=${TMPDIR:-/tmp}/peryx-oci-pid-$port
-  [ -e "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null || true
+  if [ -e "$pidfile" ]; then
+    pid=$(cat "$pidfile")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" || exit
+    fi
+  fi
   rm -f "$pidfile"
 fi
 "#;

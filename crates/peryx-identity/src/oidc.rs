@@ -339,7 +339,7 @@ fn issuer_url(value: &str) -> Result<Url, OidcVerificationError> {
 }
 
 fn oidc_client() -> Result<Client, OidcVerificationError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)

@@ -605,7 +605,7 @@ fn secure_url(url: &Url) -> Option<&Url> {
 }
 
 fn oidc_client(request_timeout: Duration) -> Result<reqwest::Client, OidcProviderBuildError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(request_timeout)

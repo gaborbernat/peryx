@@ -88,7 +88,7 @@ async fn test_sleep_before_retry_logs_a_redacted_url_and_status() {
         .respond_with(ResponseTemplate::new(503))
         .mount(&server)
         .await;
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let error = reqwest::get(server.uri())
         .await
         .unwrap()

@@ -112,7 +112,7 @@ impl HttpAnalyticsSource {
         let endpoint = base_url
             .join(ANALYTICS_PATH)
             .expect("a rooted analytics path always joins");
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let http = Client::builder()
             .user_agent(USER_AGENT)
             .timeout(timeout)

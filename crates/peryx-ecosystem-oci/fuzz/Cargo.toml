@@ -13,7 +13,6 @@ cargo-fuzz = true
 [dependencies]
 axum = "0.8.9"
 libfuzzer-sys = "0.4"
-peryx-core = { version = "0.0.1", path = "../../peryx-core" }
 peryx-driver = { version = "0.0.1", path = "../../peryx-driver" }
 peryx-ecosystem-oci = { version = "0.0.1", path = ".." }
 peryx-identity = { version = "0.0.1", path = "../../peryx-identity" }

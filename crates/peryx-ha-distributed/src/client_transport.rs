@@ -63,7 +63,7 @@ impl HttpClientTransport {
         }
         base.set_query(None);
         base.set_fragment(None);
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         Ok(Self {
             client: Client::builder()
                 .user_agent(USER_AGENT)

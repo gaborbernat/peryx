@@ -13,7 +13,7 @@ pub const MAX_DISCOVERY_BYTES: usize = 65_536;
 pub const MAX_JWKS_BYTES: usize = 1_048_576;
 
 pub fn transport(destination: &str) -> Arc<dyn OidcHttpTransport> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     Arc::new(WiremockTransport {
         logical_origin: Url::parse(&secure_origin(destination)).unwrap(),
         destination: Url::parse(destination).unwrap(),

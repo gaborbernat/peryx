@@ -559,8 +559,8 @@ fn prepared_tls(
 }
 
 fn install_rustls_provider() {
-    if rustls::crypto::ring::default_provider().install_default().is_ok() {
-        tracing::debug!("installed rustls ring provider");
+    if rustls::crypto::aws_lc_rs::default_provider().install_default().is_ok() {
+        tracing::debug!("installed rustls AWS-LC provider");
     } else {
         tracing::debug!("rustls provider already installed");
     }

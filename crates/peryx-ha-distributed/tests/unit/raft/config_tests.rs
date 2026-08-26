@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use openraft::{ConfigError, SnapshotPolicy};
+use openraft::{Config, ConfigError, SnapshotPolicy};
 
 use crate::raft::RaftConfig;
 
@@ -8,13 +8,56 @@ use crate::raft::RaftConfig;
 fn test_defaults_map_to_a_validated_config() {
     let config = RaftConfig::default().into_openraft("ownership").unwrap();
 
-    assert_eq!(config.cluster_name, "ownership");
-    assert_eq!(config.heartbeat_interval, 100);
-    assert_eq!(config.election_timeout_min, 300);
-    assert_eq!(config.election_timeout_max, 600);
-    assert_eq!(config.install_snapshot_timeout, 3_000);
-    assert_eq!(config.snapshot_policy, SnapshotPolicy::LogsSinceLast(5_000));
-    assert_eq!(config.max_in_snapshot_log_to_keep, 1_000);
+    assert_eq!(
+        (
+            config.cluster_name,
+            config.heartbeat_interval,
+            config.election_timeout_min,
+            config.election_timeout_max,
+            config.install_snapshot_timeout,
+            config.snapshot_policy,
+            config.max_in_snapshot_log_to_keep,
+        ),
+        (
+            "ownership".to_owned(),
+            100,
+            300,
+            600,
+            3_000,
+            SnapshotPolicy::LogsSinceLast(5_000),
+            1_000,
+        )
+    );
+}
+
+#[test]
+#[allow(deprecated)] // OpenRaft still exposes the deprecated snapshot field in Config.
+fn test_unowned_defaults_track_openraft() {
+    let expected = Config::default();
+    let actual = RaftConfig::default().into_openraft("ownership").unwrap();
+
+    assert_eq!(
+        (
+            actual.send_snapshot_timeout,
+            actual.max_payload_entries,
+            actual.replication_lag_threshold,
+            actual.snapshot_max_chunk_size,
+            actual.purge_batch_size,
+            actual.enable_tick,
+            actual.enable_heartbeat,
+            actual.enable_elect,
+        ),
+        (
+            expected.send_snapshot_timeout,
+            expected.max_payload_entries,
+            expected.replication_lag_threshold,
+            expected.snapshot_max_chunk_size,
+            expected.purge_batch_size,
+            expected.enable_tick,
+            expected.enable_heartbeat,
+            expected.enable_elect,
+        )
+    );
 }
 
 #[test]
@@ -30,12 +73,17 @@ fn test_operator_overrides_map_through() {
 
     let config = tuned.into_openraft("group").unwrap();
 
-    assert_eq!(config.heartbeat_interval, 250);
-    assert_eq!(config.election_timeout_min, 1_000);
-    assert_eq!(config.election_timeout_max, 2_000);
-    assert_eq!(config.install_snapshot_timeout, 30_000);
-    assert_eq!(config.snapshot_policy, SnapshotPolicy::LogsSinceLast(20_000));
-    assert_eq!(config.max_in_snapshot_log_to_keep, 4_000);
+    assert_eq!(
+        (
+            config.heartbeat_interval,
+            config.election_timeout_min,
+            config.election_timeout_max,
+            config.install_snapshot_timeout,
+            config.snapshot_policy,
+            config.max_in_snapshot_log_to_keep,
+        ),
+        (250, 1_000, 2_000, 30_000, SnapshotPolicy::LogsSinceLast(20_000), 4_000)
+    );
 }
 
 #[test]

@@ -569,7 +569,7 @@ fn valid_attribute(attribute: &str) -> bool {
 }
 
 fn tls_config(custom_ca_pem: Option<&[u8]>) -> Result<ClientConfig, LdapProviderBuildError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mut roots = RootCertStore::empty();
     roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
     if let Some(pem) = custom_ca_pem {

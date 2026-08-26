@@ -34,7 +34,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 type DataPreparation<'a> = &'a dyn Fn(&MemberSpec, &std::path::Path);
 
 pub(crate) fn http_client(timeout: Duration) -> reqwest::blocking::Client {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()

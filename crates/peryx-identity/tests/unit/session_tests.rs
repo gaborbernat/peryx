@@ -1,5 +1,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
+use ring::hkdf::{HKDF_SHA256, Salt};
 use serde::{Deserialize, Serialize};
 
 use super::{PRE_AUTH_COOKIE, SESSION_COOKIE, SessionSealer};
@@ -45,6 +47,25 @@ fn test_a_sealed_session_round_trips_before_it_expires() {
     let user = user();
     let cookie = sealer.seal_session(&user, 1_000);
     assert_eq!(sealer.open_session(&cookie, 999), Some(user));
+}
+
+#[test]
+fn test_a_ring_session_remains_compatible() {
+    let user = user();
+    let mut material = [0_u8; 32];
+    Salt::new(HKDF_SHA256, b"peryx-identity-session-hkdf-salt-v1")
+        .extract(KEY)
+        .expand(&[b"peryx browser session v1"], &CHACHA20_POLY1305)
+        .and_then(|key| key.fill(&mut material))
+        .unwrap();
+    let key = LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, &material).unwrap());
+    let nonce = [7_u8; NONCE_LEN];
+    let mut sealed = serde_json::to_vec(&serde_json::json!({ "exp": 1_000, "data": &user })).unwrap();
+    key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut sealed)
+        .unwrap();
+    let cookie = URL_SAFE_NO_PAD.encode([nonce.as_slice(), sealed.as_slice()].concat());
+
+    assert_eq!(sealer().open_session(&cookie, 999), Some(user));
 }
 
 #[test]

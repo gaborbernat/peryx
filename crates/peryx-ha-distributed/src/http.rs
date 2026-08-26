@@ -110,7 +110,7 @@ impl HttpPrimary {
         base_url.set_query(None);
         base_url.set_fragment(None);
         let changes_url = endpoint_url(&base_url, CHANGES_PATH);
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .build()

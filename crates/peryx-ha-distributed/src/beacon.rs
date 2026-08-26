@@ -67,7 +67,7 @@ impl BeaconSender {
         base.set_query(None);
         base.set_fragment(None);
         base.set_path(&format!("{}{HEARTBEAT_PATH}", base.path()));
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let http = Client::builder()
             .user_agent(USER_AGENT)
             .timeout(interval)

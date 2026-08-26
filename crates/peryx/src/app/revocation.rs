@@ -32,7 +32,7 @@ async fn run(
     password: String,
     (method, url, body): (Method, Url, Option<serde_json::Value>),
 ) -> anyhow::Result<serde_json::Value> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)

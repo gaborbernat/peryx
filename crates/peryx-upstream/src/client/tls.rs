@@ -23,7 +23,7 @@ impl UpstreamTls {
     /// # Errors
     /// Returns [`UpstreamTlsError`] when a file cannot be read or its PEM material is invalid.
     pub fn from_paths(ca_bundle: Option<&Path>, identity: Option<(&Path, &Path)>) -> Result<Self, UpstreamTlsError> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let roots = match ca_bundle {
             Some(path) => {
                 let roots =

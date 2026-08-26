@@ -27,7 +27,7 @@ serving = [
   "dep:bytes",
   "dep:base64",
   "dep:blake2",
-  "dep:md-5",
+  "dep:md5",
   "dep:csv",
   "dep:spdx",
   "dep:pep508_rs",
@@ -77,7 +77,7 @@ web_atoms = "0.2.6"
 url.workspace = true
 percent-encoding.workspace = true
 sha2.workspace = true
-xml-rs = "1.0"
+xml = { package = "xml-rs", version = "1.0" }
 hdrhistogram = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
@@ -99,7 +99,7 @@ axum = { workspace = true, features = ["multipart"], optional = true }
 bytes = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
-md-5 = { workspace = true, optional = true }
+md5 = { workspace = true, optional = true }
 csv = { workspace = true, optional = true }
 spdx = { version = "0.13", optional = true }
 pep508_rs = { version = "0.9", optional = true }

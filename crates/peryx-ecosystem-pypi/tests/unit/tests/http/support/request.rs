@@ -164,7 +164,7 @@ pub fn range_response(bytes: Vec<u8>) -> impl wiremock::Respond {
 #[case::past_end(Some("bytes=0-4"))]
 #[tokio::test]
 async fn test_range_response_rejects_invalid_ranges(#[case] range: Option<&str>) {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .respond_with(range_response(b"data".to_vec()))

@@ -138,7 +138,7 @@ async fn test_client_identity_refuses_a_cross_origin_redirect() {
 }
 
 fn tls_fixture(include_ca: bool, include_identity: bool) -> TlsFixture {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let ca_key = KeyPair::generate().unwrap();
     let mut ca_parameters = CertificateParams::new(Vec::<String>::new()).unwrap();
     ca_parameters

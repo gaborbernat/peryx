@@ -49,7 +49,7 @@ pub struct TestServer {
 
 impl TestServer {
     pub async fn start(router: Router) -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         Self {

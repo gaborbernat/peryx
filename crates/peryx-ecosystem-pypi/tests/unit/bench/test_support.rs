@@ -35,7 +35,7 @@ pub(super) fn http_client() -> reqwest::Client {
 }
 
 pub(super) fn install_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }
 
 pub(super) fn server(name: &'static str, base_url: fn(u16) -> String) -> Server {

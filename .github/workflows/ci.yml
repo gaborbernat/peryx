@@ -172,6 +172,9 @@ jobs:
           tools: jq just node prek zola
       - run: just lint-docs
       - run: just docs
+        env:
+          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+          PUPPETEER_SKIP_DOWNLOAD: "true"
 
   nightly:
     if: github.event_name == 'workflow_dispatch' && inputs.nightly

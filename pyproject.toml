@@ -7,7 +7,7 @@ name = "peryx"
 description = "Multi-ecosystem artifact cache and private registry"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 keywords = ["artifact-registry", "cache", "mirror", "oci", "pypi", "software-distribution"]
 classifiers = [
   "Development Status :: 3 - Alpha",

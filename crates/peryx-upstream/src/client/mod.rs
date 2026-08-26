@@ -181,9 +181,8 @@ impl UpstreamClient {
         identity_origin: &str,
         trusted_hosts: &[String],
     ) -> Result<Self, UpstreamError> {
-        // ring avoids the C toolchain that aws-lc requires for release cross-compilation. Provider
-        // installation is process-wide, so another caller may have installed it first.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Installation is process-wide, so another caller may have installed the provider first.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let mut base = Url::parse(base)?;
         let include_identity = same_origin(&base, &Url::parse(identity_origin)?);
         if !base.path().ends_with('/') {

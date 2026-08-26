@@ -119,7 +119,7 @@ fn assert_descriptor_adoption(descriptor: u8) {
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&stderr).expect("create fixture stderr"));
     let _child = ChildGuard(command.spawn().expect("start fixture"));
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()

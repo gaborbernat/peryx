@@ -4,11 +4,11 @@
 //! `ChaCha20-Poly1305` encrypts and authenticates cookie payloads. HKDF derives a separate key for each
 //! purpose, preventing substitution between session and pre-authentication cookies.
 
+use aws_lc_rs::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
+use aws_lc_rs::hkdf::{HKDF_SHA256, Salt};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
-use ring::hkdf::{HKDF_SHA256, Salt};
-use ring::rand::{SecureRandom, SystemRandom};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

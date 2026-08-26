@@ -48,7 +48,7 @@ peryx-upstream = { version = "0.0.1", path = "crates/peryx-upstream" }
 peryx-http = { version = "0.0.1", path = "crates/peryx-http" }
 peryx-web = { version = "0.0.1", path = "crates/peryx-web" }
 peryx-test-support = { version = "0.0.1", path = "crates/peryx-test-support" }
-axum = { version = "0.8.9", features = ["multipart"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "multipart", "original-uri", "query", "tokio", "tower-log", "tracing"] }
 tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["trace"] }
 http = "1.5"
@@ -57,7 +57,7 @@ http-body-util = "0.1.5"
 ipnet = { version = "2.12", features = ["serde"] }
 sha2 = "0.11"
 blake2 = "0.10.6"
-md-5 = "0.11"
+md5 = { package = "md-5", version = "0.11" }
 csv = "1"
 dashmap = "6.2"
 tempfile = "3.27"
@@ -68,11 +68,11 @@ redb = "4.2"
 openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 tokio = "1.53"
 reqwest = { version = "0.13.4", default-features = false }
-ring = "0.17.14"
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+aws-lc-rs = "1.18"
+rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std", "tls12", "logging"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
-rustls-acme = { version = "0.15", default-features = false, features = ["ring", "axum", "tls12", "webpki-roots"] }
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+rustls-acme = { version = "0.15", default-features = false, features = ["aws-lc-rs", "axum", "tls12", "webpki-roots"] }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 aws-sdk-s3 = { version = "1.144", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
 aws-smithy-http-client = { version = "1.4", default-features = false, features = ["test-util"] }
 bytes = "1.12.1"
@@ -86,7 +86,7 @@ parking_lot = "0.12.5"
 tokio-util = { version = "0.7.19", features = ["io"] }
 base64 = "0.23.1"
 hex = "0.4.3"
-argon2 = { version = "0.5", features = ["std"] }
+argon2 = { version = "0.5", default-features = false, features = ["std"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 url = "2.5.8"
 wiremock = "0.6"
@@ -96,18 +96,18 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 unicode-normalization = "0.1"
 uuid = { version = "1.25", features = ["serde", "v4"] }
-tantivy = "0.26"
+tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "columnar-zstd-compression"] }
 toml = "1.1"
 insta = "1"
 thiserror = "2.0.20"
 async-trait = "0.1.92"
 bb8 = { version = "0.9.1", default-features = false }
-ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
+ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-aws-lc-rs"] }
 arc-swap = "1.9"
 command-group = { version = "5.0.1", features = ["with-tokio"] }
 anyhow = "1.0.104"
 tracing = "0.1.44"
-sysinfo = "0.39"
+sysinfo = { version = "0.39", default-features = false, features = ["disk", "system"] }
 utoipa = "5.5"
 leptos = "0.8.20"
 leptos_axum = "0.8.10"
@@ -119,8 +119,8 @@ minicov = "=0.3.8"
 rustls-native-certs = "0.8.4"
 rustix = { version = "1.1.4", features = ["process"] }
 regex = "1.13"
-zip = { version = "8", default-features = false, features = ["deflate"] }
-tar = "0.4.46"
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4.46", default-features = false }
 flate2 = "1.1"
 gloo-net = "0.7"
 console_error_panic_hook = "0.1"
@@ -149,7 +149,7 @@ lto = false
 
 [profile.dist]
 inherits = "release"
-lto = "thin"
+codegen-units = 1
 
 # cargo-leptos hydrates the WASM library while the binary uses peryx-web's SSR default.
 [[workspace.metadata.leptos]]

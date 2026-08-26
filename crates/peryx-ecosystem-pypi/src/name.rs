@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 use std::fmt;
 
-/// Normalize a project name per PEP 503: lowercase, and collapse every run of `-`, `_`, or `.`
-/// into a single `-`. Equivalent to Python's `re.sub(r"[-_.]+", "-", name).lower()`.
+/// Normalize a project name per PEP 503: ASCII lowercase, and collapse every run of `-`, `_`, or
+/// `.` into a single `-`.
 #[must_use]
 pub fn normalize_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
@@ -17,7 +17,7 @@ pub fn normalize_name(name: &str) -> String {
             }
         } else {
             in_separator = false;
-            out.extend(ch.to_lowercase());
+            out.push(ch.to_ascii_lowercase());
         }
     }
     out

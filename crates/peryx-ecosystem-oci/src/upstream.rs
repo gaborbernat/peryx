@@ -116,10 +116,10 @@ impl Default for Upstream {
 impl Upstream {
     /// # Panics
     /// Panics only if the TLS backend cannot initialize the HTTP client, which cannot happen once the
-    /// ring crypto provider is installed.
+    /// AWS-LC crypto provider is installed.
     #[must_use]
     pub fn new() -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let http = reqwest::Client::builder()
             .user_agent(concat!("peryx/", env!("CARGO_PKG_VERSION")))
             .pool_max_idle_per_host(32)

@@ -17,7 +17,7 @@ pub struct WebhookRuntime {
 impl WebhookRuntime {
     #[must_use]
     pub fn disabled() -> Self {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let (stopped, _) = tokio::sync::watch::channel(0);
         Self {
             client: delivery_client(),

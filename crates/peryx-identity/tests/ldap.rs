@@ -409,7 +409,7 @@ enum TlsMaterialError {
 }
 
 fn server_config(certificate_pem: &[u8], private_key_pem: &[u8]) -> Result<ServerConfig, TlsMaterialError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certificates = CertificateDer::pem_slice_iter(certificate_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| TlsMaterialError::InvalidCertificate)?;

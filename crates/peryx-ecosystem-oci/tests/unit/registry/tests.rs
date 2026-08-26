@@ -39,7 +39,7 @@ fn test_serve_error_message_describes_every_fault() {
 
 #[tokio::test]
 async fn test_serve_error_wraps_a_transport_failure() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let err = reqwest::Client::new()
         .get("http://127.0.0.1:1/")
         .send()

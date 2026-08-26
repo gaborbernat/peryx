@@ -35,7 +35,7 @@ impl Default for StartupPolicy {
 /// # Errors
 /// Returns an error when reqwest cannot build the client.
 pub fn http_client() -> anyhow::Result<reqwest::Client> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     Ok(reqwest::Client::builder().build()?)
 }
 

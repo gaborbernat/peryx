@@ -94,7 +94,7 @@ impl TestPki {
         versions: &[&'static SupportedProtocolVersion],
         require_client_identity: bool,
     ) -> TlsServer {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut roots = RootCertStore::empty();
         roots.add(self.ca_der.clone()).unwrap();
         let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))

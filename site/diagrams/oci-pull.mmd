@@ -1,0 +1,9 @@
+sequenceDiagram
+  participant D as docker / podman
+  participant R as registry
+  D->>+R: GET /v2/ (version check)
+  R-->>-D: 200, Docker-Distribution-API-Version
+  D->>+R: GET /v2/<name>/manifests/latest (Accept: image manifest)
+  R-->>-D: manifest JSON: config + layer descriptors, digests
+  D->>+R: GET /v2/<name>/blobs/sha256:... (config, then each layer)
+  R-->>-D: blob, which docker verifies against its digest

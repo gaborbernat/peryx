@@ -63,15 +63,6 @@ All ecosystem owner registrations linked into the executable before configuratio
 
 The executable that links implementations and assembles process resources. `peryx` is the composition root.
 
-## Coverage contract
-
-A crate, its source roots, an executed LCOV report, and the coverage-policy digest. Each contract requires exact
-executable line and function coverage.
-
-## Crate contract
-
-The independent build, target, test, source-ownership, and coverage checks for one non-system workspace package.
-
 ## Datacenter
 
 A failure domain containing one or more distributed members.

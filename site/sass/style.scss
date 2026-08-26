@@ -1435,17 +1435,57 @@ table {
   }
 }
 
-// Diagrams are pre-rendered to two SVGs (light + dark); show the one matching the active theme.
 .mermaid-figure {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
   margin: 1.5rem 0;
-  text-align: center;
+  padding: 0.75rem;
 
-  svg {
-    max-width: 100%;
+  &:fullscreen {
+    background: var(--bg);
+    padding: 1rem;
+
+    .diagram-viewport {
+      height: calc(100vh - 4.5rem);
+      max-height: none;
+    }
+  }
+
+  img {
+    display: block;
     height: auto;
+    margin: auto;
+    max-width: none;
+    width: 100%;
   }
 }
-.mermaid-dark {
+.diagram-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+
+  button {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
+    min-width: 2rem;
+    padding: 0.3rem 0.55rem;
+
+    &:hover,
+    &:focus-visible {
+      border-color: var(--accent);
+    }
+  }
+}
+.diagram-viewport {
+  max-height: min(70vh, 48rem);
+  overflow: auto;
+}
+.mermaid-figure .mermaid-dark {
   display: none;
 }
 :root[data-theme="dark"] {

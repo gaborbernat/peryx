@@ -315,6 +315,43 @@
         });
       });
     });
+    document.querySelectorAll("[data-diagram]").forEach(function (figure) {
+      var viewport = figure.querySelector(".diagram-viewport");
+      var scale = 1;
+      function setScale(next) {
+        scale = Math.max(0.5, Math.min(3, next));
+        figure.querySelectorAll("img").forEach(function (image) {
+          image.style.width = scale * 100 + "%";
+        });
+      }
+      figure.querySelector('[data-diagram-zoom="in"]').addEventListener("click", function () {
+        setScale(scale + 0.25);
+      });
+      figure.querySelector('[data-diagram-zoom="out"]').addEventListener("click", function () {
+        setScale(scale - 0.25);
+      });
+      figure.querySelector('[data-diagram-zoom="reset"]').addEventListener("click", function () {
+        setScale(1);
+        viewport.scrollTo(0, 0);
+      });
+      viewport.addEventListener("keydown", function (event) {
+        if (event.key === "+" || event.key === "=") setScale(scale + 0.25);
+        if (event.key === "-") setScale(scale - 0.25);
+        if (event.key === "0") setScale(1);
+      });
+      var fullscreen = figure.querySelector("[data-diagram-fullscreen]");
+      if (!figure.requestFullscreen) {
+        fullscreen.hidden = true;
+        return;
+      }
+      fullscreen.addEventListener("click", function () {
+        var request = document.fullscreenElement === figure ? document.exitFullscreen() : figure.requestFullscreen();
+        request.catch(function () { fullscreen.hidden = true; });
+      });
+      document.addEventListener("fullscreenchange", function () {
+        fullscreen.textContent = document.fullscreenElement === figure ? "Exit full screen" : "Full screen";
+      });
+    });
   </script>
 </body>
 </html>

@@ -52,8 +52,8 @@ peryx stores the chart's config and layer blobs in its content-addressed store a
 
 ## Push and pull an arbitrary artifact
 
-For files that are not images or charts, [oras](https://oras.land/) packs any set of files into a manifest. Set an
-`--artifact-type` so consumers can tell what the artifact is:
+For files that are not images or charts, [oras](https://github.com/oras-project/oras) packs any set of files into a
+manifest. Set an `--artifact-type` so consumers can tell what the artifact is:
 
 ```shell
 oras login 127.0.0.1:4433 -u _ -p <token> --plain-http

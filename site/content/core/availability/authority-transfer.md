@@ -41,7 +41,7 @@ write the old home had in flight under the previous epoch is stale, and the new 
 returns cannot finalize a write against an authority it no longer owns. A datacenter in a control-plane minority cannot
 commit the move. It forwards to the leader, so a partition cannot produce two homes.
 
-{{<diagram file="86ac6de4ae6ad836" />}}
+{{<diagram file="authority-transfer" />}}
 
 ## Draining the retained writes
 

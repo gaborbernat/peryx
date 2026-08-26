@@ -12,7 +12,7 @@ of them. peryx serves `meta.api-version` 1.4 when the resolved page contains the
 
 `pip install requests` sends this sequence to a standards-compliant index:
 
-{{<diagram file="331095bfdf087c28" />}}
+{{<diagram file="pypi-resolve" />}}
 
 Every hop names a standard: the page format is PEP 503/691, its fields are PEP 700, the yank markers are PEP 592, the
 metadata shortcut is PEP 658/714, and the filename [pip](https://pip.pypa.io/) parsed to pick a wheel is PEP 427. peryx

@@ -10,6 +10,7 @@ highlighting = { theme = "ayu-dark" }
 
 [link_checker]
 internal_level = "error"
+skip_prefixes = ["http://127.0.0.1:4433/"]
 
 [extra]
 repo = "https://github.com/tox-dev/peryx"

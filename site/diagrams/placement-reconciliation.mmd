@@ -1,0 +1,7 @@
+flowchart LR
+  verified["Verified (served)"] --> |"bytes rotted or file gone"| failed["Failed: digest mismatch"]
+  failed -->|"copy backlog re-copies from a peer"| pending["Pending (in flight)"]
+  pending -->|"peer bytes verified"| verified
+  verified -->|"out of policy"| revoked["Revoked (retired)"]
+  class verified,pending good
+  class failed,revoked warn

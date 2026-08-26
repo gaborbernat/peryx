@@ -32,7 +32,7 @@ Confirm these conditions before an incident:
 
 ## Classify the failure
 
-{{<diagram file="ca5de35ab407da89" />}}
+{{<diagram file="failover-recovery" />}}
 
 The four failure categories are distinct because the contract distinguishes
 [crash from storage loss](@/core/availability/contracts.md#crash-versus-storage-loss) and a

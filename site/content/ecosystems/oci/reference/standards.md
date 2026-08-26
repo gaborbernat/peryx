@@ -13,7 +13,7 @@ answers the version check with `Docker-Distribution-API-Version: registry/2.0`.
 
 `docker pull alpine:latest` sends this sequence to a distribution-spec registry:
 
-{{<diagram file="46d255ed1aa50341" />}}
+{{<diagram file="oci-pull" />}}
 
 The distribution spec defines the routes. The image spec defines manifest and blob shapes. peryx serves these formats to
 clients and parses them from upstreams.

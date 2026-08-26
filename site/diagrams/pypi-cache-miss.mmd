@@ -1,0 +1,8 @@
+flowchart TB
+  miss["client requests an uncached wheel"]
+  miss --> V["peryx, devpi: <br/>stream to the client while<br/>teeing into a content-addressed store"]
+  miss --> P["proxpi: <br/>download to a disk temp dir in a thread;<br/>client waits, or is redirected after 0.9 s"]
+  miss --> S["pypiserver: <br/>302 redirect to pypi.org;<br/>nothing is downloaded or cached"]
+  miss --> C["pypicloud: <br/>buffer the whole file to a temp file,<br/>write to store + DB, then serve"]
+  class V good
+  class C,S warn

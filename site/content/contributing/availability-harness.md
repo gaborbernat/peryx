@@ -12,16 +12,10 @@ system packages.
 The neutral scenarios use the `availability-e2e` test feature. The native coverage job runs them with the rest of the
 all-features workspace suite.
 
-Install Toxiproxy for the host lane:
+Install the locked Toxiproxy release and run the harness:
 
 ```shell
-brew install toxiproxy
-just availability
-```
-
-Use the Linux system profile when the host cannot run the dependencies:
-
-```shell
+mise install --locked toxiproxy
 just availability
 ```
 

@@ -67,7 +67,7 @@ source.
 
 The cold rows measure how each server moves an uncached wheel from pypi.org to the client.
 
-{{<diagram file="03bc4817619c3f14" />}}
+{{<diagram file="pypi-cache-miss" />}}
 
 - **peryx** never buffers a whole response.
   [Page and artifact bytes stream to the client and into the store at once](@/contributing/runtime-architecture.md);
@@ -110,7 +110,7 @@ lock evaluates the project against an as-yet-empty project list, concludes it do
 caches that negative result for the mirror-expiry window (30 minutes by default). uv reads the `404` as "no such
 package" and the install fails.
 
-{{<diagram file="3304a5c0115dca6a" />}}
+{{<diagram file="devpi-concurrency" />}}
 
 **pypicloud, the concurrent INSERT.** The cache-on-miss path has no dedup and no locking. Four clients asking for one
 wheel each download the whole file, then each try to write the same `filename` primary key into single-writer SQLite.
@@ -118,7 +118,7 @@ The commits serialize; the losers hit a `UNIQUE` constraint (or `database is loc
 [pyramid_tm](https://docs.pylonsproject.org/projects/pyramid_tm/) commits after the view returns with no retry
 configured, the exception surfaces as `HTTP 500`.
 
-{{<diagram file="75269d4363d28850" />}}
+{{<diagram file="pypicloud-concurrency" />}}
 
 Read this way, each table below is a controlled test of one axis: cold latency, warm overhead, a concurrent cold burst,
 a fleet installing at once, a swarm reading pages. The architecture above says in advance which servers should struggle

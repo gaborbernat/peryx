@@ -55,7 +55,7 @@ A transfer moves through one lifecycle to a single outcome. It waits at `Awaitin
 barrier, stands `Ready`, and commits once. An administrator can cancel it while it waits, and a cancel is refused once
 it has committed, so a cancel that races the commit resolves to exactly one of the two.
 
-{{<diagram file="64d7f6a34fd52e06" />}}
+{{<diagram file="planned-transfer" />}}
 
 Cancel a waiting transfer with a `DELETE` keyed by the authority:
 

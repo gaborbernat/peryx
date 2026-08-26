@@ -14,11 +14,12 @@ Run setup commands from the repository root:
 
 ```shell
 rustup show
-mise install
+mise install --locked
 prek install
 ```
 
-`rustup` reads `rust-toolchain.toml`. Mise installs the tools pinned by the repository. Prek installs the commit hooks.
+Use `mise install --locked` to require every resolution in `mise.lock`. `rustup` reads `rust-toolchain.toml`. Prek
+installs the commit hooks.
 
 Recipes keep generated state under `.tox/`. Do not put generated files in `src/` or `tests/`.
 
@@ -46,8 +47,8 @@ and [ecosystem boundaries](@/contributing/ecosystem-boundaries.md) before moving
 
 ## Test ownership
 
-Each behavior test belongs to the crate that owns the behavior. A crate must build, test, and reach exact coverage
-without another crate's tests.
+Each behavior test belongs to the crate that owns the behavior. The workspace coverage run measures every crate through
+its owning tests.
 
 ### Unit tests
 
@@ -91,7 +92,7 @@ cleanup for every spawned task, listener, and child process.
 - `just docs`: documentation build and search index
 - `just site-links`: external-link check
 - `just pre-commit`: all repository hooks
-- `just all`: lint, complete Linux coverage, docs, and CI-safe hooks
+- `just all`: lint, complete coverage, and docs
 - `just ci`: run the same complete gate as `just all`
 
 Nextest provides process isolation used by several suites. Use the recipes instead of substituting raw `cargo test` for
@@ -114,13 +115,8 @@ makes impossible to execute, with the reason beside the exclusion.
 
 ## CI structure
 
-GitHub Actions owns event handling, runner setup, caching, artifacts, matrices, and job dependencies. The `justfile`
-owns validation. Pull requests run source, automation, contract, platform, native coverage, frontend coverage, and
-documentation jobs. Nightly CI adds feature powersets, direct dependency lower bounds, Miri, Loom, sanitizers, mutation,
-fuzzing, and the live client boundary.
-
-Run the recipe named by a failed job before changing workflow YAML. Change the workflow only when the fault concerns CI
-orchestration.
+The [CI guide](@/contributing/ci.md) maps each job to its local recipe and documents test synchronization, nightly
+analysis, and runner-specific orchestration. Run the recipe named by a failed job before changing workflow YAML.
 
 ## Docker-backed tests
 
@@ -130,6 +126,12 @@ developer machines and GitHub-hosted runners.
 
 `just clean` removes transient project state. `just clean-all` also removes reusable coverage, browser, fuzz, and
 benchmark state.
+
+## Dependency updates
+
+Renovate checks Cargo, npm, GitHub Actions, container images, mise, pre-commit hooks, and the Rust toolchain each
+Tuesday. Lock maintenance covers `Cargo.lock`, every `package-lock.json`, and `mise.lock`. Update grouped pull requests
+through their manifests; do not edit lockfiles by hand.
 
 ## Documentation ownership
 
@@ -141,8 +143,9 @@ concepts such as crate boundaries, Rust APIs, test structure, and internal owner
 just site-dev
 ```
 
-Format Markdown with `prek run mdformat --all-files`, then run `just lint-docs`, `just docs`, and `just site-links`. The
-hook installs the repository's Markdown extensions, including GFM tables.
+Format Markdown with `prek run mdformat --all-files`. Mermaid sources under `site/diagrams/` render through
+`just render-diagrams`; `just docs` rejects stale SVGs. Run `just lint-docs`, `just docs`, and `just site-links` before
+submitting documentation changes.
 
 ## Change discipline
 

@@ -16,6 +16,12 @@ An inactive ecosystem installs no driver, schema, migration, route, service, job
 Composition roots and implementations depend on shared contracts. Shared crates cannot depend on ecosystem
 implementations.
 
+{{<diagram file="crate-dependencies" />}}
+
+The diagram includes normal path dependencies declared by workspace members; each arrowhead points to the dependency.
+`cargo metadata` supplies its nodes and edges, and `just docs` checks the rendered SVG against the manifests. Run
+`just crate-dependency-diagram` after changing a workspace dependency.
+
 - `peryx-core`: stable IDs and ecosystem-neutral values
 - `peryx-driver`: serving state and focused capability traits
 - `peryx-plugin-registry`: registration validation, owner selection, and capability installation

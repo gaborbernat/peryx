@@ -1,0 +1,10 @@
+sequenceDiagram
+  participant P as pip / uv
+  participant I as index
+  P->>+I: GET /simple/requests/ (Accept: PEP 691 JSON)
+  I-->>-P: file list: names, URLs, sha256, yanked, core-metadata
+  P->>+I: GET …requests-2.32.5…whl.metadata (PEP 658)
+  I-->>-P: core metadata: dependencies, requires-python
+  Note over P: resolve, repeating metadata fetches<br/>for candidates as needed
+  P->>+I: GET …requests-2.32.5…whl
+  I-->>-P: the wheel, which pip verifies against its sha256

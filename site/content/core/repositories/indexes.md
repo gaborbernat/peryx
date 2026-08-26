@@ -41,7 +41,7 @@ cycle, or write target that is not hosted.
 Member order is part of the index definition. The owner defines resource, group, and artifact candidates. It applies
 visibility and access policy before returning a merged result.
 
-{{<diagram file="9ea9c803121f35d3" />}}
+{{<diagram file="index-resolution" />}}
 
 ## Shadowing
 

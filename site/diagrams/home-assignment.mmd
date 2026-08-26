@@ -1,0 +1,8 @@
+flowchart TB
+  p1["DC east: first publish"] --> cas{"authority homed?"}
+  p2["DC west: first publish"] --> cas
+  p3["DC north: first publish"] --> cas
+  cas --> |"no: first to commit"| win["assign home, mint epoch one"]
+  cas --> |"yes: already homed"| lose["reject: keep the committed home"]
+  class win good
+  class lose warn

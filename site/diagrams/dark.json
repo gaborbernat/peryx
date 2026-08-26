@@ -1,0 +1,18 @@
+{
+  "theme": "base",
+  "themeVariables": {
+    "background": "#101820",
+    "fontFamily": "system-ui, -apple-system, sans-serif",
+    "lineColor": "#aeb8c2",
+    "primaryBorderColor": "#6d9fd6",
+    "primaryColor": "#1e2b3a",
+    "primaryTextColor": "#cfe0f5",
+    "secondaryBorderColor": "#5aa98a",
+    "secondaryColor": "#182d25",
+    "secondaryTextColor": "#cfe8dc",
+    "tertiaryBorderColor": "#c9843f",
+    "tertiaryColor": "#33241a",
+    "tertiaryTextColor": "#f0d6bb"
+  },
+  "themeCSS": ".accent > * { fill: #1e2b3a !important; stroke: #6d9fd6 !important; color: #cfe0f5 !important; } .good > * { fill: #182d25 !important; stroke: #5aa98a !important; color: #cfe8dc !important; } .warn > * { fill: #33241a !important; stroke: #c9843f !important; color: #f0d6bb !important; }"
+}

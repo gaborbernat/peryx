@@ -1,0 +1,137 @@
+---
+config:
+  layout: elk
+  elk:
+    mergeEdges: true
+---
+flowchart TD
+  peryx --> peryx_core
+  peryx --> peryx_driver
+  peryx --> peryx_ecosystem_oci
+  peryx --> peryx_ecosystem_pypi
+  peryx --> peryx_events
+  peryx --> peryx_ha
+  peryx --> peryx_ha_distributed
+  peryx --> peryx_http
+  peryx --> peryx_identity
+  peryx --> peryx_plugin_registry
+  peryx --> peryx_policy
+  peryx --> peryx_storage
+  peryx --> peryx_upstream
+  peryx --> peryx_web
+  peryx["peryx"]
+  peryx_archive["peryx-archive"]
+  peryx_bench --> peryx_bench_core
+  peryx_bench["peryx-bench"]
+  peryx_bench_core["peryx-bench-core"]
+  peryx_core["peryx-core"]
+  peryx_driver --> peryx_core
+  peryx_driver --> peryx_events
+  peryx_driver --> peryx_ha
+  peryx_driver --> peryx_identity
+  peryx_driver --> peryx_index
+  peryx_driver --> peryx_policy
+  peryx_driver --> peryx_pql
+  peryx_driver --> peryx_search
+  peryx_driver --> peryx_storage
+  peryx_driver --> peryx_upstream
+  peryx_driver["peryx-driver"]
+  peryx_ecosystem_oci --> peryx_archive
+  peryx_ecosystem_oci --> peryx_bench
+  peryx_ecosystem_oci --> peryx_bench_core
+  peryx_ecosystem_oci --> peryx_core
+  peryx_ecosystem_oci --> peryx_driver
+  peryx_ecosystem_oci --> peryx_events
+  peryx_ecosystem_oci --> peryx_ha
+  peryx_ecosystem_oci --> peryx_identity
+  peryx_ecosystem_oci --> peryx_index
+  peryx_ecosystem_oci --> peryx_plugin_registry
+  peryx_ecosystem_oci --> peryx_policy
+  peryx_ecosystem_oci --> peryx_search
+  peryx_ecosystem_oci --> peryx_storage
+  peryx_ecosystem_oci --> peryx_upstream
+  peryx_ecosystem_oci["peryx-ecosystem-oci"]
+  peryx_ecosystem_pypi --> peryx_archive
+  peryx_ecosystem_pypi --> peryx_bench
+  peryx_ecosystem_pypi --> peryx_bench_core
+  peryx_ecosystem_pypi --> peryx_core
+  peryx_ecosystem_pypi --> peryx_driver
+  peryx_ecosystem_pypi --> peryx_events
+  peryx_ecosystem_pypi --> peryx_ha
+  peryx_ecosystem_pypi --> peryx_http
+  peryx_ecosystem_pypi --> peryx_identity
+  peryx_ecosystem_pypi --> peryx_index
+  peryx_ecosystem_pypi --> peryx_plugin_registry
+  peryx_ecosystem_pypi --> peryx_policy
+  peryx_ecosystem_pypi --> peryx_search
+  peryx_ecosystem_pypi --> peryx_storage
+  peryx_ecosystem_pypi --> peryx_upstream
+  peryx_ecosystem_pypi["peryx-ecosystem-pypi"]
+  peryx_events --> peryx_core
+  peryx_events --> peryx_ha
+  peryx_events --> peryx_identity
+  peryx_events --> peryx_storage
+  peryx_events["peryx-events"]
+  peryx_ha --> peryx_core
+  peryx_ha --> peryx_identity
+  peryx_ha["peryx-ha"]
+  peryx_ha_distributed --> peryx_core
+  peryx_ha_distributed --> peryx_driver
+  peryx_ha_distributed --> peryx_events
+  peryx_ha_distributed --> peryx_ha
+  peryx_ha_distributed --> peryx_http
+  peryx_ha_distributed --> peryx_identity
+  peryx_ha_distributed --> peryx_storage
+  peryx_ha_distributed --> peryx_upstream
+  peryx_ha_distributed["peryx-ha-distributed"]
+  peryx_http --> peryx_core
+  peryx_http --> peryx_driver
+  peryx_http --> peryx_events
+  peryx_http --> peryx_identity
+  peryx_http --> peryx_policy
+  peryx_http --> peryx_pql
+  peryx_http --> peryx_search
+  peryx_http["peryx-http"]
+  peryx_identity["peryx-identity"]
+  peryx_index --> peryx_core
+  peryx_index --> peryx_identity
+  peryx_index --> peryx_policy
+  peryx_index --> peryx_upstream
+  peryx_index["peryx-index"]
+  peryx_oci_system_tests --> peryx
+  peryx_oci_system_tests["peryx-oci-system-tests"]
+  peryx_plugin_registry --> peryx_core
+  peryx_plugin_registry --> peryx_driver
+  peryx_plugin_registry --> peryx_storage
+  peryx_plugin_registry["peryx-plugin-registry"]
+  peryx_policy["peryx-policy"]
+  peryx_pql["peryx-pql"]
+  peryx_pypi_system_tests --> peryx
+  peryx_pypi_system_tests --> peryx_core
+  peryx_pypi_system_tests --> peryx_identity
+  peryx_pypi_system_tests --> peryx_policy
+  peryx_pypi_system_tests --> peryx_storage
+  peryx_pypi_system_tests["peryx-pypi-system-tests"]
+  peryx_search --> peryx_core
+  peryx_search --> peryx_index
+  peryx_search --> peryx_storage
+  peryx_search["peryx-search"]
+  peryx_storage --> peryx_core
+  peryx_storage --> peryx_ha
+  peryx_storage --> peryx_identity
+  peryx_storage --> peryx_policy
+  peryx_storage["peryx-storage"]
+  peryx_test_support --> peryx_core
+  peryx_test_support --> peryx_driver
+  peryx_test_support["peryx-test-support"]
+  peryx_upstream["peryx-upstream"]
+  peryx_web --> peryx_core
+  peryx_web --> peryx_driver
+  peryx_web --> peryx_ha
+  peryx_web --> peryx_http
+  peryx_web --> peryx_identity
+  peryx_web --> peryx_search
+  peryx_web["peryx-web"]
+  class peryx accent
+  class peryx_ecosystem_oci,peryx_ecosystem_pypi good
+  class peryx_oci_system_tests,peryx_pypi_system_tests warn

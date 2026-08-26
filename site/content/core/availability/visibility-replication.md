@@ -30,7 +30,7 @@ the operation's own serial, wrapped in the replication envelope tagged as a visi
 visibility envelope to its visibility projection and applies every other kind as before, so the transition inherits the
 feed's ordering, back-pressure, and recovery rather than reinventing them.
 
-{{<diagram file="2f2a5788b956ea73" />}}
+{{<diagram file="visibility-replication" />}}
 
 ## Why ordering is safe
 

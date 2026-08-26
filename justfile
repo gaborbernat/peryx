@@ -6,54 +6,70 @@ tools_root := justfile_directory() + "/.tox/tools"
 export PERYX_TEST_TMPDIR := project_tmp
 export PLAYWRIGHT_BROWSERS_PATH := frontend_root + "/browsers"
 
+# Run the default test suite.
 default: test
 
+# Create the project-owned temporary directory.
 _project-temp:
     mkdir -p "{{ project_tmp }}"
 
+# Verify that the Docker daemon is available.
 _docker-ready:
     docker info >/dev/null
 
+# Check Rust formatting.
 format-check: _project-temp
     cargo fmt --all --check --
 
+# Check every workspace target with all features.
 check: _project-temp
     cargo check --workspace --all-targets --all-features
 
+# Lint every workspace target with Clippy.
 clippy: _project-temp
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+# Check Rust formatting and lints.
 lint-source: format-check clippy
 
+# Check rustdoc, Markdown, and spelling.
 lint-docs: _project-temp
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
     prek run mdformat --all-files
     prek run codespell --all-files
 
+# Check workflows and repository automation.
 lint-automation: _project-temp
     SKIP=cargo-fmt,cargo-clippy,mdformat,codespell prek run --all-files
 
+# Check dependency policy.
 lint-deps: _project-temp
     cargo deny check
 
+# Check committed PyPI snapshots.
 snapshots: _project-temp
     cargo insta test --package peryx-ecosystem-pypi --lib --all-features \
       --unreferenced reject --test-runner nextest --nextest-profile ci
 
+# List packages included in releases.
 publishable-packages: _project-temp
     cargo metadata --no-deps --format-version 1 | jq -c '[.packages[] | select(.publish != []) | .name]'
 
+# Check workspace public API compatibility.
 semver base="origin/main": _project-temp
     cargo semver-checks check-release --workspace --default-features --baseline-rev "{{ base }}"
 
+# Check one package's public API compatibility.
 semver-package package base="origin/main": _project-temp
     cargo semver-checks check-release --package "{{ package }}" \
       --default-features --baseline-rev "{{ base }}"
 
+# Check snapshots, public APIs, and the release plan.
 lint-contracts base="origin/main": snapshots
     just semver "{{ base }}"
     just release-plan
 
+# Run every lint lane.
 lint base="origin/main": _project-temp
     just lint-source
     just lint-docs
@@ -61,10 +77,12 @@ lint base="origin/main": _project-temp
     just lint-deps
     just lint-contracts "{{ base }}"
 
+# Install external test tools into the project cache.
 test-deps: _project-temp
     PATH="{{ tools_root }}/bin:$PATH" UV_TOOL_BIN_DIR="{{ tools_root }}/bin" \
       UV_TOOL_DIR="{{ tools_root }}" uv tool install twine
 
+# Run workspace tests, doctests, and benchmark harnesses.
 test: test-deps
     PATH="{{ tools_root }}/bin:$PATH" cargo nextest run \
       --workspace --exclude peryx-storage --all-features --profile ci \
@@ -73,9 +91,11 @@ test: test-deps
     cargo test --workspace --all-features --doc
     just benchmark
 
+# Run workspace benchmark harnesses as tests.
 benchmark: _project-temp
     cargo test --workspace --all-features --bench '*' --no-fail-fast
 
+# Run tests that cover platform-specific boundaries.
 platform-test: _project-temp
     cargo check --workspace --all-targets --all-features
     cargo nextest run --package peryx --test cli_entrypoint --all-features --profile ci
@@ -84,37 +104,47 @@ platform-test: _project-temp
     cargo nextest run --package peryx-storage --all-features --test integration \
       --profile ci -E 'test(/blob_backend/)'
 
+# Run hermetic PyPI client boundary tests.
 e2e: _project-temp
     cargo nextest run -p peryx-pypi-system-tests --features e2e --test e2e -E 'not(test(e2e_live))'
 
+# Run live PyPI client boundary tests.
 e2e-live: test-deps
     PATH="{{ tools_root }}/bin:$PATH" cargo nextest run -p peryx-pypi-system-tests \
       --features e2e-live --test e2e -E 'test(e2e_live)'
 
+# Run PyPI system tests without external-service cases.
 pypi-system: _project-temp
     cargo nextest run -p peryx-pypi-system-tests --tests \
       -E 'not(binary(e2e)) & not(binary(availability)) & not(binary(s3_upload))'
 
+# Run OCI system tests without availability cases.
 oci-system: _project-temp
     cargo nextest run -p peryx-oci-system-tests --tests -E 'not(binary(availability))'
 
+# Run the PyPI S3 upload tests.
 s3: _project-temp
     cargo nextest run -p peryx-pypi-system-tests --test s3_upload
 
+# Run storage tests backed by S3 containers.
 storage-s3: _project-temp _docker-ready
     cargo nextest run -p peryx-storage --features container-tests --test integration
 
+# Run distributed availability tests.
 availability: _project-temp
     cargo nextest run -p peryx --features availability-e2e --test availability --test cluster --test observability
     cargo nextest run -p peryx-pypi-system-tests --test availability
     cargo nextest run -p peryx-oci-system-tests --test availability
 
+# Run an availability simulation selection.
 simulation filter="all()": _project-temp
     cargo nextest run -p peryx --features sim-campaign --test sim_campaign -E '{{ filter }}'
 
+# Check every feature independently.
 features: _project-temp
     cargo hack --workspace --each-feature check --all-targets
 
+# Check direct dependency lower bounds.
 direct-minimum: _project-temp
     rm -rf .tox/direct-minimum
     rsync -a --exclude .git --exclude .tox --exclude target ./ .tox/direct-minimum/
@@ -122,35 +152,42 @@ direct-minimum: _project-temp
     cargo +nightly check --manifest-path .tox/direct-minimum/Cargo.toml --workspace --all-targets
     rm -rf .tox/direct-minimum
 
+# Interpret pure core crates with Miri.
 miri: _project-temp
     TMPDIR="${RUNNER_TEMP:-/tmp}" cargo +nightly miri test --package peryx-core --lib --tests
     TMPDIR="${RUNNER_TEMP:-/tmp}" cargo +nightly miri test --package peryx-pql --lib --tests
     TMPDIR="${RUNNER_TEMP:-/tmp}" cargo +nightly miri test --package peryx-policy --lib --tests
 
+# Check distributed runtime interleavings with Loom.
 loom: _project-temp
     RUSTFLAGS="--cfg peryx_loom" cargo test --package peryx-ha-distributed --lib runtime_worker::loom_tests
 
+# Run AddressSanitizer against a workspace partition.
 sanitizer-address partition="slice:1/1": test-deps
     ASAN_OPTIONS=allow_addr2line=1 RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zsanitizer=address" \
       PATH="{{ tools_root }}/bin:$PATH" \
       cargo +nightly nextest run -Z build-std --workspace --target x86_64-unknown-linux-gnu \
       --profile ci --build-jobs 1 --test-threads 1 --partition "{{ partition }}" -E 'not(test(e2e_live))'
 
+# Build the AddressSanitizer test archive.
 sanitizer-archive archive: _project-temp
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zsanitizer=address" PATH="{{ tools_root }}/bin:$PATH" \
       cargo +nightly nextest archive -Z build-std --workspace --target x86_64-unknown-linux-gnu \
       --profile ci --build-jobs 1 --archive-file "{{ archive }}"
 
+# Run a partition from an AddressSanitizer archive.
 sanitizer-run archive partition="slice:1/1": test-deps
     ASAN_OPTIONS=allow_addr2line=1 PATH="{{ tools_root }}/bin:$PATH" \
       cargo +nightly nextest run --archive-file "{{ archive }}" \
       --workspace-remap "{{ justfile_directory() }}" --profile ci --test-threads 1 \
       --partition "{{ partition }}" -E 'not(test(e2e_live))'
 
+# Run one cargo-fuzz target.
 fuzz package target seconds="60": _project-temp
     cd "crates/{{ package }}/fuzz" && cargo +nightly fuzz run \
       --target "$(rustc +nightly --print host-tuple)" "{{ target }}" -- -max_total_time="{{ seconds }}"
 
+# Mutate one workspace shard.
 mutation shard="0/1" in_place="false" jobs="2" baseline="run" timeout="500": test-deps
     PATH="{{ tools_root }}/bin:$PATH" cargo mutants --workspace --all-features --test-tool nextest \
       --no-shuffle --shard "{{ shard }}" --output .tox/mutants \
@@ -159,18 +196,22 @@ mutation shard="0/1" in_place="false" jobs="2" baseline="run" timeout="500": tes
       --timeout "{{ timeout }}" --build-timeout "{{ timeout }}" \
       -- --profile ci -E 'not(test(e2e_live))'
 
+# Run the mutation baseline suite.
 mutation-baseline: test-deps
     INSTA_UPDATE=no INSTA_FORCE_PASS=0 PATH="{{ tools_root }}/bin:$PATH" cargo nextest run --verbose \
       --workspace --all-features --profile ci -E 'not(test(e2e_live))'
 
+# Build the mutation baseline test archive.
 mutation-baseline-archive archive: _project-temp
     cargo nextest archive --workspace --all-features --profile ci --archive-file "{{ archive }}"
 
+# Run a partition from the mutation baseline archive.
 mutation-baseline-run archive partition="slice:1/1": test-deps
     INSTA_UPDATE=no INSTA_FORCE_PASS=0 PATH="{{ tools_root }}/bin:$PATH" \
       cargo nextest run --archive-file "{{ archive }}" --workspace-remap "{{ justfile_directory() }}" \
       --profile ci --partition "{{ partition }}" -E 'not(test(e2e_live))'
 
+# Count workspace mutation candidates.
 mutation-count: _project-temp
     cargo mutants --list --workspace --all-features | wc -l
 
@@ -200,6 +241,7 @@ versions: _project-temp
     node --version
     npm --version
 
+# Refresh locked mise tool versions and checksums.
 mise-lock:
     mise lock --bump
 
@@ -213,12 +255,78 @@ frontend: frontend-deps _project-temp
 site-dev: _project-temp
     zola --root site serve --interface 127.0.0.1
 
+# Write the workspace dependency graph as Mermaid source.
+crate-dependency-diagram output="site/diagrams/crate-dependencies.mmd": _project-temp
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ output }}" in
+      site/diagrams/crate-dependencies.mmd|.tox/site/crate-dependencies.mmd) ;;
+      *) printf 'unsupported diagram output: %s\n' "{{ output }}" >&2; exit 1 ;;
+    esac
+    mkdir -p "$(dirname "{{ output }}")"
+    {
+    printf '%s\n' '---' 'config:' '  layout: elk' '  elk:' '    mergeEdges: true' '---'
+    printf 'flowchart TD\n'
+    cargo metadata --format-version 1 --no-deps | jq -r '
+      (.packages | map(.name) | unique) as $workspace
+      | ($workspace[] | "  \(gsub("-"; "_"))[\(. | @json)]"),
+        (.packages[] | .name as $source | .dependencies[]
+          | select(.kind == null and .path != null)
+          | select(.name as $dependency | $workspace | index($dependency))
+          | "  \($source | gsub("-"; "_")) --> \(.name | gsub("-"; "_"))")
+    ' | sort -u
+    printf '  class peryx accent\n'
+    printf '  class peryx_ecosystem_oci,peryx_ecosystem_pypi good\n'
+    printf '  class peryx_oci_system_tests,peryx_pypi_system_tests warn\n'
+    } > "{{ output }}"
+
+# Pre-render every Mermaid diagram for light and dark themes.
+render-diagrams output="site/static/diagrams": _project-temp
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{ output }}" in
+      site/static/diagrams|.tox/site/diagrams) ;;
+      *) printf 'unsupported diagram output: %s\n' "{{ output }}" >&2; exit 1 ;;
+    esac
+    npm --prefix site ci
+    rm -rf "{{ output }}"
+    mkdir -p "{{ output }}"
+    for source in site/diagrams/*.mmd; do
+      name=$(basename "$source" .mmd)
+      for theme in light dark; do
+        rendered="{{ output }}/$name-$theme.svg"
+        digest=$(shasum -a 256 "$source" "site/diagrams/$theme.json" site/package-lock.json | \
+          shasum -a 256 | cut -d ' ' -f 1)
+        site/node_modules/.bin/mmdc --input "$source" \
+          --output "$rendered.tmp.svg" \
+          --configFile "site/diagrams/$theme.json" --backgroundColor transparent \
+          --svgId "peryx-$name-$theme" --quiet
+        { printf '<!-- peryx-mermaid-input-sha256=%s -->\n' "$digest"; awk '1' "$rendered.tmp.svg"; } > "$rendered"
+        rm "$rendered.tmp.svg"
+      done
+    done
+
+# Check every pre-rendered Mermaid diagram against its source.
+diagrams: _project-temp
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just crate-dependency-diagram .tox/site/crate-dependencies.mmd
+    cmp site/diagrams/crate-dependencies.mmd .tox/site/crate-dependencies.mmd || \
+      (printf 'crate dependency diagram is stale; run just crate-dependency-diagram\n' >&2; exit 1)
+    just render-diagrams .tox/site/diagrams
+    diff <(find site/static/diagrams -maxdepth 1 -type f -name '*.svg' -exec basename {} \; | sort) \
+      <(find .tox/site/diagrams -maxdepth 1 -type f -name '*.svg' -exec basename {} \; | sort)
+    for rendered in .tox/site/diagrams/*.svg; do
+      committed="site/static/diagrams/$(basename "$rendered")"
+      cmp <(sed -n '1p' "$committed") <(sed -n '1p' "$rendered") || \
+        (printf '%s is stale; run just render-diagrams\n' "$committed" >&2; exit 1)
+    done
+
 # Build and validate the documentation site.
-docs: _project-temp
+docs: diagrams
     zola --root site check --skip-external-links
     zola --root site build --force --output-dir "{{ justfile_directory() }}/.tox/site/public"
     cargo run --quiet --package peryx --bin peryx -- openapi > .tox/site/public/openapi.json
-    npm --prefix site ci
     npm --prefix site exec -- pagefind --site "{{ justfile_directory() }}/.tox/site/public" \
       --include-characters "_./-"
 
@@ -226,10 +334,11 @@ docs: _project-temp
 site-links: _project-temp
     zola --root site check
 
+# Build the documentation site.
 site: docs
 
 # Build the documentation site for Read the Docs.
-site-readthedocs: _project-temp
+site-readthedocs:
     : "${READTHEDOCS_CANONICAL_URL:?}"
     : "${READTHEDOCS_OUTPUT:?}"
     mkdir -p "$READTHEDOCS_OUTPUT/html"
@@ -237,7 +346,6 @@ site-readthedocs: _project-temp
       --output-dir "$READTHEDOCS_OUTPUT/html"
     CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
       cargo run --quiet --package peryx --bin peryx -- openapi > "$READTHEDOCS_OUTPUT/html/openapi.json"
-    npm --prefix site ci
     npm --prefix site exec -- pagefind --site "$READTHEDOCS_OUTPUT/html" \
       --include-characters "_./-"
 
@@ -340,6 +448,7 @@ package-wheel +args: _project-temp
 package-sdist output="dist": _project-temp
     maturin sdist --out "{{ output }}"
 
+# Measure native Rust coverage.
 coverage-native output=".tox/coverage/native.lcov": test-deps _docker-ready
     mkdir -p "$(dirname "{{ output }}")"
     cargo llvm-cov clean --workspace
@@ -351,6 +460,7 @@ coverage-native output=".tox/coverage/native.lcov": test-deps _docker-ready
       --ignore-filename-regex '/(\.cargo/(registry|git)|\.rustup/toolchains|rustc/[0-9a-f]+)/' \
       --fail-uncovered-lines 0 --show-missing-lines --lcov --output-path "{{ output }}"
 
+# Measure native and Wasm frontend coverage.
 coverage-frontend native_output=".tox/coverage/frontend-native.lcov" wasm_output=".tox/coverage/frontend-wasm.lcov" merged_output=".tox/coverage/frontend.lcov": _project-temp
     #!/usr/bin/env bash
     set -euo pipefail
@@ -426,6 +536,7 @@ coverage-frontend native_output=".tox/coverage/frontend-native.lcov" wasm_output
       --output-file "$merged_output"
     lcov --summary "$merged_output" --fail-under-lines 100
 
+# Measure native and frontend coverage.
 coverage output=".tox/coverage": _project-temp
     just coverage-native "{{ output }}/native.lcov"
     just frontend-deps
@@ -439,8 +550,7 @@ coverage-clean:
 
 # Remove transient project-owned artifacts.
 clean: coverage-clean
-    rm -rf .tox/bench/scratch .tox/conformance.test .tox/docker/tmp .tox/frontend .tox/hawk/graph \
-      .tox/site .tox/tmp \
+    rm -rf .tox/bench/scratch .tox/conformance.test .tox/docker/tmp .tox/frontend .tox/site .tox/tmp \
       crates/peryx-ecosystem-oci/tests/frontend/blob-report \
       crates/peryx-ecosystem-oci/tests/frontend/playwright-report \
       crates/peryx-ecosystem-oci/tests/frontend/test-results \
@@ -461,6 +571,8 @@ clean-all:
 pre-commit: _project-temp
     prek run --all-files
 
+# Run the complete CI suite.
 ci: all
 
+# Run lint, coverage, and documentation checks.
 all: lint coverage docs

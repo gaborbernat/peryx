@@ -1,0 +1,9 @@
+sequenceDiagram
+  participant A as client A
+  participant B as clients B…J
+  participant D as devpi
+  A->>+D: GET simple/polars/ (first ever)
+  B->>+D: GET simple/polars/ (name list still empty)
+  D-->>-B: 404 "does not exist" (cached ~30 min)
+  Note over B: uv reads 404 as "no such package"
+  D-->>-A: 200 once the upstream fetch lands

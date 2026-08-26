@@ -26,10 +26,25 @@
       "groupName": "GitHub Actions"
     },
     {
+      "description": "Update compatible frontend dependencies together",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "Frontend dependencies"
+    },
+    {
       "description": "Update compatible container images together",
       "matchManagers": ["dockerfile", "docker-compose"],
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
       "groupName": "Container images"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^dist-workspace\\.toml$/"],
+      "matchStrings": ["cargo-dist-version\\s*=\\s*\"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "cargo-dist",
+      "datasourceTemplate": "crate"
     }
   ]
 }

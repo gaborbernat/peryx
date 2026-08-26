@@ -7,6 +7,10 @@ weight = 30
 Cargo-dist generates `.github/workflows/release.yml` from `dist-workspace.toml`. Do not edit the generated workflow by
 hand. Change the distribution configuration and regenerate it through cargo-dist.
 
+`cargo-dist-version` selects the configuration and generator contract. The `cargo:cargo-dist` entry in `mise.toml`
+installs the CLI, and `mise.lock` records its resolved release. Renovate updates the configuration version; weekly mise
+lock maintenance updates the CLI resolution.
+
 Pull requests run the cargo-dist planning path. The plan covers five archive targets, shell and PowerShell installers,
 checksums, CycloneDX manifests, cargo-auditable metadata, GitHub attestations, and the package publication job.
 
@@ -19,15 +23,7 @@ just release-plan
 just all
 ```
 
-`just all` runs all non-system crate contracts through `just coverage`, then merges system and frontend reports. It also
-runs source, documentation, automation, dependency, API, feature, package, release-plan, site, and CI-safe hook checks.
-Do not rerun crate contracts as a separate release step.
-
-Use Compose when the host cannot run the Linux coverage or system dependencies:
-
-```shell
-just all
-```
+`just all` runs the lint lanes, native and frontend coverage, and the documentation build.
 
 Build the Python artifacts from the checkout when changing Python packaging:
 

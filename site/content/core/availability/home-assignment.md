@@ -28,7 +28,7 @@ committed cluster because it accepted the request. Assignment needs no separate 
 The control quorum applies a compare-and-set command to an unassigned authority. The first committed command records the
 home and epoch. A later command for the same authority returns the committed assignment without replacing it.
 
-{{<diagram file="87fdb0f328746e51" />}}
+{{<diagram file="home-assignment" />}}
 
 The winning command records its cause, leader term, log index, and minted epoch. Ownership snapshots retain that audit
 record. Rejected commands do not replace it.

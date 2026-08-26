@@ -32,7 +32,7 @@ single pass reads the whole ledger:
 
 A placement carries an evidence-based state, and reconciliation only ever moves it along one of two paths:
 
-{{<diagram file="c50ea5fb70c1fcfe" />}}
+{{<diagram file="placement-reconciliation" />}}
 
 The demotion and the retirement are both fenced by the ownership group's cluster-level term, the same monotonic epoch
 the copier fences on: a node running no ownership group reads term zero and reconciles nothing, and a placement write

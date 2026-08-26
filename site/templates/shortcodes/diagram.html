@@ -1,3 +1,18 @@
 {% component diagram(file) %}
-{{ load_data(path="data/diagrams/" ~ file ~ ".html", format="plain") | safe }}
+<figure class="mermaid-figure" data-diagram>
+  <div class="diagram-controls" aria-label="Diagram controls">
+    <button type="button" data-diagram-zoom="in" aria-label="Zoom in">+</button>
+    <button type="button" data-diagram-zoom="out" aria-label="Zoom out">−</button>
+    <button type="button" data-diagram-zoom="reset">Reset</button>
+    <button type="button" data-diagram-fullscreen>Full screen</button>
+  </div>
+  <div class="diagram-viewport" tabindex="0">
+    <img class="mermaid-light"
+         src="{{ get_url(path='diagrams/' ~ file ~ '-light.svg') }}"
+         alt="{{ file | replace(from='-', to=' ') }} diagram">
+    <img class="mermaid-dark"
+         src="{{ get_url(path='diagrams/' ~ file ~ '-dark.svg') }}"
+         alt="{{ file | replace(from='-', to=' ') }} diagram">
+  </div>
+</figure>
 {% endcomponent diagram %}

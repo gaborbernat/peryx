@@ -6,5 +6,5 @@ build:
     rust: latest
   commands:
     - curl --fail --location https://mise.run | sh
-    - MISE_SAFE=1 ~/.local/bin/mise install --locked jq just node zola
-    - MISE_SAFE=1 ~/.local/bin/mise exec -- just site-readthedocs
+    - MISE_SAFE=1 ~/.local/bin/mise install --locked just node zola
+    - MISE_EXEC_AUTO_INSTALL=0 MISE_SAFE=1 ~/.local/bin/mise exec -- just site-readthedocs

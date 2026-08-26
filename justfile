@@ -338,7 +338,7 @@ site-links: _project-temp
 site: docs
 
 # Build the documentation site for Read the Docs.
-site-readthedocs: diagrams
+site-readthedocs:
     : "${READTHEDOCS_CANONICAL_URL:?}"
     : "${READTHEDOCS_OUTPUT:?}"
     mkdir -p "$READTHEDOCS_OUTPUT/html"

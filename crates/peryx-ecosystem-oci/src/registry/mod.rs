@@ -428,12 +428,19 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let (parts, body) = request.into_parts();
         let path = parts.uri.path();
         let read = matches!(method, Method::GET | Method::HEAD);
-        if method == Method::GET && (path == "/v2/token" || path == "/v2/token/") {
-            return auth::issue_token(&state, &parts.headers, parts.uri.query().unwrap_or_default());
+        if method == Method::GET
+            && (path == "/v2/token" || path == "/v2/token/")
+            && let Some(signer) = &state.signer
+        {
+            return auth::issue_token(&state, signer, &parts.headers, parts.uri.query().unwrap_or_default());
         }
         let Some(route) = classify(path) else {
             return error_response(ErrorCode::NameUnknown, "repository name unknown");
         };
+        let allow = allowed_methods(&route);
+        if !allow.split(", ").any(|allowed| method.as_str() == allowed) {
+            return method_not_allowed(allow);
+        }
         let governed_read = read
             && matches!(
                 &route,
@@ -460,46 +467,43 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let head = method == Method::HEAD;
         let authenticated = headers.contains_key(header::AUTHORIZATION);
         let result = match route {
-            OciRoute::Manifest { name, reference } if read => {
-                let accept = combined_accept(headers);
-                self.serve_manifest(&state, &name, &reference, head, accept.as_deref())
-                    .await
+            OciRoute::Manifest { name, reference } => {
+                if read {
+                    let accept = combined_accept(headers);
+                    self.serve_manifest(&state, &name, &reference, head, accept.as_deref())
+                        .await
+                } else if method == Method::PUT {
+                    put_manifest(&state, headers, body, &name, &reference, self.journal_outbox).await
+                } else {
+                    delete_manifest(&state, headers, &name, &reference, query, self.journal_outbox).await
+                }
             }
-            OciRoute::Manifest { name, reference } if method == Method::PUT => {
-                put_manifest(&state, headers, body, &name, &reference, self.journal_outbox).await
-            }
-            OciRoute::Manifest { name, reference } if method == Method::DELETE => {
-                delete_manifest(&state, headers, &name, &reference, query, self.journal_outbox).await
-            }
-            OciRoute::ManifestRestore { name, reference } if method == Method::PUT => {
+            OciRoute::ManifestRestore { name, reference } => {
                 restore_manifest(&state, headers, &name, &reference, self.journal_outbox).await
             }
-            OciRoute::Blob { name, digest } if read => self.serve_blob(&state, &name, &digest, head, headers).await,
-            OciRoute::Blob { name, digest } if method == Method::DELETE => {
-                self.delete_blob(&state, headers, &name, &digest)
+            OciRoute::Blob { name, digest } => {
+                if read {
+                    self.serve_blob(&state, &name, &digest, head, headers).await
+                } else {
+                    self.delete_blob(&state, headers, &name, &digest)
+                }
             }
-            OciRoute::BlobContents { name, digest } if method == Method::GET => {
-                self.serve_layer_contents(&state, &name, &digest, query).await
+            OciRoute::BlobContents { name, digest } => self.serve_layer_contents(&state, &name, &digest, query).await,
+            OciRoute::Catalog => serve_catalog(&state, query),
+            OciRoute::TagsList { name } => self.serve_tags(&state, &name, query).await,
+            OciRoute::Referrers { name, digest } => self.serve_referrers(&state, &name, &digest, query).await,
+            OciRoute::UploadStart { name } => self.start_upload(&state, headers, query, &name, body).await,
+            OciRoute::UploadSession { name, session } => {
+                if method == Method::GET {
+                    Self::upload_status(&state, headers, &name, &session)
+                } else if method == Method::PATCH {
+                    self.patch_upload(&state, headers, &name, &session, body).await
+                } else if method == Method::PUT {
+                    self.finish_upload(&state, headers, query, &name, &session, body).await
+                } else {
+                    self.cancel_upload(&state, headers, &name, &session).await
+                }
             }
-            OciRoute::Catalog if method == Method::GET => serve_catalog(&state, query),
-            OciRoute::TagsList { name } if method == Method::GET => self.serve_tags(&state, &name, query).await,
-            OciRoute::Referrers { name, digest } if read => self.serve_referrers(&state, &name, &digest, query).await,
-            OciRoute::UploadStart { name } if method == Method::POST => {
-                self.start_upload(&state, headers, query, &name, body).await
-            }
-            OciRoute::UploadSession { name, session } if method == Method::GET => {
-                Self::upload_status(&state, headers, &name, &session)
-            }
-            OciRoute::UploadSession { name, session } if method == Method::PATCH => {
-                self.patch_upload(&state, headers, &name, &session, body).await
-            }
-            OciRoute::UploadSession { name, session } if method == Method::PUT => {
-                self.finish_upload(&state, headers, query, &name, &session, body).await
-            }
-            OciRoute::UploadSession { name, session } if method == Method::DELETE => {
-                self.cancel_upload(&state, headers, &name, &session).await
-            }
-            _ => Ok(error_response(ErrorCode::Unsupported, "operation not supported")),
         };
         let mut response = result.unwrap_or_else(ServeError::into_response);
         if governed_read {
@@ -591,6 +595,26 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         };
         Ok(chunk)
     }
+}
+
+const fn allowed_methods(route: &OciRoute) -> &'static str {
+    match route {
+        OciRoute::Catalog | OciRoute::BlobContents { .. } | OciRoute::TagsList { .. } => "GET",
+        OciRoute::Manifest { .. } => "GET, HEAD, PUT, DELETE",
+        OciRoute::ManifestRestore { .. } => "PUT",
+        OciRoute::Blob { .. } => "GET, HEAD, DELETE",
+        OciRoute::Referrers { .. } => "GET, HEAD",
+        OciRoute::UploadStart { .. } => "POST",
+        OciRoute::UploadSession { .. } => "GET, PATCH, PUT, DELETE",
+    }
+}
+
+fn method_not_allowed(allow: &'static str) -> Response {
+    let mut response = error_response(ErrorCode::Unsupported, "operation not supported");
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static(allow));
+    response
 }
 
 #[derive(Default)]

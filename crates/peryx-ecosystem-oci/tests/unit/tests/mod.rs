@@ -31,7 +31,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::Poll;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
 use peryx_core::Ecosystem;
@@ -653,12 +653,16 @@ async fn test_writing_to_a_proxy_index_is_denied() {
     assert!(body_has_code(&body, "DENIED"), "{body:?}");
 }
 
+#[rstest]
+#[case::manifest("/v2/hub/app/manifests/latest", "GET, HEAD, PUT, DELETE")]
+#[case::upload_session("/v2/hub/app/blobs/uploads/session", "GET, PATCH, PUT, DELETE")]
 #[tokio::test]
-async fn test_unsupported_method_on_a_route_is_declined() {
+async fn test_unsupported_method_on_a_route_includes_allow(#[case] path: &str, #[case] allow: &str) {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = proxy(&dir, "http://127.0.0.1:1/", false);
-    let (status, _, body) = send(&app, Method::PATCH, "/v2/hub/app/tags/list").await;
+    let (status, headers, body) = send(&app, Method::POST, path).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(headers[header::ALLOW], allow);
     assert!(body_has_code(&body, "UNSUPPORTED"), "{body:?}");
 }
 

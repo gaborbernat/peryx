@@ -167,13 +167,14 @@ sanitizer-address partition="slice:1/1": test-deps
     ASAN_OPTIONS=allow_addr2line=1 RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zsanitizer=address" \
       PATH="{{ tools_root }}/bin:$PATH" \
       cargo +nightly nextest run -Z build-std --workspace --target x86_64-unknown-linux-gnu \
-      --profile ci --build-jobs 1 --test-threads 1 --partition "{{ partition }}" -E 'not(test(e2e_live))'
+      --features peryx/process-fixture --profile ci --build-jobs 1 --test-threads 1 \
+      --partition "{{ partition }}" -E 'not(test(e2e_live))'
 
 # Build the AddressSanitizer test archive.
 sanitizer-archive archive: _project-temp
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Zsanitizer=address" PATH="{{ tools_root }}/bin:$PATH" \
       cargo +nightly nextest archive -Z build-std --workspace --target x86_64-unknown-linux-gnu \
-      --profile ci --build-jobs 1 --archive-file "{{ archive }}"
+      --features peryx/process-fixture --profile ci --build-jobs 1 --archive-file "{{ archive }}"
 
 # Run a partition from an AddressSanitizer archive.
 sanitizer-run archive partition="slice:1/1": test-deps

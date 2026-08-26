@@ -268,6 +268,12 @@ fn cluster_public_behavior() {
             "dc-b"
         );
         fs::write(fixture.state(), "leader:dc-a").expect("restore leader");
+        assert_eq!(
+            cluster
+                .await_leader_change("dc-b", Duration::from_secs(1))
+                .expect("observe restored leader"),
+            "dc-a"
+        );
         assert!(matches!(
             cluster.await_authority_transfer("dc-a", Duration::ZERO),
             Err(HarnessError::NoTransfer { observed: Some(ref leader), .. }) if leader == "dc-a"

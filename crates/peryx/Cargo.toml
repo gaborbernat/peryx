@@ -22,6 +22,11 @@ bench = false
 doc = false
 required-features = ["process-fixture"]
 
+[[test]]
+name = "process_fixture"
+path = "tests/process_fixture.rs"
+required-features = ["process-fixture"]
+
 [features]
 default = ["composition-oci", "composition-pypi"]
 composition-oci = ["dep:peryx-ecosystem-oci"]

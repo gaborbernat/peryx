@@ -295,22 +295,32 @@ render-diagrams output="site/static/diagrams": _project-temp
       name=$(basename "$source" .mmd)
       for theme in light dark; do
         rendered="{{ output }}/$name-$theme.svg"
+        digest=$(shasum -a 256 "$source" "site/diagrams/$theme.json" site/package-lock.json | \
+          shasum -a 256 | cut -d ' ' -f 1)
         site/node_modules/.bin/mmdc --input "$source" \
           --output "$rendered.tmp.svg" \
           --configFile "site/diagrams/$theme.json" --backgroundColor transparent \
           --svgId "peryx-$name-$theme" --quiet
-        awk '1' "$rendered.tmp.svg" > "$rendered"
+        { printf '<!-- peryx-mermaid-input-sha256=%s -->\n' "$digest"; awk '1' "$rendered.tmp.svg"; } > "$rendered"
         rm "$rendered.tmp.svg"
       done
     done
 
 # Check every pre-rendered Mermaid diagram against its source.
 diagrams: _project-temp
+    #!/usr/bin/env bash
+    set -euo pipefail
     just crate-dependency-diagram .tox/site/crate-dependencies.mmd
     cmp site/diagrams/crate-dependencies.mmd .tox/site/crate-dependencies.mmd || \
       (printf 'crate dependency diagram is stale; run just crate-dependency-diagram\n' >&2; exit 1)
     just render-diagrams .tox/site/diagrams
-    diff --recursive --brief site/static/diagrams .tox/site/diagrams
+    diff <(find site/static/diagrams -maxdepth 1 -type f -name '*.svg' -exec basename {} \; | sort) \
+      <(find .tox/site/diagrams -maxdepth 1 -type f -name '*.svg' -exec basename {} \; | sort)
+    for rendered in .tox/site/diagrams/*.svg; do
+      committed="site/static/diagrams/$(basename "$rendered")"
+      cmp <(sed -n '1p' "$committed") <(sed -n '1p' "$rendered") || \
+        (printf '%s is stale; run just render-diagrams\n' "$committed" >&2; exit 1)
+    done
 
 # Build and validate the documentation site.
 docs: diagrams

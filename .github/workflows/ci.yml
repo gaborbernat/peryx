@@ -66,6 +66,8 @@ jobs:
   semver:
     name: semver (${{ matrix.package }})
     needs: contracts
+    env:
+      CARGO_HTTP_MULTIPLEXING: "false"
     strategy:
       fail-fast: false
       matrix:

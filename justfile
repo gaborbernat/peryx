@@ -293,10 +293,13 @@ render-diagrams output="site/static/diagrams": _project-temp
     for source in site/diagrams/*.mmd; do
       name=$(basename "$source" .mmd)
       for theme in light dark; do
+        rendered="{{ output }}/$name-$theme.svg"
         site/node_modules/.bin/mmdc --input "$source" \
-          --output "{{ output }}/$name-$theme.svg" \
+          --output "$rendered.tmp.svg" \
           --configFile "site/diagrams/$theme.json" --backgroundColor transparent \
           --svgId "peryx-$name-$theme" --quiet
+        awk '1' "$rendered.tmp.svg" > "$rendered"
+        rm "$rendered.tmp.svg"
       done
     done
 

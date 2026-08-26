@@ -221,29 +221,47 @@ async fn test_callback_rejects_a_mismatched_state() {
 }
 
 #[rstest]
-#[case::wrong_issuer(json!("https://evil.example"), "iss", false)]
-#[case::wrong_audience(json!("other-client"), "aud", false)]
-#[case::expiration_at_skew(json!(NOW - 60), "exp", true)]
-#[case::expiration_beyond_skew(json!(NOW - 61), "exp", false)]
-#[case::issued_at_skew(json!(NOW + 60), "iat", true)]
-#[case::issued_beyond_skew(json!(NOW + 61), "iat", false)]
+#[case::wrong_issuer("iss", Some(json!("https://evil.example")), false)]
+#[case::wrong_audience("aud", Some(json!("other-client")), false)]
+#[case::expiration_before_boundary("exp", Some(json!(NOW - 59)), true)]
+#[case::expiration_at_boundary("exp", Some(json!(NOW - 60)), false)]
+#[case::expiration_beyond_boundary("exp", Some(json!(NOW - 61)), false)]
+#[case::expiration_maximum("exp", Some(json!(i64::MAX)), true)]
+#[case::issued_at_skew("iat", Some(json!(NOW + 60)), true)]
+#[case::issued_beyond_skew("iat", Some(json!(NOW + 61)), false)]
+#[case::not_before_absent("nbf", None, true)]
+#[case::not_before_at_skew("nbf", Some(json!(NOW + 60)), true)]
+#[case::not_before_beyond_skew("nbf", Some(json!(NOW + 61)), false)]
+#[case::not_before_minimum("nbf", Some(json!(i64::MIN)), true)]
+#[case::not_before_nonnumeric("nbf", Some(json!("later")), false)]
 #[tokio::test]
 async fn test_id_token_registered_claims_are_enforced(
-    #[case] value: Value,
     #[case] claim: &str,
+    #[case] value: Option<Value>,
     #[case] accepted: bool,
 ) {
     let server = MockServer::start().await;
     mount_metadata(&server, json!({"keys": [jwk("key-1")]})).await;
-    let provider = provider(&server.uri());
     let mut claims = base_claims(&server);
-    claims[claim] = value;
+    if let Some(value) = value {
+        claims[claim] = value;
+    }
     mount_token(
         &server,
         json!({"id_token": mint("key-1", &claims), "token_type": "Bearer"}),
     )
     .await;
-    assert_eq!(provider.callback(&response(), &pending(), NOW).await.is_ok(), accepted);
+    let store = TestStore::ok();
+    assert_eq!(
+        (
+            service(&server.uri(), store.clone())
+                .callback(&response(), &pending(), NOW)
+                .await
+                .is_ok(),
+            store.calls(),
+        ),
+        (accepted, usize::from(accepted))
+    );
 }
 
 #[tokio::test]

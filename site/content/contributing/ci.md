@@ -23,8 +23,9 @@ The required workflow runs these job groups:
 The coverage jobs reject uncovered source lines. `ci-gate` gives branch protection one check name and fails unless every
 required job succeeds.
 
-CodSpeed runs the ecosystem benchmark packages on standard GitHub-hosted runners in [simulation
-mode][codspeed-simulation]. This avoids quota-limited Macro Runners. Run the same benchmark path with `just codspeed`.
+CodSpeed runs the ecosystem benchmark packages on standard GitHub-hosted runners in
+[simulation mode][codspeed-simulation]. This avoids quota-limited Macro Runners. Run the same benchmark path with
+`just codspeed`.
 
 ## Test synchronization
 

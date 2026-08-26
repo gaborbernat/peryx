@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use peryx_driver::ServingState;
 use peryx_driver::discovery::BaseUrl;
 use peryx_identity::{
-    Action, Denial, Glob, Grant, Identity, IndexAcl, Principal, ResourceMatch, authorize, authorize_all,
+    Action, Denial, Glob, Grant, Identity, IndexAcl, Principal, ResourceMatch, Signer, authorize, authorize_all,
     authorize_grants, strip_auth_scheme,
 };
 use serde_json::json;
@@ -67,10 +67,7 @@ fn verified_principal(state: &ServingState, headers: &HeaderMap) -> Option<Princ
 /// Answer `GET /v2/token`: a request for this realm's service gets a JWT whose grants are the
 /// intersection of the requested scope with what the caller may do. A missing or different service is
 /// denied, and a Basic credential matching no live token is a login failure.
-pub(super) fn issue_token(state: &ServingState, headers: &HeaderMap, query: &str) -> Response {
-    let Some(signer) = &state.signer else {
-        return error_response(ErrorCode::Unsupported, "token authentication is not enabled");
-    };
+pub(super) fn issue_token(state: &ServingState, signer: &Signer, headers: &HeaderMap, query: &str) -> Response {
     let Some(scopes) = parse_token_request(query, signer.audience()) else {
         return error_response(ErrorCode::Denied, "requested service is not available");
     };

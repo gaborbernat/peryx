@@ -668,12 +668,12 @@ async fn test_token_endpoint_accepts_a_trailing_slash() {
 }
 
 #[tokio::test]
-async fn test_token_endpoint_is_unsupported_without_a_realm() {
+async fn test_token_endpoint_is_not_found_without_a_realm() {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = hosted_writable(&dir, SECRET);
     let (status, _, body) = send(&app, Method::GET, "/v2/token?service=peryx").await;
-    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-    assert!(body_has_code(&body, "UNSUPPORTED"), "{body:?}");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&body, "NAME_UNKNOWN"), "{body:?}");
 }
 
 #[rstest]

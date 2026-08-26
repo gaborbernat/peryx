@@ -263,6 +263,7 @@ crate-dependency-diagram output="site/diagrams/crate-dependencies.mmd": _project
       site/diagrams/crate-dependencies.mmd|.tox/site/crate-dependencies.mmd) ;;
       *) printf 'unsupported diagram output: %s\n' "{{ output }}" >&2; exit 1 ;;
     esac
+    mkdir -p "$(dirname "{{ output }}")"
     {
     printf '%s\n' '---' 'config:' '  layout: elk' '  elk:' '    mergeEdges: true' '---'
     printf 'flowchart TD\n'

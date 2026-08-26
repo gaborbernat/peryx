@@ -5,6 +5,7 @@ members = [
   "crates/peryx-ecosystem-oci/tests/system-suite",
   "crates/peryx-ecosystem-pypi/tests/system-suite",
 ]
+default-members = ["crates/peryx"]
 
 [workspace.package]
 version = "0.0.1"

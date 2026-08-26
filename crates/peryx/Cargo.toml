@@ -20,6 +20,7 @@ path = "tests/fixtures/process.rs"
 test = false
 bench = false
 doc = false
+required-features = ["process-fixture"]
 
 [features]
 default = ["composition-oci", "composition-pypi"]
@@ -27,6 +28,7 @@ composition-oci = ["dep:peryx-ecosystem-oci"]
 composition-pypi = ["dep:peryx-ecosystem-pypi"]
 # Requires toxiproxy-server to inject faults into spawned processes.
 availability-e2e = []
+process-fixture = []
 # Pull requests bound the simulator seed range; scheduled CI uses larger shards.
 sim-campaign = []
 system-tests = ["peryx-web/hydrate", "peryx-web/ssr"]

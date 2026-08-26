@@ -706,8 +706,8 @@ struct UpstreamAttestationBundle<'a> {
 struct UpstreamPublisher<'a> {
     #[serde(borrow)]
     kind: &'a str,
-    #[serde(rename = "claims", borrow)]
-    _claims: std::collections::BTreeMap<&'a str, serde_json::Value>,
+    #[serde(rename = "claims", borrow, default)]
+    _claims: Option<std::collections::BTreeMap<&'a str, serde_json::Value>>,
 }
 
 #[derive(serde::Deserialize)]

@@ -50,7 +50,7 @@ pub struct OidcProviderSettings {
     pub display_name_claim: String,
     /// Use `None` when the provider asserts no groups.
     pub groups_claim: Option<String>,
-    /// Tolerance applied to `exp` and `iat` for provider clock drift.
+    /// Tolerance applied to token time claims for provider clock drift.
     pub clock_skew: Duration,
     pub request_timeout: Duration,
 }
@@ -189,7 +189,7 @@ impl OidcLoginProvider {
 
     /// # Errors
     /// Returns [`OidcProviderError`] on a state mismatch, a failed exchange, or an ID token that fails
-    /// signature, issuer, audience, expiry, or nonce validation.
+    /// signature, issuer, audience, time claim, or nonce validation.
     pub async fn callback(
         &self,
         response: &CallbackResponse,
@@ -255,7 +255,12 @@ impl OidcLoginProvider {
             .map_err(|_| OidcProviderError::InvalidToken)?
             .claims;
         let skew = i64::try_from(self.leeway_secs).unwrap_or(i64::MAX);
-        if claims.exp.saturating_add(skew) < now || claims.iat.saturating_sub(skew) > now {
+        if claims.exp.saturating_add(skew) <= now
+            || claims.iat.saturating_sub(skew) > now
+            || claims
+                .nbf
+                .is_some_and(|not_before| not_before.saturating_sub(skew) > now)
+        {
             return Err(OidcProviderError::InvalidToken);
         }
         if !crate::secrets_match(&claims.nonce, nonce) {
@@ -559,6 +564,8 @@ struct IdTokenClaims {
     aud: Audience,
     exp: i64,
     iat: i64,
+    #[serde(default)]
+    nbf: Option<i64>,
     nonce: String,
     #[serde(default)]
     azp: Option<String>,

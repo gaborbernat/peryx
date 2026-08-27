@@ -50,8 +50,12 @@ before verification changes the signed bytes.
 ## Delivery contract
 
 peryx stores each delivery before a background worker sends it. A process restart retains queued work. A `2xx` response
-completes delivery. Transport failures, redirects, `408`, `429`, and `5xx` responses retry with the same delivery ID.
-Other `4xx` responses are final. peryx does not follow redirects.
+completes delivery. Transport failures and HTTP `5xx` responses retry with the same delivery ID; `408` and `429` use the
+same retry path. Other `4xx` responses are final.
+
+Redirects are final after the first attempt. peryx neither follows nor retries them because sending the signed payload
+to a target-selected location could move it outside the configured origin. A `302` stores
+`webhook target returned redirect 302; redirects are not followed` in the delivery log.
 
 Delivery is at least once and does not preserve mutation order. Receivers deduplicate by `X-Peryx-Delivery`.
 

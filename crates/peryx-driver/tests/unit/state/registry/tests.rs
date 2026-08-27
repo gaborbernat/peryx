@@ -187,6 +187,10 @@ impl ReplicatedApplyDriver for Driver {
 
 #[async_trait]
 impl MirrorDriver for Driver {
+    fn validate_options(&self, _configured: &toml::Table, _overrides: &toml::Table) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn mirror(
         &self,
         _state: Arc<AppState>,
@@ -345,7 +349,13 @@ fn test_registry_installs_neutral_driver_capabilities() {
     assert_eq!(state.intent_finalizers().count(), 0);
     assert_eq!(state.cache_refreshers().count(), 0);
     assert_eq!(state.replicated_apply_drivers().count(), 1);
-    assert!(state.mirror_driver_for(&ecosystem).is_some());
+    assert_eq!(
+        state
+            .mirror_driver_for(&ecosystem)
+            .unwrap()
+            .validate_options(&toml::Table::new(), &toml::Table::new()),
+        Ok(())
+    );
     assert_eq!(
         state
             .absolute_driver_for_path("/artifacts/item")

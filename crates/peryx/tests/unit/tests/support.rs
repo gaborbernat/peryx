@@ -458,6 +458,10 @@ impl peryx_driver::jobs::ScheduledJobFactory for FixtureJob {
 
 #[async_trait::async_trait]
 impl MirrorDriver for Driver {
+    fn validate_options(&self, _configured: &toml::Table, _overrides: &toml::Table) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn mirror(
         &self,
         _: Arc<AppState>,

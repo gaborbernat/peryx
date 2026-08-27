@@ -572,6 +572,10 @@ pub struct MirrorRequest<'a> {
 
 #[async_trait]
 pub trait MirrorDriver: Send + Sync {
+    /// # Errors
+    /// Returns an error when the ecosystem does not support a configured or command-line option.
+    fn validate_options(&self, configured: &toml::Table, overrides: &toml::Table) -> Result<(), String>;
+
     async fn mirror(
         &self,
         state: Arc<crate::AppState>,

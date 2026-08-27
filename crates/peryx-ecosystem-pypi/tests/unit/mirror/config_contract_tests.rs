@@ -1,4 +1,61 @@
+use peryx_driver::serving::MirrorDriver as _;
+
 use super::{mode, table_bool, table_strings, table_u64};
+use crate::PypiServing;
+
+#[rstest::rstest]
+#[case::configured("images", false)]
+#[case::override_option("images", true)]
+fn prefetch_options_reject_unsupported_keys(#[case] key: &str, #[case] override_option: bool) {
+    let mut configured = toml::Table::new();
+    let mut overrides = toml::Table::new();
+    if override_option {
+        overrides.insert(key.to_owned(), toml::Value::Array(Vec::new()));
+    } else {
+        configured.insert(key.to_owned(), toml::Value::Array(Vec::new()));
+    }
+
+    assert_eq!(
+        PypiServing.validate_options(&configured, &overrides).unwrap_err(),
+        "prefetch option \"images\" is not supported by pypi"
+    );
+}
+
+#[test]
+fn prefetch_options_accept_consumed_keys() {
+    let configured = toml::Table::from_iter(
+        [
+            "mode",
+            "packages",
+            "requirements",
+            "include_wheels",
+            "include_sdists",
+            "python_tags",
+            "abi_tags",
+            "platform_tags",
+            "max_file_size_bytes",
+            "metadata_only",
+        ]
+        .map(|key| (key.to_owned(), toml::Value::Boolean(true))),
+    );
+    let overrides = toml::Table::from_iter(
+        [
+            "packages",
+            "requirements",
+            "mode",
+            "metadata_only",
+            "no_wheels",
+            "no_sdists",
+            "python_tags",
+            "abi_tags",
+            "platform_tags",
+            "max_file_size_bytes",
+        ]
+        .map(|key| (key.to_owned(), toml::Value::Boolean(true))),
+    );
+
+    assert_eq!(PypiServing.validate_options(&configured, &overrides), Ok(()));
+}
 
 #[test]
 fn configuration_rejects_unknown_modes_and_invalid_sizes() {

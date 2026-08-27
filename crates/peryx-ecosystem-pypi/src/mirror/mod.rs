@@ -14,6 +14,39 @@ mod selection;
 
 #[async_trait::async_trait]
 impl MirrorDriver for PypiServing {
+    fn validate_options(&self, configured: &toml::Table, overrides: &toml::Table) -> Result<(), String> {
+        validate_options(
+            configured,
+            &[
+                "mode",
+                "packages",
+                "requirements",
+                "include_wheels",
+                "include_sdists",
+                "python_tags",
+                "abi_tags",
+                "platform_tags",
+                "max_file_size_bytes",
+                "metadata_only",
+            ],
+        )?;
+        validate_options(
+            overrides,
+            &[
+                "packages",
+                "requirements",
+                "mode",
+                "metadata_only",
+                "no_wheels",
+                "no_sdists",
+                "python_tags",
+                "abi_tags",
+                "platform_tags",
+                "max_file_size_bytes",
+            ],
+        )
+    }
+
     async fn mirror(
         &self,
         state: Arc<peryx_driver::AppState>,
@@ -29,6 +62,13 @@ impl MirrorDriver for PypiServing {
         }
         .map_err(|error| error.to_string())
     }
+}
+
+fn validate_options(options: &toml::Table, supported: &[&str]) -> Result<(), String> {
+    if let Some(key) = options.keys().find(|key| !supported.contains(&key.as_str())) {
+        return Err(format!("prefetch option {key:?} is not supported by pypi"));
+    }
+    Ok(())
 }
 
 const HEADER: &str = "kind\tindex\tproject\tfilename\tdigest\turl\tbytes\tstatus\treason\n";

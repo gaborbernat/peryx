@@ -278,7 +278,7 @@ fn test_meta_before_files_keeps_streaming() {
 
 #[test]
 fn test_escapes_and_braces_inside_strings_survive() {
-    let page = r#"{"name":"de\"mo}{","versions":[],"files":[
+    let page = r#"{"meta":{},"name":"de\"mo}{","versions":[],"files":[
         {"filename":"a{1}-1.0.whl","url":"https://up/a\"b[",
          "hashes":{"sha256":"ee55"},"yanked":false}
     ]}"#;
@@ -409,7 +409,7 @@ fn test_versions_after_files_and_empty_files() {
 
 #[test]
 fn test_local_files_emitted_into_empty_upstream_array() {
-    let page = r#"{"name":"demo","files":[]}"#;
+    let page = r#"{"meta":{},"name":"demo","files":[]}"#;
     let local = File {
         filename: "demo-1.0-py3-none-any.whl".to_owned(),
         url: "/r/files/aa/demo-1.0-py3-none-any.whl".to_owned(),
@@ -519,7 +519,7 @@ fn test_preserves_simple_api_fields_during_streaming() {
 
 #[test]
 fn test_proxy_mode_rewrites_a_secure_provenance_url() {
-    let page = r#"{"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
+    let page = r#"{"meta":{},"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
         "url":"https://up/demo.whl","hashes":{"sha256":"aa11"},
         "provenance":"https://up/demo.whl.provenance"}]}"#;
     let mut context = plain_context();
@@ -540,7 +540,7 @@ fn test_proxy_mode_rewrites_a_secure_provenance_url() {
 
 #[test]
 fn test_streaming_drops_an_insecure_provenance_url() {
-    let page = r#"{"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
+    let page = r#"{"meta":{},"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
         "url":"https://up/demo.whl","hashes":{"sha256":"aa11"},
         "provenance":"http://up/demo.whl.provenance"}]}"#;
 
@@ -576,7 +576,7 @@ fn test_streaming_rejects_unsupported_major_api_version() {
 
 #[test]
 fn test_escaped_version_strings_merge() {
-    let page = r#"{"name":"demo","versions":["1\u002e0","2.0"],"files":[]}"#;
+    let page = r#"{"meta":{},"name":"demo","versions":["1\u002e0","2.0"],"files":[]}"#;
     let (out, _) = transform(page, plain_context(), 2);
     let detail = parse_detail(out.as_bytes()).unwrap();
     assert_eq!(detail.versions, vec!["1.0", "2.0"]);
@@ -610,7 +610,7 @@ fn test_two_local_files_emit_with_separators() {
         Vec::new(),
         &BTreeMap::new(),
     );
-    let (out, _) = transform(r#"{"name":"demo","files":[]}"#, context, 4096);
+    let (out, _) = transform(r#"{"meta":{},"name":"demo","files":[]}"#, context, 4096);
     let detail = parse_detail(out.as_bytes()).unwrap();
     assert_eq!(detail.files.len(), 2);
 }
@@ -622,7 +622,9 @@ fn based_context(base: &str) -> PageContext {
 }
 
 fn one_file_page(url: &str, hashes: &str) -> String {
-    format!(r#"{{"name":"demo","files":[{{"filename":"demo-1.0-py3-none-any.whl","url":"{url}","hashes":{hashes}}}]}}"#)
+    format!(
+        r#"{{"meta":{{}},"name":"demo","files":[{{"filename":"demo-1.0-py3-none-any.whl","url":"{url}","hashes":{hashes}}}]}}"#
+    )
 }
 
 #[rstest]
@@ -685,7 +687,7 @@ fn test_legacy_record_urls_pass_through_unregistered() {
 
 #[test]
 fn test_streaming_drops_gpg_sig_on_a_legacy_local_record() {
-    let page = r#"{"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
+    let page = r#"{"meta":{},"name":"demo","files":[{"filename":"demo-1.0-py3-none-any.whl",
         "url":"/root/pypi/files/aa11/demo-1.0-py3-none-any.whl","hashes":{"sha256":"aa11"},"gpg-sig":true}]}"#;
     let (out, _) = transform(page, plain_context(), 8);
     let detail = parse_detail(out.as_bytes()).unwrap();
@@ -694,7 +696,7 @@ fn test_streaming_drops_gpg_sig_on_a_legacy_local_record() {
 
 #[test]
 fn test_streaming_keeps_gpg_sig_when_the_url_stays_upstream() {
-    let page = r#"{"name":"demo","files":[{"filename":"demo-1.0.tar.gz",
+    let page = r#"{"meta":{},"name":"demo","files":[{"filename":"demo-1.0.tar.gz",
         "url":"https://up/demo-1.0.tar.gz","hashes":{},"gpg-sig":true}]}"#;
     let (out, _) = transform(page, plain_context(), 7);
     let detail = parse_detail(out.as_bytes()).unwrap();
@@ -704,7 +706,7 @@ fn test_streaming_keeps_gpg_sig_when_the_url_stays_upstream() {
 
 #[test]
 fn test_legacy_record_after_a_rewritten_file_keeps_separators() {
-    let page = r#"{"name":"demo","files":[
+    let page = r#"{"meta":{},"name":"demo","files":[
         {"filename":"demo-1.0-py3-none-any.whl","url":"https://up/demo-1.0-py3-none-any.whl",
          "hashes":{"sha256":"aa11"}},
         {"filename":"demo-2.0-py3-none-any.whl","url":"/root/pypi/files/bb22/demo-2.0-py3-none-any.whl",
@@ -798,7 +800,7 @@ fn test_local_file_hidden_override_is_dropped_like_the_buffered_path() {
         Vec::new(),
         &overrides,
     );
-    let (out, _) = transform(r#"{"name":"demo","files":[]}"#, context, 4096);
+    let (out, _) = transform(r#"{"meta":{},"name":"demo","files":[]}"#, context, 4096);
     let detail = parse_detail(out.as_bytes()).unwrap();
     assert!(detail.files.is_empty());
 }
@@ -815,7 +817,7 @@ fn test_local_file_yank_override_is_applied_like_the_buffered_path() {
         Vec::new(),
         &overrides,
     );
-    let (out, _) = transform(r#"{"name":"demo","files":[]}"#, context, 4096);
+    let (out, _) = transform(r#"{"meta":{},"name":"demo","files":[]}"#, context, 4096);
     let detail = parse_detail(out.as_bytes()).unwrap();
     assert_eq!(detail.files[0].yanked, Yanked::Reason("bad build".to_owned()));
 }

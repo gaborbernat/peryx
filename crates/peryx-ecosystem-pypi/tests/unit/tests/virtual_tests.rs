@@ -225,7 +225,7 @@ async fn test_buffered_virtual_caps_version_at_a_pre_pep700_layer() {
     // A PEP 503-era upstream that advertises no version promises none of PEP 700's fields, so the
     // merged virtual page must fall back to the base version rather than inherit the default ceiling.
     let body = format!(
-        "{{\"name\":\"peryxpkg\",\"files\":[{{\"filename\":\"peryxpkg-1.0-py3-none-any.whl\",\
+        "{{\"meta\":{{}},\"name\":\"peryxpkg\",\"files\":[{{\"filename\":\"peryxpkg-1.0-py3-none-any.whl\",\
          \"url\":\"https://upstream.invalid/peryxpkg-1.0-py3-none-any.whl\",\
          \"hashes\":{{\"sha256\":\"{UPSTREAM_DIGEST}\"}}}}]}}"
     );

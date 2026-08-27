@@ -267,11 +267,11 @@ async fn test_sync_404_leaves_the_prior_generation_serviceable() {
 }
 
 #[tokio::test]
-async fn test_sync_parse_failure_preserves_the_active_generation() {
+async fn test_sync_incomplete_detail_preserves_the_active_generation() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/simple/flask/"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw("not json", JSON))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(r#"{"meta":{"api-version":"1.0"},"name":"flask"}"#, JSON))
         .mount(&server)
         .await;
     let client = client_for(&server);
@@ -649,7 +649,7 @@ fn test_parse_project_flushes_at_the_batch_limit() {
         })
         .collect::<Vec<_>>()
         .join(",");
-    let body = format!(r#"{{"meta":{{"api-version":"1.1"}},"files":[{files}]}}"#);
+    let body = format!(r#"{{"meta":{{"api-version":"1.1"}},"name":"flask","files":[{files}]}}"#);
 
     let (admitted, _) = parse_project(
         &mut std::io::Cursor::new(body),

@@ -1,3 +1,8 @@
+use std::io::{Read as _, Write as _};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread::JoinHandle;
+
 use futures_util::TryStreamExt as _;
 use rstest::rstest;
 use wiremock::matchers::{header, header_regex, method, path};
@@ -159,7 +164,7 @@ async fn test_fetch_range_requests_identity_bytes() {
     let client = guarded_client(&server);
 
     let bytes = client
-        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3)
+        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3, 3)
         .await
         .unwrap();
 
@@ -182,12 +187,65 @@ async fn test_fetch_range_accepts_unknown_total() {
     let client = guarded_client(&server);
 
     let bytes = client
-        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3)
+        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3, 3)
         .await
         .unwrap();
 
     assert_eq!(&bytes[..], b"hee");
     assert!(client.may_support_ranges());
+}
+
+#[tokio::test]
+async fn test_fetch_range_accepts_exact_chunked_body() {
+    let server = RangeServer::start(RangeResponse::ExactChunked);
+    let client = UpstreamClient::new(&server.origin()).unwrap();
+
+    let bytes = client.fetch_range(&server.url(), 1, 3, 3).await.unwrap();
+
+    assert_eq!(bytes, b"hee".as_slice());
+}
+
+#[tokio::test]
+async fn test_fetch_range_stops_at_first_excess_byte() {
+    let server = RangeServer::start(RangeResponse::ExcessChunked);
+    let client = UpstreamClient::new(&server.origin()).unwrap();
+
+    let err = client.fetch_range(&server.url(), 1, 3, 3).await.unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "upstream returned an invalid byte range response: response body exceeds the expected 3 bytes"
+    );
+}
+
+#[tokio::test]
+async fn test_fetch_range_rejects_mismatched_content_length_before_body() {
+    let server = RangeServer::start(RangeResponse::MismatchedContentLength);
+    let client = UpstreamClient::new(&server.origin()).unwrap();
+
+    let err = client.fetch_range(&server.url(), 1, 3, 3).await.unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "upstream returned an invalid byte range response: expected 3 bytes, received Content-Length 4"
+    );
+}
+
+#[tokio::test]
+async fn test_fetch_range_rejects_caller_budget_before_request() {
+    let server = MockServer::start().await;
+    let client = guarded_client(&server);
+
+    let err = client
+        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 0, 3, 3)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "upstream returned an invalid byte range response: requested range of 4 bytes exceeds the 3-byte memory limit"
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[rstest]
@@ -215,7 +273,7 @@ async fn test_fetch_range_disables_on_bad_range_response(
     let client = guarded_client(&server);
 
     let err = client
-        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3)
+        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3, 3)
         .await
         .unwrap_err();
 
@@ -225,22 +283,10 @@ async fn test_fetch_range_disables_on_bad_range_response(
 
 #[tokio::test]
 async fn test_fetch_range_rejects_short_body() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/files/artifact.bin"))
-        .respond_with(
-            ResponseTemplate::new(206)
-                .insert_header("content-range", "bytes 1-3/5")
-                .set_body_bytes(b"he".to_vec()),
-        )
-        .mount(&server)
-        .await;
-    let client = guarded_client(&server);
+    let server = RangeServer::start(RangeResponse::ShortChunked);
+    let client = UpstreamClient::new(&server.origin()).unwrap();
 
-    let err = client
-        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3)
-        .await
-        .unwrap_err();
+    let err = client.fetch_range(&server.url(), 1, 3, 3).await.unwrap_err();
 
     assert_eq!(
         err.to_string(),
@@ -505,4 +551,77 @@ async fn test_warm_records_an_unreachable_upstream_host() {
     let client = UpstreamClient::new("http://127.0.0.1:0/api/").unwrap();
     client.warm().await;
     assert_eq!(client.reachability().as_str(), "unreachable");
+}
+
+#[derive(Clone, Copy)]
+enum RangeResponse {
+    ExactChunked,
+    ExcessChunked,
+    MismatchedContentLength,
+    ShortChunked,
+}
+
+struct RangeServer {
+    address: SocketAddr,
+    release: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl RangeServer {
+    fn start(response: RangeResponse) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, released) = channel();
+        Self {
+            address,
+            release: Some(release),
+            thread: Some(std::thread::spawn(move || serve_range(&listener, response, &released))),
+        }
+    }
+
+    fn origin(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    fn url(&self) -> String {
+        format!("{}/files/artifact.bin", self.origin())
+    }
+}
+
+impl Drop for RangeServer {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        let _ = TcpStream::connect(self.address);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+fn serve_range(listener: &TcpListener, response: RangeResponse, released: &Receiver<()>) {
+    let (mut socket, _) = listener.accept().unwrap();
+    let mut request = [0; 1024];
+    let _ = socket.read(&mut request);
+    let (body, hold_open): (&[u8], bool) = match response {
+        RangeResponse::ExactChunked => (
+            b"HTTP/1.1 206 Partial Content\r\ncontent-range: bytes 1-3/5\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n1\r\nh\r\n2\r\nee\r\n0\r\n\r\n",
+            false,
+        ),
+        RangeResponse::ExcessChunked => (
+            b"HTTP/1.1 206 Partial Content\r\ncontent-range: bytes 1-3/5\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n3\r\nhee\r\n1\r\nx\r\n",
+            true,
+        ),
+        RangeResponse::MismatchedContentLength => (
+            b"HTTP/1.1 206 Partial Content\r\ncontent-range: bytes 1-3/5\r\ncontent-length: 4\r\nconnection: close\r\n\r\n",
+            true,
+        ),
+        RangeResponse::ShortChunked => (
+            b"HTTP/1.1 206 Partial Content\r\ncontent-range: bytes 1-3/5\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n2\r\nhe\r\n0\r\n\r\n",
+            false,
+        ),
+    };
+    socket.write_all(body).unwrap();
+    if hold_open {
+        released.recv().unwrap_err();
+    }
 }

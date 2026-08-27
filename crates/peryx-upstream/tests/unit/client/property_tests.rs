@@ -122,7 +122,12 @@ async fn test_range_response_round_trips_generated_spans() {
 
         assert_eq!(
             client
-                .fetch_range(&format!("{}{route}", server.uri()), start, end)
+                .fetch_range(
+                    &format!("{}{route}", server.uri()),
+                    start,
+                    end,
+                    usize::try_from(length).unwrap(),
+                )
                 .await
                 .unwrap()
                 .as_ref(),

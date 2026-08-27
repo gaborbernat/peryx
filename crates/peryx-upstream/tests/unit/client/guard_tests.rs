@@ -250,7 +250,7 @@ async fn test_head_file_for_range_blocks_private_literal() {
 #[tokio::test]
 async fn test_fetch_range_blocks_private_literal() {
     let error = blocked_client()
-        .fetch_range("http://127.0.0.1/x", 0, 10)
+        .fetch_range("http://127.0.0.1/x", 0, 10, 11)
         .await
         .unwrap_err();
 

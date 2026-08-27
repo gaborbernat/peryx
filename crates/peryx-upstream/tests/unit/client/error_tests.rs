@@ -127,7 +127,7 @@ async fn test_fetch_range_rejects_invalid_bounds(#[case] start: u64, #[case] end
     let client = UpstreamClient::new("https://upstream.example/artifacts/").unwrap();
 
     let err = client
-        .fetch_range("https://example.invalid/artifact.bin", start, end)
+        .fetch_range("https://example.invalid/artifact.bin", start, end, usize::MAX)
         .await
         .unwrap_err();
 
@@ -148,7 +148,7 @@ async fn test_fetch_range_rejects_non_partial_success() {
     let client = guarded_client(&server);
 
     let err = client
-        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3)
+        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3, 3)
         .await
         .unwrap_err();
 

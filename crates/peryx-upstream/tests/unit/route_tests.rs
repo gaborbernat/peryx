@@ -182,10 +182,36 @@ async fn test_artifact_client_falls_back_for_range_reads() {
 
     assert!(artifacts.may_support_ranges());
     assert_eq!(artifacts.head_file_for_range(&url).await.unwrap().len, 5);
-    assert_eq!(&artifacts.fetch_range(&url, 1, 3).await.unwrap()[..], b"hee");
+    assert_eq!(&artifacts.fetch_range(&url, 1, 3, 3).await.unwrap()[..], b"hee");
 
     artifacts.disable_ranges();
     assert!(!artifacts.may_support_ranges());
+}
+
+#[tokio::test]
+async fn test_artifact_client_rejects_range_over_budget_before_selecting_source() {
+    let origin = MockServer::start().await;
+    let mirror = MockServer::start().await;
+    let source = NamedUpstream::new("origin", UpstreamClient::new(&origin.uri()).unwrap())
+        .with_artifact_mirror(UpstreamClient::new(&mirror.uri()).unwrap(), true);
+    let artifacts = source.artifacts();
+
+    let err = artifacts
+        .fetch_range(&format!("{}/files/artifact.bin", origin.uri()), 0, 3, 3)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "upstream returned an invalid byte range response: requested range of 4 bytes exceeds the 3-byte memory limit"
+    );
+    assert_eq!(
+        (
+            origin.received_requests().await.unwrap().len(),
+            mirror.received_requests().await.unwrap().len()
+        ),
+        (0, 0)
+    );
 }
 
 #[tokio::test]
@@ -225,7 +251,7 @@ async fn test_artifact_client_reads_ranges_from_mirror() {
     );
     assert_eq!(
         &artifacts
-            .fetch_range("https://origin.example/files/artifact.bin", 1, 3)
+            .fetch_range("https://origin.example/files/artifact.bin", 1, 3, 3)
             .await
             .unwrap()[..],
         b"hee"
@@ -249,7 +275,7 @@ async fn test_artifact_client_does_not_fallback_range_reads_when_disabled() {
     let url = "https://origin.example/files/artifact.bin";
 
     assert!(artifacts.head_file_for_range(url).await.is_err());
-    assert!(artifacts.fetch_range(url, 1, 3).await.is_err());
+    assert!(artifacts.fetch_range(url, 1, 3, 3).await.is_err());
 }
 
 #[tokio::test]
@@ -389,7 +415,7 @@ async fn test_direct_artifact_client_reads_ranges() {
     assert_eq!(
         (
             artifacts.head_file_for_range(&url).await.unwrap().len,
-            artifacts.fetch_range(&url, 1, 3).await.unwrap(),
+            artifacts.fetch_range(&url, 1, 3, 3).await.unwrap(),
         ),
         (5, bytes::Bytes::from_static(b"hee"))
     );

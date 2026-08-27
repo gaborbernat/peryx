@@ -11,17 +11,17 @@ reads artifact bytes. The authoritative metadata store can rebuild the index aft
 
 Each implementation maps its entities to this record:
 
-| Field             | Meaning                                               |
-| ----------------- | ----------------------------------------------------- |
-| `display_name`    | Name shown to the caller                              |
-| `normalized_name` | Stable name used for matching and ordering            |
-| `route`           | Repository route                                      |
-| `index`           | Index name                                            |
-| `ecosystem`       | Registered ecosystem identifier                       |
-| `type_label`      | Implementation term for the entity                    |
-| `type`            | `uploaded`, `cached`, or `override`                   |
-| `available`       | Whether this instance can serve at least one artifact |
-| `summary`         | Optional implementation-provided summary              |
+| Field           | Meaning                                               |
+| --------------- | ----------------------------------------------------- |
+| `display_label` | Name shown to the caller                              |
+| `resource_key`  | Stable name used for matching and ordering            |
+| `route`         | Repository route                                      |
+| `index`         | Index name                                            |
+| `ecosystem`     | Registered ecosystem identifier                       |
+| `type_label`    | Implementation term for the entity                    |
+| `type`          | `uploaded`, `cached`, or `override`                   |
+| `available`     | Whether this instance can serve at least one artifact |
+| `summary`       | Optional implementation-provided summary              |
 
 The `type_label` field lets a mixed result page use the implementation's terminology. Clients should identify the
 implementation through `ecosystem`, not by matching `type_label` text.
@@ -51,7 +51,7 @@ dialect. An invalid expression or availability value returns `400 Bad Request`.
 
 The response echoes `query`, `route`, `type`, `availability`, `page`, and `page_size`. It adds `total` and a `results`
 array of the records above. `total` counts all readable matches after policy and availability filters. Results sort by
-display name, route, then normalized name. Search does not rank by relevance.
+`display_label`, `route`, then `resource_key`. Search does not rank by relevance.
 
 ## Access control
 

@@ -1,7 +1,10 @@
+use std::collections::BTreeSet;
+
 use rstest::rstest;
 use serde_json::{Value, json};
 
 use peryx_driver::openapi::{api_json_response, artifact_search, query_param, route_param, text_response};
+use peryx_search::{ContentSource, SearchResult};
 
 fn value<T: serde::Serialize>(input: T) -> Value {
     serde_json::to_value(input).unwrap()
@@ -97,10 +100,12 @@ fn artifact_search_matches_contract(#[case] scoped: bool, #[case] summary: &str,
                                 "page_size": 25,
                                 "total": 1,
                                 "results": [{
-                                    "display_name": "Widget",
-                                    "normalized_name": "widget",
+                                    "display_label": "Widget",
+                                    "resource_key": "widget",
                                     "route": "team/catalog",
                                     "index": "team/catalog",
+                                    "ecosystem": "pypi",
+                                    "type_label": "project",
                                     "type": "cached",
                                     "available": true,
                                     "summary": "An indexed artifact.",
@@ -120,6 +125,31 @@ fn artifact_search_matches_contract(#[case] scoped: bool, #[case] summary: &str,
             },
         }),
     );
+}
+
+#[test]
+fn artifact_search_result_example_matches_serialized_contract() {
+    let example =
+        value(artifact_search(false).build())["responses"]["200"]["content"]["application/json"]["example"]["results"]
+            [0]
+        .clone();
+    let expected = SearchResult {
+        display_label: "Widget".into(),
+        resource_key: "widget".into(),
+        route: "team/catalog".into(),
+        index: "team/catalog".into(),
+        ecosystem: "pypi".into(),
+        type_label: "project".into(),
+        source_type: ContentSource::Cached,
+        available_locally: true,
+        summary: Some("An indexed artifact.".into()),
+    };
+
+    assert_eq!(
+        example.as_object().unwrap().keys().collect::<BTreeSet<_>>(),
+        value(&expected).as_object().unwrap().keys().collect::<BTreeSet<_>>(),
+    );
+    assert_eq!(serde_json::from_value::<SearchResult>(example).unwrap(), expected);
 }
 
 fn search_parameters() -> Vec<Value> {

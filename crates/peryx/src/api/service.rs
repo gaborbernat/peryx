@@ -2,6 +2,7 @@ use serde_json::json;
 use utoipa::openapi::content::ContentBuilder;
 use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder};
 use utoipa::openapi::request_body::RequestBodyBuilder;
+use utoipa::openapi::schema::{ObjectBuilder, Type};
 use utoipa::openapi::{PathsBuilder, Required, ResponseBuilder, SecurityRequirement};
 
 use peryx_driver::openapi::{api_json_response, artifact_search, text_response};
@@ -125,6 +126,11 @@ fn list_repositories() -> OperationBuilder {
                     .parameter_in(ParameterIn::Query)
                     .required(Required::False)
                     .description(Some("Filter by `enabled` or `disabled`"))
+                    .schema(Some(
+                        ObjectBuilder::new()
+                            .schema_type(Type::String)
+                            .enum_values(Some(["enabled", "disabled"])),
+                    ))
                     .build(),
             )
             .parameter(
@@ -153,8 +159,8 @@ fn list_repositories() -> OperationBuilder {
             .response(
                 "400",
                 api_json_response(
-                    "The limit is out of range",
-                    json!({"error": "limit must be between 1 and 100"}),
+                    "The limit or state filter is invalid",
+                    json!({"error": "state must be enabled or disabled"}),
                 ),
             ),
     )

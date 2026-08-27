@@ -65,6 +65,22 @@ fn test_openapi_document_covers_every_endpoint() {
 }
 
 #[test]
+fn test_repository_state_filter_has_a_closed_enum() {
+    let spec = serde_json::to_value(openapi()).unwrap();
+    let state = spec["paths"]["/+repositories"]["get"]["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parameter| parameter["name"] == "state")
+        .unwrap();
+
+    assert_eq!(
+        state["schema"],
+        serde_json::json!({"type": "string", "enum": ["enabled", "disabled"]})
+    );
+}
+
+#[test]
 fn test_openapi_json_has_stable_object_order() {
     assert_json_objects_are_sorted(&serde_json::from_str(&openapi_json()).unwrap());
 }

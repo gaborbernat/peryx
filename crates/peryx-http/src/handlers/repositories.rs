@@ -95,7 +95,10 @@ pub async fn list_repositories(
         return response;
     }
     let repository_query = RepositoryQuery {
-        state: query.state.as_deref().and_then(parse_state),
+        state: match query.state.as_deref().map(parse_state).transpose() {
+            Ok(state) => state,
+            Err(rejection) => return rejection.into_response(),
+        },
         cursor: query.cursor.as_deref().map(repository_id),
         limit: query.limit.unwrap_or_else(|| RepositoryQuery::default().limit),
     };
@@ -277,8 +280,15 @@ fn if_match(headers: &HeaderMap) -> Result<u64, Rejection> {
     })
 }
 
-fn parse_state(value: &str) -> Option<RepositoryState> {
-    serde_json::from_value(Value::String(value.to_owned())).ok()
+fn parse_state(value: &str) -> Result<RepositoryState, Rejection> {
+    match value {
+        "enabled" => Ok(RepositoryState::Enabled),
+        "disabled" => Ok(RepositoryState::Disabled),
+        _ => Err(Rejection {
+            status: StatusCode::BAD_REQUEST,
+            message: "state must be enabled or disabled",
+        }),
+    }
 }
 
 fn repository_id(value: &str) -> RepositoryId {

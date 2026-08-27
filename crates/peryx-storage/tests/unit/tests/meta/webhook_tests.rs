@@ -1,4 +1,8 @@
 use std::collections::HashSet;
+use std::io::{Read as _, Seek as _};
+use std::sync::Mutex;
+
+use rstest::rstest;
 
 use super::store;
 use crate::meta::{MetaStore, NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryStatus};
@@ -146,7 +150,7 @@ fn test_webhook_delivery_update_handles_record_without_due_key() {
 }
 
 #[test]
-fn test_webhook_delivery_ignores_empty_limit_and_stale_due_rows() {
+fn test_webhook_delivery_ignores_empty_limit_and_missing_updates() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");
     let store = MetaStore::open(&path).unwrap();
@@ -166,21 +170,110 @@ fn test_webhook_delivery_ignores_empty_limit_and_stale_due_rows() {
             .unwrap()
             .is_none()
     );
-    drop(store);
+}
 
-    let db = redb::Database::create(&path).unwrap();
-    let table: redb::TableDefinition<&str, &str> = redb::TableDefinition::new("webhook_due");
+#[derive(Clone, Copy)]
+enum QueueDamage {
+    MalformedTimestamp,
+    MissingRecord,
+    InvalidJson,
+    FinishedRecord,
+}
+
+#[rstest]
+#[case::malformed_timestamp(QueueDamage::MalformedTimestamp, "malformed_due_keys")]
+#[case::missing_record(QueueDamage::MissingRecord, "dangling_due_rows")]
+#[case::invalid_json(QueueDamage::InvalidJson, "malformed_delivery_records")]
+#[case::finished_record(QueueDamage::FinishedRecord, "dangling_due_rows")]
+fn test_webhook_queue_scan_skips_and_cleans_damaged_rows(#[case] damage: QueueDamage, #[case] count: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let store = MetaStore::open(&path).unwrap();
+    let damaged = matches!(damage, QueueDamage::InvalidJson | QueueDamage::FinishedRecord)
+        .then(|| enqueue(&store, "hosted", "broken", 10));
+    if matches!(damage, QueueDamage::FinishedRecord) {
+        store
+            .update_webhook_delivery(
+                damaged.as_deref().unwrap(),
+                WebhookDeliveryAttempt {
+                    status: WebhookDeliveryStatus::Delivered,
+                    updated_at_unix: 10,
+                    next_attempt_at_unix: None,
+                    response_status: Some(200),
+                    last_error: None,
+                },
+            )
+            .unwrap();
+    }
+    let healthy = enqueue(&store, "hosted", "healthy", 20);
+    drop(store);
+    damage_queue(&path, damage, damaged.as_deref());
+
+    let store = MetaStore::open_existing(&path).unwrap();
+    assert_eq!(store.next_webhook_delivery_at().unwrap(), Some(20));
+    let mut capture = tempfile::tempfile().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(Mutex::new(capture.try_clone().unwrap()))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        for _ in 0..2 {
+            assert_eq!(
+                store
+                    .list_due_webhook_deliveries(100, 10, &none())
+                    .unwrap()
+                    .into_iter()
+                    .map(|record| record.id)
+                    .collect::<Vec<_>>(),
+                std::slice::from_ref(&healthy)
+            );
+        }
+    });
+    if matches!(damage, QueueDamage::InvalidJson) {
+        assert_eq!(store.get_webhook_delivery(damaged.as_deref().unwrap()).unwrap(), None);
+    }
+    capture.rewind().unwrap();
+    let mut output = String::new();
+    capture.read_to_string(&mut output).unwrap();
+    assert_eq!(output.matches("discarding damaged webhook queue rows").count(), 1);
+    assert!(output.contains(&format!("{count}=1")), "{output}");
+    assert!(!output.contains("unbounded-corrupt-identifier"));
+}
+
+fn damage_queue(path: &std::path::Path, damage: QueueDamage, damaged: Option<&str>) {
+    let db = redb::Database::open(path).unwrap();
     let txn = db.begin_write().unwrap();
-    {
-        let mut table = txn.open_table(table).unwrap();
-        table.insert("not-a-due-key", "missing").unwrap();
-        table.insert("09223372036854775808/missing", "missing").unwrap();
+    match damage {
+        QueueDamage::MalformedTimestamp => {
+            txn.open_table(redb::TableDefinition::<&str, &str>::new("webhook_due"))
+                .unwrap()
+                .insert("!unparseable", "unbounded-corrupt-identifier")
+                .unwrap();
+        }
+        QueueDamage::MissingRecord => {
+            txn.open_table(redb::TableDefinition::<&str, &str>::new("webhook_due"))
+                .unwrap()
+                .insert(
+                    "09223372036854775818/unbounded-corrupt-identifier",
+                    "unbounded-corrupt-identifier",
+                )
+                .unwrap();
+        }
+        QueueDamage::InvalidJson => {
+            txn.open_table(redb::TableDefinition::<&str, &[u8]>::new("webhook_delivery"))
+                .unwrap()
+                .insert(damaged.unwrap(), b"{".as_slice())
+                .unwrap();
+        }
+        QueueDamage::FinishedRecord => {
+            txn.open_table(redb::TableDefinition::<&str, &str>::new("webhook_due"))
+                .unwrap()
+                .insert("09223372036854775818/stale", damaged.unwrap())
+                .unwrap();
+        }
     }
     txn.commit().unwrap();
-    drop(db);
-
-    let store = MetaStore::open(&path).unwrap();
-    assert!(store.list_due_webhook_deliveries(0, 10, &none()).unwrap().is_empty());
 }
 
 fn enqueue(store: &MetaStore, index: &str, target: &str, created_at_unix: i64) -> String {

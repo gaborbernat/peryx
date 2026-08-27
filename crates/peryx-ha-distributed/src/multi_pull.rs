@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::multi_peer::{MemberOutcome, PeerSet};
+use crate::multi_peer::{MemberOutcome, PeerSet, RetiredPeer};
 use crate::peer::PeerTransport;
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
 
@@ -18,6 +18,8 @@ pub struct PullRound {
     /// The highest advertised peer head, including heads not reached this round.
     pub head: u64,
     pub incompatible: Option<u16>,
+    pub retired: Vec<RetiredPeer>,
+    pub fully_retired: bool,
 }
 
 /// Applies pages from the current serial. `apply` returns the serial it committed. A fresh replica uses
@@ -111,6 +113,8 @@ where
         answered,
         head: set.head(),
         incompatible,
+        retired: report.retired,
+        fully_retired: report.fully_retired,
     })
 }
 

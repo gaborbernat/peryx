@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use peryx_core::PrometheusSource;
 
-use crate::{BlobPlaneReport, SyncError, SyncOutcome};
+use crate::{BlobPlaneReport, RetiredPeer, SyncError, SyncOutcome};
 
 #[derive(Clone, Copy)]
 enum ReplicaHealthStatus {
@@ -20,7 +20,7 @@ enum ReplicaFault {
     IncompatibleSchema,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ReplicaObservation {
     status: ReplicaHealthStatus,
     fault: ReplicaFault,
@@ -31,6 +31,8 @@ pub struct ReplicaObservation {
     readable_serial: u64,
     blobs_fetched: u64,
     blobs_pending: u64,
+    pub retired: Vec<RetiredPeer>,
+    pub fully_retired: bool,
 }
 
 pub struct ReplicaMonitor {
@@ -51,6 +53,8 @@ impl ReplicaMonitor {
                 readable_serial: 0,
                 blobs_fetched: 0,
                 blobs_pending: 0,
+                retired: Vec::new(),
+                fully_retired: false,
             }),
         }
     }
@@ -106,18 +110,28 @@ impl ReplicaMonitor {
         observation.errors = observation.errors.saturating_add(1);
     }
 
-    pub fn snapshot(&self) -> ReplicaObservation {
-        *self
+    pub(crate) fn record_retired(&self, retired: Vec<RetiredPeer>, fully_retired: bool) {
+        let mut observation = self
             .observation
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        observation.retired = retired;
+        observation.fully_retired = fully_retired;
     }
 
-    /// Reports the highest-priority readiness gap: schema incompatibility, sync failure, then frontier lag.
+    pub fn snapshot(&self) -> ReplicaObservation {
+        self.observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Reports the highest-priority readiness gap: schema incompatibility, full retirement, sync failure, then lag.
     pub fn readiness_gap(&self) -> Option<&'static str> {
         let observation = self.snapshot();
         match observation.fault {
             ReplicaFault::IncompatibleSchema => Some("incompatible_schema"),
+            _ if observation.fully_retired => Some("retired_peers"),
             ReplicaFault::Sync => Some("sync_error"),
             ReplicaFault::None => match observation.status {
                 ReplicaHealthStatus::CaughtUp => None,
@@ -131,10 +145,11 @@ impl ReplicaMonitor {
 
 impl PrometheusSource for ReplicaMonitor {
     fn write_metrics(&self, body: &mut String) {
-        let observation = *self
+        let observation = self
             .observation
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let caught_up = u8::from(matches!(observation.status, ReplicaHealthStatus::CaughtUp));
         let _ = write!(
             body,

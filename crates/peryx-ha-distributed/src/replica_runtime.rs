@@ -134,6 +134,7 @@ impl ReplicaLoop {
             Ok(round) => round,
             Err(error) => return Ok(self.record_metadata_error(&error, started.elapsed())),
         };
+        self.monitor.record_retired(round.retired.clone(), round.fully_retired);
         let elapsed = started.elapsed();
         if let Some(actual) = round.incompatible {
             let error = SyncError::UnsupportedVersion {

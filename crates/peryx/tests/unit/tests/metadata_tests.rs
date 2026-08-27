@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 
 use peryx_storage::meta::{
     AccountingClass, MetadataMigration, MetadataRecord, MetadataRecordSet, NewQuotaReservation, QuotaLimits, QuotaUsage,
@@ -42,6 +43,35 @@ fn immutable_open_accepts_current_metadata() {
 }
 
 #[test]
+fn immutable_open_does_not_copy_current_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    let store = peryx_storage::meta::MetaStore::open(&path).unwrap();
+    seed(&store);
+    drop(store);
+    let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(0);
+    let (resume_sender, resume_receiver) = std::sync::mpsc::sync_channel(0);
+    let plugins = crate::tests::support::plugins_with_metadata_migration(Arc::new(TestMigration {
+        result: MigrationResult::Keep,
+        gate: Some(MigrationGate {
+            entered: entered_sender,
+            resume: Mutex::new(resume_receiver),
+        }),
+    }));
+    let before = directory_entries(directory.path());
+
+    std::thread::scope(|scope| {
+        let opener = scope.spawn(|| open_existing_read_only(&path, &plugins));
+        entered_receiver.recv().unwrap();
+        let during = directory_entries(directory.path());
+        resume_sender.send(()).unwrap();
+        drop(opener.join().unwrap().unwrap());
+
+        assert_eq!(during, before);
+    });
+}
+
+#[test]
 fn immutable_open_rejects_a_required_upgrade_without_mutating_source() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("peryx.redb");
@@ -49,6 +79,7 @@ fn immutable_open_rejects_a_required_upgrade_without_mutating_source() {
     seed(&store);
     drop(store);
     let plugins = crate::tests::support::plugins_with_metadata_migration(migration(MigrationResult::Move));
+    let before = std::fs::read(&path).unwrap();
 
     assert_eq!(
         open_existing_read_only(&path, &plugins).unwrap_err().to_string(),
@@ -60,6 +91,8 @@ fn immutable_open_rejects_a_required_upgrade_without_mutating_source() {
     let source = peryx_storage::meta::MetaStore::open_existing_read_only(&path).unwrap();
     assert_eq!(source.quota_usage("source").unwrap().accounted_bytes.reserved, 1);
     assert_eq!(source.quota_usage("target").unwrap(), QuotaUsage::default());
+    drop(source);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[test]
@@ -124,7 +157,15 @@ enum MigrationResult {
     Move,
 }
 
-struct TestMigration(MigrationResult);
+struct TestMigration {
+    result: MigrationResult,
+    gate: Option<MigrationGate>,
+}
+
+struct MigrationGate {
+    entered: SyncSender<()>,
+    resume: Mutex<Receiver<()>>,
+}
 
 impl MetadataMigration for TestMigration {
     fn name(&self) -> &'static str {
@@ -136,7 +177,11 @@ impl MetadataMigration for TestMigration {
     }
 
     fn rewrite(&self, _: MetadataRecordSet, record: &MetadataRecord) -> Result<Option<MetadataRecord>, String> {
-        Ok(match self.0 {
+        if let Some(gate) = &self.gate {
+            gate.entered.send(()).unwrap();
+            gate.resume.lock().unwrap().recv().unwrap();
+        }
+        Ok(match self.result {
             MigrationResult::Keep => None,
             MigrationResult::Move => Some(MetadataRecord {
                 key: "target".to_owned(),
@@ -147,7 +192,7 @@ impl MetadataMigration for TestMigration {
 }
 
 fn migration(result: MigrationResult) -> Arc<dyn MetadataMigration> {
-    Arc::new(TestMigration(result))
+    Arc::new(TestMigration { result, gate: None })
 }
 
 fn seed(store: &peryx_storage::meta::MetaStore) {

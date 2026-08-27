@@ -258,6 +258,18 @@ impl PluginRegistry {
             .collect()
     }
 
+    /// # Errors
+    /// Returns the first store or owner migration error.
+    pub fn dry_run_metadata_migrations(
+        &self,
+        store: &peryx_storage::meta::MetaStore,
+    ) -> Result<Vec<peryx_storage::meta::MetadataMigrationReport>, peryx_storage::meta::MetadataMigrationError> {
+        self.metadata_migrations
+            .iter()
+            .map(|migration| store.dry_run_metadata_migration(migration.as_ref()))
+            .collect()
+    }
+
     #[must_use]
     pub fn has_metadata_migrations(&self) -> bool {
         !self.metadata_migrations.is_empty()

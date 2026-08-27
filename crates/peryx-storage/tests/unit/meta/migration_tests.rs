@@ -131,6 +131,175 @@ fn test_metadata_migration_uses_the_default_empty_legacy_sources() {
     assert_eq!(read_bytes(&database_path(&directory), "quota_usage")["key"], b"old!");
 }
 
+#[test]
+fn test_metadata_migration_dry_run_reads_current_records_without_writing() {
+    let (directory, store) = store();
+    drop(store);
+    let cases = [
+        (MetadataRecordSet::QuotaUsage, "quota_usage", MetadataValueKind::Bytes),
+        (
+            MetadataRecordSet::QuotaResource,
+            "quota_resource",
+            MetadataValueKind::Bytes,
+        ),
+        (MetadataRecordSet::QuotaGroup, "quota_group", MetadataValueKind::Bytes),
+        (
+            MetadataRecordSet::QuotaReservation,
+            "quota_reservation",
+            MetadataValueKind::Bytes,
+        ),
+        (
+            MetadataRecordSet::PolicyDecisionHistory,
+            "policy_decision",
+            MetadataValueKind::Bytes,
+        ),
+        (
+            MetadataRecordSet::PolicyDecisionCurrent,
+            "policy_decision_current",
+            MetadataValueKind::Text,
+        ),
+        (
+            MetadataRecordSet::PolicyDecisionCurrentById,
+            "policy_decision_current_id",
+            MetadataValueKind::Text,
+        ),
+        (MetadataRecordSet::Analytics, "analytics", MetadataValueKind::Bytes),
+    ];
+    for &(_, table, value_kind) in &cases {
+        match value_kind {
+            MetadataValueKind::Bytes => write_bytes(
+                &database_path(&directory),
+                table,
+                &[("key".to_owned(), b"old".to_vec())],
+            ),
+            MetadataValueKind::Text => write_text(&database_path(&directory), table, &[("key", "old")]),
+        }
+    }
+    let record_sets = cases.map(|(record_set, _, _)| record_set);
+    let before = std::fs::read(database_path(&directory)).unwrap();
+    let store = MetaStore::open_existing_read_only(database_path(&directory)).unwrap();
+    let report = store
+        .dry_run_metadata_migration(&Migration {
+            record_sets: &record_sets,
+            legacy_sources: &[],
+            rewrite: Rewrite::Append,
+        })
+        .unwrap();
+    drop(store);
+
+    assert_eq!(
+        (report, std::fs::read(database_path(&directory)).unwrap()),
+        (
+            MetadataMigrationReport {
+                scanned: 8,
+                rewritten: 8,
+            },
+            before,
+        )
+    );
+}
+
+#[test]
+fn test_metadata_migration_dry_run_reads_legacy_sources_without_writing() {
+    let (directory, store) = store();
+    drop(store);
+    write_bytes(
+        &database_path(&directory),
+        "retired_bytes",
+        &[("legacy-bytes".to_owned(), b"old".to_vec())],
+    );
+    write_text(&database_path(&directory), "retired_text", &[("legacy-text", "old")]);
+    write_bytes(
+        &database_path(&directory),
+        "quota_group",
+        &[("current".to_owned(), b"old".to_vec())],
+    );
+    let sources = [
+        LegacyMetadataSource {
+            table: "retired_bytes",
+            value_kind: MetadataValueKind::Bytes,
+            target: MetadataRecordSet::QuotaResource,
+        },
+        LegacyMetadataSource {
+            table: "retired_text",
+            value_kind: MetadataValueKind::Text,
+            target: MetadataRecordSet::PolicyDecisionCurrent,
+        },
+        LegacyMetadataSource {
+            table: "quota_group",
+            value_kind: MetadataValueKind::Bytes,
+            target: MetadataRecordSet::QuotaGroup,
+        },
+        LegacyMetadataSource {
+            table: "absent_source",
+            value_kind: MetadataValueKind::Bytes,
+            target: MetadataRecordSet::QuotaUsage,
+        },
+        LegacyMetadataSource {
+            table: "absent_text_source",
+            value_kind: MetadataValueKind::Text,
+            target: MetadataRecordSet::PolicyDecisionCurrentById,
+        },
+    ];
+    let before = std::fs::read(database_path(&directory)).unwrap();
+    let store = MetaStore::open_existing_read_only(database_path(&directory)).unwrap();
+    let report = store
+        .dry_run_metadata_migration(&Migration {
+            record_sets: &[],
+            legacy_sources: &sources,
+            rewrite: Rewrite::Append,
+        })
+        .unwrap();
+    drop(store);
+
+    assert_eq!(
+        (report, std::fs::read(database_path(&directory)).unwrap()),
+        (
+            MetadataMigrationReport {
+                scanned: 3,
+                rewritten: 3,
+            },
+            before,
+        )
+    );
+}
+
+#[test]
+fn test_metadata_migration_dry_run_reports_owner_errors_without_writing() {
+    let (directory, store) = store();
+    drop(store);
+    write_bytes(
+        &database_path(&directory),
+        "quota_usage",
+        &[("fail".to_owned(), b"old".to_vec())],
+    );
+    write_text(
+        &database_path(&directory),
+        "policy_decision_current",
+        &[("fail", "old")],
+    );
+    let before = std::fs::read(database_path(&directory)).unwrap();
+    let store = MetaStore::open_existing_read_only(database_path(&directory)).unwrap();
+
+    for record_set in [MetadataRecordSet::QuotaUsage, MetadataRecordSet::PolicyDecisionCurrent] {
+        assert_eq!(
+            store
+                .dry_run_metadata_migration(&Migration {
+                    record_sets: &[record_set],
+                    legacy_sources: &[],
+                    rewrite: Rewrite::Append,
+                })
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "metadata migration \"neutral-test\" failed for {record_set:?} record \"fail\": owner rejected record"
+            )
+        );
+    }
+    drop(store);
+    assert_eq!(std::fs::read(database_path(&directory)).unwrap(), before);
+}
+
 #[rstest]
 #[case::quota_usage(MetadataRecordSet::QuotaUsage, "quota_usage")]
 #[case::quota_resource(MetadataRecordSet::QuotaResource, "quota_resource")]

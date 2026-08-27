@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::Extension;
-use axum::extract::{FromRequest as _, Multipart, OriginalUri, Path, Request, State};
+use axum::extract::{OriginalUri, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
@@ -96,24 +96,15 @@ pub async fn dispatch_post(State(state): State<Arc<AppState>>, Path(path): Path<
         Ok(serving) => serving.clone(),
         Err(reason) => return reason.response(),
     };
-    let headers = request.headers().clone();
-    let multipart = match Multipart::from_request(request, &()).await {
-        Ok(multipart) => multipart,
-        Err(rejection) => return rejection.into_response(),
-    };
-    serving.post(state.serving.clone(), path, headers, multipart).await
+    serving.post(state.serving.clone(), path, request).await
 }
 
-pub async fn dispatch_put(
-    State(state): State<Arc<AppState>>,
-    OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
-) -> Response {
-    let serving = match driver_for(&state, uri.path().trim_start_matches('/')) {
+pub async fn dispatch_put(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let serving = match driver_for(&state, request.uri().path().trim_start_matches('/')) {
         Ok(serving) => serving.clone(),
         Err(reason) => return reason.response(),
     };
-    serving.put(state.serving.clone(), uri, headers).await
+    serving.put(state.serving.clone(), request).await
 }
 
 pub async fn dispatch_delete(

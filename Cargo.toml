@@ -48,7 +48,7 @@ peryx-upstream = { version = "0.0.1", path = "crates/peryx-upstream" }
 peryx-http = { version = "0.0.1", path = "crates/peryx-http" }
 peryx-web = { version = "0.0.1", path = "crates/peryx-web" }
 peryx-test-support = { version = "0.0.1", path = "crates/peryx-test-support" }
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "multipart", "original-uri", "query", "tokio", "tower-log", "tracing"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "original-uri", "query", "tokio", "tower-log", "tracing"] }
 tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["trace"] }
 http = "1.5"

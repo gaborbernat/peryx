@@ -4,8 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{FromRequest, Multipart, Request};
-use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+use axum::extract::Request;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use peryx_core::{Ecosystem, Lexicon};
 use peryx_identity::IndexAcl;
@@ -100,17 +100,11 @@ impl IndexedProtocolDriver for IndexedDriver {
         StatusCode::NO_CONTENT.into_response()
     }
 
-    async fn post(
-        &self,
-        _state: Arc<ServingState>,
-        _path: String,
-        _headers: HeaderMap,
-        _multipart: Multipart,
-    ) -> Response {
+    async fn post(&self, _state: Arc<ServingState>, _path: String, _request: Request) -> Response {
         StatusCode::NO_CONTENT.into_response()
     }
 
-    async fn put(&self, _state: Arc<ServingState>, _uri: Uri, _headers: HeaderMap) -> Response {
+    async fn put(&self, _state: Arc<ServingState>, _request: Request) -> Response {
         StatusCode::NO_CONTENT.into_response()
     }
 
@@ -557,21 +551,27 @@ async fn test_registry_returns_typed_indexed_driver() {
             .status(),
         StatusCode::NO_CONTENT
     );
-    let request = Request::builder()
-        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=X")
-        .body(Body::from("--X--\r\n"))
-        .unwrap();
-    let multipart = Multipart::from_request(request, &()).await.unwrap();
     assert_eq!(
         driver
-            .post(state.serving.clone(), String::new(), HeaderMap::new(), multipart)
+            .post(
+                state.serving.clone(),
+                String::new(),
+                Request::builder().body(Body::from("post body")).unwrap(),
+            )
             .await
             .status(),
         StatusCode::NO_CONTENT
     );
     assert_eq!(
         driver
-            .put(state.serving.clone(), Uri::from_static("/artifact"), HeaderMap::new())
+            .put(
+                state.serving.clone(),
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/artifact")
+                    .body(Body::from("put body"))
+                    .unwrap(),
+            )
             .await
             .status(),
         StatusCode::NO_CONTENT

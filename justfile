@@ -430,7 +430,7 @@ conformance suite binary="": _project-temp
 
 # Build one package's CodSpeed benchmarks.
 codspeed-build package mode="simulation": _project-temp
-    cargo codspeed build --locked -m "{{ mode }}" --package "{{ package }}"
+    cargo codspeed build --locked -m "{{ mode }}" --package "{{ package }}" {{ if package == "peryx-ecosystem-pypi" { "--no-default-features" } else { "" } }}
 
 # Run one package's built CodSpeed benchmarks.
 codspeed-run package: _project-temp

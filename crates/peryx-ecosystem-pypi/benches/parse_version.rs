@@ -4,15 +4,15 @@
 )]
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use peryx_ecosystem_pypi::normalize_name;
+use peryx_ecosystem_pypi::parse_version;
 
-fn bench_name_version(criterion: &mut Criterion) {
+fn bench_parse_version(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("name_version");
-    group.bench_function("normalize_name", |bencher| {
-        bencher.iter(|| normalize_name(std::hint::black_box("Flask.Extension_Name")));
+    group.bench_function("parse_version", |bencher| {
+        bencher.iter(|| parse_version(std::hint::black_box("3.0.1.post2")));
     });
     group.finish();
 }
 
-criterion_group!(benches, bench_name_version);
+criterion_group!(benches, bench_parse_version);
 criterion_main!(benches);

@@ -176,6 +176,18 @@ name = "name_version"
 harness = false
 
 [[bench]]
+name = "parse_version"
+harness = false
+
+[[bench]]
+name = "parse_version_specifiers"
+harness = false
+
+[[bench]]
+name = "sorted_desc"
+harness = false
+
+[[bench]]
 name = "transform"
 harness = false
 required-features = ["serving"]

@@ -23,6 +23,25 @@ struct DurableAcknowledger {
     calls: Arc<AtomicUsize>,
 }
 
+#[tokio::test]
+async fn test_upload_rejects_non_multipart_body() {
+    let h = harness().await;
+    assert_eq!(
+        post_upload_response(
+            &h.state,
+            "/hosted/",
+            Some(&upload_auth()),
+            "application/json",
+            br#"{"name":"peryxpkg"}"#.to_vec(),
+        )
+        .await,
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid `boundary` for `multipart/form-data` request".to_owned(),
+        )
+    );
+}
+
 #[async_trait::async_trait]
 impl peryx_ha::BlobWriteDurability for DurableAcknowledger {
     async fn confirm(&self, _write: peryx_ha::CommittedBlob<'_>) -> peryx_ha::WriteDurability {
@@ -1866,8 +1885,6 @@ async fn test_trusted_token_uploads_with_supported_auth(#[case] basic_user: Opti
 
 #[tokio::test]
 async fn test_trusted_token_uploads_to_the_root_route() {
-    use axum::extract::FromRequest as _;
-
     let (_dir, state, signer) = trusted_publishing();
     let token = trusted_token(&signer, "peryxpkg");
     let (content_type, body) = multipart_body(
@@ -1879,11 +1896,9 @@ async fn test_trusted_token_uploads_to_the_root_route() {
         .header(header::CONTENT_TYPE, content_type)
         .body(Body::from(body))
         .unwrap();
-    let headers = request.headers().clone();
-    let multipart = axum::extract::Multipart::from_request(request, &()).await.unwrap();
     assert_eq!(
         crate::serving::PypiServing
-            .post(state.serving.clone(), String::new(), headers, multipart)
+            .post(state.serving.clone(), String::new(), request)
             .await
             .status(),
         StatusCode::OK

@@ -4,7 +4,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::extract::{Multipart, Request};
+use axum::extract::Request;
 use axum::http::{HeaderMap, Method, Uri};
 use axum::response::Response;
 use peryx_core::DefaultIndex;
@@ -646,8 +646,8 @@ pub trait IndexedProtocolDriver: EcosystemDriver {
         headers: HeaderMap,
         method: Method,
     ) -> Response;
-    async fn post(&self, state: Arc<ServingState>, path: String, headers: HeaderMap, multipart: Multipart) -> Response;
-    async fn put(&self, state: Arc<ServingState>, uri: Uri, headers: HeaderMap) -> Response;
+    async fn post(&self, state: Arc<ServingState>, path: String, request: Request) -> Response;
+    async fn put(&self, state: Arc<ServingState>, request: Request) -> Response;
     async fn delete(&self, state: Arc<ServingState>, uri: Uri, headers: HeaderMap) -> Response;
 }
 

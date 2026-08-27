@@ -172,6 +172,12 @@ fn fixture_servers_follow_protocol_events() {
         fs::read_to_string(&state).expect("read transferred state"),
         "leader:dc-b"
     );
+    fs::write(&state, "leader-until-stream-error").expect("schedule topology stream error");
+    assert!(request(address, "GET /+availability/topology/stream HTTP/1.1\r\n\r\n").contains("503 test"));
+    assert_eq!(
+        fs::read_to_string(&state).expect("read invalidated state"),
+        "control-500"
+    );
     assert!(request(address, "GET /__fixture/shutdown HTTP/1.1\r\n\r\n").contains("204 test"));
     server.join().expect("join fixture server");
 

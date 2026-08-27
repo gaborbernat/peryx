@@ -440,36 +440,37 @@ async fn test_dropped_handle_releases_the_worker() {
 }
 
 #[tokio::test]
-async fn test_worker_reports_backing_store_failure() {
+async fn test_worker_discards_malformed_delivery_and_reaches_valid_work() {
+    let mut healthy = observed_status_server(200);
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("peryx.redb");
     let meta = MetaStore::open(&database).unwrap();
-    let id = enqueue(&meta, "ci", 10);
+    let damaged = enqueue(&meta, "broken", 10);
+    enqueue(&meta, "healthy", 11);
     drop(meta);
     let raw = redb::Database::open(&database).unwrap();
     let write = raw.begin_write().unwrap();
     write
         .open_table(redb::TableDefinition::<&str, &[u8]>::new("webhook_delivery"))
         .unwrap()
-        .insert(id.as_str(), b"{".as_slice())
+        .insert(damaged.as_str(), b"{".as_slice())
         .unwrap();
     write.commit().unwrap();
     drop(raw);
     let host = Arc::new(TestHost {
-        webhooks: WebhookRuntime::new(vec![target_config("ci", "https://example.invalid/hook")]).unwrap(),
+        webhooks: WebhookRuntime::new(vec![target_config("healthy", &healthy.url)]).unwrap(),
         meta: MetaStore::open_existing(database).unwrap(),
         now: 100,
     });
-    let mut handle = kick(host).unwrap();
+    let handle = kick(Arc::clone(&host)).unwrap();
 
-    let failure = tokio::time::timeout(Duration::from_secs(1), handle.wait_for_failure())
+    tokio::time::timeout(Duration::from_secs(1), healthy.requests.recv())
         .await
-        .expect("corrupt webhook store did not stop its worker");
+        .expect("valid webhook remained behind malformed JSON")
+        .expect("healthy webhook server stopped");
 
-    assert!(
-        failure.to_string().contains("webhook delivery storage failed"),
-        "{failure}"
-    );
+    assert_eq!(host.meta().get_webhook_delivery(&damaged).unwrap(), None);
+    handle.shutdown().await.unwrap();
 }
 
 #[tokio::test]

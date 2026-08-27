@@ -88,7 +88,7 @@ impl MetaStore {
     /// targets so a slow endpoint cannot starve others.
     ///
     /// # Errors
-    /// Returns a store error if the read fails or a record cannot be decoded.
+    /// Returns a store error if the scan or damaged-row cleanup fails.
     pub fn list_due_webhook_deliveries(
         &self,
         now_unix: i64,
@@ -98,32 +98,64 @@ impl MetaStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let txn = self.db.begin_read()?;
-        let due = txn.open_table(WEBHOOK_DUE)?;
-        let deliveries = txn.open_table(WEBHOOK_DELIVERY)?;
+        let txn = self.db.begin_write()?;
         let mut records = Vec::new();
         let mut seen: HashSet<(String, String)> = HashSet::new();
-        for entry in due.iter()? {
-            let (key, id) = entry?;
-            let Some(due_at) = due_key_time(key.value()) else {
-                continue;
-            };
-            if due_at > now_unix {
-                break;
-            }
-            let Some(value) = deliveries.get(id.value())? else {
-                continue;
-            };
-            let record: WebhookDeliveryRecord = serde_json::from_slice(value.value())?;
-            let target = (record.index.clone(), record.target.clone());
-            if excluded.contains(&target) || !seen.insert(target) {
-                continue;
-            }
-            records.push(record);
-            if records.len() == limit {
-                break;
+        let mut cleanup = WebhookQueueCleanup::default();
+        let mut damaged_due_keys = Vec::new();
+        let mut damaged_delivery_ids = HashSet::new();
+        {
+            let due = txn.open_table(WEBHOOK_DUE)?;
+            let deliveries = txn.open_table(WEBHOOK_DELIVERY)?;
+            for entry in due.iter()? {
+                let (key, id) = entry?;
+                let Some(due_at) = due_key_time(key.value()) else {
+                    cleanup.malformed_due_keys += 1;
+                    damaged_due_keys.push(key.value().to_owned());
+                    continue;
+                };
+                if due_at > now_unix {
+                    break;
+                }
+                let Some(value) = deliveries.get(id.value())? else {
+                    cleanup.dangling_due_rows += 1;
+                    damaged_due_keys.push(key.value().to_owned());
+                    continue;
+                };
+                let Ok(record) = serde_json::from_slice::<WebhookDeliveryRecord>(value.value()) else {
+                    if damaged_delivery_ids.insert(id.value().to_owned()) {
+                        cleanup.malformed_delivery_records += 1;
+                    }
+                    damaged_due_keys.push(key.value().to_owned());
+                    continue;
+                };
+                if record.status != WebhookDeliveryStatus::Pending || record.next_attempt_at_unix != Some(due_at) {
+                    cleanup.dangling_due_rows += 1;
+                    damaged_due_keys.push(key.value().to_owned());
+                    continue;
+                }
+                let target = (record.index.clone(), record.target.clone());
+                if excluded.contains(&target) || !seen.insert(target) {
+                    continue;
+                }
+                records.push(record);
+                if records.len() == limit {
+                    break;
+                }
             }
         }
+        {
+            let mut due = txn.open_table(WEBHOOK_DUE)?;
+            for key in damaged_due_keys {
+                due.remove(key.as_str())?;
+            }
+            let mut deliveries = txn.open_table(WEBHOOK_DELIVERY)?;
+            for id in damaged_delivery_ids {
+                deliveries.remove(id.as_str())?;
+            }
+        }
+        txn.commit()?;
+        cleanup.log();
         Ok(records)
     }
 
@@ -131,12 +163,24 @@ impl MetaStore {
     /// Returns a store error if the read fails.
     pub fn next_webhook_delivery_at(&self) -> Result<Option<i64>, MetaError> {
         let txn = self.db.begin_read()?;
-        let table = txn.open_table(WEBHOOK_DUE)?;
-        let mut entries = table.iter()?;
-        Ok(match entries.next().transpose()? {
-            Some((key, _)) => due_key_time(key.value()),
-            None => None,
-        })
+        let due = txn.open_table(WEBHOOK_DUE)?;
+        let deliveries = txn.open_table(WEBHOOK_DELIVERY)?;
+        for entry in due.iter()? {
+            let (key, id) = entry?;
+            let Some(due_at) = due_key_time(key.value()) else {
+                continue;
+            };
+            let Some(value) = deliveries.get(id.value())? else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_slice::<WebhookDeliveryRecord>(value.value()) else {
+                continue;
+            };
+            if record.status == WebhookDeliveryStatus::Pending && record.next_attempt_at_unix == Some(due_at) {
+                return Ok(Some(due_at));
+            }
+        }
+        Ok(None)
     }
 
     /// Returns the updated record or `None` when the delivery no longer exists.
@@ -205,6 +249,28 @@ impl MetaStore {
             deliveries.push(serde_json::from_slice(value.value())?);
         }
         Ok(deliveries)
+    }
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct WebhookQueueCleanup {
+    malformed_due_keys: usize,
+    dangling_due_rows: usize,
+    malformed_delivery_records: usize,
+}
+
+impl WebhookQueueCleanup {
+    fn log(&self) {
+        if self == &Self::default() {
+            return;
+        }
+        tracing::warn!(
+            target: "peryx::webhook",
+            malformed_due_keys = self.malformed_due_keys,
+            dangling_due_rows = self.dangling_due_rows,
+            malformed_delivery_records = self.malformed_delivery_records,
+            "discarding damaged webhook queue rows"
+        );
     }
 }
 

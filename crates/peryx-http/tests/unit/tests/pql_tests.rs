@@ -15,6 +15,7 @@ use peryx_identity::{Action, Glob, Grant, GrantScope, IndexAcl, NamedToken, Pass
 use peryx_policy::{Policy, PolicyAction, PolicyDecisionState};
 use peryx_storage::meta::{MetaStore, NewPolicyDecision};
 use redb::TableDefinition;
+use rstest::rstest;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
@@ -136,6 +137,39 @@ async fn app_authz_storage_fault() -> (tempfile::TempDir, axum::Router) {
     let serving = Arc::get_mut(&mut state.serving).unwrap();
     serving.users = UserService::with_password_settings(meta.clone(), PasswordPolicy::new(8, 1, 1).unwrap(), 2);
     serving.authorization = broken;
+    (dir, crate::router(Arc::new(state)))
+}
+
+async fn app_policy_query_storage_fault() -> (tempfile::TempDir, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let meta = MetaStore::open(&path).unwrap();
+    let users = UserService::with_password_settings(meta.clone(), PasswordPolicy::new(8, 1, 1).unwrap(), 2);
+    let alice = users.create("Alice").unwrap();
+    users.set_password(&alice.id, PASSWORD).await.unwrap();
+    AuthorizationService::new(meta.clone())
+        .grant(&alice.id, Role::Administrator, GrantScope::Server)
+        .unwrap();
+    meta.record_policy_decision(decision("private", "alpha", PolicyDecisionState::Deny, 30))
+        .unwrap();
+    drop(users);
+    drop(meta);
+
+    let database = redb::Database::open(&path).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.open_table(TableDefinition::<&str, &[u8]>::new("policy_input_generation"))
+        .unwrap()
+        .insert("private", b"{".as_slice())
+        .unwrap();
+    txn.commit().unwrap();
+    drop(database);
+
+    let meta = MetaStore::open_existing(path).unwrap();
+    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
+    let mut state = AppState::new(meta.clone(), blobs, 60, vec![index()]);
+    super::support::register_example_driver(&mut state);
+    Arc::get_mut(&mut state.serving).unwrap().users =
+        UserService::with_password_settings(meta, PasswordPolicy::new(8, 1, 1).unwrap(), 2);
     (dir, crate::router(Arc::new(state)))
 }
 
@@ -679,20 +713,40 @@ async fn test_query_scopes_to_repository_equality_on_the_right_of_an_and() {
     assert_eq!(resources(&document), ["alpha"]);
 }
 
+#[rstest]
+#[case::equality_at_limit(
+    format!("from policy.decisions where resource == \"{}\"", "x".repeat(512)),
+    StatusCode::OK,
+    None
+)]
+#[case::equality_over_limit(
+    format!("from policy.decisions where resource == \"{}\"", "x".repeat(513)),
+    StatusCode::BAD_REQUEST,
+    Some("the query is not valid")
+)]
+#[case::membership_at_limit(
+    format!("from policy.decisions where resource in (\"{}\")", "é".repeat(256)),
+    StatusCode::OK,
+    None
+)]
+#[case::membership_over_limit(
+    format!("from policy.decisions where resource in (\"{}x\")", "é".repeat(256)),
+    StatusCode::BAD_REQUEST,
+    Some("the query is not valid")
+)]
 #[tokio::test]
-async fn test_query_backend_fault_is_service_unavailable() {
-    // A resource filter longer than the store's bound makes the backing query reject it; the source
-    // surfaces that as a backend error, which the endpoint answers as 503.
+async fn test_query_bounds_policy_resource_filter_bytes(
+    #[case] query: String,
+    #[case] expected_status: StatusCode,
+    #[case] expected_error: Option<&str>,
+) {
     let (_dir, meta, app) = app(false).await;
     seed(&meta);
-    let long = "x".repeat(513);
-    let (status, _headers, _document) = post(
-        &app,
-        json!({"query": format!("from policy.decisions where resource == \"{long}\"")}),
-        Some(("Alice", PASSWORD)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let (status, _headers, document) = post(&app, json!({"query": query}), Some(("Alice", PASSWORD))).await;
+    assert_eq!(
+        (status, document.get("error").and_then(Value::as_str)),
+        (expected_status, expected_error)
+    );
 }
 
 #[tokio::test]
@@ -779,6 +833,24 @@ async fn test_query_authz_storage_fault_is_service_unavailable() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_query_policy_storage_fault_is_service_unavailable() {
+    let (_dir, app) = app_policy_query_storage_fault().await;
+    let (status, _headers, document) = post(
+        &app,
+        json!({"query": "from policy.decisions where resource == \"alpha\""}),
+        Some(("Alice", PASSWORD)),
+    )
+    .await;
+    assert_eq!(
+        (status, document),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "the query backend is unavailable"})
+        )
+    );
 }
 
 #[tokio::test]

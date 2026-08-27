@@ -425,7 +425,10 @@ impl NeutralQuerySource {
                     limit: STORE_PAGE,
                     ..PolicyDecisionQuery::default()
                 })
-                .map_err(|error| PqlError::Backend(error.to_string()))?;
+                .map_err(|error| match error {
+                    error @ PolicyDecisionQueryError::FilterTooLong { .. } => PqlError::Validation(error.to_string()),
+                    error => PqlError::Backend(error.to_string()),
+                })?;
             rows.extend(page.decisions.iter().map(policy_row));
             match page.next_cursor {
                 Some(next) => cursor = Some(next),

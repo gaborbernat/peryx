@@ -5,7 +5,7 @@ use super::model::ArchiveError;
 use super::{
     ArchiveFormat, ArchiveProfile, MAX_CONTAINER_DEPTH, MAX_DECOMPRESSED_INSPECT_BYTES, MAX_NESTED_ARCHIVE_SIZE,
 };
-use super::{read_error, safe_member_name};
+use super::{read_error, safe_member_name, zip_member_position};
 
 pub struct ResolvedArchive {
     pub format: ArchiveFormat,
@@ -62,13 +62,8 @@ fn nested_zip_source(
     temps: &mut Vec<tempfile::TempPath>,
 ) -> Result<ArchiveSource, ArchiveError> {
     let mut archive = zip::ZipArchive::new(source.open()?).map_err(read_error)?;
-    let Ok(entry) = archive.by_name(member) else {
-        return Err(ArchiveError::MemberNotFound);
-    };
-    if !entry.is_file() {
-        return Err(ArchiveError::MemberNotFound);
-    }
-    safe_member_name(entry.name())?;
+    let position = zip_member_position(&mut archive, member)?.ok_or(ArchiveError::MemberNotFound)?;
+    let entry = archive.by_index(position).map_err(read_error)?;
     reject_large_nested_archive(member, entry.size())?;
     if entry.compression() == zip::CompressionMethod::Stored
         && !entry.encrypted()
@@ -91,8 +86,7 @@ fn nested_tar_source(
         let entry = entry.map_err(read_error)?;
         if entry.header().entry_type().is_file() {
             let path = entry.path().map_err(read_error)?.to_string_lossy().into_owned();
-            let path = safe_member_name(&path)?;
-            if path == member {
+            if safe_member_name(&path).is_ok_and(|path| path == member) {
                 reject_large_nested_archive(member, entry.size())?;
                 return copy_nested_archive(entry, temps);
             }

@@ -12,7 +12,7 @@ pub struct ReceiptAck {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ByteDurability {
-    Durable { nodes: Vec<String> },
+    Durable { nodes: Vec<String>, required: usize },
     Pending { nodes: Vec<String>, required: usize },
 }
 
@@ -20,7 +20,7 @@ impl ByteDurability {
     #[must_use]
     pub fn nodes(&self) -> &[String] {
         match self {
-            Self::Durable { nodes } | Self::Pending { nodes, .. } => nodes,
+            Self::Durable { nodes, .. } | Self::Pending { nodes, .. } => nodes,
         }
     }
 
@@ -50,7 +50,7 @@ pub fn assess_byte_durability(
         .collect();
     let required = policy.required_acks(members.len()).max(1);
     if nodes.len() >= required {
-        ByteDurability::Durable { nodes }
+        ByteDurability::Durable { nodes, required }
     } else {
         ByteDurability::Pending { nodes, required }
     }

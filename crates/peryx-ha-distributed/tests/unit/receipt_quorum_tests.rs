@@ -34,7 +34,8 @@ fn test_majority_acknowledges_after_two_of_three_independent_nodes() {
     assert_eq!(
         outcome,
         ByteDurability::Durable {
-            nodes: nodes(&["a", "b"])
+            nodes: nodes(&["a", "b"]),
+            required: 2,
         }
     );
     assert!(outcome.is_durable());

@@ -45,14 +45,18 @@ impl DcDurabilityMetrics {
     }
 
     pub fn record_quorum(&self, decision: &ByteAckDecision) {
-        let (acknowledged, remaining) = match decision {
-            ByteAckDecision::Acknowledged { nodes } => (nodes.len(), 0),
-            ByteAckDecision::Pending { nodes, remaining } => (nodes.len(), *remaining),
+        let (acknowledged, required, remaining) = match decision {
+            ByteAckDecision::Acknowledged { nodes, required } => (nodes.len(), *required, 0),
+            ByteAckDecision::Pending {
+                nodes,
+                required,
+                remaining,
+            } => (nodes.len(), *required, *remaining),
         };
         self.with(|state| {
             state.quorum_acknowledged = acknowledged as u64;
             state.quorum_remaining = remaining as u64;
-            state.quorum_required = (acknowledged + remaining) as u64;
+            state.quorum_required = required as u64;
         });
     }
 }

@@ -6,7 +6,7 @@ use peryx_storage::blob::Digest;
 use crate::readiness::DurabilityPolicy;
 use crate::receipt_quorum::{ByteDurability, ReceiptAck, assess_byte_durability};
 
-/// Pending decisions report the number of additional independent receipts required.
+/// Decisions retain the configured threshold; pending decisions also report the outstanding receipt count.
 #[must_use]
 pub fn decide_byte_ack(
     digest: &Digest,
@@ -15,9 +15,10 @@ pub fn decide_byte_ack(
     policy: DurabilityPolicy,
 ) -> ByteAckDecision {
     match assess_byte_durability(digest, acks, members, policy) {
-        ByteDurability::Durable { nodes } => ByteAckDecision::Acknowledged { nodes },
+        ByteDurability::Durable { nodes, required } => ByteAckDecision::Acknowledged { nodes, required },
         ByteDurability::Pending { nodes, required } => ByteAckDecision::Pending {
             remaining: required - nodes.len(),
+            required,
             nodes,
         },
     }

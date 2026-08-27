@@ -1,4 +1,8 @@
 use super::*;
+use crate::byte_ack::decide_byte_ack;
+use crate::readiness::DurabilityPolicy;
+use crate::receipt_quorum::ReceiptAck;
+use peryx_storage::blob::Digest;
 
 const SERIES_BUDGET: usize = SCOPES.len() + 2 + 3;
 
@@ -51,27 +55,22 @@ fn test_record_counts_pending_and_unknown_outcomes_apart() {
 #[test]
 fn test_record_quorum_reports_progress_from_a_pending_decision() {
     let metrics = DcDurabilityMetrics::default();
-    metrics.record_quorum(&ByteAckDecision::Pending {
-        nodes: vec!["east".to_owned(), "west".to_owned()],
-        remaining: 1,
-    });
+    metrics.record_quorum(&byte_decision(&["east", "east", "outside"]));
 
     let body = rendered(&metrics);
-    assert!(body.contains("peryx_dc_ack_quorum_acknowledged 2\n"), "{body}");
-    assert!(body.contains("peryx_dc_ack_quorum_required 3\n"), "{body}");
+    assert!(body.contains("peryx_dc_ack_quorum_acknowledged 1\n"), "{body}");
+    assert!(body.contains("peryx_dc_ack_quorum_required 2\n"), "{body}");
     assert!(body.contains("peryx_dc_ack_quorum_remaining 1\n"), "{body}");
 }
 
 #[test]
 fn test_record_quorum_reports_a_complete_decision_with_nothing_remaining() {
     let metrics = DcDurabilityMetrics::default();
-    metrics.record_quorum(&ByteAckDecision::Acknowledged {
-        nodes: vec!["east".to_owned(), "west".to_owned(), "south".to_owned()],
-    });
+    metrics.record_quorum(&byte_decision(&["east", "west", "south"]));
 
     let body = rendered(&metrics);
     assert!(body.contains("peryx_dc_ack_quorum_acknowledged 3\n"), "{body}");
-    assert!(body.contains("peryx_dc_ack_quorum_required 3\n"), "{body}");
+    assert!(body.contains("peryx_dc_ack_quorum_required 2\n"), "{body}");
     assert!(body.contains("peryx_dc_ack_quorum_remaining 0\n"), "{body}");
 }
 
@@ -85,6 +84,7 @@ fn test_exposition_stays_within_the_series_budget() {
     metrics.record(DcAck::Unknown);
     metrics.record_quorum(&ByteAckDecision::Pending {
         nodes: vec!["east".to_owned()],
+        required: 3,
         remaining: 2,
     });
 
@@ -117,6 +117,7 @@ fn test_write_ack_observer_records_outcome_and_quorum() {
         DcAck::Pending,
         &ByteAckDecision::Pending {
             nodes: vec!["east".to_owned()],
+            required: 2,
             remaining: 1,
         },
     );
@@ -124,4 +125,20 @@ fn test_write_ack_observer_records_outcome_and_quorum() {
     let body = rendered(&metrics);
     assert!(body.contains("peryx_dc_ack_pending_total 1\n"), "{body}");
     assert!(body.contains("peryx_dc_ack_quorum_required 2\n"), "{body}");
+}
+
+fn byte_decision(receipt_nodes: &[&str]) -> ByteAckDecision {
+    let digest = Digest::of(b"artifact");
+    decide_byte_ack(
+        &digest,
+        &receipt_nodes
+            .iter()
+            .map(|node| ReceiptAck {
+                node: (*node).to_owned(),
+                digest: digest.clone(),
+            })
+            .collect::<Vec<_>>(),
+        &["east", "west", "south"].map(str::to_owned).into_iter().collect(),
+        DurabilityPolicy::Majority,
+    )
 }

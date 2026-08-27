@@ -10,12 +10,14 @@ use crate::readiness::ReadinessBlocker;
 fn filesystem_durable() -> ByteEvidence {
     ByteEvidence::Filesystem(ByteAckDecision::Acknowledged {
         nodes: vec!["a".to_owned(), "b".to_owned()],
+        required: 2,
     })
 }
 
 fn filesystem_pending() -> ByteEvidence {
     ByteEvidence::Filesystem(ByteAckDecision::Pending {
         nodes: vec!["a".to_owned()],
+        required: 2,
         remaining: 1,
     })
 }

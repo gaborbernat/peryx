@@ -35,7 +35,8 @@ fn test_acknowledges_once_the_quorum_is_met() {
     assert_eq!(
         decision,
         ByteAckDecision::Acknowledged {
-            nodes: nodes(&["a", "b"])
+            nodes: nodes(&["a", "b"]),
+            required: 2,
         }
     );
     assert!(decision.is_acknowledged());
@@ -56,6 +57,7 @@ fn test_pending_reports_how_many_more_receipts_are_needed() {
         decision,
         ByteAckDecision::Pending {
             nodes: nodes(&["a"]),
+            required: 2,
             remaining: 1,
         }
     );
@@ -72,6 +74,7 @@ fn test_no_receipts_still_need_the_full_quorum() {
         decision,
         ByteAckDecision::Pending {
             nodes: Vec::new(),
+            required: 2,
             remaining: 2,
         }
     );
@@ -92,6 +95,7 @@ fn test_everywhere_policy_counts_every_remaining_node() {
         decision,
         ByteAckDecision::Pending {
             nodes: nodes(&["a"]),
+            required: 3,
             remaining: 2,
         }
     );
@@ -107,6 +111,7 @@ fn test_an_empty_roster_still_needs_one_node() {
         decision,
         ByteAckDecision::Pending {
             nodes: Vec::new(),
+            required: 1,
             remaining: 1,
         }
     );

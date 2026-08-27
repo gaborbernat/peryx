@@ -1,14 +1,15 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use tokio::sync::{Notify, oneshot};
 
 use peryx_ha::CommandOutcome;
 
 use super::{
-    AuditRecord, CommandReceipt, ControlCommand, ControlError, ControlPlane, KeyEntry, KeyState, MembershipControl,
-    evict_committed, percentile, plan_voter_roster,
+    AuditRecord, CommandMetrics, CommandReceipt, ControlCommand, ControlError, ControlPlane, DurationSource, KeyEntry,
+    KeyState, MembershipControl, evict_committed, percentile, plan_voter_roster,
 };
 use peryx_core::Clock;
 use std::collections::{BTreeSet, VecDeque};
@@ -66,11 +67,15 @@ impl MembershipControl for GatedControl {
     }
 }
 
-fn fixed_clock() -> Clock {
+fn fixed_unix_clock() -> Clock {
     Arc::new(|| 0)
 }
 
-fn scripted_clock(readings: impl IntoIterator<Item = i64>) -> Clock {
+fn fixed_duration_source() -> DurationSource {
+    Arc::new(|| Duration::ZERO)
+}
+
+fn scripted_duration_source(readings: impl IntoIterator<Item = Duration>) -> DurationSource {
     let readings = Mutex::new(readings.into_iter().collect::<VecDeque<_>>());
     Arc::new(move || {
         let mut readings = readings.lock().unwrap();
@@ -92,7 +97,7 @@ fn transfer() -> ControlCommand {
 #[tokio::test]
 async fn test_execute_returns_the_committed_receipt() {
     let control = ScriptedControl::new([Ok(receipt(7))]);
-    let plane = ControlPlane::new(control.clone(), fixed_clock());
+    let plane = ControlPlane::new(control.clone(), fixed_unix_clock());
 
     let committed = plane.execute("alice", Some("k1"), transfer()).await.unwrap();
 
@@ -103,7 +108,7 @@ async fn test_execute_returns_the_committed_receipt() {
 #[tokio::test]
 async fn test_a_repeated_key_returns_one_committed_result_without_resubmitting() {
     let control = ScriptedControl::new([Ok(receipt(7)), Err(ControlError::Unavailable("gone".to_owned()))]);
-    let plane = ControlPlane::new(control.clone(), fixed_clock());
+    let plane = ControlPlane::new(control.clone(), fixed_unix_clock());
 
     let first = plane.execute("alice", Some("k1"), transfer()).await.unwrap();
     let replay = plane.execute("alice", Some("k1"), transfer()).await.unwrap();
@@ -119,7 +124,7 @@ async fn test_a_repeated_key_returns_one_committed_result_without_resubmitting()
 #[tokio::test]
 async fn test_a_replay_survives_a_leader_loss_after_commit() {
     let control = ScriptedControl::new([Ok(receipt(3)), Err(ControlError::NotLeader { leader: None })]);
-    let plane = ControlPlane::new(control, fixed_clock());
+    let plane = ControlPlane::new(control, fixed_unix_clock());
 
     let committed = plane.execute("alice", Some("k1"), transfer()).await.unwrap();
     let after_loss = plane.execute("alice", Some("k1"), transfer()).await.unwrap();
@@ -130,7 +135,7 @@ async fn test_a_replay_survives_a_leader_loss_after_commit() {
 #[tokio::test]
 async fn test_a_keyless_command_never_deduplicates() {
     let control = ScriptedControl::new([Ok(receipt(1)), Ok(receipt(2))]);
-    let plane = ControlPlane::new(control.clone(), fixed_clock());
+    let plane = ControlPlane::new(control.clone(), fixed_unix_clock());
 
     plane.execute("alice", None, transfer()).await.unwrap();
     plane.execute("alice", None, transfer()).await.unwrap();
@@ -141,7 +146,7 @@ async fn test_a_keyless_command_never_deduplicates() {
 #[tokio::test]
 async fn test_a_failure_is_returned_and_not_cached() {
     let control = ScriptedControl::new([Err(ControlError::Invalid("same home".to_owned())), Ok(receipt(5))]);
-    let plane = ControlPlane::new(control, fixed_clock());
+    let plane = ControlPlane::new(control, fixed_unix_clock());
 
     let failed = plane.execute("alice", Some("k1"), transfer()).await;
     let retried = plane.execute("alice", Some("k1"), transfer()).await.unwrap();
@@ -157,7 +162,7 @@ async fn test_a_failure_is_returned_and_not_cached() {
 #[tokio::test]
 async fn test_each_failure_kind_is_returned_and_audited(#[case] error: ControlError) {
     let control = ScriptedControl::new([Err(error.clone())]);
-    let plane = ControlPlane::new(control, fixed_clock());
+    let plane = ControlPlane::new(control, fixed_unix_clock());
 
     assert_eq!(plane.execute("alice", None, transfer()).await, Err(error));
 }
@@ -172,7 +177,7 @@ async fn test_concurrent_requests_on_one_key_reach_the_command_once() {
         release: release.clone(),
         submissions: submissions.clone(),
     });
-    let plane = Arc::new(ControlPlane::new(control, fixed_clock()));
+    let plane = Arc::new(ControlPlane::new(control, fixed_unix_clock()));
 
     let owner = tokio::spawn({
         let plane = plane.clone();
@@ -207,7 +212,7 @@ async fn test_concurrent_requests_on_one_key_reach_the_command_once() {
 #[tokio::test]
 async fn test_a_key_reused_for_a_different_command_is_rejected() {
     let control = ScriptedControl::new([Ok(receipt(7))]);
-    let plane = ControlPlane::new(control.clone(), fixed_clock());
+    let plane = ControlPlane::new(control.clone(), fixed_unix_clock());
 
     plane.execute("alice", Some("k1"), transfer()).await.unwrap();
     let other = ControlCommand::AdvanceEpoch {
@@ -232,7 +237,13 @@ async fn test_the_concurrency_bound_rejects_an_excess_command() {
         release: release.clone(),
         submissions: Arc::new(AtomicUsize::new(0)),
     });
-    let plane = Arc::new(ControlPlane::with_limits(control, fixed_clock(), 1, 8));
+    let plane = Arc::new(ControlPlane::with_limits(
+        control,
+        fixed_unix_clock(),
+        fixed_duration_source(),
+        1,
+        8,
+    ));
 
     let held = plane.clone();
     let holding = tokio::spawn(async move { held.execute("alice", None, transfer()).await });
@@ -248,7 +259,11 @@ async fn test_the_concurrency_bound_rejects_an_excess_command() {
 #[tokio::test]
 async fn test_metrics_report_the_completed_count_and_latency_percentiles() {
     let control = ScriptedControl::new([Ok(receipt(1)), Ok(receipt(2)), Ok(receipt(3)), Ok(receipt(4))]);
-    let plane = ControlPlane::new(control, scripted_clock([0, 1, 0, 5, 0, 10, 0, 100]));
+    let plane = ControlPlane::with_duration_source(
+        control,
+        fixed_unix_clock(),
+        scripted_duration_source([0, 1, 0, 5, 0, 10, 0, 100].map(Duration::from_millis)),
+    );
 
     for _ in 0..4 {
         plane.execute("alice", None, transfer()).await.unwrap();
@@ -260,11 +275,51 @@ async fn test_metrics_report_the_completed_count_and_latency_percentiles() {
     assert_eq!(metrics.p99_ms, 100);
 }
 
+#[rstest::rstest]
+#[case::subsecond(Duration::from_millis(750), 1_700_000_000, 1_700_000_000, 750)]
+#[case::multisecond(Duration::from_millis(2_125), 1_700_000_000, 1_700_000_000, 2_125)]
+#[case::wall_clock_adjustment(Duration::from_millis(875), 1_700_000_000, 1_600_000_000, 875)]
+#[tokio::test]
+async fn test_metrics_use_monotonic_milliseconds(
+    #[case] elapsed: Duration,
+    #[case] wall_before: i64,
+    #[case] wall_after: i64,
+    #[case] expected_ms: i64,
+) {
+    let wall = Arc::new(AtomicI64::new(wall_before));
+    let adjusted_wall = wall.clone();
+    let readings = Mutex::new(VecDeque::from([Duration::ZERO, elapsed]));
+    let duration_source: DurationSource = Arc::new(move || {
+        let elapsed = readings.lock().unwrap().pop_front().unwrap();
+        if elapsed > Duration::ZERO {
+            adjusted_wall.store(wall_after, Ordering::SeqCst);
+        }
+        elapsed
+    });
+    let observed_wall = wall.clone();
+    let plane = ControlPlane::with_duration_source(
+        ScriptedControl::new([Ok(receipt(1))]),
+        Arc::new(move || observed_wall.load(Ordering::SeqCst)),
+        duration_source,
+    );
+
+    plane.execute("alice", None, transfer()).await.unwrap();
+
+    assert_eq!(
+        plane.metrics(),
+        CommandMetrics {
+            completed: 1,
+            p50_ms: expected_ms,
+            p99_ms: expected_ms,
+        }
+    );
+}
+
 #[tokio::test]
 async fn test_the_idempotency_window_evicts_the_oldest_receipt() {
     let results = (0..3).map(|index| Ok(receipt(index))).chain([Ok(receipt(99))]);
     let control = ScriptedControl::new(results);
-    let plane = ControlPlane::with_limits(control.clone(), fixed_clock(), 4, 2);
+    let plane = ControlPlane::with_limits(control.clone(), fixed_unix_clock(), fixed_duration_source(), 4, 2);
 
     for key in ["k0", "k1", "k2"] {
         plane.execute("alice", Some(key), transfer()).await.unwrap();

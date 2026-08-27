@@ -128,7 +128,7 @@ pub use circuit::{CircuitBreaker, CircuitConfig, DEFAULT_CIRCUIT};
 pub use completeness::{ProducerCoverage, assess};
 pub use completeness_query::{DistributedAnalyticsCompleteness, assess_completeness};
 pub use consensus_runtime::{ConsensusMember, ConsensusPlan, OwnershipGroup};
-pub use control::{AuditRecord, CommandMetrics, ControlPlane, plan_voter_roster};
+pub use control::{AuditRecord, CommandMetrics, ControlPlane, DurationSource, plan_voter_roster};
 pub use copy_runtime::CrossDcBlobCopier;
 pub use dc_ack::{ByteEvidence, DcAck, Deadline, decide_dc_ack};
 pub use dc_copy::{CopyError, copy_blob_to_target};

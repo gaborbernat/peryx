@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use peryx_ha::{CommandReceipt, ControlCommand, ControlError, ControlExecutor, ControlMetrics, MembershipControl};
 use serde::Serialize;
@@ -10,6 +11,9 @@ use peryx_core::Clock;
 const MAX_CONCURRENT_COMMANDS: usize = 4;
 
 const RETAINED: usize = 256;
+
+/// Monotonic elapsed time since an arbitrary origin.
+pub type DurationSource = Arc<dyn Fn() -> Duration + Send + Sync>;
 
 #[must_use]
 pub fn plan_voter_roster(current: &BTreeSet<u64>, add: Option<u64>, remove: Option<u64>) -> BTreeSet<u64> {
@@ -70,8 +74,9 @@ impl AuditRecord {
         }
     }
 
-    fn emit(&self) {
+    fn emit(&self, timestamp_unix: i64) {
         tracing::info!(
+            timestamp_unix,
             actor = %self.actor,
             command = self.command,
             target = %self.target,
@@ -122,7 +127,8 @@ struct History {
 
 pub struct ControlPlane {
     control: Arc<dyn MembershipControl>,
-    clock: Clock,
+    unix_clock: Clock,
+    duration_source: DurationSource,
     permits: Semaphore,
     retained: usize,
     completed: std::sync::atomic::AtomicU64,
@@ -131,14 +137,31 @@ pub struct ControlPlane {
 
 impl ControlPlane {
     #[must_use]
-    pub fn new(control: Arc<dyn MembershipControl>, clock: Clock) -> Self {
-        Self::with_limits(control, clock, MAX_CONCURRENT_COMMANDS, RETAINED)
+    pub fn new(control: Arc<dyn MembershipControl>, unix_clock: Clock) -> Self {
+        let origin = Instant::now();
+        Self::with_duration_source(control, unix_clock, Arc::new(move || origin.elapsed()))
     }
 
-    fn with_limits(control: Arc<dyn MembershipControl>, clock: Clock, concurrency: usize, retained: usize) -> Self {
+    #[must_use]
+    pub fn with_duration_source(
+        control: Arc<dyn MembershipControl>,
+        unix_clock: Clock,
+        duration_source: DurationSource,
+    ) -> Self {
+        Self::with_limits(control, unix_clock, duration_source, MAX_CONCURRENT_COMMANDS, RETAINED)
+    }
+
+    fn with_limits(
+        control: Arc<dyn MembershipControl>,
+        unix_clock: Clock,
+        duration_source: DurationSource,
+        concurrency: usize,
+        retained: usize,
+    ) -> Self {
         Self {
             control,
-            clock,
+            unix_clock,
+            duration_source,
             permits: Semaphore::new(concurrency),
             retained,
             completed: std::sync::atomic::AtomicU64::new(0),
@@ -166,12 +189,12 @@ impl ControlPlane {
         loop {
             match self.claim(key, fingerprint) {
                 Claim::Replay(receipt) => {
-                    AuditRecord::replayed(actor, &command, &receipt).emit();
+                    AuditRecord::replayed(actor, &command, &receipt).emit((self.unix_clock)());
                     return Ok(receipt);
                 }
                 Claim::Conflict => {
                     let error = ControlError::KeyReuse;
-                    AuditRecord::failed(actor, &command, &error).emit();
+                    AuditRecord::failed(actor, &command, &error).emit((self.unix_clock)());
                     return Err(error);
                 }
                 Claim::Execute(sender) => {
@@ -189,15 +212,17 @@ impl ControlPlane {
     async fn run(&self, actor: &str, command: &ControlCommand) -> Result<CommandReceipt, ControlError> {
         let Ok(_permit) = self.permits.try_acquire() else {
             let error = ControlError::Overloaded;
-            AuditRecord::failed(actor, command, &error).emit();
+            AuditRecord::failed(actor, command, &error).emit((self.unix_clock)());
             return Err(error);
         };
-        let started = (self.clock)();
+        let timestamp_unix = (self.unix_clock)();
+        let started = (self.duration_source)();
         let result = self.control.submit(command.clone()).await;
-        self.record(((self.clock)() - started).max(0));
+        let elapsed = (self.duration_source)().saturating_sub(started);
+        self.record(i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
         match &result {
-            Ok(receipt) => AuditRecord::committed(actor, command, receipt).emit(),
-            Err(error) => AuditRecord::failed(actor, command, error).emit(),
+            Ok(receipt) => AuditRecord::committed(actor, command, receipt).emit(timestamp_unix),
+            Err(error) => AuditRecord::failed(actor, command, error).emit(timestamp_unix),
         }
         result
     }

@@ -1,7 +1,13 @@
-include!("../fixtures/process.rs");
+use std::sync::mpsc;
+use std::time::Duration;
 
-pub fn assert_main_rejects_test_arguments() {
-    assert_eq!(main(), std::process::ExitCode::FAILURE);
+use super::*;
+
+const TOXIPROXY_FAILURE_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[test]
+fn fixture_main_rejects_test_arguments() {
+    assert_eq!(crate::run_process_fixture(), std::process::ExitCode::FAILURE);
 }
 
 #[test]
@@ -308,7 +314,7 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
             None,
         )
     });
-    let mut release = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy readiness event");
+    let mut release = accept_within(&gate, TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy readiness event");
     release.read_exact(&mut [0]).expect("identify readiness gate");
     release.write_all(&[1]).expect("release readiness gate");
     release.read_exact(&mut [0]).expect("observe control bind");
@@ -331,7 +337,7 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
     let control_address = control.local_addr().expect("silent control address");
     let command_executable = executable.clone();
     let command = thread::spawn(move || run_toxiproxy(&command_executable, &[], Some(control)));
-    let mut startup_signal = super::accept_within(&gate, super::TOXIPROXY_FAILURE_TIMEOUT, "silent startup event");
+    let mut startup_signal = accept_within(&gate, TOXIPROXY_FAILURE_TIMEOUT, "silent startup event");
     startup_signal.read_exact(&mut [0]).expect("identify startup gate");
     drop(startup_signal);
     assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
@@ -356,6 +362,13 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
     assert_eq!(command.join().expect("join ready toxiproxy"), Ok(()));
 }
 
+#[test]
+#[should_panic(expected = "fixture gate not received within 0ns")]
+fn fixture_gate_timeout_is_bounded() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture gate");
+    accept_within(&listener, Duration::ZERO, "fixture gate");
+}
+
 fn request(address: std::net::SocketAddr, request: &str) -> String {
     let mut stream = TcpStream::connect(address).expect("connect fixture server");
     stream.write_all(request.as_bytes()).expect("write fixture request");
@@ -370,4 +383,23 @@ fn socket_pair() -> (TcpStream, TcpStream) {
     let client = TcpStream::connect(address).expect("connect socket pair");
     let (server, _) = listener.accept().expect("accept socket pair");
     (server, client)
+}
+
+fn accept_within(listener: &TcpListener, timeout: Duration, event: &str) -> TcpStream {
+    let address = listener.local_addr().expect("gate address");
+    let (cancel_timeout, cancellation) = mpsc::channel();
+    let watchdog = thread::spawn(move || {
+        let timed_out = matches!(cancellation.recv_timeout(timeout), Err(mpsc::RecvTimeoutError::Timeout));
+        if timed_out {
+            TcpStream::connect(address).expect("unblock timed-out gate accept");
+        }
+        timed_out
+    });
+    let connection = listener.accept().expect("accept gate connection").0;
+    let _ = cancel_timeout.send(());
+    if watchdog.join().expect("join gate watchdog") {
+        drop(connection);
+        panic!("{event} not received within {timeout:?}");
+    }
+    connection
 }

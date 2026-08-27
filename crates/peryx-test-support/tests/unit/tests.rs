@@ -25,8 +25,6 @@ use peryx_test_support::{
 };
 use tempfile::TempDir;
 
-mod process_fixture;
-
 const FAILURE_TIMEOUT: Duration = Duration::from_millis(100);
 const TOXIPROXY_FAILURE_TIMEOUT: Duration = Duration::from_secs(2);
 const FIXTURE_ECOSYSTEM: Ecosystem = Ecosystem::new("fixture");
@@ -655,11 +653,6 @@ fn process_bootstrap_and_claim_failures() {
             Err(HarnessError::Config(_))
         ));
     });
-}
-
-#[test]
-fn fixture_main_rejects_test_arguments() {
-    process_fixture::assert_main_rejects_test_arguments();
 }
 
 #[test]

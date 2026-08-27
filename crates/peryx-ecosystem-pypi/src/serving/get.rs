@@ -103,14 +103,15 @@ async fn pypi_get(
     if rest == "simple/" {
         return simple_index_response(state, index, headers);
     }
-    if let Some(project) = rest
-        .strip_prefix("simple/")
-        .filter(|rest| !rest.is_empty() && !rest.contains('/'))
-    {
-        return simple_slash_redirect(uri, rest, &format!("simple/{}/", normalize_name(project)));
-    }
-    if let Some(project) = rest.strip_prefix("simple/").and_then(|rest| rest.strip_suffix('/')) {
-        let normalized = normalize_name(project);
+    let project = match simple_project(rest) {
+        Ok(project) => project,
+        Err(error) => return error.into_response(),
+    };
+    if let Some(project) = project {
+        if !project.trailing_slash {
+            return simple_slash_redirect(uri, rest, &format!("simple/{}/", project.normalized));
+        }
+        let normalized = project.normalized;
         state.metrics.record(Observation::Page {
             repository: index.route.clone(),
             resource: normalized.clone(),
@@ -189,6 +190,31 @@ async fn pypi_get(
             .await;
     }
     not_found()
+}
+
+struct SimpleProject {
+    normalized: String,
+    trailing_slash: bool,
+}
+
+fn simple_project(rest: &str) -> HttpResult<Option<SimpleProject>> {
+    let Some(project) = rest.strip_prefix("simple/") else {
+        return Ok(None);
+    };
+    let trailing_slash = project.ends_with('/');
+    let project = project.strip_suffix('/').unwrap_or(project);
+    if project.is_empty() || project.contains('/') {
+        return Ok(None);
+    }
+    let project = path::decode_path_segment(project).map_err(|error| path_error_response(&error))?;
+    path::validate_path_segment("project", &project).map_err(|error| path_error_response(&error))?;
+    if !crate::is_valid_name(&project) {
+        return Ok(None);
+    }
+    Ok(Some(SimpleProject {
+        normalized: normalize_name(&project),
+        trailing_slash,
+    }))
 }
 
 async fn legacy_json_route(state: &Arc<ServingState>, index: &Index, rest: &str) -> Option<Response> {

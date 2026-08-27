@@ -5,7 +5,7 @@ use leptos_router::hooks::use_query_map;
 use leptos_router::{SsrMode, StaticSegment};
 
 use crate::data::load_search;
-use crate::markdown::external_link_rel;
+use crate::markdown::EXTERNAL_LINK_REL;
 use crate::model::UiSearchResult;
 use crate::url::browse_index_url;
 use crate::url::search_page_url;
@@ -125,8 +125,8 @@ fn Header() -> impl IntoView {
                     <a href="/admin/trash">"Trash"</a>
                     <a href="/admin/analytics">"Usage"</a>
                     <a href="/login">"Login"</a>
-                    <a href=DOCS_URL rel=external_link_rel(DOCS_URL)>"Docs"</a>
-                    <a href=REPO_URL rel=external_link_rel(REPO_URL)>"GitHub"</a>
+                    <a href=DOCS_URL rel=EXTERNAL_LINK_REL>"Docs"</a>
+                    <a href=REPO_URL rel=EXTERNAL_LINK_REL>"GitHub"</a>
                     <ThemeToggle />
                 </div>
             </nav>

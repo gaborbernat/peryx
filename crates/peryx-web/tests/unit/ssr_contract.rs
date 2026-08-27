@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use leptos::prelude::*;
-use peryx_core::{BrowsePage, Ecosystem, Role as IndexRole};
+use peryx_core::{
+    BrowseCell, BrowseLink, BrowsePage, BrowseProperty, BrowseRow, BrowseSection, Ecosystem, Role as IndexRole,
+};
 use peryx_driver::rate_limit::RouteClass;
 use peryx_driver::serving::{
     AbsoluteProtocolDriver, BrowseDriver, EcosystemDriver, IndexSummary, IndexSummaryDriver, MetricsDriver, RecentWrite,
@@ -54,6 +56,137 @@ async fn neutral_browse_contract_renders_no_match() {
 
     assert!(body.contains("Nothing matched this browse query."), "{body}");
     assert!(!body.contains("Fixture object"), "{body}");
+}
+
+#[tokio::test]
+async fn browse_contract_renders_unsafe_link_destinations_as_text() {
+    let body = render_browse(Some(BrowsePage {
+        title: "Unsafe links".to_owned(),
+        breadcrumbs: vec![BrowseLink {
+            label: "Breadcrumb".to_owned(),
+            href: "javascript:alert(1)".to_owned(),
+        }],
+        sections: vec![
+            BrowseSection::Properties {
+                heading: "Properties".to_owned(),
+                entries: vec![BrowseProperty {
+                    label: "Homepage".to_owned(),
+                    value: "Property".to_owned(),
+                    href: Some("data:text/html,<script>".to_owned()),
+                }],
+            },
+            BrowseSection::Links {
+                heading: "Links".to_owned(),
+                entries: vec![
+                    BrowseLink {
+                        label: "Related".to_owned(),
+                        href: "javascript:alert(2)".to_owned(),
+                    },
+                    BrowseLink {
+                        label: "Whitespace".to_owned(),
+                        href: " javascript:alert(4)".to_owned(),
+                    },
+                    BrowseLink {
+                        label: "Control".to_owned(),
+                        href: "java\nscript:alert(5)".to_owned(),
+                    },
+                    BrowseLink {
+                        label: "File".to_owned(),
+                        href: "file:///tmp/unsafe".to_owned(),
+                    },
+                ],
+                empty: String::new(),
+            },
+            BrowseSection::Table {
+                heading: "Table".to_owned(),
+                columns: vec!["Value".to_owned()],
+                rows: vec![BrowseRow {
+                    cells: vec![BrowseCell {
+                        text: "Cell".to_owned(),
+                        href: Some("data:text/plain,unsafe".to_owned()),
+                        code: false,
+                    }],
+                    badges: Vec::new(),
+                    actions: Vec::new(),
+                }],
+                empty: String::new(),
+            },
+            BrowseSection::Content {
+                heading: "Content".to_owned(),
+                text: String::new(),
+                size: None,
+                offset: 0,
+                next: Some(BrowseLink {
+                    label: "Next".to_owned(),
+                    href: "javascript:alert(3)".to_owned(),
+                }),
+            },
+        ],
+        ..BrowsePage::default()
+    }))
+    .await;
+    let body = rendered_main(&body);
+
+    for text in [
+        "Breadcrumb",
+        "Property",
+        "Related",
+        "Whitespace",
+        "Control",
+        "File",
+        "Cell",
+        "Next",
+    ] {
+        assert!(body.contains(text), "missing {text:?} in {body}");
+    }
+    for destination in ["javascript:", "data:", "file:"] {
+        assert!(!body.contains(destination), "unexpected {destination:?} in {body}");
+    }
+}
+
+#[tokio::test]
+async fn browse_contract_preserves_allowed_link_destinations() {
+    let body = render_browse(Some(BrowsePage {
+        title: "Allowed links".to_owned(),
+        breadcrumbs: [
+            ("HTTP", "http://example.test/x"),
+            ("HTTPS", "https://example.test/x"),
+            ("Mail", "mailto:owner@example.test"),
+            ("Path", "/browse?index=fixture"),
+            ("Query", "?index=fixture"),
+            ("Fragment", "#files"),
+            ("Relative", "artifact/file"),
+            ("Network", "//example.test/x"),
+        ]
+        .into_iter()
+        .map(|(label, href)| BrowseLink {
+            label: label.to_owned(),
+            href: href.to_owned(),
+        })
+        .collect(),
+        ..BrowsePage::default()
+    }))
+    .await;
+    let body = rendered_main(&body);
+
+    for href in [
+        "mailto:owner@example.test",
+        "/browse?index=fixture",
+        "?index=fixture",
+        "#files",
+        "artifact/file",
+    ] {
+        assert!(
+            body.contains(&format!(r#"href="{href}""#)),
+            "missing {href:?} in {body}"
+        );
+    }
+    for href in ["http://example.test/x", "https://example.test/x", "//example.test/x"] {
+        assert!(
+            body.contains(&format!(r#"href="{href}" rel="external nofollow noopener noreferrer""#)),
+            "missing external {href:?} in {body}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -335,6 +468,10 @@ async fn render_browse(browse_response: Option<BrowsePage>) -> String {
     let (status, _, body) = render(Arc::new(app), &format!("/browse?{QUERY}"), &[]).await;
     assert_eq!(status, StatusCode::OK);
     body
+}
+
+fn rendered_main(body: &str) -> &str {
+    body.split_once("<main>").unwrap().1.split_once("</main>").unwrap().0
 }
 
 async fn render(app: Arc<AppState>, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, HeaderMap, String) {

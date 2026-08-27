@@ -696,7 +696,7 @@ async fn test_ui_project_page_renders_metadata_and_sanitizes_description_links()
         [
             links.contains("href=\"https://example.com/docs\""),
             links.contains("Unsafe"),
-            links.contains(r#"href="JaVaScRiPt:alert(1)""#),
+            !links.contains(r#"href="JaVaScRiPt:alert(1)""#),
             description.contains("href=\"https://example.com/guide\""),
             description.contains("rel=\"external nofollow noopener noreferrer\""),
             description.contains(">guide</a>"),

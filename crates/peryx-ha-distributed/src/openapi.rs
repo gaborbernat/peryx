@@ -1,7 +1,9 @@
 use serde_json::json;
 use utoipa::openapi::content::ContentBuilder;
-use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder};
+use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterIn, PathItemBuilder};
 use utoipa::openapi::{PathsBuilder, ResponseBuilder, SecurityRequirement};
+
+use peryx_driver::openapi::{bounded_integer_parameter, parameter};
 
 #[must_use]
 pub fn availability_paths(paths: PathsBuilder) -> PathsBuilder {
@@ -84,17 +86,17 @@ fn analytics_completeness() -> OperationBuilder {
         ("from", "Minimum Unix timestamp", json!(1_703_980_800_i64)),
         ("to", "Maximum Unix timestamp", json!(1_706_659_200_i64)),
         ("cursor", "Cursor from the prior page", json!("MjU")),
-        ("limit", "Rows to return, from 1 through 100", json!(25)),
     ] {
-        operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .description(Some(description))
-                .example(Some(example)),
-        );
+        operation = operation.parameter(parameter(name, ParameterIn::Query, description, example));
     }
-    operation
+    operation.parameter(bounded_integer_parameter(
+        "limit",
+        ParameterIn::Query,
+        "Rows to return, from 1 through 100",
+        json!(25),
+        Some(1),
+        Some(100),
+    ))
 }
 
 fn availability_topology() -> OperationBuilder {
@@ -150,13 +152,12 @@ fn availability_blob_placements() -> OperationBuilder {
         .tag("operations")
         .summary(Some("Blob placement across datacenters"))
         .description(Some("Returns datacenter placement state without backend paths."))
-        .parameter(
-            ParameterBuilder::new()
-                .name("digest")
-                .parameter_in(ParameterIn::Path)
-                .description(Some("Content digest"))
-                .example(Some(json!("sha256:0f1e"))),
-        )
+        .parameter(parameter(
+            "digest",
+            ParameterIn::Path,
+            "Content digest",
+            json!("sha256:0f1e"),
+        ))
         .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
         .response(
             "200",
@@ -214,20 +215,20 @@ fn paged_health_operation(
         .tag("operations")
         .summary(Some(summary))
         .description(Some(description))
-        .parameter(
-            ParameterBuilder::new()
-                .name("cursor")
-                .parameter_in(ParameterIn::Query)
-                .description(Some(format!("Resume after this {cursor_kind}")))
-                .example(Some(cursor)),
-        )
-        .parameter(
-            ParameterBuilder::new()
-                .name("limit")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("Rows per page, 1 to 100"))
-                .example(Some(json!(25))),
-        )
+        .parameter(parameter(
+            "cursor",
+            ParameterIn::Query,
+            format!("Resume after this {cursor_kind}"),
+            cursor,
+        ))
+        .parameter(bounded_integer_parameter(
+            "limit",
+            ParameterIn::Query,
+            "Rows per page, 1 to 100",
+            json!(25),
+            Some(1),
+            Some(100),
+        ))
         .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
         .response("200", json_response("The bounded health view", example))
 }

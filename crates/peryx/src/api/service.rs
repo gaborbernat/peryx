@@ -1,11 +1,12 @@
 use serde_json::json;
 use utoipa::openapi::content::ContentBuilder;
-use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder};
+use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterIn, PathItemBuilder};
 use utoipa::openapi::request_body::RequestBodyBuilder;
-use utoipa::openapi::schema::{ObjectBuilder, Type};
 use utoipa::openapi::{PathsBuilder, Required, ResponseBuilder, SecurityRequirement};
 
-use peryx_driver::openapi::{api_json_response, artifact_search, text_response};
+use peryx_driver::openapi::{
+    api_json_response, artifact_search, bounded_integer_parameter, enum_parameter, parameter, text_response,
+};
 
 /// Register the `/+analytics/*` usage query family, kept apart so the service path list stays short.
 fn analytics_paths(paths: PathsBuilder) -> PathsBuilder {
@@ -100,15 +101,13 @@ fn repository_example() -> serde_json::Value {
 }
 
 fn repository_id_parameter() -> utoipa::openapi::path::Parameter {
-    ParameterBuilder::new()
-        .name("id")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some(
-            "Opaque, stable repository identifier from a create or list response",
-        ))
-        .example(Some(json!("repo_2f7e6a1b9c4d4e2f8a1b2c3d4e5f6a7b")))
-        .build()
+    parameter(
+        "id",
+        ParameterIn::Path,
+        "Opaque, stable repository identifier from a create or list response",
+        json!("repo_2f7e6a1b9c4d4e2f8a1b2c3d4e5f6a7b"),
+    )
+    .build()
 }
 
 fn list_repositories() -> OperationBuilder {
@@ -121,33 +120,34 @@ fn list_repositories() -> OperationBuilder {
             ))
             .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
             .parameter(
-                ParameterBuilder::new()
-                    .name("state")
-                    .parameter_in(ParameterIn::Query)
-                    .required(Required::False)
-                    .description(Some("Filter by `enabled` or `disabled`"))
-                    .schema(Some(
-                        ObjectBuilder::new()
-                            .schema_type(Type::String)
-                            .enum_values(Some(["enabled", "disabled"])),
-                    ))
-                    .build(),
+                enum_parameter(
+                    "state",
+                    ParameterIn::Query,
+                    "Filter by `enabled` or `disabled`",
+                    json!("enabled"),
+                    [json!("enabled"), json!("disabled")],
+                )
+                .build(),
             )
             .parameter(
-                ParameterBuilder::new()
-                    .name("cursor")
-                    .parameter_in(ParameterIn::Query)
-                    .required(Required::False)
-                    .description(Some("Opaque cursor from a prior page's `next_cursor`"))
-                    .build(),
+                parameter(
+                    "cursor",
+                    ParameterIn::Query,
+                    "Opaque cursor from a prior page's `next_cursor`",
+                    json!("repo_2f7e6a1b9c4d4e2f8a1b2c3d4e5f6a7b"),
+                )
+                .build(),
             )
             .parameter(
-                ParameterBuilder::new()
-                    .name("limit")
-                    .parameter_in(ParameterIn::Query)
-                    .required(Required::False)
-                    .description(Some("Page size, 1..=100 (default 25)"))
-                    .build(),
+                bounded_integer_parameter(
+                    "limit",
+                    ParameterIn::Query,
+                    "Page size, 1..=100 (default 25)",
+                    json!(25),
+                    Some(1),
+                    Some(100),
+                )
+                .build(),
             )
             .response(
                 "200",
@@ -472,13 +472,13 @@ fn cancel_job() -> OperationBuilder {
 }
 
 fn job_id_parameter() -> utoipa::openapi::path::Parameter {
-    ParameterBuilder::new()
-        .name("id")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("The durable job-run identifier the job history reports"))
-        .example(Some(json!("jr_000000000000ffff")))
-        .build()
+    parameter(
+        "id",
+        ParameterIn::Path,
+        "The durable job-run identifier the job history reports",
+        json!("jr_000000000000ffff"),
+    )
+    .build()
 }
 
 fn acl() -> OperationBuilder {
@@ -493,12 +493,14 @@ fn acl() -> OperationBuilder {
         ))
         .security(SecurityRequirement::new("writeToken", Vec::<String>::new()))
         .parameter(
-            ParameterBuilder::new()
-                .name("index")
-                .parameter_in(ParameterIn::Query)
-                .required(Required::True)
-                .description(Some("The route of the index to describe"))
-                .example(Some(json!("hosted"))),
+            parameter(
+                "index",
+                ParameterIn::Query,
+                "The route of the index to describe",
+                json!("hosted"),
+            )
+            .required(Required::True)
+            .build(),
         )
         .response(
             "200",
@@ -639,11 +641,12 @@ fn readiness() -> OperationBuilder {
             "Checks the bounded local metadata and blob-store dependencies used to serve artifact requests. Set `writes=true` to require a writer. The probe does not enumerate repositories or contact upstreams.",
         ))
         .parameter(
-            ParameterBuilder::new()
-                .name("writes")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("Require the node to accept writes"))
-                .example(Some(json!(true))),
+            parameter(
+                "writes",
+                ParameterIn::Query,
+                "Require the node to accept writes",
+                json!(true),
+            ),
         )
         .response(
             "200",
@@ -688,20 +691,18 @@ fn stats() -> OperationBuilder {
                 json!({"error": "stats service unavailable"}),
             ),
         )
-        .parameter(
-            ParameterBuilder::new()
-                .name("index")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("Drill into one index's resources"))
-                .example(Some(json!("root/artifacts"))),
-        )
-        .parameter(
-            ParameterBuilder::new()
-                .name("resource")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("With `index`, drill into one resource's artifacts"))
-                .example(Some(json!("widget"))),
-        )
+        .parameter(parameter(
+            "index",
+            ParameterIn::Query,
+            "Drill into one index's resources",
+            json!("root/artifacts"),
+        ))
+        .parameter(parameter(
+            "resource",
+            ParameterIn::Query,
+            "With `index`, drill into one resource's artifacts",
+            json!("widget"),
+        ))
         .response(
             "200",
             ResponseBuilder::new()
@@ -787,17 +788,17 @@ fn analytics_query(operation: OperationBuilder) -> OperationBuilder {
             "Opaque cursor from the prior page's next_cursor",
             json!("MjU"),
         ),
-        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
     ] {
-        operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .description(Some(description))
-                .example(Some(example)),
-        );
+        operation = operation.parameter(parameter(name, ParameterIn::Query, description, example));
     }
-    operation
+    operation.parameter(bounded_integer_parameter(
+        "limit",
+        ParameterIn::Query,
+        "Rows to return, from 1 through 100; defaults to 25",
+        json!(25),
+        Some(1),
+        Some(100),
+    ))
 }
 
 fn analytics_top() -> OperationBuilder {
@@ -1080,7 +1081,6 @@ fn policy_decisions() -> OperationBuilder {
             "Filter to one resource's decisions, at most 512 bytes",
             json!("example"),
         ),
-        ("state", "Filter by `allow`, `deny`, or `wait`", json!("deny")),
         (
             "rule",
             "Filter by matched rule ID, at most 512 bytes",
@@ -1094,16 +1094,25 @@ fn policy_decisions() -> OperationBuilder {
             "Exclusive cursor from the prior page",
             json!("pd_000000000000002a"),
         ),
-        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
     ] {
-        let parameter = ParameterBuilder::new()
-            .name(name)
-            .parameter_in(ParameterIn::Query)
-            .description(Some(description))
-            .example(Some(example));
-        operation = operation.parameter(parameter);
+        operation = operation.parameter(parameter(name, ParameterIn::Query, description, example));
     }
     operation
+        .parameter(enum_parameter(
+            "state",
+            ParameterIn::Query,
+            "Filter by `allow`, `deny`, or `wait`",
+            json!("deny"),
+            [json!("allow"), json!("deny"), json!("wait")],
+        ))
+        .parameter(bounded_integer_parameter(
+            "limit",
+            ParameterIn::Query,
+            "Rows to return, from 1 through 100; defaults to 25",
+            json!(25),
+            Some(1),
+            Some(100),
+        ))
 }
 
 fn revocation_example() -> serde_json::Value {
@@ -1118,15 +1127,13 @@ fn revocation_example() -> serde_json::Value {
 }
 
 fn digest_parameter() -> utoipa::openapi::path::Parameter {
-    ParameterBuilder::new()
-        .name("digest")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("Canonical `sha256:<64 lowercase hex>` artifact digest"))
-        .example(Some(json!(
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        )))
-        .build()
+    parameter(
+        "digest",
+        ParameterIn::Path,
+        "Canonical `sha256:<64 lowercase hex>` artifact digest",
+        json!("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+    )
+    .build()
 }
 
 fn administrator_errors(operation: OperationBuilder) -> OperationBuilder {
@@ -1173,7 +1180,7 @@ fn inspect_revocation() -> OperationBuilder {
 }
 
 fn list_revocations() -> OperationBuilder {
-    let mut operation = administrator_errors(
+    administrator_errors(
         OperationBuilder::new()
             .tag("operations")
             .summary(Some("List digest revocations"))
@@ -1198,25 +1205,28 @@ fn list_revocations() -> OperationBuilder {
                     json!({"error": "invalid revocation cursor"}),
                 ),
             ),
-    );
-    for (name, description, example) in [
-        ("status", "Filter by `active` or `lifted`", json!("active")),
-        (
-            "cursor",
-            "Exclusive canonical digest from the prior page",
-            json!("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
-        ),
-        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
-    ] {
-        operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .description(Some(description))
-                .example(Some(example)),
-        );
-    }
-    operation
+    )
+    .parameter(enum_parameter(
+        "status",
+        ParameterIn::Query,
+        "Filter by `active` or `lifted`",
+        json!("active"),
+        [json!("active"), json!("lifted")],
+    ))
+    .parameter(parameter(
+        "cursor",
+        ParameterIn::Query,
+        "Exclusive canonical digest from the prior page",
+        json!("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+    ))
+    .parameter(bounded_integer_parameter(
+        "limit",
+        ParameterIn::Query,
+        "Rows to return, from 1 through 100; defaults to 25",
+        json!(25),
+        Some(1),
+        Some(100),
+    ))
 }
 
 fn put_revocation() -> OperationBuilder {
@@ -1328,7 +1338,7 @@ fn quota_repository_example() -> serde_json::Value {
 }
 
 fn quota_summary() -> OperationBuilder {
-    let mut operation = OperationBuilder::new()
+    OperationBuilder::new()
         .tag("operations")
         .summary(Some("Repository quota summary"))
         .description(Some(
@@ -1372,20 +1382,21 @@ fn quota_summary() -> OperationBuilder {
                 "Authentication, authorization, or quota storage is unavailable",
                 json!({"error": "quota service unavailable"}),
             ),
-        );
-    for (name, description, example) in [
-        ("cursor", "Opaque cursor from the prior page's next_cursor", json!("Mg")),
-        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
-    ] {
-        operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .description(Some(description))
-                .example(Some(example)),
-        );
-    }
-    operation
+        )
+        .parameter(parameter(
+            "cursor",
+            ParameterIn::Query,
+            "Opaque cursor from the prior page's next_cursor",
+            json!("Mg"),
+        ))
+        .parameter(bounded_integer_parameter(
+            "limit",
+            ParameterIn::Query,
+            "Rows to return, from 1 through 100; defaults to 25",
+            json!(25),
+            Some(1),
+            Some(100),
+        ))
 }
 
 fn quota_repository() -> OperationBuilder {
@@ -1400,12 +1411,14 @@ fn quota_repository() -> OperationBuilder {
         .security(SecurityRequirement::new("writeToken", Vec::<String>::new()))
         .security(SecurityRequirement::new("administratorPassword", Vec::<String>::new()))
         .parameter(
-            ParameterBuilder::new()
-                .name("repository")
-                .parameter_in(ParameterIn::Query)
-                .required(Required::True)
-                .description(Some("Index route to inspect, at most 512 bytes"))
-                .example(Some(json!("root/artifacts"))),
+            parameter(
+                "repository",
+                ParameterIn::Query,
+                "Index route to inspect, at most 512 bytes",
+                json!("root/artifacts"),
+            )
+            .required(Required::True)
+            .build(),
         )
         .response(
             "200",
@@ -1452,13 +1465,13 @@ fn grant_example() -> serde_json::Value {
 }
 
 fn grant_id_parameter() -> utoipa::openapi::path::Parameter {
-    ParameterBuilder::new()
-        .name("id")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("Opaque, stable grant identifier from a create or list response"))
-        .example(Some(json!("rg_7573725f31322f7265706f7369746f72795f726561646572")))
-        .build()
+    parameter(
+        "id",
+        ParameterIn::Path,
+        "Opaque, stable grant identifier from a create or list response",
+        json!("rg_7573725f31322f7265706f7369746f72795f726561646572"),
+    )
+    .build()
 }
 
 fn list_grants() -> OperationBuilder {
@@ -1500,23 +1513,25 @@ fn list_grants() -> OperationBuilder {
             "Opaque identifier from the prior page",
             json!("rg_7573725f31322f7265706f7369746f72795f726561646572"),
         ),
-        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
     ] {
-        operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .description(Some(description))
-                .example(Some(example)),
-        );
+        operation = operation.parameter(parameter(name, ParameterIn::Query, description, example));
     }
-    operation.response(
-        "400",
-        api_json_response(
-            "A filter or limit is invalid",
-            json!({"error": "invalid resource filter"}),
-        ),
-    )
+    operation
+        .parameter(bounded_integer_parameter(
+            "limit",
+            ParameterIn::Query,
+            "Rows to return, from 1 through 100; defaults to 25",
+            json!(25),
+            Some(1),
+            Some(100),
+        ))
+        .response(
+            "400",
+            api_json_response(
+                "A filter or limit is invalid",
+                json!({"error": "invalid resource filter"}),
+            ),
+        )
 }
 
 fn create_grant() -> OperationBuilder {
@@ -1811,13 +1826,13 @@ fn scoped_token_example() -> serde_json::Value {
 }
 
 fn token_id_parameter() -> utoipa::openapi::path::Parameter {
-    ParameterBuilder::new()
-        .name("id")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("The stable token identifier returned at creation"))
-        .example(Some(json!("tok_550e8400e29b41d4a716446655440000")))
-        .build()
+    parameter(
+        "id",
+        ParameterIn::Path,
+        "The stable token identifier returned at creation",
+        json!("tok_550e8400e29b41d4a716446655440000"),
+    )
+    .build()
 }
 
 fn token_errors(operation: OperationBuilder) -> OperationBuilder {
@@ -1925,17 +1940,17 @@ fn list_tokens() -> OperationBuilder {
             "Exclusive token id from the prior page",
             json!("tok_550e8400e29b41d4a716446655440000"),
         ),
-        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
     ] {
-        operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .description(Some(description))
-                .example(Some(example)),
-        );
+        operation = operation.parameter(parameter(name, ParameterIn::Query, description, example));
     }
-    operation
+    operation.parameter(bounded_integer_parameter(
+        "limit",
+        ParameterIn::Query,
+        "Rows to return, from 1 through 100; defaults to 25",
+        json!(25),
+        Some(1),
+        Some(100),
+    ))
 }
 
 fn inspect_token() -> OperationBuilder {

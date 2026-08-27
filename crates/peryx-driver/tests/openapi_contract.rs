@@ -19,21 +19,30 @@ fn route_parameter_matches_contract() {
             "in": "path",
             "description": "The index route, for example `team/catalog`",
             "required": true,
+            "schema": {"type": "string"},
             "example": "team/catalog",
         }),
     );
 }
 
-#[test]
-fn query_parameter_matches_contract() {
+#[rstest]
+#[case::null(json!(null), json!({}))]
+#[case::boolean(json!(true), json!({"type": "boolean"}))]
+#[case::integer(json!(2), json!({"type": "integer"}))]
+#[case::number(json!(2.5), json!({"type": "number"}))]
+#[case::string(json!("two"), json!({"type": "string"}))]
+#[case::array(json!([2]), json!({"type": "array"}))]
+#[case::object(json!({"page": 2}), json!({"type": "object"}))]
+fn query_parameter_matches_contract(#[case] example: Value, #[case] schema: Value) {
     assert_eq!(
-        value(query_param("page", "One-based page.", json!(2)).build()),
+        value(query_param("page", "One-based page.", example.clone()).build()),
         json!({
             "name": "page",
             "in": "query",
             "description": "One-based page.",
             "required": false,
-            "example": 2,
+            "schema": schema,
+            "example": example,
         }),
     );
 }
@@ -159,6 +168,7 @@ fn search_parameters() -> Vec<Value> {
             "in": "query",
             "description": "Search text. Prefix with `re:` to use a regex.",
             "required": false,
+            "schema": {"type": "string"},
             "example": "widget",
         }),
         json!({
@@ -166,6 +176,7 @@ fn search_parameters() -> Vec<Value> {
             "in": "query",
             "description": "`uploaded`, `cached`, or `override`; omit for all sources.",
             "required": false,
+            "schema": {"type": "string", "enum": ["uploaded", "cached", "override"]},
             "example": "override",
         }),
         json!({
@@ -174,6 +185,7 @@ fn search_parameters() -> Vec<Value> {
             "description": "`local` returns only resources whose bytes are available from local storage now; omit or \
                             `all` returns every indexed resource.",
             "required": false,
+            "schema": {"type": "string", "enum": ["local", "all"]},
             "example": "local",
         }),
         json!({
@@ -181,6 +193,7 @@ fn search_parameters() -> Vec<Value> {
             "in": "query",
             "description": "One-based page number.",
             "required": false,
+            "schema": {"type": "integer", "minimum": 1},
             "example": 1,
         }),
         json!({
@@ -188,6 +201,7 @@ fn search_parameters() -> Vec<Value> {
             "in": "query",
             "description": "Page size: 25, 50, or 100.",
             "required": false,
+            "schema": {"type": "integer", "enum": [25, 50, 100]},
             "example": 25,
         }),
     ]
@@ -199,6 +213,7 @@ fn route_parameter() -> Value {
         "in": "path",
         "description": "The index route, for example `team/catalog`",
         "required": true,
+        "schema": {"type": "string"},
         "example": "team/catalog",
     })
 }

@@ -1,6 +1,6 @@
 use super::shared::{
-    ContentBuilder, OperationBuilder, ParameterBuilder, ParameterIn, Required, ResponseBuilder, filename_param, json,
-    route_param, sha256_param, text_response,
+    ContentBuilder, OperationBuilder, ParameterIn, ResponseBuilder, bounded_integer_parameter, filename_param, json,
+    parameter, route_param, sha256_param, string_array_parameter, text_response,
 };
 
 pub(super) fn inspect_listing() -> OperationBuilder {
@@ -16,38 +16,34 @@ pub(super) fn inspect_listing() -> OperationBuilder {
         .parameter(route_param())
         .parameter(sha256_param())
         .parameter(filename_param("peryxpkg-1.0-py3-none-any.whl"))
-        .parameter(
-            ParameterBuilder::new()
-                .name("container")
-                .parameter_in(ParameterIn::Query)
-                .description(Some(
-                    "Optional archive-member path to treat as the next archive level. Repeat in stack order.",
-                ))
-                .example(Some(json!("vendor/inner.zip"))),
-        )
-        .parameter(
-            ParameterBuilder::new()
-                .name("member")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("Optional text member path to read as a bounded chunk"))
-                .example(Some(json!("peryxpkg-1.0.dist-info/METADATA"))),
-        )
-        .parameter(
-            ParameterBuilder::new()
-                .name("offset")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("Byte offset inside the selected member; defaults to 0"))
-                .example(Some(json!(262_144))),
-        )
-        .parameter(
-            ParameterBuilder::new()
-                .name("limit")
-                .parameter_in(ParameterIn::Query)
-                .description(Some(
-                    "Maximum bytes to return, from 1 through 1048576; defaults to 262144",
-                ))
-                .example(Some(json!(262_144))),
-        )
+        .parameter(string_array_parameter(
+            "container",
+            ParameterIn::Query,
+            "Optional archive-member path to treat as the next archive level. Repeat in stack order.",
+            json!(["vendor/inner.zip"]),
+        ))
+        .parameter(parameter(
+            "member",
+            ParameterIn::Query,
+            "Optional text member path to read as a bounded chunk",
+            json!("peryxpkg-1.0.dist-info/METADATA"),
+        ))
+        .parameter(bounded_integer_parameter(
+            "offset",
+            ParameterIn::Query,
+            "Byte offset inside the selected member; defaults to 0",
+            json!(262_144),
+            Some(0),
+            None,
+        ))
+        .parameter(bounded_integer_parameter(
+            "limit",
+            ParameterIn::Query,
+            "Maximum bytes to return, from 1 through 1048576; defaults to 262144",
+            json!(262_144),
+            Some(1),
+            Some(1_048_576),
+        ))
         .response(
             "200",
             ResponseBuilder::new()
@@ -106,11 +102,13 @@ pub(super) fn inspect_member() -> OperationBuilder {
         .parameter(sha256_param())
         .parameter(filename_param("peryxpkg-1.0-py3-none-any.whl"))
         .parameter(
-            ParameterBuilder::new()
-                .name("member")
-                .parameter_in(ParameterIn::Path)
-                .required(Required::True)
-                .example(Some(json!("peryxpkg-1.0.dist-info/METADATA"))),
+            parameter(
+                "member",
+                ParameterIn::Path,
+                "Archive member path",
+                json!("peryxpkg-1.0.dist-info/METADATA"),
+            )
+            .build(),
         )
         .response(
             "200",

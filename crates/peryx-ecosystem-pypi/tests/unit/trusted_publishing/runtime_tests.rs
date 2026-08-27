@@ -2,8 +2,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peryx_identity::{Action, OidcTokenVerifier, Principal, VerifiedOidcIdentity};
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode, header};
+use peryx_driver::serving::IndexedProtocolDriver as _;
+use peryx_driver::state::{AppState, Index, IndexKind};
+use peryx_identity::{Action, IndexAcl, OidcTokenVerifier, Principal, VerifiedOidcIdentity};
+use peryx_policy::Policy;
+use peryx_storage::blob::BlobStorage;
+use peryx_storage::meta::MetaStore;
 use rstest::rstest;
+use tower::ServiceExt as _;
 
 use super::*;
 
@@ -38,7 +46,8 @@ impl OidcTokenVerifier for Verifier {
 fn binding() -> PublisherBinding {
     PublisherBinding {
         id: "github-release".to_owned(),
-        repository: "private".to_owned(),
+        repository: "root-pypi".to_owned(),
+        route: "private".to_owned(),
         publisher: TrustedPublisher {
             issuer: "https://issuer.example".to_owned(),
             audience: "peryx".to_owned(),
@@ -104,7 +113,7 @@ async fn test_exchange_mints_a_repository_scoped_token_once() {
             "github-release",
             internal.id.as_str(),
             internal.id.as_str(),
-            "private",
+            "root-pypi",
             NOW + 300,
             Principal::Named {
                 subject: "trusted-publisher:github-release".to_owned(),
@@ -133,6 +142,127 @@ async fn test_exchange_mints_a_repository_scoped_token_once() {
     ));
 }
 
+#[rstest]
+#[case::named("root/pypi", "/root/pypi/")]
+#[case::root("", "/")]
+#[tokio::test]
+async fn test_minted_token_uploads_through_the_configured_index_route(#[case] route: &str, #[case] upload_uri: &str) {
+    let (_directory, state) = publishing_state(route);
+    let token = mint_token(&state).await;
+
+    assert_eq!(upload(&state, route, upload_uri, &token).await, StatusCode::OK);
+}
+
+#[rstest]
+#[case::sibling("/sibling/")]
+#[case::hosted_layer("/internal/")]
+#[tokio::test]
+async fn test_minted_token_cannot_upload_outside_the_configured_index_route(#[case] upload_uri: &str) {
+    let (_directory, state) = publishing_state("root/pypi");
+    let token = mint_token(&state).await;
+
+    assert_eq!(
+        upload(&state, "root/pypi", upload_uri, &token).await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+async fn upload(state: &Arc<AppState>, route: &str, upload_uri: &str, token: &str) -> StatusCode {
+    let (content_type, body) = crate::tests::http::multipart_body(
+        &crate::tests::http::upload_fields(),
+        Some(("peryxpkg-1.0-py3-none-any.whl", &crate::tests::http::fixture_wheel())),
+    );
+    if route.is_empty() {
+        return crate::PypiServing
+            .post(
+                Arc::clone(&state.serving),
+                String::new(),
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(upload_uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .status();
+    }
+    crate::tests::http::post_upload(state, upload_uri, Some(&format!("Bearer {token}")), &content_type, body).await
+}
+
+async fn mint_token(state: &Arc<AppState>) -> String {
+    let response = peryx_http::router(Arc::clone(state))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_/oidc/mint-token")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"token":"external"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn publishing_state(route: &str) -> (tempfile::TempDir, Arc<AppState>) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::new(
+        MetaStore::open(directory.path().join("peryx.redb")).unwrap(),
+        BlobStorage::filesystem(directory.path().join("blobs")),
+        60,
+        vec![
+            Index {
+                name: "hosted".to_owned(),
+                route: "internal".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Hosted { volatile: true },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "root-pypi".to_owned(),
+                route: route.to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: Some(0),
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "sibling".to_owned(),
+                route: "sibling".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: Some(0),
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+        ],
+    );
+    crate::tests::install(&mut state);
+    let mut publisher = binding();
+    publisher.route = route.to_owned();
+    publisher.publisher.projects = vec![Glob::new("peryxpkg")];
+    let runtime = Arc::new(runtime(vec![publisher], MAX_REPLAY_ENTRIES).1);
+    {
+        let mut context = state.auth_install_context().unwrap();
+        context.register_service(Arc::clone(&runtime));
+        context.register_routes(Arc::new(super::super::http::TrustedPublishingRoutes::new(runtime)));
+    }
+    (directory, Arc::new(state))
+}
+
 #[tokio::test]
 async fn test_concurrent_exchange_has_one_winner() {
     let (_, runtime) = runtime(vec![binding()], MAX_REPLAY_ENTRIES);
@@ -159,9 +289,9 @@ async fn test_replay_capacity_rejects_a_distinct_identity() {
 }
 
 #[tokio::test]
-async fn test_empty_repository_keeps_project_grants_unqualified() {
+async fn test_empty_route_keeps_project_grants_unqualified() {
     let mut unqualified = binding();
-    unqualified.repository.clear();
+    unqualified.route.clear();
     let (signer, runtime) = runtime(vec![unqualified], MAX_REPLAY_ENTRIES);
     let exchanged = runtime.exchange("external", NOW).await.unwrap();
 
@@ -196,7 +326,7 @@ async fn test_verification_error_is_preserved() {
 #[case::ttl(vec![binding()], 0, MAX_REPLAY_ENTRIES)]
 #[case::capacity(vec![binding()], 300, 0)]
 #[case::empty_id(vec![PublisherBinding { id: String::new(), ..binding() }], 300, MAX_REPLAY_ENTRIES)]
-#[case::parent_repository(vec![PublisherBinding { repository: "../private".to_owned(), ..binding() }], 300, MAX_REPLAY_ENTRIES)]
+#[case::parent_route(vec![PublisherBinding { route: "../private".to_owned(), ..binding() }], 300, MAX_REPLAY_ENTRIES)]
 #[case::duplicate_id(vec![binding(), binding()], 300, MAX_REPLAY_ENTRIES)]
 #[case::mixed_audience(vec![binding(), PublisherBinding {
     id: "other".to_owned(),

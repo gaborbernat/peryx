@@ -39,10 +39,7 @@ pub fn validate(config: PluginAuthConfig<'_>) -> Result<(), String> {
             .iter()
             .any(|index| index.name == publisher.repository && index.ecosystem == ECOSYSTEM && index.writable)
         {
-            return Err(format!(
-                "trusted publisher {}: repository must name a writable index with trusted publishing support",
-                publisher.id
-            ));
+            return Err(invalid_repository(&publisher.id));
         }
     }
     Ok(())
@@ -62,18 +59,25 @@ pub fn install(context: &mut AuthInstallContext<'_>, values: &toml::Table) -> Re
             config
                 .publishers
                 .into_iter()
-                .map(|publisher| PublisherBinding {
-                    id: publisher.id,
-                    repository: publisher.repository,
-                    publisher: TrustedPublisher {
-                        issuer: publisher.issuer,
-                        audience: config.audience.clone(),
-                        subject: Glob::new(publisher.subject),
-                        claims: publisher.claims,
-                        projects: publisher.projects.into_iter().map(Glob::new).collect(),
-                    },
+                .map(|publisher| {
+                    let route = context
+                        .writable_index_route(&ECOSYSTEM, &publisher.repository)
+                        .ok_or_else(|| invalid_repository(&publisher.id))?
+                        .to_owned();
+                    Ok(PublisherBinding {
+                        id: publisher.id,
+                        repository: publisher.repository,
+                        route,
+                        publisher: TrustedPublisher {
+                            issuer: publisher.issuer,
+                            audience: config.audience.clone(),
+                            subject: Glob::new(publisher.subject),
+                            claims: publisher.claims,
+                            projects: publisher.projects.into_iter().map(Glob::new).collect(),
+                        },
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, String>>()?,
             signer,
             context.token_ttl_secs(),
         )
@@ -138,6 +142,10 @@ fn parse(values: &toml::Table) -> Result<Config, String> {
         return Err("auth: trusted publisher fields and project lists must not be empty".to_owned());
     }
     Ok(config)
+}
+
+fn invalid_repository(id: &str) -> String {
+    format!("trusted publisher {id}: repository must name a writable index with trusted publishing support")
 }
 
 #[cfg(test)]

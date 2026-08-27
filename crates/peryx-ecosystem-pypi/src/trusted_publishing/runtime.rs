@@ -15,6 +15,7 @@ const MAX_REPLAY_ENTRIES: usize = 65_536;
 pub(super) struct PublisherBinding {
     pub id: String,
     pub repository: String,
+    pub route: String,
     pub publisher: TrustedPublisher,
 }
 
@@ -66,7 +67,7 @@ impl OidcRuntime {
         let mut ids = std::collections::HashSet::new();
         if bindings.iter().any(|binding| {
             binding.id.trim().is_empty()
-                || binding.repository.contains("..")
+                || binding.route.contains("..")
                 || binding.publisher.audience != audience
                 || !ids.insert(binding.id.clone())
         }) {
@@ -107,7 +108,7 @@ impl OidcRuntime {
         };
         let (position, mut grants) = authorize_publish(&self.publishers, &claims, now)?;
         let binding = &self.bindings[position];
-        qualify_grants(&mut grants, &binding.repository);
+        qualify_grants(&mut grants, &binding.route);
         let ttl_secs = self.token_ttl_secs.min(claims.expires_at - now);
         let token_id = uuid::Uuid::new_v4().to_string();
         let principal = Principal::Named {

@@ -676,13 +676,44 @@ fn test_resolves_file_url_against_the_response_url(
     );
 }
 
+#[rstest]
+#[case::route_prefix("/root/pypi/files/releases/demo-1.0-py3-none-any.whl")]
+#[case::different_digest("/root/pypi/files/bb22/demo-1.0-py3-none-any.whl")]
+#[case::different_filename("/root/pypi/files/aa11/other.whl")]
+#[case::extra_path_segment("/root/pypi/files/aa11/releases/demo-1.0-py3-none-any.whl")]
+fn test_incomplete_local_urls_resolve_register_and_rewrite(#[case] source_url: &str) {
+    let (out, registrations) = transform(
+        &one_file_page(source_url, r#"{"sha256":"aa11"}"#),
+        based_context("https://mirror.test/simple/demo/"),
+        6,
+    );
+    let detail = parse_detail(out.as_bytes()).unwrap();
+    assert_eq!(
+        (detail.files[0].url.as_str(), registrations),
+        (
+            "/root/pypi/files/aa11/demo-1.0-py3-none-any.whl",
+            vec![Registration {
+                filename: "demo-1.0-py3-none-any.whl".to_owned(),
+                sha256: "aa11".to_owned(),
+                url: format!("https://mirror.test{source_url}"),
+                size: None,
+                metadata: None,
+                provenance: None,
+            }],
+        )
+    );
+}
+
 #[test]
-fn test_legacy_record_urls_pass_through_unregistered() {
-    let page = r#"{"files":[{"filename":"demo-1.0-py3-none-any.whl",
-        "url":"/root/pypi/files/aa11/demo-1.0-py3-none-any.whl","hashes":{"sha256":"aa11"}}]}"#;
-    let (out, registrations) = transform(page, plain_context(), 6);
-    assert!(out.contains("/root/pypi/files/aa11/demo-1.0-py3-none-any.whl"));
-    assert!(registrations.is_empty());
+fn test_complete_legacy_record_url_passes_through_unregistered() {
+    let source_url = "/root/pypi/files/aa11/demo-1.0-py3-none-any.whl";
+    let (out, registrations) = transform(
+        &one_file_page(source_url, r#"{"sha256":"aa11"}"#),
+        based_context("https://mirror.test/simple/demo/"),
+        6,
+    );
+    let detail = parse_detail(out.as_bytes()).unwrap();
+    assert_eq!((detail.files[0].url.as_str(), registrations), (source_url, Vec::new()));
 }
 
 #[test]

@@ -420,7 +420,7 @@ fn present_file(mut file: File, route: &str, known_metadata: &BTreeMap<String, S
             metadata.clone(),
         )])));
     }
-    if !is_local_artifact_url(route, &file.url) {
+    if !is_local_artifact_url(route, &sha256, &file.filename, &file.url) {
         file.url = local_artifact_url(route, &sha256, &file.filename);
     }
     // The URL now points at peryx's route, which serves the blob but never the detached `.asc`

@@ -119,6 +119,27 @@ enum Claim {
     Conflict,
 }
 
+struct ClaimGuard<'a> {
+    plane: &'a ControlPlane,
+    key: &'a str,
+    sender: Option<watch::Sender<()>>,
+}
+
+impl ClaimGuard<'_> {
+    fn settle(mut self, result: &Result<CommandReceipt, ControlError>) {
+        self.plane.settle(self.key, result);
+        self.sender.take();
+    }
+}
+
+impl Drop for ClaimGuard<'_> {
+    fn drop(&mut self) {
+        if self.sender.is_some() {
+            self.plane.abandon(self.key);
+        }
+    }
+}
+
 #[derive(Default)]
 struct History {
     receipts: VecDeque<KeyEntry>,
@@ -198,8 +219,13 @@ impl ControlPlane {
                     return Err(error);
                 }
                 Claim::Execute(sender) => {
+                    let claim = ClaimGuard {
+                        plane: self,
+                        key,
+                        sender: Some(sender),
+                    };
                     let result = self.run(actor, &command).await;
-                    self.settle(key, &result, sender);
+                    claim.settle(&result);
                     return result;
                 }
                 Claim::Wait(mut receiver) => {
@@ -267,7 +293,7 @@ impl ControlPlane {
 
     /// Commits receipts, reopens failed keys, then wakes waiters after releasing the lock so they observe
     /// the settled slot.
-    fn settle(&self, key: &str, result: &Result<CommandReceipt, ControlError>, sender: watch::Sender<()>) {
+    fn settle(&self, key: &str, result: &Result<CommandReceipt, ControlError>) {
         let mut history = self.lock();
         match result {
             Ok(receipt) => {
@@ -277,8 +303,12 @@ impl ControlPlane {
             }
             Err(_) => history.receipts.retain(|entry| entry.key != key),
         }
-        drop(history);
-        drop(sender);
+    }
+
+    fn abandon(&self, key: &str) {
+        self.lock()
+            .receipts
+            .retain(|entry| entry.key != key || !matches!(entry.state, KeyState::Pending(_)));
     }
 
     fn record(&self, latency: i64) {

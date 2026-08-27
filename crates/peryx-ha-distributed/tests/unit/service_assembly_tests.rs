@@ -1040,17 +1040,24 @@ async fn bounded_shutdown_reports_a_stalled_owner() {
         Ok(())
     });
     assert!(owner.wait_shutdown(Duration::ZERO).await.is_none());
-    let failure = owner
+    let first_failure = owner
         .shutdown(AvailabilityShutdownStage::Listener, Duration::ZERO, |shutdown| {
             shutdown()
         })
         .await
         .unwrap();
+    let second_failure = owner.wait_shutdown(Duration::ZERO).await.unwrap();
+    let mut first_completion = first_failure.completion.unwrap();
+    let mut second_completion = second_failure.completion.unwrap();
     release.send(()).unwrap();
 
-    assert_eq!(failure.0, AvailabilityShutdownStage::Listener);
-    assert_eq!(failure.1.to_string(), "shutdown deadline exceeded");
+    assert_eq!(first_failure.stage, AvailabilityShutdownStage::Listener);
+    assert_eq!(first_failure.error.to_string(), "shutdown deadline exceeded");
+    assert_eq!(second_failure.stage, AvailabilityShutdownStage::Listener);
+    assert_eq!(second_failure.error.to_string(), "shutdown deadline exceeded");
     assert!(owner.wait_shutdown(DEADLOCK_GUARD).await.is_none());
+    first_completion.wait_for(|completed| *completed).await.unwrap();
+    second_completion.wait_for(|completed| *completed).await.unwrap();
     assert!(owner.wait_shutdown(DEADLOCK_GUARD).await.is_none());
 }
 
@@ -1076,10 +1083,8 @@ async fn active_shutdown_cancels_its_runtime() {
 #[tokio::test]
 async fn stalled_shutdown_moves_to_the_process_reaper() {
     let (release, released) = std::sync::mpsc::channel();
-    let (completed, completion) = tokio::sync::oneshot::channel();
     let mut owner = OwnedResource::Owned(move || -> Result<(), std::io::Error> {
         released.recv().unwrap();
-        completed.send(()).unwrap();
         Ok(())
     });
 
@@ -1089,12 +1094,13 @@ async fn stalled_shutdown_moves_to_the_process_reaper() {
         })
         .await
         .unwrap();
+    let mut completion = failure.completion.unwrap();
     drop(owner);
     release.send(()).unwrap();
 
-    assert_eq!(failure.0, AvailabilityShutdownStage::Runtime);
-    assert_eq!(failure.1.to_string(), "shutdown deadline exceeded");
-    completion.await.unwrap();
+    assert_eq!(failure.stage, AvailabilityShutdownStage::Runtime);
+    assert_eq!(failure.error.to_string(), "shutdown deadline exceeded");
+    completion.wait_for(|completed| *completed).await.unwrap();
 }
 
 #[tokio::test]
@@ -1108,8 +1114,9 @@ async fn bounded_shutdown_reports_an_owner_panic() {
         .await
         .unwrap();
 
-    assert_eq!(failure.0, AvailabilityShutdownStage::Runtime);
-    assert_eq!(failure.1.to_string(), "shutdown panicked: shutdown panic");
+    assert_eq!(failure.stage, AvailabilityShutdownStage::Runtime);
+    assert_eq!(failure.error.to_string(), "shutdown panicked: shutdown panic");
+    assert!(failure.completion.is_none());
 }
 
 #[tokio::test]

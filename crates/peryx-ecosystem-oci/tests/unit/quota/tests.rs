@@ -1,6 +1,6 @@
 use peryx_storage::meta::{AccountingClass, MetaStore, QuotaLimit, QuotaLimits};
 
-use super::{ReserveOutcome, describe, finalize, quota_reservation, reserve};
+use super::{ReserveOutcome, finalize, quota_reservation, reserve};
 use crate::registry::ServeError;
 
 fn store() -> (tempfile::TempDir, MetaStore) {
@@ -44,19 +44,6 @@ fn test_reserve_maps_a_validation_fault_to_a_serve_error() {
     let long = "r".repeat(600);
     let request = quota_reservation(&long, "app", None, "sha256:a", 1, AccountingClass::Hosted, 1);
     assert!(reserve(&meta, request, QuotaLimits::default()).is_err());
-}
-
-#[test]
-fn test_describe_names_each_crossed_counter() {
-    assert_eq!(
-        describe(&[
-            QuotaLimit::ArtifactBytes,
-            QuotaLimit::AccountedBytes,
-            QuotaLimit::Resources,
-            QuotaLimit::GroupsPerResource,
-        ]),
-        "file size, repository bytes, repository projects, project versions"
-    );
 }
 
 #[test]

@@ -16,6 +16,7 @@ use peryx_storage::meta::{
 
 use crate::upload_session::UploadStore as _;
 
+use crate::OCI_LEXICON;
 use crate::error::{ErrorCode, error_response};
 use crate::name::Reference;
 use crate::registry::ServeError;
@@ -161,10 +162,10 @@ fn describe(violations: &[QuotaLimit]) -> String {
     violations
         .iter()
         .map(|limit| match limit {
-            QuotaLimit::ArtifactBytes => "file size",
-            QuotaLimit::AccountedBytes => "repository bytes",
-            QuotaLimit::Resources => "repository projects",
-            QuotaLimit::GroupsPerResource => "project versions",
+            QuotaLimit::ArtifactBytes => format!("{} size", OCI_LEXICON.artifact),
+            QuotaLimit::AccountedBytes => format!("{} bytes", OCI_LEXICON.repository),
+            QuotaLimit::Resources => OCI_LEXICON.resources.to_owned(),
+            QuotaLimit::GroupsPerResource => OCI_LEXICON.groups.to_owned(),
         })
         .collect::<Vec<_>>()
         .join(", ")

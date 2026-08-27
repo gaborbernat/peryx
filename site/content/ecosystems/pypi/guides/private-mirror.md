@@ -216,12 +216,13 @@ timeout_secs = 900
 Run the identical job once while validating an upstream or warming a new node:
 
 ```shell
-peryx job run --config peryx.toml --repository corp --max-projects 10000 --concurrency 4 --timeout-secs 900
+peryx job run --config peryx.toml --target corp --item-limit 10000 --concurrency 4 --timeout-secs 900
 ```
 
 peryx publishes the root before project work begins. Cancellation or timeout stops new project requests and drops
-in-flight transfers; completed generations remain available. A run admits projects in canonical-name order up to
-`max_projects`. It bounds concurrent metadata requests apart from the node's job-worker limit and emits at most 100
+in-flight transfers; completed generations remain available. For a one-off run, `--target` selects the index route and
+`--item-limit` bounds projects in canonical-name order. The schedule table names those settings `repository` and
+`max_projects`. The job bounds concurrent metadata requests apart from the node's job-worker limit and emits at most 100
 progress updates. Named multi-source routes use their fallback rules unless `source` selects one configured upstream.
 Set an interval longer than a typical run and schedule it outside peak request periods.
 

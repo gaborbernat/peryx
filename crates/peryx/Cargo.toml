@@ -101,6 +101,7 @@ base64.workspace = true
 redb.workspace = true
 wiremock.workspace = true
 rcgen = "0.14.9"
+shlex.workspace = true
 
 [lints]
 workspace = true

@@ -237,6 +237,37 @@ fn test_the_largest_ttl_is_accepted() {
     assert_eq!(auth.token_ttl_secs, 86_400);
 }
 
+#[rstest]
+#[case::oci_below_minimum(
+    "oci",
+    true,
+    59,
+    Some("auth: `token_ttl_secs` must be at least 60 when a signing key and OCI index enable token authentication")
+)]
+#[case::oci_minimum("oci", true, 60, None)]
+#[case::oci_without_signing_key("oci", false, 1, None)]
+#[case::pypi_below_oci_minimum("pypi", true, 1, None)]
+fn test_token_lifetime_matches_active_service(
+    #[case] ecosystem: &str,
+    #[case] signing_key_configured: bool,
+    #[case] token_ttl_secs: i64,
+    #[case] expected: Option<&str>,
+) {
+    let signing_key = if signing_key_configured {
+        "signing_key = \"key\"\n"
+    } else {
+        ""
+    };
+    let config = toml_config(&format!(
+        "[auth]\n{signing_key}token_ttl_secs = {token_ttl_secs}\n[[index]]\nname = \"packages\"\necosystem = \"{ecosystem}\"\nhosted = true\n"
+    ));
+
+    assert_eq!(
+        config.validate().err().map(|error| error.to_string()).as_deref(),
+        expected
+    );
+}
+
 #[test]
 fn test_signing_key_reads_from_a_file() {
     let auth = toml_config("[auth]\nsigning_key_file = \"/run/secrets/key\"\n").auth;

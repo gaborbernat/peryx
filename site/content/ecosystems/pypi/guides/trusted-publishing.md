@@ -72,7 +72,8 @@ repeat that issuer byte for byte, and accepts RS256 signing keys that it discove
 redirects or use a JWT header or claim as a network location. Discovery requests have a five-second total timeout and a
 64 KiB body limit; JWKS responses have the same timeout and a 1 MiB body limit. Peryx limits identity tokens to 32 KiB
 and one hour from `iat` to `exp`, with no clock-skew allowance. It limits the subject to 2,048 bytes and the replay ID
-to 256 bytes. The internal token expires at the earlier of `token_ttl_secs` and the external identity expiry.
+to 256 bytes. The internal token expires at the earlier of `token_ttl_secs` and the external identity expiry. A
+deployment with no OCI index accepts `token_ttl_secs` from 1 through 86400.
 
 The algorithm allowlist and issuer-to-JWK binding implement
 [RFC 8725](https://www.rfc-editor.org/rfc/rfc8725.html#section-3). JWK metadata follows RFC 7517. Peryx accepts both

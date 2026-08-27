@@ -119,8 +119,9 @@ Each index inherits this value when it omits `anonymous_read`. A public index ca
 
 ## Set token lifetime
 
-`token_ttl_secs` under `[auth]` sets how long a minted token lives (default 300 seconds). A shorter lifetime makes a
-revoked ACL take hold sooner; a longer one cuts token-endpoint traffic for a busy CI fleet.
+`token_ttl_secs` under `[auth]` sets how long a minted token lives. The OCI token realm accepts 60 through 86400 seconds
+and defaults to 300. A shorter lifetime makes a revoked ACL take hold sooner; a longer one cuts token-endpoint traffic
+for a busy CI fleet.
 
 ```toml
 [auth]

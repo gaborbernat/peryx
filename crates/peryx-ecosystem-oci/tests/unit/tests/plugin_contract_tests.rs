@@ -2,11 +2,12 @@ use std::collections::BTreeSet;
 
 use peryx_core::{DefaultIndex, DefaultIndexKind};
 use peryx_driver::serving::{
-    CompiledEcosystemSettings, DistributedRuntime, EcosystemBrowse as _, EcosystemConfig as _,
-    EcosystemRegistration as _, EcosystemRuntime,
+    CompiledEcosystemSettings, DistributedRuntime, EcosystemAuth as _, EcosystemBrowse as _, EcosystemConfig as _,
+    EcosystemRegistration as _, EcosystemRuntime, PluginAuthConfig, PluginIndexConfig,
 };
 use peryx_driver::state::AppState;
 use peryx_index::IndexKind;
+use rstest::rstest;
 use utoipa::openapi::PathsBuilder;
 
 use crate::{ECOSYSTEM, OciPlugin, registration};
@@ -63,12 +64,83 @@ fn plugin_exposes_its_contract() {
     assert_eq!(
         (
             registration.registration.ecosystem(),
-            registration.auth.is_none(),
+            registration.auth.is_some(),
             registration.browse.is_some(),
             registration.snippets.is_none(),
             registration.priority,
         ),
         (ECOSYSTEM, true, true, true, 1)
+    );
+}
+
+#[test]
+fn plugin_auth_uses_only_shared_settings() {
+    assert_eq!(
+        (OciPlugin.fields(), OciPlugin.defaults()),
+        (&[] as &[&str], toml::Table::new())
+    );
+}
+
+#[test]
+fn plugin_auth_installation_needs_no_extension_state() {
+    let (_dir, mut state) = state();
+
+    assert_eq!(
+        peryx_driver::serving::EcosystemAuth::install(
+            &OciPlugin,
+            &mut state.auth_install_context().unwrap(),
+            &toml::Table::new(),
+        ),
+        Ok(())
+    );
+}
+
+#[rstest]
+#[case::below_minimum(
+    59,
+    Some("auth: `token_ttl_secs` must be at least 60 when a signing key and OCI index enable token authentication")
+)]
+#[case::minimum(60, None)]
+fn plugin_validates_oci_token_lifetime(#[case] token_ttl_secs: i64, #[case] expected: Option<&str>) {
+    let indexes = [PluginIndexConfig {
+        name: "images",
+        ecosystem: ECOSYSTEM,
+        writable: true,
+    }];
+
+    assert_eq!(
+        OciPlugin
+            .validate(PluginAuthConfig {
+                values: &toml::Table::new(),
+                signing_key_configured: true,
+                token_ttl_secs,
+                indexes: &indexes,
+            })
+            .err()
+            .as_deref(),
+        expected
+    );
+}
+
+#[rstest]
+#[case::no_signing_key(false, &[PluginIndexConfig {
+    name: "images",
+    ecosystem: ECOSYSTEM,
+    writable: true,
+}])]
+#[case::no_oci_index(true, &[])]
+fn plugin_accepts_short_lifetime_without_oci_token_service(
+    #[case] signing_key_configured: bool,
+    #[case] indexes: &[PluginIndexConfig<'_>],
+) {
+    assert_eq!(
+        OciPlugin.validate(PluginAuthConfig {
+            values: &toml::Table::new(),
+            signing_key_configured,
+            token_ttl_secs: 1,
+            indexes,
+        }),
+        Ok(())
     );
 }
 

@@ -12,15 +12,16 @@ fn test_path_segments_encode_reserved_characters() {
     );
 }
 
-#[test]
-fn test_is_local_artifact_url_matches_only_the_route_files_prefix() {
-    assert!(is_local_artifact_url("root/alpha", "/root/alpha/files/aa/artifact.bin"));
-    assert!(!is_local_artifact_url("root/alpha", "/artifacts/artifact.bin"));
-    assert!(!is_local_artifact_url("root/alpha", "/other/files/aa/artifact.bin"));
-    assert!(!is_local_artifact_url(
-        "root/alpha",
-        "https://files.example/artifact.bin"
-    ));
+#[rstest]
+#[case::complete("/root/alpha/files/aa/artifact.bin", true)]
+#[case::different_route("/other/files/aa/artifact.bin", false)]
+#[case::digest_prefix("/root/alpha/files/aa0/artifact.bin", false)]
+#[case::digest_suffix("/root/alpha/files/a/artifact.bin", false)]
+#[case::different_filename("/root/alpha/files/aa/other.bin", false)]
+#[case::extra_path_segment("/root/alpha/files/aa/extra/artifact.bin", false)]
+#[case::absolute("https://files.example/artifact.bin", false)]
+fn test_is_local_artifact_url_matches_the_complete_url(#[case] url: &str, #[case] expected: bool) {
+    assert_eq!(is_local_artifact_url("root/alpha", "aa", "artifact.bin", url), expected);
 }
 
 #[test]

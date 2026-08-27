@@ -49,14 +49,10 @@ pub fn local_artifact_url(route: &str, sha256: &str, artifact: &str) -> String {
     url
 }
 
-/// A bare leading slash can also identify a valid upstream artifact.
+/// Whether `url` is the complete local URL for this artifact.
 #[must_use]
-pub fn is_local_artifact_url(route: &str, url: &str) -> bool {
-    let mut prefix = String::with_capacity(route.len() + 8);
-    prefix.push('/');
-    push_path(&mut prefix, route);
-    prefix.push_str("/files/");
-    url.starts_with(&prefix)
+pub fn is_local_artifact_url(route: &str, sha256: &str, artifact: &str, url: &str) -> bool {
+    local_artifact_url(route, sha256, artifact) == url
 }
 
 /// # Errors

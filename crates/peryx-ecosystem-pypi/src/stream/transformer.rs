@@ -576,7 +576,11 @@ impl PageTransformer {
         if let Some(yanked) = self.context.yanked.get(&file.filename) {
             file.yanked = yanked.clone();
         }
-        if is_local_artifact_url(&self.context.route, &file.url) {
+        let sha256 = file.hashes.get("sha256").cloned();
+        if sha256
+            .as_deref()
+            .is_some_and(|sha256| is_local_artifact_url(&self.context.route, sha256, &file.filename, &file.url))
+        {
             // A legacy cached record already carries peryx-route URLs; serve it as-is, but still drop
             // the gpg-sig since peryx never serves the detached `.asc` at that route.
             file.gpg_sig = None;
@@ -590,7 +594,7 @@ impl PageTransformer {
         if let Some(base) = &self.context.base {
             absolutize(base, &mut file.url);
         }
-        if let Some(sha256) = file.hashes.get("sha256").cloned() {
+        if let Some(sha256) = sha256 {
             let metadata = if supports_metadata_sibling(&file.filename) {
                 match file.metadata() {
                     CoreMetadata::Hashes(hashes) => hashes

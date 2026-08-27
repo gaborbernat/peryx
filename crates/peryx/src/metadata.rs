@@ -26,9 +26,8 @@ pub fn open_existing_read_only(path: &Path, plugins: &PluginRegistry) -> anyhow:
     if !plugins.has_metadata_migrations() {
         return Ok(store);
     }
-    let probe = Probe::copy(path)?;
     let reports = plugins
-        .migrate_metadata(&MetaStore::open_existing(&probe.path).context("open metadata schema probe")?)
+        .dry_run_metadata_migrations(&store)
         .context("check metadata schema")?;
     ensure!(
         reports.iter().all(|report| report.rewritten == 0),

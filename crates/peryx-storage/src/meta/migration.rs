@@ -5,7 +5,7 @@ use redb::{ReadableTable as _, TableDefinition, TableHandle as _};
 
 use super::{
     ANALYTICS, MetaError, MetaStore, POLICY_DECISION, POLICY_DECISION_CURRENT, POLICY_DECISION_CURRENT_ID, QUOTA_GROUP,
-    QUOTA_RESERVATION, QUOTA_RESOURCE, QUOTA_USAGE,
+    QUOTA_RESERVATION, QUOTA_RESOURCE, QUOTA_USAGE, open_optional_table,
 };
 
 const BATCH_SIZE: usize = 256;
@@ -98,6 +98,128 @@ impl MetaStore {
         }
         Ok(report)
     }
+
+    /// Detects pending rewrites without requiring a writable transaction.
+    ///
+    /// # Errors
+    /// Returns the first store or owner error without writing to the store.
+    pub fn dry_run_metadata_migration(
+        &self,
+        migration: &dyn MetadataMigration,
+    ) -> Result<MetadataMigrationReport, MetadataMigrationError> {
+        let txn = self.db.begin_read().map_err(MetaError::from)?;
+        let mut report = MetadataMigrationReport::default();
+        for &record_set in migration.record_sets() {
+            dry_run_current(&txn, migration, record_set, &mut report)?;
+        }
+        for &source in migration.legacy_sources() {
+            dry_run_legacy(&txn, migration, source, &mut report)?;
+        }
+        Ok(report)
+    }
+}
+
+fn dry_run_current(
+    txn: &redb::ReadTransaction,
+    migration: &dyn MetadataMigration,
+    record_set: MetadataRecordSet,
+    report: &mut MetadataMigrationReport,
+) -> Result<(), MetadataMigrationError> {
+    dry_run_source(
+        txn,
+        migration,
+        target_name(record_set),
+        target_value_kind(record_set),
+        record_set,
+        report,
+    )
+}
+
+fn dry_run_legacy(
+    txn: &redb::ReadTransaction,
+    migration: &dyn MetadataMigration,
+    source: LegacyMetadataSource,
+    report: &mut MetadataMigrationReport,
+) -> Result<(), MetadataMigrationError> {
+    if source.table == target_name(source.target) {
+        return dry_run_current(txn, migration, source.target, report);
+    }
+    dry_run_source(txn, migration, source.table, source.value_kind, source.target, report)
+}
+
+fn dry_run_source(
+    txn: &redb::ReadTransaction,
+    migration: &dyn MetadataMigration,
+    table: &'static str,
+    value_kind: MetadataValueKind,
+    record_set: MetadataRecordSet,
+    report: &mut MetadataMigrationReport,
+) -> Result<(), MetadataMigrationError> {
+    match value_kind {
+        MetadataValueKind::Bytes => dry_run_bytes(txn, migration, table, record_set, report),
+        MetadataValueKind::Text => dry_run_text(txn, migration, table, record_set, report),
+    }
+}
+
+fn dry_run_bytes(
+    txn: &redb::ReadTransaction,
+    migration: &dyn MetadataMigration,
+    table: &'static str,
+    record_set: MetadataRecordSet,
+    report: &mut MetadataMigrationReport,
+) -> Result<(), MetadataMigrationError> {
+    let Some(table) = open_optional_table(txn, TableDefinition::<&str, &[u8]>::new(table))? else {
+        return Ok(());
+    };
+    for entry in table.iter().map_err(MetaError::from)? {
+        let (key, value) = entry.map_err(MetaError::from)?;
+        dry_run_record(
+            migration,
+            record_set,
+            &MetadataRecord {
+                key: key.value().to_owned(),
+                value: value.value().to_vec(),
+            },
+            report,
+        )?;
+    }
+    Ok(())
+}
+
+fn dry_run_text(
+    txn: &redb::ReadTransaction,
+    migration: &dyn MetadataMigration,
+    table: &'static str,
+    record_set: MetadataRecordSet,
+    report: &mut MetadataMigrationReport,
+) -> Result<(), MetadataMigrationError> {
+    let Some(table) = open_optional_table(txn, TableDefinition::<&str, &str>::new(table))? else {
+        return Ok(());
+    };
+    for entry in table.iter().map_err(MetaError::from)? {
+        let (key, value) = entry.map_err(MetaError::from)?;
+        dry_run_record(
+            migration,
+            record_set,
+            &MetadataRecord {
+                key: key.value().to_owned(),
+                value: value.value().as_bytes().to_vec(),
+            },
+            report,
+        )?;
+    }
+    Ok(())
+}
+
+fn dry_run_record(
+    migration: &dyn MetadataMigration,
+    record_set: MetadataRecordSet,
+    record: &MetadataRecord,
+    report: &mut MetadataMigrationReport,
+) -> Result<(), MetadataMigrationError> {
+    report.scanned += 1;
+    report.rewritten += usize::from(rewrite(migration, record_set, record)?.is_some());
+    Ok(())
 }
 
 fn migrate_current(
@@ -498,6 +620,15 @@ const fn target_name(record_set: MetadataRecordSet) -> &'static str {
         MetadataRecordSet::PolicyDecisionCurrent => "policy_decision_current",
         MetadataRecordSet::PolicyDecisionCurrentById => "policy_decision_current_id",
         MetadataRecordSet::Analytics => "analytics",
+    }
+}
+
+const fn target_value_kind(record_set: MetadataRecordSet) -> MetadataValueKind {
+    match record_set {
+        MetadataRecordSet::PolicyDecisionCurrent | MetadataRecordSet::PolicyDecisionCurrentById => {
+            MetadataValueKind::Text
+        }
+        _ => MetadataValueKind::Bytes,
     }
 }
 

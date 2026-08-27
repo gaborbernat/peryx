@@ -329,8 +329,10 @@ fn registry_runs_one_metadata_capability() {
     let (_directory, store) = metadata_store();
 
     assert!(registry.has_metadata_migrations());
-    assert_eq!(registry.migrate_metadata(&store).unwrap()[0].rewritten, 1);
+    assert_eq!(registry.dry_run_metadata_migrations(&store).unwrap()[0].rewritten, 1);
     assert_eq!(*calls.lock().unwrap(), ["only"]);
+    assert_eq!(registry.migrate_metadata(&store).unwrap()[0].rewritten, 1);
+    assert_eq!(*calls.lock().unwrap(), ["only", "only"]);
 }
 
 #[test]

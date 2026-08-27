@@ -107,7 +107,7 @@ pub struct QuotaAllocation<'a> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QuotaRepairReport {
     pub released: usize,
-    pub remaining: bool,
+    pub remaining: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -389,28 +389,34 @@ impl MetaStore {
         )
     }
 
-    /// Releases at most `limit` pending reservations abandoned by a restart.
+    /// Releases at most `limit` pending reservations created on or before `created_before_unix`.
     ///
     /// # Errors
     /// Returns a decode or store error without partially changing counters.
-    pub fn repair_abandoned_quota_reservations(&self, limit: usize) -> Result<QuotaRepairReport, QuotaError> {
-        if limit == 0 {
-            return Ok(QuotaRepairReport::default());
-        }
+    pub fn repair_abandoned_quota_reservations(
+        &self,
+        created_before_unix: i64,
+        limit: usize,
+    ) -> Result<QuotaRepairReport, QuotaError> {
         let txn = self.db.begin_write().map_err(MetaError::from)?;
-        let (ids, remaining) = {
-            let table = txn.open_table(QUOTA_PENDING).map_err(MetaError::from)?;
-            let mut entries = table.iter().map_err(MetaError::from)?;
-            let ids = entries
-                .by_ref()
-                .take(limit)
-                .map(|entry| {
-                    entry
-                        .map(|(id, _)| Uuid::from_u128(id.value()))
-                        .map_err(MetaError::from)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            (ids, entries.next().transpose().map_err(MetaError::from)?.is_some())
+        let (ids, eligible) = {
+            let pending = txn.open_table(QUOTA_PENDING).map_err(MetaError::from)?;
+            let reservations = txn.open_table(QUOTA_RESERVATION).map_err(MetaError::from)?;
+            let mut ids = Vec::with_capacity(limit);
+            let mut eligible = 0;
+            for entry in pending.iter().map_err(MetaError::from)? {
+                let (id, _) = entry.map_err(MetaError::from)?;
+                let id = Uuid::from_u128(id.value());
+                let reservation = read_quota_reservation(&reservations, &id.to_string())?
+                    .ok_or(QuotaError::ReservationUnavailable { id })?;
+                if reservation.created_at_unix <= created_before_unix {
+                    eligible += 1;
+                    if ids.len() < limit {
+                        ids.push(id);
+                    }
+                }
+            }
+            (ids, eligible)
         };
         for id in &ids {
             release(&txn, *id, ReleaseScope::Pending)?;
@@ -418,7 +424,7 @@ impl MetaStore {
         txn.commit().map_err(MetaError::from)?;
         Ok(QuotaRepairReport {
             released: ids.len(),
-            remaining,
+            remaining: eligible - ids.len(),
         })
     }
 

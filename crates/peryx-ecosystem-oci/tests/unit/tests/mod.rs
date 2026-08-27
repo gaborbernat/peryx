@@ -757,6 +757,7 @@ struct EpochAuthority {
     committed: std::sync::atomic::AtomicU64,
     current: std::sync::atomic::AtomicU64,
     homed: bool,
+    entered: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl EpochAuthority {
@@ -765,6 +766,7 @@ impl EpochAuthority {
             committed: std::sync::atomic::AtomicU64::new(epoch),
             current: std::sync::atomic::AtomicU64::new(epoch),
             homed,
+            entered: None,
         })
     }
 
@@ -773,7 +775,21 @@ impl EpochAuthority {
             committed: std::sync::atomic::AtomicU64::new(leased),
             current: std::sync::atomic::AtomicU64::new(current),
             homed: true,
+            entered: None,
         })
+    }
+
+    fn blocked(epoch: u64) -> (Arc<Self>, Arc<tokio::sync::Semaphore>) {
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        (
+            Arc::new(Self {
+                committed: std::sync::atomic::AtomicU64::new(epoch),
+                current: std::sync::atomic::AtomicU64::new(epoch),
+                homed: true,
+                entered: Some(entered.clone()),
+            }),
+            entered,
+        )
     }
 
     fn settle(&self) {
@@ -793,6 +809,10 @@ impl peryx_driver::state::OwnershipAuthority for EpochAuthority {
     }
 
     async fn admit_epoch(&self, _authority: &str, presented: u64) -> bool {
+        if let Some(entered) = &self.entered {
+            entered.add_permits(1);
+            return std::future::pending().await;
+        }
         let current = self.current.load(std::sync::atomic::Ordering::SeqCst);
         current != 0 && presented == current
     }

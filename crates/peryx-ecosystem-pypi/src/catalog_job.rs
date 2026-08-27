@@ -496,6 +496,7 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
     let mut report = JobReport {
         processed: 0,
         changed: root_changed,
+        ..JobReport::default()
     };
     loop {
         let next = tokio::select! {

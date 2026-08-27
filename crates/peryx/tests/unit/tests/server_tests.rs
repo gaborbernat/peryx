@@ -9,7 +9,8 @@ use http_body_util::BodyExt as _;
 use peryx_identity::{Action, ProviderId};
 use peryx_policy::PolicyAction;
 use peryx_storage::meta::{
-    JobKind, JobState, MetaStore, MetadataMigration, MetadataRecord, MetadataRecordSet, NewJobRun, PolicyDecisionQuery,
+    AccountingClass, JobKind, JobState, MetaStore, MetadataMigration, MetadataRecord, MetadataRecordSet, NewJobRun,
+    NewQuotaReservation, PolicyDecisionQuery, QuotaLimits,
 };
 use peryx_upstream::Auth;
 use rstest::rstest;
@@ -370,6 +371,57 @@ fn test_build_state_opens_configured_data_dir() {
 
     assert_eq!(state.serving.indexes.len(), config.indexes.len());
     assert!(dir.path().join("peryx.redb").exists());
+}
+
+#[test]
+fn test_build_state_repairs_abandoned_quota_before_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        ..neutral_config()
+    };
+    let path = dir.path().join("peryx.redb");
+    let meta = MetaStore::open(&path).unwrap();
+    for serial in 0..=peryx_driver::jobs::QUOTA_REPAIR_BATCH {
+        let digest = format!("sha256:stale-{serial}");
+        meta.reserve_quota(
+            NewQuotaReservation {
+                repository: "private",
+                resource: Some(&digest),
+                group: None,
+                digest: &digest,
+                bytes: 1,
+                class: AccountingClass::Hosted,
+                created_at_unix: 1,
+            },
+            QuotaLimits::default(),
+        )
+        .unwrap();
+    }
+    drop(meta);
+
+    let state = build_state(&config).unwrap();
+    let reservation = state
+        .serving
+        .meta
+        .reserve_quota(
+            NewQuotaReservation {
+                repository: "private",
+                resource: Some("next"),
+                group: None,
+                digest: "sha256:next",
+                bytes: 1,
+                class: AccountingClass::Hosted,
+                created_at_unix: 2,
+            },
+            QuotaLimits {
+                max_accounted_bytes: Some(1),
+                ..QuotaLimits::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(reservation.bytes, 1);
 }
 
 #[rstest]

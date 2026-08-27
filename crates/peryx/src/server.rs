@@ -162,10 +162,20 @@ fn build_state_with_active_backend_and_plugins(
         .context("validate configuration")?;
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("create data directory {}", config.data_dir.display()))?;
-    let meta_path = config.data_dir.join("peryx.redb");
-    let meta = crate::metadata::open(&meta_path, plugins)?;
     let configured_replica = config.availability.is_replica_mode();
     let read_only = config.read_only || configured_replica;
+    let meta_path = config.data_dir.join("peryx.redb");
+    let meta = crate::metadata::open(&meta_path, plugins)?;
+    if !read_only {
+        loop {
+            let report = meta
+                .repair_abandoned_quota_reservations(i64::MAX, peryx_driver::jobs::QUOTA_REPAIR_BATCH)
+                .context("repair abandoned quota reservations")?;
+            if report.remaining == 0 {
+                break;
+            }
+        }
+    }
     if config.availability.replication().is_some() {
         if read_only {
             let active = meta.writer_identity().context("read metadata store writer identity")?;

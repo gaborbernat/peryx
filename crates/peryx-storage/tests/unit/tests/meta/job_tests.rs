@@ -40,6 +40,8 @@ fn test_start_job_run_opens_a_running_record() {
             finished_at_unix: None,
             items_processed: 0,
             items_changed: 0,
+            quota_released: 0,
+            quota_remaining: 0,
             error: None,
         },
     );
@@ -69,6 +71,8 @@ fn test_start_job_run_records_repository_ownership() {
             finished_at_unix: None,
             items_processed: 0,
             items_changed: 0,
+            quota_released: 0,
+            quota_remaining: 0,
             error: None,
         })
     );
@@ -89,7 +93,10 @@ fn test_job_run_record_without_repository_remains_readable() {
     }))
     .unwrap();
 
-    assert_eq!(record.repository, None);
+    assert_eq!(
+        (record.repository, record.quota_released, record.quota_remaining),
+        (None, 0, 0)
+    );
 }
 
 #[test]
@@ -107,10 +114,14 @@ fn test_finish_job_run_records_success_and_counters() {
         finished_at_unix: Some(142),
         items_processed: 9,
         items_changed: 3,
+        quota_released: 2,
+        quota_remaining: 3,
         error: None,
     };
     assert_eq!(
-        store.finish_job_run(&id, JobOutcome::succeeded(142, 9, 3)).unwrap(),
+        store
+            .finish_job_run(&id, JobOutcome::succeeded(142, 9, 3).with_quota(2, 3))
+            .unwrap(),
         FinishJobRun::Finished(expected.clone())
     );
     assert_eq!(store.get_job_run(&id).unwrap(), Some(expected));
@@ -131,6 +142,8 @@ fn test_finish_job_run_records_failure_with_error() {
         finished_at_unix: Some(110),
         items_processed: 4,
         items_changed: 0,
+        quota_released: 0,
+        quota_remaining: 0,
         error: Some("upstream 503".to_owned()),
     };
     assert_eq!(
@@ -157,6 +170,8 @@ fn test_finish_job_run_records_cancellation() {
         finished_at_unix: Some(110),
         items_processed: 4,
         items_changed: 1,
+        quota_released: 0,
+        quota_remaining: 0,
         error: None,
     };
     assert_eq!(
@@ -329,6 +344,8 @@ fn test_finish_job_run_truncates_error_at_a_utf8_boundary() {
         finished_at_unix: Some(20),
         items_processed: 0,
         items_changed: 0,
+        quota_released: 0,
+        quota_remaining: 0,
         error: Some("x".repeat(2_047)),
     };
     assert_eq!(

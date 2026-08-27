@@ -59,12 +59,13 @@ Protocol limits and denial responses belong to ecosystem owners:
 
 ## Restart repair
 
-An interrupted process can leave reservations without a live writer. The repair API accepts a row limit and releases a
-bounded number of pending entries per pass. It leaves committed allocations intact and reports whether more work
-remains.
+An interrupted process can leave reservations without a live writer. A writable server releases all pending reservations
+at startup, before it accepts writes. The recurring write-ledger job releases a bounded batch of reservations older than
+one hour; the age threshold protects writers that are still committing. Each pass reports the number released and the
+number of eligible reservations left for the next pass.
 
 A separate pending index keeps repair work independent of committed history. One repair pass uses memory proportional to
-its row limit and commits its counter changes together.
+its batch size and commits its counter changes together. Committed allocations remain intact.
 
 ## Status API
 

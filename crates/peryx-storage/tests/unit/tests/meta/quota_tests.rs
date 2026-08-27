@@ -940,17 +940,8 @@ fn test_quota_parallel_reservations_admit_each_artifact_within_the_limit(artifac
     barrier.wait();
     let results = threads.map(|thread| thread.join().unwrap());
 
-    assert_eq!(
-        (
-            results.iter().filter(|result| result.is_ok()).count(),
-            results
-                .iter()
-                .filter(|result| matches!(result, Err(QuotaError::Exceeded { .. })))
-                .count(),
-            meta.quota_usage("private").unwrap().artifact_bytes.reserved,
-        ),
-        (2, 0, 14)
-    );
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(meta.quota_usage("private").unwrap().artifact_bytes.reserved, 14);
 }
 
 #[test]

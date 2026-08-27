@@ -416,8 +416,31 @@ async fn test_inspect_and_list_report_missing_and_bad_limit() {
     assert_eq!(bad_limit.0, StatusCode::BAD_REQUEST);
 }
 
+#[rstest]
+#[case::empty("/+repositories?state=")]
+#[case::unknown("/+repositories?state=disabledd")]
 #[tokio::test]
-async fn test_list_filters_by_state_and_paginates() {
+async fn test_list_rejects_invalid_state(#[case] uri: &str) {
+    let fixture = Fixture::new().await;
+    fixture.create("a").await;
+
+    let (status, _, body) = fixture.send(Method::GET, uri, Some(ADMIN), None).await;
+
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"error": "state must be enabled or disabled"})
+        )
+    );
+}
+
+#[rstest]
+#[case::omitted("/+repositories", vec!["disabled", "enabled"])]
+#[case::enabled("/+repositories?state=enabled", vec!["enabled"])]
+#[case::disabled("/+repositories?state=disabled", vec!["disabled"])]
+#[tokio::test]
+async fn test_list_filters_by_state(#[case] uri: &str, #[case] expected: Vec<&str>) {
     let fixture = Fixture::new().await;
     let a = fixture.create("a").await;
     fixture.create("b").await;
@@ -428,10 +451,23 @@ async fn test_list_filters_by_state_and_paginates() {
         )
         .await;
 
-    let (_, _, disabled) = fixture
-        .send(Method::GET, "/+repositories?state=disabled", Some(ADMIN), None)
-        .await;
-    assert_eq!(disabled["repositories"].as_array().unwrap().len(), 1);
+    let (status, _, body) = fixture.send(Method::GET, uri, Some(ADMIN), None).await;
+    let mut states: Vec<&str> = body["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repository| repository["state"].as_str().unwrap())
+        .collect();
+    states.sort_unstable();
+
+    assert_eq!((status, states), (StatusCode::OK, expected));
+}
+
+#[tokio::test]
+async fn test_list_paginates() {
+    let fixture = Fixture::new().await;
+    fixture.create("a").await;
+    fixture.create("b").await;
 
     let (_, _, first) = fixture
         .send(Method::GET, "/+repositories?limit=1", Some(ADMIN), None)

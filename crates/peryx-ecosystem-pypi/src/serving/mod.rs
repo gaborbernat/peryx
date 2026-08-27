@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::extract::{Multipart, Request};
+use axum::extract::{FromRequest as _, Multipart, Request};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::FutureExt;
@@ -301,12 +301,18 @@ impl IndexedProtocolDriver for PypiServing {
             .await
     }
 
-    async fn post(&self, state: Arc<ServingState>, path: String, headers: HeaderMap, multipart: Multipart) -> Response {
+    async fn post(&self, state: Arc<ServingState>, path: String, request: Request) -> Response {
+        let headers = request.headers().clone();
+        let multipart = match Multipart::from_request(request, &()).await {
+            Ok(multipart) => multipart,
+            Err(rejection) => return rejection.into_response(),
+        };
         pypi_dispatch_post(state, path, headers, multipart).boxed().await
     }
 
-    async fn put(&self, state: Arc<ServingState>, uri: Uri, headers: HeaderMap) -> Response {
-        pypi_dispatch_put(state, uri, headers).boxed().await
+    async fn put(&self, state: Arc<ServingState>, request: Request) -> Response {
+        let (parts, _) = request.into_parts();
+        pypi_dispatch_put(state, parts.uri, parts.headers).boxed().await
     }
 
     async fn delete(&self, state: Arc<ServingState>, uri: Uri, headers: HeaderMap) -> Response {

@@ -78,12 +78,7 @@ async fn test_unwired_state_serves_503_when_a_driver_is_missing() {
         (Method::GET, "/alpha/catalog/", Body::empty(), None),
         (Method::PUT, "/alpha/artifacts/item", Body::empty(), None),
         (Method::DELETE, "/alpha/artifacts/item", Body::empty(), None),
-        (
-            Method::POST,
-            "/alpha/",
-            Body::from("--x--\r\n"),
-            Some("multipart/form-data; boundary=x"),
-        ),
+        (Method::POST, "/alpha/", Body::from("{}"), Some("application/json")),
     ];
     for (method, uri, body, content_type) in cases {
         let mut builder = Request::builder().method(method.clone()).uri(uri);
@@ -255,19 +250,13 @@ impl IndexedProtocolDriver for StubServing {
         &self,
         _state: std::sync::Arc<ServingState>,
         _path: String,
-        _headers: axum::http::HeaderMap,
-        _multipart: axum::extract::Multipart,
+        request: axum::extract::Request,
     ) -> axum::response::Response {
-        axum::response::IntoResponse::into_response(StatusCode::OK)
+        request_summary(request).await
     }
 
-    async fn put(
-        &self,
-        _state: std::sync::Arc<ServingState>,
-        _uri: axum::http::Uri,
-        _headers: axum::http::HeaderMap,
-    ) -> axum::response::Response {
-        axum::response::IntoResponse::into_response(StatusCode::OK)
+    async fn put(&self, _state: std::sync::Arc<ServingState>, request: axum::extract::Request) -> Response {
+        request_summary(request).await
     }
 
     async fn delete(
@@ -278,6 +267,19 @@ impl IndexedProtocolDriver for StubServing {
     ) -> axum::response::Response {
         axum::response::IntoResponse::into_response(StatusCode::OK)
     }
+}
+
+async fn request_summary(request: axum::extract::Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    format!(
+        "{} {} {} {}",
+        parts.method,
+        parts.uri,
+        parts.headers[axum::http::header::CONTENT_TYPE].to_str().unwrap(),
+        String::from_utf8(body.to_vec()).unwrap(),
+    )
+    .into_response()
 }
 
 struct AbsoluteDriver;
@@ -424,27 +426,35 @@ async fn test_driver_mismatch_is_not_routable() {
 }
 
 #[rstest]
-#[case::post(Method::POST, "/alpha/", Some("multipart/form-data; boundary=x"))]
-#[case::put(Method::PUT, "/alpha/item", None)]
-#[case::delete(Method::DELETE, "/alpha/item", None)]
+#[case::post(Method::POST, "/alpha/", "post body", "POST /alpha/ application/json post body")]
+#[case::put(Method::PUT, "/alpha/item", "put body", "PUT /alpha/item application/json put body")]
+#[case::delete(Method::DELETE, "/alpha/item", "", "")]
 #[tokio::test]
-async fn test_registered_driver_handles_mutations(
+async fn test_registered_driver_handles_mutation(
     #[case] method: Method,
     #[case] uri: &str,
-    #[case] content_type: Option<&str>,
+    #[case] body: &str,
+    #[case] expected: &str,
 ) {
     let (_dir, state) = unwired_state_with(vec![test_index("alpha")]);
     let mut state = std::sync::Arc::into_inner(state).unwrap();
     register_indexed(&mut state, StubServing(peryx_core::Ecosystem::new("example")));
-    let mut request = Request::builder().method(method).uri(uri);
-    if let Some(content_type) = content_type {
-        request = request.header("content-type", content_type);
-    }
     let response = crate::router(std::sync::Arc::new(state))
-        .oneshot(request.body(Body::from("--x--\r\n")).unwrap())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        expected
+    );
 }
 
 #[rstest]
@@ -559,28 +569,6 @@ fn test_an_unwired_state_holds_no_driver_for_any_ecosystem() {
     ] {
         assert!(state.driver_for(&ecosystem).is_none(), "{ecosystem} was wired in");
     }
-}
-
-#[tokio::test]
-async fn test_post_without_multipart_content_type_is_bad_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
-    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
-    let mut state = AppState::new(meta, blobs, 60, vec![test_index("alpha")]);
-    register_indexed(&mut state, StubServing(peryx_core::Ecosystem::new("example")));
-
-    let response = crate::router(std::sync::Arc::new(state))
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/alpha/")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

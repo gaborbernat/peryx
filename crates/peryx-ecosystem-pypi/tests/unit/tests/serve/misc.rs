@@ -676,37 +676,22 @@ fn live_stream(
     }
 }
 
+#[rstest]
+#[case::unresolved("nowhere")]
+#[case::non_root("pypi/extra")]
 #[tokio::test]
-async fn test_upload_to_an_unresolvable_or_non_root_path_is_rejected() {
-    use axum::extract::FromRequest as _;
-
-    async fn empty_multipart() -> axum::extract::Multipart {
-        let request = axum::http::Request::builder()
-            .header("content-type", "multipart/form-data; boundary=x")
-            .body(axum::body::Body::from("--x--\r\n"))
-            .unwrap();
-        axum::extract::Multipart::from_request(request, &()).await.unwrap()
-    }
-
+async fn test_upload_to_an_unresolvable_or_non_root_path_is_rejected(#[case] path: &str) {
     let h = harness().await;
-
-    let unresolved = crate::serving::PypiServing
-        .post(
-            h.state.serving.clone(),
-            "nowhere".to_owned(),
-            axum::http::HeaderMap::new(),
-            empty_multipart().await,
-        )
-        .await;
-    assert_eq!(unresolved.status(), StatusCode::NOT_FOUND);
-    let non_root = crate::serving::PypiServing
-        .post(
-            h.state.serving.clone(),
-            "pypi/extra".to_owned(),
-            axum::http::HeaderMap::new(),
-            empty_multipart().await,
-        )
-        .await;
-    assert_eq!(non_root.status(), StatusCode::NOT_FOUND);
+    let request = axum::http::Request::builder()
+        .header("content-type", "multipart/form-data; boundary=x")
+        .body(axum::body::Body::from("--x--\r\n"))
+        .unwrap();
+    assert_eq!(
+        crate::serving::PypiServing
+            .post(h.state.serving.clone(), path.to_owned(), request)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 use crate::tests::http::placement_harness;

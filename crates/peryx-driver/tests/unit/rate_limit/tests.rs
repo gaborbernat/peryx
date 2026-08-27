@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, FromRequest as _, Multipart};
+use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
 use axum::response::{IntoResponse as _, Response};
 use axum::{Router, middleware, routing::get};
@@ -66,17 +66,11 @@ impl IndexedProtocolDriver for IndexedDriver {
         StatusCode::NO_CONTENT.into_response()
     }
 
-    async fn post(
-        &self,
-        _state: Arc<ServingState>,
-        _path: String,
-        _headers: HeaderMap,
-        _multipart: Multipart,
-    ) -> Response {
+    async fn post(&self, _state: Arc<ServingState>, _path: String, _request: axum::extract::Request) -> Response {
         StatusCode::NO_CONTENT.into_response()
     }
 
-    async fn put(&self, _state: Arc<ServingState>, _uri: Uri, _headers: HeaderMap) -> Response {
+    async fn put(&self, _state: Arc<ServingState>, _request: axum::extract::Request) -> Response {
         StatusCode::NO_CONTENT.into_response()
     }
 
@@ -123,15 +117,6 @@ impl AbsoluteProtocolDriver for AbsoluteDriver {
 async fn test_protocol_fixtures_serve_supported_requests() {
     let (_dir, state) = app(RateLimitConfig::default());
     let serving = Arc::clone(&state.serving);
-    let multipart = Multipart::from_request(
-        Request::builder()
-            .header(header::CONTENT_TYPE, "multipart/form-data; boundary=fixture")
-            .body(Body::from("--fixture--\r\n"))
-            .unwrap(),
-        &(),
-    )
-    .await
-    .unwrap();
     let indexed = IndexedDriver;
 
     assert_eq!(
@@ -150,7 +135,11 @@ async fn test_protocol_fixtures_serve_supported_requests() {
     );
     assert_eq!(
         indexed
-            .post(Arc::clone(&serving), "/items".to_owned(), HeaderMap::new(), multipart,)
+            .post(
+                Arc::clone(&serving),
+                "/items".to_owned(),
+                Request::builder().body(Body::from("post body")).unwrap(),
+            )
             .await
             .status(),
         StatusCode::NO_CONTENT
@@ -159,8 +148,11 @@ async fn test_protocol_fixtures_serve_supported_requests() {
         indexed
             .put(
                 Arc::clone(&serving),
-                Uri::from_static("/items/resource"),
-                HeaderMap::new(),
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/items/resource")
+                    .body(Body::from("put body"))
+                    .unwrap(),
             )
             .await
             .status(),

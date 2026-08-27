@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::{FromRequest, Multipart, Request};
-use axum::http::{HeaderMap, Method, Uri, header};
+use axum::extract::Request;
+use axum::http::{HeaderMap, Method, Uri};
 use axum::response::IntoResponse as _;
 use peryx_core::Ecosystem;
 use peryx_storage::blob::BlobStore;
@@ -52,21 +52,27 @@ async fn protocol_driver_exposes_only_indexed_operations() {
             .status(),
         204
     );
-    let request = Request::builder()
-        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=X")
-        .body(Body::from("--X--\r\n"))
-        .unwrap();
-    let multipart = Multipart::from_request(request, &()).await.unwrap();
     assert_eq!(
         driver
-            .post(serving, String::new(), HeaderMap::new(), multipart)
+            .post(
+                serving,
+                String::new(),
+                Request::builder().body(Body::from("post body")).unwrap(),
+            )
             .await
             .status(),
         204
     );
     assert_eq!(
         driver
-            .put(state.serving.clone(), Uri::from_static("/artifact"), HeaderMap::new(),)
+            .put(
+                state.serving.clone(),
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/artifact")
+                    .body(Body::from("put body"))
+                    .unwrap(),
+            )
             .await
             .status(),
         204
@@ -97,10 +103,10 @@ impl IndexedProtocolDriver for Driver {
     ) -> axum::response::Response {
         axum::http::StatusCode::NO_CONTENT.into_response()
     }
-    async fn post(&self, _: Arc<ServingState>, _: String, _: HeaderMap, _: Multipart) -> axum::response::Response {
+    async fn post(&self, _: Arc<ServingState>, _: String, _: Request) -> axum::response::Response {
         axum::http::StatusCode::NO_CONTENT.into_response()
     }
-    async fn put(&self, _: Arc<ServingState>, _: Uri, _: HeaderMap) -> axum::response::Response {
+    async fn put(&self, _: Arc<ServingState>, _: Request) -> axum::response::Response {
         axum::http::StatusCode::NO_CONTENT.into_response()
     }
     async fn delete(&self, _: Arc<ServingState>, _: Uri, _: HeaderMap) -> axum::response::Response {

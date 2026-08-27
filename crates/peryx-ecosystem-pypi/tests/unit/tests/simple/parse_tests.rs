@@ -52,24 +52,34 @@ fn test_parse_detail_roundtrips_serialized_model() {
 }
 
 #[test]
-fn test_parse_detail_minimal() {
-    let parsed = crate::parse_detail(b"{\"name\":\"x\"}").unwrap();
+fn test_parse_detail_accepts_empty_files() {
+    let parsed = crate::parse_detail(br#"{"meta":{},"name":"x","files":[]}"#).unwrap();
     // A page that advertises no version promises no PEP 700 fields, so it maps to the base version.
     assert_eq!(
-        parsed.meta,
-        Meta {
-            api_version: crate::API_VERSION_BASE,
-            ..Meta::default()
+        parsed,
+        crate::ParsedDetail {
+            meta: Meta {
+                api_version: crate::API_VERSION_BASE,
+                ..Meta::default()
+            },
+            name: "x".to_owned(),
+            versions: Vec::new(),
+            files: Vec::new(),
         }
     );
-    assert_eq!(parsed.name, "x");
-    assert!(parsed.versions.is_empty());
-    assert!(parsed.files.is_empty());
+}
+
+#[rstest::rstest]
+#[case::meta(br#"{"name":"x","files":[]}"#, "meta")]
+#[case::name(br#"{"meta":{},"files":[]}"#, "name")]
+#[case::files(br#"{"meta":{},"name":"x"}"#, "files")]
+fn test_parse_detail_rejects_a_missing_required_member(#[case] body: &[u8], #[case] member: &str) {
+    assert!(crate::parse_detail(body).unwrap_err().to_string().contains(member));
 }
 
 #[test]
 fn test_parse_detail_reads_both_metadata_spellings() {
-    let json = r#"{"name":"x","files":[{"filename":"x-1.whl","url":"u",
+    let json = r#"{"meta":{},"name":"x","files":[{"filename":"x-1.whl","url":"u",
         "core-metadata":{"sha256":"abc"},"dist-info-metadata":{"sha256":"abc"}}]}"#;
     let parsed = crate::parse_detail(json.as_bytes()).unwrap();
     assert_eq!(
@@ -83,7 +93,7 @@ fn test_parse_detail_reads_both_metadata_spellings() {
 
 #[test]
 fn test_parse_detail_reads_legacy_only_metadata_key() {
-    let json = r#"{"name":"x","files":[{"filename":"x-1.whl","url":"u","dist-info-metadata":true}]}"#;
+    let json = r#"{"meta":{},"name":"x","files":[{"filename":"x-1.whl","url":"u","dist-info-metadata":true}]}"#;
     let parsed = crate::parse_detail(json.as_bytes()).unwrap();
     assert_eq!(
         (&parsed.files[0].core_metadata, &parsed.files[0].dist_info_metadata),
@@ -439,17 +449,39 @@ fn test_stream_detail_json_collects_files_and_absolutizes_urls() {
 }
 
 #[test]
-fn test_stream_detail_json_defaults_a_missing_name() {
-    let body = br#"{"meta":{"api-version":"1.0"},"files":[]}"#;
+fn test_stream_detail_json_accepts_empty_files() {
+    let body = br#"{"meta":{"api-version":"1.0"},"name":"flask","files":[]}"#;
     let mut sink = Collect::default();
     let detail = crate::simple::stream_detail_json(std::io::Cursor::new(&body[..]), &detail_base(), &mut sink).unwrap();
-    assert_eq!(detail.name, "");
-    assert!(sink.0.is_empty());
+    assert_eq!(
+        (detail, sink.0),
+        (
+            crate::simple::StreamedDetail {
+                meta: Meta {
+                    api_version: crate::API_VERSION_BASE,
+                    ..Meta::default()
+                },
+                name: "flask".to_owned(),
+                versions: Vec::new(),
+            },
+            Vec::new(),
+        )
+    );
+}
+
+#[rstest::rstest]
+#[case::meta(br#"{"name":"flask","files":[]}"#, "meta")]
+#[case::name(br#"{"meta":{},"files":[]}"#, "name")]
+#[case::files(br#"{"meta":{},"name":"flask"}"#, "files")]
+fn test_stream_detail_json_rejects_a_missing_required_member(#[case] body: &[u8], #[case] member: &str) {
+    let mut sink = Collect::default();
+    let error = crate::simple::stream_detail_json(std::io::Cursor::new(body), &detail_base(), &mut sink).unwrap_err();
+    assert!(error.to_string().contains(member));
 }
 
 #[test]
 fn test_stream_detail_json_rejects_unsupported_api_version() {
-    let body = br#"{"meta":{"api-version":"2.0"},"files":[]}"#;
+    let body = br#"{"meta":{"api-version":"2.0"},"name":"flask","files":[]}"#;
     let mut sink = Collect::default();
     assert!(crate::simple::stream_detail_json(std::io::Cursor::new(&body[..]), &detail_base(), &mut sink).is_err());
 }
@@ -477,14 +509,18 @@ fn test_stream_detail_json_rejects_a_non_object_root() {
 fn test_stream_detail_json_rejects_non_array_files() {
     let mut sink = Collect::default();
     assert!(
-        crate::simple::stream_detail_json(std::io::Cursor::new(&br#"{"files":{}}"#[..]), &detail_base(), &mut sink)
-            .is_err()
+        crate::simple::stream_detail_json(
+            std::io::Cursor::new(&br#"{"meta":{},"name":"flask","files":{}}"#[..]),
+            &detail_base(),
+            &mut sink
+        )
+        .is_err()
     );
 }
 
 #[test]
 fn test_stream_detail_json_surfaces_a_sink_error() {
-    let body = br#"{"files":[{"filename":"f","url":"u","hashes":{}}]}"#;
+    let body = br#"{"meta":{},"name":"flask","files":[{"filename":"f","url":"u","hashes":{}}]}"#;
     let mut sink = Boom;
     assert!(crate::simple::stream_detail_json(std::io::Cursor::new(&body[..]), &detail_base(), &mut sink).is_err());
 }

@@ -50,14 +50,14 @@ fn test_project_status_policy() {
 
 #[test]
 fn test_parse_detail_rejects_unsupported_major_api_version() {
-    let err = crate::parse_detail(br#"{"meta":{"api-version":"2.0"},"name":"x"}"#).unwrap_err();
+    let err = crate::parse_detail(br#"{"meta":{"api-version":"2.0"},"name":"x","files":[]}"#).unwrap_err();
     assert!(matches!(err, SimpleError::UnsupportedApiVersion(version) if version == "2.0"));
 }
 
 #[test]
 fn test_parse_detail_rejects_invalid_api_version() {
     for version in ["1", "x.0", "1.x"] {
-        let page = format!(r#"{{"meta":{{"api-version":"{version}"}},"name":"x"}}"#);
+        let page = format!(r#"{{"meta":{{"api-version":"{version}"}},"name":"x","files":[]}}"#);
         let err = crate::parse_detail(page.as_bytes()).unwrap_err();
         assert!(matches!(&err, SimpleError::InvalidApiVersion(invalid) if invalid == version));
         assert_eq!(

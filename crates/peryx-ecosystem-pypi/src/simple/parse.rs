@@ -35,12 +35,10 @@ pub struct ParsedDetail {
 
 #[derive(Deserialize)]
 struct IncomingDetail {
-    #[serde(default)]
     meta: IncomingMeta,
     name: String,
     #[serde(default)]
     versions: Vec<String>,
-    #[serde(default)]
     files: Vec<File>,
 }
 
@@ -92,43 +90,34 @@ pub fn stream_detail_json<S: DetailSink>(
     base: &Url,
     sink: &mut S,
 ) -> Result<StreamedDetail, SimpleError> {
-    let mut header = DetailHeader::default();
     let mut deserializer = serde_json::Deserializer::from_reader(reader);
-    DetailSeed {
-        base,
-        sink,
-        header: &mut header,
-    }
-    .deserialize(&mut deserializer)?;
+    let header = DetailSeed { base, sink }.deserialize(&mut deserializer)?;
     deserializer.end()?;
     Ok(StreamedDetail {
         meta: header.meta.into_meta()?,
-        name: header.name.unwrap_or_default(),
+        name: header.name,
         versions: header.versions,
     })
 }
 
-#[derive(Default)]
-struct DetailHeader {
+struct IncomingStreamedDetail {
     meta: IncomingMeta,
-    name: Option<String>,
+    name: String,
     versions: Vec<String>,
 }
 
 struct DetailSeed<'a, S: DetailSink> {
     base: &'a Url,
     sink: &'a mut S,
-    header: &'a mut DetailHeader,
 }
 
 impl<'de, S: DetailSink> DeserializeSeed<'de> for DetailSeed<'_, S> {
-    type Value = ();
+    type Value = IncomingStreamedDetail;
 
     fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_map(DetailVisitor {
             base: self.base,
             sink: self.sink,
-            header: self.header,
         })
     }
 }
@@ -136,32 +125,45 @@ impl<'de, S: DetailSink> DeserializeSeed<'de> for DetailSeed<'_, S> {
 struct DetailVisitor<'a, S: DetailSink> {
     base: &'a Url,
     sink: &'a mut S,
-    header: &'a mut DetailHeader,
 }
 
 impl<'de, S: DetailSink> Visitor<'de> for DetailVisitor<'_, S> {
-    type Value = ();
+    type Value = IncomingStreamedDetail;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a PEP 691 project detail object")
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut meta = None;
+        let mut name = None;
+        let mut versions = Vec::new();
+        let mut files = false;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
-                "meta" => self.header.meta = map.next_value()?,
-                "name" => self.header.name = Some(map.next_value()?),
-                "versions" => self.header.versions = map.next_value()?,
-                "files" => map.next_value_seed(FilesSeed {
-                    base: self.base,
-                    sink: self.sink,
-                })?,
+                "meta" => meta = Some(map.next_value()?),
+                "name" => name = Some(map.next_value()?),
+                "versions" => versions = map.next_value()?,
+                "files" => {
+                    map.next_value_seed(FilesSeed {
+                        base: self.base,
+                        sink: self.sink,
+                    })?;
+                    files = true;
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
             }
         }
-        Ok(())
+        if !files {
+            return Err(serde::de::Error::missing_field("files"));
+        }
+        Ok(IncomingStreamedDetail {
+            meta: meta.ok_or_else(|| serde::de::Error::missing_field("meta"))?,
+            name: name.ok_or_else(|| serde::de::Error::missing_field("name"))?,
+            versions,
+        })
     }
 }
 

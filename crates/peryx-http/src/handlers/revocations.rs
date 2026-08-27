@@ -43,16 +43,7 @@ pub async fn put_revocation(
     let Ok(digest) = ArtifactDigest::from_str(&digest) else {
         return problem(StatusCode::BAD_REQUEST, "invalid digest");
     };
-    if !headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
-        })
-    {
+    if !super::is_json(headers) {
         return problem(StatusCode::UNSUPPORTED_MEDIA_TYPE, "request body must be JSON");
     }
     let body = match axum::body::to_bytes(request.into_body(), 3 * 1024).await {

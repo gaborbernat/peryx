@@ -258,21 +258,13 @@ impl Rejection {
 }
 
 async fn read_json_body(headers: &HeaderMap, body: Body) -> Result<CreateTokenBody, Response> {
-    if !is_json(headers) {
+    if !super::is_json(headers) {
         return Err(problem(StatusCode::UNSUPPORTED_MEDIA_TYPE, "request body must be JSON"));
     }
     let bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
         .await
         .map_err(|_| problem(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large"))?;
     serde_json::from_slice(&bytes).map_err(|_| problem(StatusCode::UNPROCESSABLE_ENTITY, "invalid request body"))
-}
-
-fn is_json(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
 }
 
 fn minted_response(status: StatusCode, record: &ScopedTokenRecord, secret: &str) -> Response {

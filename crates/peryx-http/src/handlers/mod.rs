@@ -21,6 +21,7 @@ mod usage;
 
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use mediatype::{MediaType, names};
 use peryx_driver::state::{AppState, Index};
 use peryx_identity::{Action, Denial};
 
@@ -59,6 +60,21 @@ fn denied(denial: Denial) -> Response {
 
 fn index_by_route<'state>(state: &'state AppState, route: &str) -> Option<&'state Index> {
     state.serving.indexes.iter().find(|index| index.route == route)
+}
+
+fn is_json(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    value
+        .to_str()
+        .ok()
+        .and_then(|value| MediaType::parse(value).ok())
+        .is_some_and(|media_type| media_type.ty == names::APPLICATION && media_type.subty == names::JSON)
 }
 
 /// HTTP handlers distinguish an authenticated denial from a missing or invalid credential.

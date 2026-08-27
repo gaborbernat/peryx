@@ -189,11 +189,16 @@ fn unfold(headers: &str) -> Result<Vec<(String, String)>, MetadataError> {
     let mut fields: Vec<(String, String)> = Vec::new();
     for raw in headers.lines() {
         if raw.starts_with(' ') || raw.starts_with('\t') {
-            let Some((_, value)) = fields.last_mut() else {
+            let Some((key, value)) = fields.last_mut() else {
                 return Err(MetadataError::LeadingContinuation(raw.to_owned()));
             };
-            value.push(' ');
-            value.push_str(raw.trim_start());
+            if matches!(key.as_str(), "description" | "license") {
+                value.push('\n');
+                value.push_str(raw);
+            } else {
+                value.push(' ');
+                value.push_str(raw.trim_start());
+            }
             continue;
         }
         let Some((key, value)) = raw.split_once(':') else {
@@ -204,7 +209,30 @@ fn unfold(headers: &str) -> Result<Vec<(String, String)>, MetadataError> {
         }
         fields.push((key.to_ascii_lowercase(), value.to_owned()));
     }
+    for (key, value) in &mut fields {
+        if matches!(key.as_str(), "description" | "license") {
+            *value = unfold_multiline(value, key == "description");
+        }
+    }
     Ok(fields)
+}
+
+fn unfold_multiline(value: &str, description: bool) -> String {
+    let Some((first, rest)) = value.split_once('\n') else {
+        return value.to_owned();
+    };
+    let indent = rest
+        .lines()
+        .map(|line| line.len() - line.trim_start_matches([' ', '\t']).len())
+        .min()
+        .expect("a folded value has a continuation");
+    let strip_marker = description && rest.lines().all(|line| line[indent..].starts_with('|'));
+    let mut unfolded = first.to_owned();
+    for line in rest.lines() {
+        unfolded.push('\n');
+        unfolded.push_str(&line[indent + usize::from(strip_marker)..]);
+    }
+    unfolded
 }
 
 fn non_empty(value: &str) -> Option<String> {

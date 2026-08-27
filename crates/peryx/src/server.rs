@@ -119,6 +119,7 @@ pub(crate) fn check_config_with_active_plugins(
     config
         .validate_with_plugins(plugins)
         .context("validate configuration")?;
+    resolve_signing_key(config)?;
     crate::logging::validate(&config.log).context("validate logging configuration")?;
     build_indexes_with_plugins(&config.indexes, &config.auth, config.offline, plugins)?;
     build_index_settings_with_plugins(&config.indexes, plugins)?;
@@ -160,6 +161,7 @@ fn build_state_with_active_backend_and_plugins(
     config
         .validate_with_plugins(plugins)
         .context("validate configuration")?;
+    let signing_key = resolve_signing_key(config)?;
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("create data directory {}", config.data_dir.display()))?;
     let configured_replica = config.availability.is_replica_mode();
@@ -243,13 +245,35 @@ fn build_state_with_active_backend_and_plugins(
         },
     )
     .context(format!("open search index {}", search_path.display()))?;
-    configure_state(&mut state, config, &ecosystem_settings, read_only, plugins)?;
+    configure_state(
+        &mut state,
+        config,
+        signing_key.as_deref(),
+        &ecosystem_settings,
+        read_only,
+        plugins,
+    )?;
     Ok(Arc::new(state))
+}
+
+fn resolve_signing_key(config: &Config) -> anyhow::Result<Option<String>> {
+    const MIN_BYTES: usize = 32;
+    let Some(source) = &config.auth.signing_key else {
+        return Ok(None);
+    };
+    let key = source.read().context("read `auth.signing_key`")?;
+    ensure!(!key.trim().is_empty(), "`auth.signing_key` must not be empty");
+    ensure!(
+        key.len() >= MIN_BYTES,
+        "`auth.signing_key` must contain at least {MIN_BYTES} bytes"
+    );
+    Ok(Some(key))
 }
 
 fn configure_state(
     state: &mut AppState,
     config: &Config,
+    signing_key: Option<&str>,
     ecosystem_settings: &HashMap<String, peryx_driver::serving::CompiledEcosystemSettings>,
     read_only: bool,
     plugins: &peryx_plugin_registry::PluginRegistry,
@@ -294,11 +318,7 @@ fn configure_state(
         .set_oidc_logins(oidc_logins(&config.auth.oidc_providers, &state.serving.meta)?)
         .map_err(anyhow::Error::msg)
         .context("install OIDC login services")?;
-    if let Some(source) = &config.auth.signing_key {
-        let key = source.read().context("read the token realm signing key")?;
-        if key.trim().is_empty() {
-            bail!("token realm signing key must not be empty");
-        }
+    if let Some(key) = signing_key {
         state
             .set_session_sealer(SessionSealer::new(key.as_bytes()))
             .map_err(anyhow::Error::msg)

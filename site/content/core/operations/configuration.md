@@ -847,7 +847,9 @@ default_anonymous_read = false
 Set at most one of `signing_key` and `signing_key_file`. peryx reads the key at startup. Implementations that mint
 tokens cap their lifetime at `token_ttl_secs`. Peryx requires 60 through 86400 when a signing key and OCI index enable
 the OCI token realm. A deployment with no OCI index accepts 1 through 86400. `default_anonymous_read = false` sets the
-anonymous-read default once instead of adding a flag to each index.
+anonymous-read default once instead of adding a flag to each index. See
+[signing key](@/core/access/authentication.md#signing-key) for the 32-byte minimum, generation, and coordinated
+rotation.
 
 Each `[[auth.ldap_provider]]` configures one named StartTLS directory and optional exact group-to-role mappings. It
 supports direct user DNs and service-account search followed by a user bind. Provider URLs, attributes, trust files,

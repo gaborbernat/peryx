@@ -28,6 +28,7 @@ use crate::tests::support::{plugins, plugins_with_inactive_owner, plugins_withou
 
 static INACTIVE_MIGRATION_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static INACTIVE_MIGRATION: InactiveMigration = InactiveMigration;
+const TOKEN_REALM_SIGNING_KEY: &str = "test-token-realm-signing-key-32-bytes";
 
 struct InactiveMigration;
 
@@ -641,7 +642,7 @@ fn test_build_state_wires_the_token_realm_signing_key() {
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         auth: AuthConfig {
-            signing_key: Some(SecretSource::Literal("super-secret".to_owned())),
+            signing_key: Some(SecretSource::Literal(TOKEN_REALM_SIGNING_KEY.to_owned())),
             token_ttl_secs: 900,
             ..AuthConfig::default()
         },
@@ -652,6 +653,103 @@ fn test_build_state_wires_the_token_realm_signing_key() {
 
     assert!(state.serving.signer.is_some());
     assert_eq!(state.serving.token_ttl_secs, 900);
+}
+
+#[test]
+fn test_token_realm_boundaries_reject_a_short_signing_key() {
+    for (boundary, source) in SIGNING_KEY_CASES {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "x".repeat(31);
+        let config = signing_key_config(dir.path(), source(dir.path(), &secret));
+
+        let error = boundary.validate(&config).unwrap_err().to_string();
+
+        assert_eq!(error, "`auth.signing_key` must contain at least 32 bytes");
+        assert!(!error.contains(&secret));
+    }
+}
+
+#[test]
+fn test_token_realm_boundaries_accept_a_32_byte_signing_key() {
+    for (boundary, source) in SIGNING_KEY_CASES {
+        let dir = tempfile::tempdir().unwrap();
+        let config = signing_key_config(dir.path(), source(dir.path(), &"x".repeat(32)));
+
+        boundary.validate(&config).unwrap();
+    }
+}
+
+#[test]
+fn test_token_realm_boundaries_reject_a_short_environment_signing_key() {
+    const CHILD_FLAG: &str = "PERYX_TEST_SHORT_SIGNING_KEY_CHILD";
+    const KEY_ENV: &str = "PERYX_TEST_SHORT_SIGNING_KEY";
+    if std::env::var_os(CHILD_FLAG).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::server_tests::test_token_realm_boundaries_reject_a_short_environment_signing_key",
+            ])
+            .env(CHILD_FLAG, "1")
+            .env(KEY_ENV, "x".repeat(31))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config = signing_key_config(dir.path(), SecretSource::Env(KEY_ENV.to_owned()));
+
+    for boundary in [SigningKeyBoundary::Startup, SigningKeyBoundary::CheckConfig] {
+        assert_eq!(
+            boundary.validate(&config).unwrap_err().to_string(),
+            "`auth.signing_key` must contain at least 32 bytes"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SigningKeyBoundary {
+    Startup,
+    CheckConfig,
+}
+
+type SigningKeySource = fn(&Path, &str) -> SecretSource;
+
+const SIGNING_KEY_CASES: [(SigningKeyBoundary, SigningKeySource); 4] = [
+    (SigningKeyBoundary::Startup, literal_signing_key),
+    (SigningKeyBoundary::Startup, file_signing_key),
+    (SigningKeyBoundary::CheckConfig, literal_signing_key),
+    (SigningKeyBoundary::CheckConfig, file_signing_key),
+];
+
+impl SigningKeyBoundary {
+    fn validate(self, config: &Config) -> anyhow::Result<()> {
+        match self {
+            Self::Startup => build_state(config).map(drop),
+            Self::CheckConfig => check_config(config),
+        }
+    }
+}
+
+fn literal_signing_key(_: &Path, secret: &str) -> SecretSource {
+    SecretSource::Literal(secret.to_owned())
+}
+
+fn file_signing_key(dir: &Path, secret: &str) -> SecretSource {
+    let path = dir.join("signing-key");
+    std::fs::write(&path, secret).unwrap();
+    SecretSource::File(path)
+}
+
+fn signing_key_config(data_dir: &Path, signing_key: SecretSource) -> Config {
+    Config {
+        data_dir: data_dir.to_owned(),
+        auth: AuthConfig {
+            signing_key: Some(signing_key),
+            ..AuthConfig::default()
+        },
+        ..neutral_config()
+    }
 }
 
 fn ldap_provider(bind: LdapBindConfig) -> LdapProviderConfig {
@@ -698,7 +796,7 @@ fn test_build_state_installs_lazy_named_oidc_logins() {
                 oidc_provider("corporate", Some(SecretSource::Literal("client-secret".to_owned()))),
                 oidc_provider("partners", None),
             ],
-            signing_key: Some(SecretSource::Literal("realm-key".to_owned())),
+            signing_key: Some(SecretSource::Literal(TOKEN_REALM_SIGNING_KEY.to_owned())),
             ..AuthConfig::default()
         },
         ..neutral_config()
@@ -725,7 +823,7 @@ fn test_build_state_reports_an_unreadable_oidc_client_secret() {
                 "corporate",
                 Some(SecretSource::File(PathBuf::from("/nonexistent/peryx/oidc-secret"))),
             )],
-            signing_key: Some(SecretSource::Literal("realm-key".to_owned())),
+            signing_key: Some(SecretSource::Literal(TOKEN_REALM_SIGNING_KEY.to_owned())),
             ..AuthConfig::default()
         },
         ..neutral_config()
@@ -745,7 +843,7 @@ fn test_build_state_rejects_an_invalid_oidc_provider() {
         data_dir: dir.path().to_path_buf(),
         auth: AuthConfig {
             oidc_providers: vec![provider],
-            signing_key: Some(SecretSource::Literal("realm-key".to_owned())),
+            signing_key: Some(SecretSource::Literal(TOKEN_REALM_SIGNING_KEY.to_owned())),
             ..AuthConfig::default()
         },
         ..neutral_config()
@@ -893,12 +991,12 @@ fn test_build_state_reports_an_unreadable_signing_key_file() {
 
     let err = build_state(&config).err().expect("expected signing-key read error");
 
-    assert!(err.to_string().contains("read the token realm signing key"), "{err}");
+    assert_eq!(err.to_string(), "read `auth.signing_key`");
 }
 
 #[rstest]
-#[case::literal(empty_literal_signing_key, "token realm signing key must not be empty")]
-#[case::file(empty_file_signing_key, "read the token realm signing key")]
+#[case::literal(empty_literal_signing_key, "`auth.signing_key` must not be empty")]
+#[case::file(empty_file_signing_key, "read `auth.signing_key`")]
 fn test_build_state_rejects_an_empty_signing_key(#[case] source: fn(&Path) -> SecretSource, #[case] expected: &str) {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {

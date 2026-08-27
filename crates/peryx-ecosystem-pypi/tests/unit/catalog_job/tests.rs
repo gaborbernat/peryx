@@ -442,7 +442,8 @@ async fn test_public_job_factory_runs_bounded_catalog_sync_and_persists_progress
         run(&app, parameters("bounded", 1, 1)).await.unwrap(),
         JobReport {
             processed: 1,
-            changed: 2
+            changed: 2,
+            ..JobReport::default()
         }
     );
     let runs = app.serving.meta.list_job_runs().unwrap();
@@ -486,7 +487,8 @@ async fn test_public_job_bounds_progress_updates_for_large_catalog_slices() {
         run(&app, parameters("progress", 101, 16)).await.unwrap(),
         JobReport {
             processed: 101,
-            changed: 1
+            changed: 1,
+            ..JobReport::default()
         }
     );
     server.verify().await;
@@ -540,14 +542,16 @@ async fn test_public_job_revalidates_root_and_project_generations_and_tolerates_
         run(&app, parameters("revalidation", 2, 2)).await.unwrap(),
         JobReport {
             processed: 2,
-            changed: 2
+            changed: 2,
+            ..JobReport::default()
         }
     );
     assert_eq!(
         run(&app, parameters("revalidation", 2, 2)).await.unwrap(),
         JobReport {
             processed: 2,
-            changed: 1
+            changed: 1,
+            ..JobReport::default()
         }
     );
     server.verify().await;
@@ -586,11 +590,13 @@ async fn test_concurrent_public_jobs_coalesce_root_publication() {
         [
             JobReport {
                 processed: 0,
-                changed: 0
+                changed: 0,
+                ..JobReport::default()
             },
             JobReport {
                 processed: 0,
-                changed: 1
+                changed: 1,
+                ..JobReport::default()
             }
         ]
     );
@@ -633,7 +639,8 @@ async fn test_public_job_factory_uses_the_selected_named_source() {
         run(&app, parameters).await.unwrap(),
         JobReport {
             processed: 0,
-            changed: 1
+            changed: 1,
+            ..JobReport::default()
         }
     );
     primary.verify().await;
@@ -676,7 +683,8 @@ async fn test_public_job_factory_uses_repository_routing_when_source_is_absent()
         run(&app, parameters("routed", 1, 1)).await.unwrap(),
         JobReport {
             processed: 1,
-            changed: 2
+            changed: 2,
+            ..JobReport::default()
         }
     );
     primary.verify().await;
@@ -703,7 +711,8 @@ async fn test_catalog_job_uses_the_public_factory_and_scheduler_completion() {
         scheduler.run(job).await.unwrap(),
         JobReport {
             processed: 0,
-            changed: 1
+            changed: 1,
+            ..JobReport::default()
         }
     );
     scheduler.shutdown().await;
@@ -748,7 +757,8 @@ async fn test_cancellation_drops_an_inflight_project_without_partial_publication
             .unwrap(),
         JobReport {
             processed: 0,
-            changed: 1
+            changed: 1,
+            ..JobReport::default()
         }
     );
     assert!(

@@ -234,7 +234,8 @@ async fn test_distributed_job_runs_its_bound_capability(#[case] case: JobCase) {
         scheduler.run(job).await.unwrap(),
         JobReport {
             processed: 5,
-            changed: 2
+            changed: 2,
+            ..JobReport::default()
         }
     );
     match case {
@@ -301,7 +302,7 @@ impl AuthorityDrainer for Drainer {
 }
 
 #[rstest]
-#[case::success(false, Ok(JobReport { processed: 3, changed: 2 }))]
+#[case::success(false, Ok(JobReport { processed: 3, changed: 2, ..JobReport::default() }))]
 #[case::failure(true, Err("storage: unavailable".to_owned()))]
 #[tokio::test]
 async fn test_authority_drain_runs_through_the_scheduler(

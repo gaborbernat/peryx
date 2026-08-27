@@ -319,6 +319,8 @@ const fn task_report(report: peryx_ha::AvailabilityTaskReport) -> JobReport {
     JobReport {
         processed: report.processed,
         changed: report.changed,
+        quota_released: 0,
+        quota_remaining: 0,
     }
 }
 

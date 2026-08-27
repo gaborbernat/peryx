@@ -94,6 +94,16 @@ async fn push_blob(app: &axum::Router, repo: &str, blob: &[u8]) -> StatusCode {
     .0
 }
 
+async fn abort_blob_after_admission(state: &peryx_driver::AppState, app: &axum::Router, blob: &'static [u8]) {
+    let (authority, entered) = super::EpochAuthority::blocked(1);
+    bind_ownership(state, authority);
+    let app = app.clone();
+    let push = tokio::spawn(async move { push_blob(&app, "store/app", blob).await });
+    entered.acquire().await.unwrap().forget();
+    push.abort();
+    assert!(push.await.unwrap_err().is_cancelled());
+}
+
 async fn delete_blob(app: &axum::Router, repo: &str, digest: &str) -> StatusCode {
     send_body(
         app,
@@ -176,6 +186,42 @@ async fn test_blob_push_within_the_repository_byte_quota_is_accounted() {
     assert_eq!(
         (usage.accounted_bytes.committed, usage.resources.committed),
         (blob.len() as u64, 1)
+    );
+}
+
+#[tokio::test]
+async fn test_repair_releases_aborted_blob_pushes_for_later_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = quota_store_distributed(
+        &dir,
+        &PolicyConfig {
+            max_accounted_bytes: Some(4),
+            ..PolicyConfig::default()
+        },
+    );
+    abort_blob_after_admission(&state, &app, b"a1").await;
+    abort_blob_after_admission(&state, &app, b"b2").await;
+    bind_ownership(&state, super::EpochAuthority::settled(1, true));
+
+    assert_eq!(push_blob(&app, "store/app", b"c3").await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        state
+            .serving
+            .meta
+            .repair_abandoned_quota_reservations(i64::MAX, 10)
+            .unwrap(),
+        peryx_storage::meta::QuotaRepairReport {
+            released: 2,
+            remaining: 0,
+        }
+    );
+    assert_eq!(push_blob(&app, "store/app", b"c3").await, StatusCode::CREATED);
+    assert_eq!(
+        state.serving.meta.quota_usage("store").unwrap().accounted_bytes,
+        peryx_storage::meta::QuotaValue {
+            committed: 2,
+            reserved: 0,
+        }
     );
 }
 

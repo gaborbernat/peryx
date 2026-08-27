@@ -1023,20 +1023,30 @@ fn test_quota_repair_is_bounded_and_preserves_committed_allocations() {
     drop(meta);
 
     let meta = MetaStore::open(&path).unwrap();
+    assert!(matches!(
+        meta.reserve_quota(
+            request("blocked", "group-a", "sha256:blocked", 1),
+            QuotaLimits {
+                max_accounted_bytes: Some(19),
+                ..QuotaLimits::default()
+            },
+        ),
+        Err(QuotaError::Exceeded { .. })
+    ));
     assert_eq!(
         (
-            meta.repair_abandoned_quota_reservations(1).unwrap(),
-            meta.repair_abandoned_quota_reservations(1).unwrap(),
+            meta.repair_abandoned_quota_reservations(10, 1).unwrap(),
+            meta.repair_abandoned_quota_reservations(10, 1).unwrap(),
             meta.quota_usage("private").unwrap().accounted_bytes,
         ),
         (
             crate::meta::QuotaRepairReport {
                 released: 1,
-                remaining: true,
+                remaining: 1,
             },
             crate::meta::QuotaRepairReport {
                 released: 1,
-                remaining: false,
+                remaining: 0,
             },
             QuotaValue {
                 committed: 5,
@@ -1047,7 +1057,7 @@ fn test_quota_repair_is_bounded_and_preserves_committed_allocations() {
 }
 
 #[test]
-fn test_quota_repair_zero_limit_changes_nothing() {
+fn test_quota_repair_zero_limit_reports_eligible_reservations() {
     let (_dir, meta) = store();
     meta.reserve_quota(
         request("resource-a", "group-a", "sha256:first", 7),
@@ -1057,10 +1067,53 @@ fn test_quota_repair_zero_limit_changes_nothing() {
 
     assert_eq!(
         (
-            meta.repair_abandoned_quota_reservations(0).unwrap(),
+            meta.repair_abandoned_quota_reservations(10, 0).unwrap(),
             meta.quota_usage("private").unwrap().accounted_bytes.reserved,
         ),
-        (crate::meta::QuotaRepairReport::default(), 7)
+        (
+            crate::meta::QuotaRepairReport {
+                released: 0,
+                remaining: 1,
+            },
+            7,
+        )
+    );
+}
+
+#[test]
+fn test_quota_repair_keeps_young_owner_live_and_fences_released_owner() {
+    let (_dir, meta) = store();
+    let old = meta
+        .reserve_quota(request("old", "group-a", "sha256:old", 7), QuotaLimits::default())
+        .unwrap();
+    let young = meta
+        .reserve_quota(
+            NewQuotaReservation {
+                created_at_unix: 11,
+                ..request("young", "group-a", "sha256:young", 5)
+            },
+            QuotaLimits::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        meta.repair_abandoned_quota_reservations(10, 10).unwrap(),
+        crate::meta::QuotaRepairReport {
+            released: 1,
+            remaining: 0,
+        }
+    );
+    assert!(meta.commit_quota_reservation(young.id).unwrap());
+    assert!(matches!(
+        meta.commit_driver_txn_with_quota(old.id, |_txn| Ok::<_, QuotaError>(((), Vec::new()))),
+        Err(QuotaError::ReservationUnavailable { id }) if id == old.id
+    ));
+    assert_eq!(
+        meta.quota_usage("private").unwrap().accounted_bytes,
+        QuotaValue {
+            committed: 5,
+            reserved: 0,
+        }
     );
 }
 

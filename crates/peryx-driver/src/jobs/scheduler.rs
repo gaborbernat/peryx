@@ -346,8 +346,10 @@ async fn run_persisted(
         let persisted = if outcome == Outcome::Cancelled {
             let report = result.as_ref().ok().copied().unwrap_or_default();
             JobOutcome::cancelled(finished_at_unix, report.processed, report.changed)
+                .with_quota(report.quota_released, report.quota_remaining)
         } else if let Ok(report) = &result {
             JobOutcome::succeeded(finished_at_unix, report.processed, report.changed)
+                .with_quota(report.quota_released, report.quota_remaining)
         } else {
             JobOutcome::failed(
                 finished_at_unix,

@@ -63,6 +63,8 @@ fn test_job_lists_durable_runs() {
                     "finished_at_unix": 21,
                     "items_processed": 4,
                     "items_changed": 1,
+                    "quota_released": 0,
+                    "quota_remaining": 0,
                     "error": "source unavailable"
                 },
                 {
@@ -75,6 +77,8 @@ fn test_job_lists_durable_runs() {
                     "finished_at_unix": null,
                     "items_processed": 0,
                     "items_changed": 0,
+                    "quota_released": 0,
+                    "quota_remaining": 0,
                     "error": null
                 }
             ],
@@ -103,6 +107,8 @@ fn test_job_shows_a_durable_run() {
             "finished_at_unix": 21,
             "items_processed": 4,
             "items_changed": 1,
+            "quota_released": 0,
+            "quota_remaining": 0,
             "error": "source unavailable"
         })
     );
@@ -187,7 +193,10 @@ fn test_job_run_reports_the_registered_job_counts() {
 
     job_with_plugins(&config, &plugins, &run_command(), &mut output).unwrap();
 
-    assert_eq!(String::from_utf8(output).unwrap(), "processed\t2\nchanged\t1\n");
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "processed\t2\nchanged\t1\nquota_released\t0\nquota_remaining\t0\n"
+    );
 }
 
 #[test]
@@ -209,8 +218,18 @@ fn test_job_run_records_the_registered_job() {
             runs[0].state,
             runs[0].items_processed,
             runs[0].items_changed,
+            runs[0].quota_released,
+            runs[0].quota_remaining,
         ),
-        (JobKind::new("core_sync").unwrap(), "main", JobState::Succeeded, 2, 1,)
+        (
+            JobKind::new("core_sync").unwrap(),
+            "main",
+            JobState::Succeeded,
+            2,
+            1,
+            0,
+            0,
+        )
     );
 }
 
@@ -321,7 +340,10 @@ fn test_job_drain_reports_counts() {
 
     job_with_plugins(&config, &plugins, &drain_command(), &mut output).unwrap();
 
-    assert_eq!(String::from_utf8(output).unwrap(), "processed\t2\nchanged\t2\n");
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "processed\t2\nchanged\t2\nquota_released\t0\nquota_remaining\t0\n"
+    );
 }
 
 #[test]
@@ -693,6 +715,7 @@ impl ScheduledJobFactory for RunJobFactory {
             report: JobReport {
                 processed: self.processed,
                 changed: self.changed,
+                ..JobReport::default()
             },
         }))
     }

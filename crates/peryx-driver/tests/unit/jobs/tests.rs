@@ -367,13 +367,15 @@ async fn test_a_succeeding_job_runs_and_is_not_recorded_without_persistence() {
         Action::Return(Ok(JobReport {
             processed: 4,
             changed: 2,
+            ..JobReport::default()
         })),
     );
     assert_eq!(
         scheduler.run(job.clone()).await.unwrap(),
         JobReport {
             processed: 4,
-            changed: 2
+            changed: 2,
+            ..JobReport::default()
         }
     );
     assert_eq!(job.ran.load(Ordering::SeqCst), 1);
@@ -388,6 +390,7 @@ async fn test_run_waits_for_and_returns_a_jobs_report() {
     let report = JobReport {
         processed: 4,
         changed: 2,
+        ..JobReport::default()
     };
 
     assert_eq!(
@@ -668,6 +671,8 @@ async fn test_cancel_job_run_records_cancelled_when_the_job_returns_an_error() {
             finished_at_unix: Some(1_000),
             items_processed: 0,
             items_changed: 0,
+            quota_released: 0,
+            quota_remaining: 0,
             error: None,
         }
     );
@@ -859,6 +864,8 @@ async fn test_recovering_scheduler_fails_an_interrupted_attempt_before_accepting
             finished_at_unix: Some(1_000),
             items_processed: 0,
             items_changed: 0,
+            quota_released: 0,
+            quota_remaining: 0,
             error: Some("node restarted before the job finished".to_owned()),
         }
     );
@@ -1005,7 +1012,8 @@ async fn test_idle_reclaim_reports_changed_resources() {
         job.run(&context(state, CancellationToken::new())).await.unwrap(),
         JobReport {
             processed: 2,
-            changed: 2
+            changed: 2,
+            ..JobReport::default()
         }
     );
     assert_eq!(driver.reclaim_calls.load(Ordering::SeqCst), 1);
@@ -1027,7 +1035,8 @@ async fn test_intent_finalize_reports_finalized_intents() {
         job.run(&context(state, CancellationToken::new())).await.unwrap(),
         JobReport {
             processed: 3,
-            changed: 3
+            changed: 3,
+            ..JobReport::default()
         }
     );
     assert_eq!(driver.finalize_calls.load(Ordering::SeqCst), 1);
@@ -1048,7 +1057,8 @@ async fn test_cache_refresh_reports_the_sweep() {
         job.run(&context(state, CancellationToken::new())).await.unwrap(),
         JobReport {
             processed: 3,
-            changed: 1
+            changed: 1,
+            ..JobReport::default()
         }
     );
     assert_eq!(job.kind(), "cache_refresh");
@@ -1221,7 +1231,8 @@ async fn test_job_history_cleanup_removes_every_excess_terminal_attempt() {
         report,
         JobReport {
             processed: 8,
-            changed: 8
+            changed: 8,
+            ..JobReport::default()
         }
     );
     assert_eq!(job_runs(&state.meta).len(), 16);
@@ -1483,7 +1494,7 @@ fn test_cache_maintenance_does_not_compile_as_one_factory() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn test_an_unsupported_scheduled_job_is_rejected_without_submission() {
+async fn test_an_unsupported_scheduled_job_is_rejected_without_plugin_submission() {
     let (_dir, app) = scheduled_app(Arc::new(StubDriver::new(0, Ok(RefreshSweep::default()))));
     let plan = plugin_schedule(60, Err("plugin job rejected".to_owned()));
     let error = scheduled_job(&app, &plan[0].job).err().unwrap();
@@ -1501,7 +1512,13 @@ async fn test_an_unsupported_scheduled_job_is_rejected_without_submission() {
     cancel.cancel();
     timer.await.unwrap();
     scheduler.shutdown().await;
-    assert!(job_runs(&app.serving.meta).is_empty());
+    assert_eq!(
+        job_runs(&app.serving.meta)
+            .iter()
+            .map(|run| run.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["write_ledger_reap", "write_ledger_reap"]
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1723,7 +1740,8 @@ async fn test_search_rebuild_persists_a_node_wide_run_and_reports_documents() {
         report,
         JobReport {
             processed: 2,
-            changed: 2
+            changed: 2,
+            ..JobReport::default()
         }
     );
     let runs = job_runs(&state.serving.meta);
@@ -2035,8 +2053,86 @@ async fn test_write_ledger_reap_drains_settled_rows_and_keeps_pending() {
         peryx_storage::meta::IntentPhase::Pending
     );
     assert_eq!(state.meta.operation_outcome("op").unwrap(), None);
-    assert_eq!(super::WriteLedgerReap::default().kind(), "write_ledger_reap");
-    assert_eq!(super::WriteLedgerReap::default().scope(), "");
+    assert_eq!(
+        (
+            super::WriteLedgerReap::default().kind(),
+            super::WriteLedgerReap::default().scope(),
+            super::WriteLedgerReap::default().persist_as(),
+        ),
+        (
+            "write_ledger_reap",
+            "",
+            Some(JobKind::new("write_ledger_reap").unwrap()),
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_write_ledger_reap_repairs_old_quota_and_keeps_young_owner() {
+    let (_dir, state) = serving();
+    for (digest, bytes, created_at_unix) in [("sha256:old-a", 7, -3_000), ("sha256:old-b", 7, -2_999)] {
+        state
+            .meta
+            .reserve_quota(
+                peryx_storage::meta::NewQuotaReservation {
+                    repository: "private",
+                    resource: Some(digest),
+                    group: None,
+                    digest,
+                    bytes,
+                    class: peryx_storage::meta::AccountingClass::Hosted,
+                    created_at_unix,
+                },
+                peryx_storage::meta::QuotaLimits::default(),
+            )
+            .unwrap();
+    }
+    let young = state
+        .meta
+        .reserve_quota(
+            peryx_storage::meta::NewQuotaReservation {
+                repository: "private",
+                resource: Some("young"),
+                group: None,
+                digest: "sha256:young",
+                bytes: 5,
+                class: peryx_storage::meta::AccountingClass::Hosted,
+                created_at_unix: 999,
+            },
+            peryx_storage::meta::QuotaLimits::default(),
+        )
+        .unwrap();
+
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 1, 1, 1));
+    let report = scheduler
+        .run(Arc::new(super::WriteLedgerReap { batch: 1 }))
+        .await
+        .unwrap();
+    let run = job_runs(&state.meta).remove(0);
+    scheduler.shutdown().await;
+
+    assert_eq!(
+        (
+            report,
+            (run.kind, run.state, run.quota_released, run.quota_remaining),
+            state.meta.commit_quota_reservation(young.id).unwrap(),
+            state.meta.quota_usage("private").unwrap().accounted_bytes,
+        ),
+        (
+            JobReport {
+                processed: 2,
+                changed: 1,
+                quota_released: 1,
+                quota_remaining: 1,
+            },
+            (JobKind::new("write_ledger_reap").unwrap(), JobState::Succeeded, 1, 1),
+            true,
+            peryx_storage::meta::QuotaValue {
+                committed: 5,
+                reserved: 7,
+            },
+        )
+    );
 }
 
 #[tokio::test]

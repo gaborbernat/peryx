@@ -79,7 +79,10 @@ fn registered_catalog_job_syncs_and_records_history() {
 
     app::job(&config, &run_command("pypi"), &mut output).unwrap();
 
-    assert_eq!(String::from_utf8(output).unwrap(), "processed\t1\nchanged\t2\n");
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "processed\t1\nchanged\t2\nquota_released\t0\nquota_remaining\t0\n"
+    );
     server.join().unwrap();
     let runs = MetaStore::open(config.data_dir.join("peryx.redb"))
         .unwrap()

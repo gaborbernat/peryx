@@ -53,6 +53,10 @@ pub struct JobReport {
     pub processed: u64,
     /// Items the run changed.
     pub changed: u64,
+    /// Abandoned quota reservations the run released.
+    pub quota_released: u64,
+    /// Eligible quota reservations left for a later bounded pass.
+    pub quota_remaining: u64,
 }
 
 /// A bounded public failure category and message safe for durable history and operator responses.
@@ -223,6 +227,7 @@ impl NodeJob for IdleReclaimJob {
         Ok(JobReport {
             processed: reclaimed,
             changed: reclaimed,
+            ..JobReport::default()
         })
     }
 }
@@ -261,6 +266,7 @@ impl NodeJob for IntentFinalizeJob {
         Ok(JobReport {
             processed: finalized,
             changed: finalized,
+            ..JobReport::default()
         })
     }
 }
@@ -303,6 +309,7 @@ impl NodeJob for CacheRefreshJob {
         Ok(JobReport {
             processed: sweep.checked as u64,
             changed: sweep.changed as u64,
+            ..JobReport::default()
         })
     }
 }
@@ -344,6 +351,7 @@ impl NodeJob for JobHistoryCleanup {
                 return Ok(JobReport {
                     processed: removed,
                     changed: removed,
+                    ..JobReport::default()
                 });
             }
             let batch = ctx
@@ -356,6 +364,7 @@ impl NodeJob for JobHistoryCleanup {
                 return Ok(JobReport {
                     processed: removed,
                     changed: removed,
+                    ..JobReport::default()
                 });
             }
         }
@@ -365,6 +374,10 @@ impl NodeJob for JobHistoryCleanup {
 /// How long a settled ingress intent is kept before the reaper prunes it, so a brief home-DC
 /// finalization lag never drops an intent a slow duplicate retry still resolves against.
 pub const INGRESS_INTENT_RETENTION_SECS: i64 = 3600;
+/// Pending quota owners get this long to finish before node maintenance may reclaim their reservation.
+pub const QUOTA_RESERVATION_GRACE_SECS: i64 = 3600;
+/// Batching caps the metadata write set during startup and recurring repair.
+pub const QUOTA_REPAIR_BATCH: usize = 128;
 
 /// Bound the two write-idempotency ledgers so neither grows without end.
 ///
@@ -384,7 +397,9 @@ pub(super) struct WriteLedgerReap {
 
 impl Default for WriteLedgerReap {
     fn default() -> Self {
-        Self { batch: MAX_JOB_RUNS }
+        Self {
+            batch: QUOTA_REPAIR_BATCH,
+        }
     }
 }
 
@@ -402,7 +417,7 @@ impl NodeJob for WriteLedgerReap {
         NodeJobMetadata {
             lease_scope: LeaseScope::NodeLocal,
             repository: None,
-            persist_as: None,
+            persist_as: Some(JobKind::new("write_ledger_reap").expect("static job kind is valid")),
         }
     }
 
@@ -410,7 +425,11 @@ impl NodeJob for WriteLedgerReap {
         let mut reaped = 0_u64;
         loop {
             if ctx.is_cancelled() {
-                break;
+                return Ok(JobReport {
+                    processed: reaped,
+                    changed: reaped,
+                    ..JobReport::default()
+                });
             }
             let now = (ctx.state().clock)();
             let intents = reap_storage_result(ctx.state().meta.prune_ingress_intents(
@@ -424,9 +443,17 @@ impl NodeJob for WriteLedgerReap {
                 break;
             }
         }
+        let quota = reap_storage_result(ctx.state().meta.repair_abandoned_quota_reservations(
+            (ctx.state().clock)().saturating_sub(QUOTA_RESERVATION_GRACE_SECS),
+            self.batch,
+        ))?;
+        let quota_released = reaped_count(quota.released);
+        let quota_remaining = reaped_count(quota.remaining);
         Ok(JobReport {
-            processed: reaped,
-            changed: reaped,
+            processed: reaped + quota_released + quota_remaining,
+            changed: reaped + quota_released,
+            quota_released,
+            quota_remaining,
         })
     }
 }
@@ -435,7 +462,7 @@ fn reaped_count(batch: usize) -> u64 {
     u64::try_from(batch).expect("bounded batch fits in u64")
 }
 
-fn reap_storage_result<T>(result: Result<T, peryx_storage::meta::MetaError>) -> Result<T, JobFailure> {
+fn reap_storage_result<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, JobFailure> {
     result.map_err(|error| JobFailure::new("storage", error.to_string()))
 }
 
@@ -501,10 +528,12 @@ impl NodeJob for SearchRebuildJob {
             RebuildOutcome::Published { documents } => JobReport {
                 processed: documents,
                 changed: documents,
+                ..JobReport::default()
             },
             RebuildOutcome::Aborted { documents } => JobReport {
                 processed: documents,
                 changed: 0,
+                ..JobReport::default()
             },
         })
     }

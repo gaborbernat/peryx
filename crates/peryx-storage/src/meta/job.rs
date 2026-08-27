@@ -82,6 +82,10 @@ pub struct JobRunRecord {
     pub finished_at_unix: Option<i64>,
     pub items_processed: u64,
     pub items_changed: u64,
+    #[serde(default)]
+    pub quota_released: u64,
+    #[serde(default)]
+    pub quota_remaining: u64,
     pub error: Option<String>,
 }
 
@@ -99,6 +103,8 @@ pub struct JobOutcome<'a> {
     finished_at_unix: i64,
     items_processed: u64,
     items_changed: u64,
+    quota_released: u64,
+    quota_remaining: u64,
     error: Option<&'a str>,
 }
 
@@ -110,6 +116,8 @@ impl<'a> JobOutcome<'a> {
             finished_at_unix,
             items_processed,
             items_changed,
+            quota_released: 0,
+            quota_remaining: 0,
             error: None,
         }
     }
@@ -121,6 +129,8 @@ impl<'a> JobOutcome<'a> {
             finished_at_unix,
             items_processed,
             items_changed,
+            quota_released: 0,
+            quota_remaining: 0,
             error: Some(error),
         }
     }
@@ -132,8 +142,17 @@ impl<'a> JobOutcome<'a> {
             finished_at_unix,
             items_processed,
             items_changed,
+            quota_released: 0,
+            quota_remaining: 0,
             error: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_quota(mut self, released: u64, remaining: u64) -> Self {
+        self.quota_released = released;
+        self.quota_remaining = remaining;
+        self
     }
 }
 
@@ -220,6 +239,8 @@ impl MetaStore {
             finished_at_unix: None,
             items_processed: 0,
             items_changed: 0,
+            quota_released: 0,
+            quota_remaining: 0,
             error: None,
         };
         {
@@ -255,6 +276,8 @@ impl MetaStore {
         record.finished_at_unix = Some(outcome.finished_at_unix);
         record.items_processed = outcome.items_processed;
         record.items_changed = outcome.items_changed;
+        record.quota_released = outcome.quota_released;
+        record.quota_remaining = outcome.quota_remaining;
         record.error = outcome
             .error
             .map(|error| error[..error.floor_char_boundary(MAX_ERROR_BYTES)].to_owned());

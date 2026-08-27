@@ -150,6 +150,8 @@ fn run_node_job(
     })?;
     writeln!(out, "processed\t{}", report.processed)?;
     writeln!(out, "changed\t{}", report.changed)?;
+    writeln!(out, "quota_released\t{}", report.quota_released)?;
+    writeln!(out, "quota_remaining\t{}", report.quota_remaining)?;
     Ok(())
 }
 

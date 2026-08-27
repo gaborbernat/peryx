@@ -556,13 +556,8 @@ fn test_reconcile_pass_repairs_and_retires_under_a_live_term() {
 fn test_reconcile_pass_continues_after_a_nonlocal_page() {
     let (_dir, meta) = meta();
     let (_sdir, store, _root, backend) = filesystem();
-    let (_first_blob, first_digest) = digests(b"first-placement");
-    let (_second_blob, second_digest) = digests(b"second-placement");
-    let (remote, local) = if first_digest.canonical() < second_digest.canonical() {
-        (first_digest, second_digest)
-    } else {
-        (second_digest, first_digest)
-    };
+    let remote = ArtifactDigest::from_sha256("1".repeat(64)).unwrap();
+    let local = ArtifactDigest::from_sha256("2".repeat(64)).unwrap();
     let remote_key = key(&remote, &backend, "remote", remote.sha256());
     let local_key = key(&local, &backend, "home", local.sha256());
     seed_verified(&meta, &remote_key, 1);

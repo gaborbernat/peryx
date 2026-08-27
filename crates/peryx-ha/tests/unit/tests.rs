@@ -945,6 +945,15 @@ fn transport_error_contract(
 }
 
 #[rstest]
+#[case::source_changed(TransportError::SourceChanged { expected: "a".into(), actual: "b".into() }, true)]
+#[case::frontier_gap(TransportError::FrontierGap { expected: 1, actual: 2 }, true)]
+#[case::empty_batch(TransportError::EmptyBatch { frontier: 2, after: 1 }, true)]
+#[case::bad_status(TransportError::BadStatus { status: 429 }, false)]
+fn protocol_error_rearm_contract(#[case] error: TransportError, #[case] expected: bool) {
+    assert_eq!(error.requires_explicit_rearm(), expected);
+}
+
+#[rstest]
 #[case(ByteAckDecision::Acknowledged { nodes: vec!["one".into()], required: 1 }, true)]
 #[case(ByteAckDecision::Pending { nodes: Vec::new(), required: 1, remaining: 1 }, false)]
 fn byte_ack_decision_contract(#[case] decision: ByteAckDecision, #[case] acknowledged: bool) {

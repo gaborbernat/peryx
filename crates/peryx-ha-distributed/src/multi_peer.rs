@@ -54,14 +54,28 @@ pub enum MemberOutcome {
     },
     /// `delay` is relative to the round's logical `now`.
     RetryAfter { source: String, delay: Duration },
+    /// The peer becomes due after `delay` without losing its attempt history.
+    Quarantined {
+        source: String,
+        reason: &'static str,
+        delay: Duration,
+    },
     /// `reason` is the stable machine token for retirement.
     GaveUp { source: String, reason: &'static str },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RetiredPeer {
+    pub source: String,
+    pub reason: &'static str,
 }
 
 /// Contains due peers in selection order; idle peers are omitted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoundReport {
     pub outcomes: Vec<MemberOutcome>,
+    pub retired: Vec<RetiredPeer>,
+    pub fully_retired: bool,
 }
 
 impl RoundReport {
@@ -76,7 +90,8 @@ impl RoundReport {
 enum Health {
     Ready,
     BackingOff { until: Duration },
-    GaveUp,
+    Quarantined { until: Duration, reason: &'static str },
+    Retired { reason: &'static str },
 }
 
 struct Member<T: PeerTransport> {
@@ -100,9 +115,20 @@ impl<T: PeerTransport> Member<T> {
             && !self.draining
             && match self.health {
                 Health::Ready => true,
-                Health::BackingOff { until } => until <= now,
-                Health::GaveUp => false,
+                Health::BackingOff { until } | Health::Quarantined { until, .. } => until <= now,
+                Health::Retired { .. } => false,
             }
+    }
+
+    fn retirement(&self) -> Option<RetiredPeer> {
+        let reason = match self.health {
+            Health::Quarantined { reason, .. } | Health::Retired { reason } => reason,
+            Health::Ready | Health::BackingOff { .. } => return None,
+        };
+        Some(RetiredPeer {
+            source: self.source.clone(),
+            reason,
+        })
     }
 }
 
@@ -204,16 +230,27 @@ impl<T: PeerTransport> PeerSet<T> {
         changes
     }
 
-    /// Clears drain and backoff state. Duplicate or stale commits cannot move the frontier backward.
+    /// Duplicate or stale commits cannot move the frontier backward or alter peer health.
     pub fn commit(&mut self, source: &str, through: u64) {
         if let Some(member) = self.member_mut(source) {
             if through > member.frontier {
                 member.frontier = through;
             }
-            member.attempt = 0;
-            member.health = Health::Ready;
             member.draining = false;
         }
+    }
+
+    /// Re-arms a peer retired for a protocol violation. Returns false for an unknown or active peer.
+    pub fn rearm(&mut self, source: &str) -> bool {
+        let Some(member) = self.member_mut(source) else {
+            return false;
+        };
+        if !matches!(member.health, Health::Retired { .. }) {
+            return false;
+        }
+        member.attempt = 0;
+        member.health = Health::Ready;
+        true
     }
 
     /// Selects due peers round-robin, fetches up to `max_concurrent` in parallel, and isolates each
@@ -221,7 +258,7 @@ impl<T: PeerTransport> PeerSet<T> {
     pub async fn advance(&mut self, now: Duration) -> RoundReport {
         let selected = self.select(now);
         if selected.is_empty() {
-            return RoundReport::default();
+            return self.report(Vec::new());
         }
         let fetches = selected.iter().map(|&index| {
             let member = &self.members[index];
@@ -235,7 +272,16 @@ impl<T: PeerTransport> PeerSet<T> {
         for (index, result) in selected.into_iter().zip(results) {
             outcomes.push(self.settle(index, result, now));
         }
-        RoundReport { outcomes }
+        self.report(outcomes)
+    }
+
+    fn report(&self, outcomes: Vec<MemberOutcome>) -> RoundReport {
+        let retired: Vec<RetiredPeer> = self.members.iter().filter_map(Member::retirement).collect();
+        RoundReport {
+            outcomes,
+            fully_retired: !self.members.is_empty() && retired.len() == self.members.len(),
+            retired,
+        }
     }
 
     fn select(&mut self, now: Duration) -> Vec<usize> {
@@ -302,7 +348,7 @@ impl<T: PeerTransport> PeerSet<T> {
 
     fn back_off(&mut self, index: usize, error: &crate::peer::TransportError, now: Duration) -> MemberOutcome {
         let member = &mut self.members[index];
-        member.attempt += 1;
+        member.attempt = member.attempt.saturating_add(1);
         let source = member.source.clone();
         match self.policy.on_error(error, member.attempt) {
             Retry::After(base) => {
@@ -311,8 +357,17 @@ impl<T: PeerTransport> PeerSet<T> {
                 MemberOutcome::RetryAfter { source, delay }
             }
             Retry::GiveUp { reason } => {
-                self.members[index].health = Health::GaveUp;
-                MemberOutcome::GaveUp { source, reason }
+                if error.requires_explicit_rearm() {
+                    self.members[index].health = Health::Retired { reason };
+                    MemberOutcome::GaveUp { source, reason }
+                } else {
+                    let delay = self.policy.quarantine_delay() + jitter(&source, member.attempt, self.limits.jitter);
+                    self.members[index].health = Health::Quarantined {
+                        until: now + delay,
+                        reason,
+                    };
+                    MemberOutcome::Quarantined { source, reason, delay }
+                }
             }
         }
     }

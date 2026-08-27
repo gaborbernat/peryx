@@ -81,4 +81,8 @@ impl ReconnectPolicy {
         }
         delay.min(self.max_delay)
     }
+
+    pub(crate) fn quarantine_delay(&self) -> Duration {
+        self.delay_for(self.max_attempts.get())
+    }
 }

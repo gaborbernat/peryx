@@ -157,7 +157,7 @@ pub use liveness::{
     DEFAULT_DEAD_AFTER, DEFAULT_MAX_HEARTBEAT_BYTES, DEFAULT_SUSPECT_AFTER, HeartbeatReport, LivenessRejection,
     LivenessTracker, PeerHealth, Suspicion, liveness_router,
 };
-pub use multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RoundReport, SetLimits};
+pub use multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RetiredPeer, RoundReport, SetLimits};
 pub use multi_pull::{PullRound, pull_round};
 pub use openapi::availability_paths;
 pub use ownership::{

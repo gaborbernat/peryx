@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json, Router, http::StatusCode};
 use peryx_ha::{ReplicaPage, ReplicaViewApplier};
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
@@ -14,7 +14,7 @@ use crate::multi_peer::DEFAULT_SET_LIMITS;
 use crate::support::TestServer;
 use crate::{
     AvailabilityMetrics, BlobReference, CapacityLimited, Change, ChangePage, HttpBlobTransport, HttpPeerTransport,
-    MetadataMutation, PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, ReplicaMonitor, TransferLimits,
+    MetadataMutation, PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, ReplicaMonitor, RetiredPeer, TransferLimits,
     TransportError, primary_router,
 };
 
@@ -60,6 +60,18 @@ fn metadata(base: &str) -> PeerSet<HttpPeerTransport> {
         HttpPeerTransport::new(base, TOKEN, TransferLimits::default(), Duration::from_secs(1)).unwrap(),
         0,
     );
+    peers
+}
+
+fn metadata_peers(bases: &[(&str, &str)]) -> PeerSet<HttpPeerTransport> {
+    let mut peers = PeerSet::new(DEFAULT_SET_LIMITS, bounded_policy(3));
+    for (source, base) in bases {
+        peers.join(
+            *source,
+            HttpPeerTransport::new(base, TOKEN, TransferLimits::default(), Duration::from_secs(1)).unwrap(),
+            0,
+        );
+    }
     peers
 }
 
@@ -308,4 +320,74 @@ async fn test_run_retries_a_disconnected_metadata_plane_until_cancelled() {
 
     assert!(monitor.snapshot().errors > 0);
     assert_eq!(monitor.readiness_gap(), Some("sync_error"));
+}
+
+#[tokio::test]
+async fn test_cycle_reports_a_fully_retired_peer_set() {
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        get(|| async { StatusCode::TOO_MANY_REQUESTS }),
+    ))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (meta, blobs) = stores(&dir);
+    let monitor = Arc::new(ReplicaMonitor::new(0));
+    let mut replica = replica(
+        meta,
+        blobs,
+        metadata(&server.url),
+        blob_transport(&server.url),
+        Arc::new(Views::default()),
+        Arc::clone(&monitor),
+    );
+
+    assert_eq!(replica.cycle().await, Err(TransportError::Disconnected));
+    assert_eq!(monitor.readiness_gap(), Some("retired_peers"));
+    assert!(monitor.snapshot().fully_retired);
+    assert_eq!(
+        monitor.snapshot().retired,
+        vec![RetiredPeer {
+            source: "primary".to_owned(),
+            reason: "bad_status",
+        }]
+    );
+}
+
+#[tokio::test]
+async fn test_cycle_keeps_partial_retirement_distinct_from_sync_error() {
+    let retired_server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        get(|| async { StatusCode::TOO_MANY_REQUESTS }),
+    ))
+    .await;
+    let backing_off_server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+    ))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (meta, blobs) = stores(&dir);
+    let monitor = Arc::new(ReplicaMonitor::new(0));
+    let mut replica = replica(
+        meta,
+        blobs,
+        metadata_peers(&[
+            ("retired", &retired_server.url),
+            ("backing-off", &backing_off_server.url),
+        ]),
+        blob_transport(&retired_server.url),
+        Arc::new(Views::default()),
+        Arc::clone(&monitor),
+    );
+
+    assert_eq!(replica.cycle().await, Err(TransportError::Disconnected));
+    assert_eq!(monitor.readiness_gap(), Some("sync_error"));
+    assert!(!monitor.snapshot().fully_retired);
+    assert_eq!(
+        monitor.snapshot().retired,
+        vec![RetiredPeer {
+            source: "retired".to_owned(),
+            reason: "bad_status",
+        }]
+    );
 }

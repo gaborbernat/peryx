@@ -1,15 +1,22 @@
 use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::response::IntoResponse as _;
+use axum::routing::get;
+use axum::{Json, Router, http::StatusCode};
 
+use crate::HttpPeerTransport;
 use crate::backoff::ReconnectPolicy;
 use crate::multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RoundReport, SetLimits};
 use crate::peer::{
     BatchFrame, BatchRequest, LoopbackPeer, LoopbackTransport, PeerFault, PeerTransport, TransferLimits, TransportError,
 };
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
+use crate::support::TestServer;
 
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("non-zero")
@@ -39,6 +46,96 @@ fn peer_with(source: &str, token: &str, count: u64) -> LoopbackPeer {
         peer.append(format!("event-{index}").into_bytes());
     }
     peer
+}
+
+async fn recovering_http_peer(
+    failures: usize,
+    status: StatusCode,
+    max_attempts: u32,
+) -> (TestServer, PeerSet<HttpPeerTransport>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let router = Router::new().route(
+        "/+replication/v1/changes",
+        get(move || {
+            let handler_calls = Arc::clone(&handler_calls);
+            async move {
+                if handler_calls.fetch_add(1, Ordering::Relaxed) < failures {
+                    status.into_response()
+                } else {
+                    Json(change_page(1, 1)).into_response()
+                }
+            }
+        }),
+    );
+    let (server, set) = http_peer(router, 8, max_attempts).await;
+    (server, set, calls)
+}
+
+async fn protocol_recovery_http_peer() -> (TestServer, PeerSet<HttpPeerTransport>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let router = Router::new().route(
+        "/+replication/v1/changes",
+        get(move || {
+            let call = handler_calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                Json(if call == 0 {
+                    change_page(2, 2)
+                } else {
+                    change_page(1, 1)
+                })
+            }
+        }),
+    );
+    let (server, set) = http_peer(router, 8, 3).await;
+    (server, set, calls)
+}
+
+async fn buffered_then_outage() -> (TestServer, PeerSet<HttpPeerTransport>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let router = Router::new().route(
+        "/+replication/v1/changes",
+        get(move || {
+            let call = handler_calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if call == 0 {
+                    Json(change_page(2, 1)).into_response()
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE.into_response()
+                }
+            }
+        }),
+    );
+    let (server, set) = http_peer(router, 1, 2).await;
+    (server, set, calls)
+}
+
+async fn http_peer(router: Router, request_size: usize, max_attempts: u32) -> (TestServer, PeerSet<HttpPeerTransport>) {
+    let server = TestServer::start(router).await;
+    let mut set = PeerSet::new(limits(1, request_size, 8, Duration::ZERO), policy(max_attempts));
+    set.join(
+        "primary",
+        HttpPeerTransport::new(&server.url, "tok", TransferLimits::default(), Duration::from_secs(1)).unwrap(),
+        0,
+    );
+    (server, set)
+}
+
+fn change_page(current_serial: u64, change_serial: u64) -> ChangePage {
+    ChangePage {
+        version: PROTOCOL_VERSION,
+        source: "writer".to_owned(),
+        after: 0,
+        current_serial,
+        changes: vec![Change {
+            serial: change_serial,
+            event: b"event".to_vec(),
+            metadata: Vec::new(),
+            blobs: Vec::new(),
+        }],
+    }
 }
 
 #[test]
@@ -289,43 +386,128 @@ async fn test_a_backed_off_peer_is_due_again_only_after_its_delay() {
 }
 
 #[tokio::test]
-async fn test_a_bad_credential_retires_a_peer_terminally() {
+async fn test_a_bad_credential_quarantines_a_peer() {
     let peer = peer_with("a", "tok", 2);
-    let mut set = PeerSet::new(DEFAULT_SET_LIMITS, policy(10));
+    let mut set = PeerSet::new(limits(4, 256, 1024, Duration::ZERO), policy(10));
     set.join("a", LoopbackTransport::connect(&peer, "wrong"), 0);
 
     let report = set.advance(Duration::ZERO).await;
 
     assert_eq!(
         report.outcomes[0],
-        MemberOutcome::GaveUp {
+        MemberOutcome::Quarantined {
             source: "a".to_owned(),
             reason: "unauthenticated",
+            delay: Duration::from_secs(30),
         }
     );
     assert_eq!(
         set.advance(Duration::ZERO).await.advanced(),
         0,
-        "a retired peer never returns"
+        "a quarantined peer waits for its delay"
     );
 }
 
 #[tokio::test]
-async fn test_an_exhausted_retry_budget_retires_a_peer() {
+async fn test_an_exhausted_retry_budget_quarantines_a_peer() {
     let slow = peer_with("b", "tok", 2);
     slow.inject(PeerFault::Disconnect);
-    let mut set = PeerSet::new(DEFAULT_SET_LIMITS, policy(1));
+    let mut set = PeerSet::new(limits(4, 256, 1024, Duration::ZERO), policy(1));
     set.join("b", LoopbackTransport::connect(&slow, "tok"), 0);
 
     let report = set.advance(Duration::ZERO).await;
 
     assert_eq!(
         report.outcomes[0],
-        MemberOutcome::GaveUp {
+        MemberOutcome::Quarantined {
             source: "b".to_owned(),
             reason: "retry_exhausted",
+            delay: Duration::from_millis(100),
         }
     );
+}
+
+#[tokio::test]
+async fn test_a_bad_exchange_becomes_due_and_recovers() {
+    let (_server, mut set, calls) = recovering_http_peer(1, StatusCode::TOO_MANY_REQUESTS, 3).await;
+
+    let quarantined = set.advance(Duration::ZERO).await;
+    assert_eq!(
+        quarantined.outcomes,
+        vec![MemberOutcome::Quarantined {
+            source: "primary".to_owned(),
+            reason: "bad_status",
+            delay: Duration::from_millis(400),
+        }]
+    );
+    assert_eq!(
+        quarantined.retired,
+        vec![crate::RetiredPeer {
+            source: "primary".to_owned(),
+            reason: "bad_status",
+        }]
+    );
+    assert!(quarantined.fully_retired);
+    assert_eq!(set.advance(Duration::from_millis(99)).await.advanced(), 0);
+    assert_eq!(set.advance(Duration::from_secs(1)).await.advanced(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn test_an_outage_past_the_retry_budget_becomes_due_and_recovers() {
+    let (_server, mut set, calls) = recovering_http_peer(2, StatusCode::SERVICE_UNAVAILABLE, 2).await;
+
+    assert!(matches!(
+        set.advance(Duration::ZERO).await.outcomes.as_slice(),
+        [MemberOutcome::RetryAfter { .. }]
+    ));
+    assert!(matches!(
+        set.advance(Duration::from_millis(100)).await.outcomes.as_slice(),
+        [MemberOutcome::Quarantined {
+            reason: "retry_exhausted",
+            ..
+        }]
+    ));
+    assert_eq!(set.advance(Duration::from_secs(1)).await.advanced(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn test_quarantine_preserves_attempts_across_commit_and_becomes_due() {
+    let (_server, mut set, calls) = buffered_then_outage().await;
+
+    assert!(matches!(
+        set.advance(Duration::ZERO).await.outcomes.as_slice(),
+        [MemberOutcome::Progressed { caught_up: false, .. }]
+    ));
+    assert_eq!(
+        set.advance(Duration::ZERO).await.outcomes,
+        vec![MemberOutcome::RetryAfter {
+            source: "primary".to_owned(),
+            delay: Duration::from_millis(100),
+        }]
+    );
+    assert_eq!(set.drain("primary").len(), 1);
+    set.commit("primary", 1);
+    assert_eq!(set.advance(Duration::from_millis(99)).await.advanced(), 0);
+    assert_eq!(
+        set.advance(Duration::from_millis(100)).await.outcomes,
+        vec![MemberOutcome::Quarantined {
+            source: "primary".to_owned(),
+            reason: "retry_exhausted",
+            delay: Duration::from_millis(200),
+        }]
+    );
+    assert_eq!(set.advance(Duration::from_millis(299)).await.advanced(), 0);
+    assert_eq!(
+        set.advance(Duration::from_millis(300)).await.outcomes,
+        vec![MemberOutcome::Quarantined {
+            source: "primary".to_owned(),
+            reason: "retry_exhausted",
+            delay: Duration::from_millis(200),
+        }]
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
 }
 
 struct GappyTransport;
@@ -363,6 +545,30 @@ async fn test_a_non_contiguous_batch_retires_the_peer() {
             reason: "frontier_gap",
         }
     );
+    assert!(report.fully_retired);
+    assert_eq!(set.advance(Duration::from_secs(1)).await.advanced(), 0);
+}
+
+#[tokio::test]
+async fn test_a_protocol_violation_requires_an_explicit_rearm() {
+    let (_server, mut set, calls) = protocol_recovery_http_peer().await;
+
+    assert!(matches!(
+        set.advance(Duration::ZERO).await.outcomes.as_slice(),
+        [MemberOutcome::GaveUp {
+            reason: "frontier_gap",
+            ..
+        }]
+    ));
+    assert_eq!(set.advance(Duration::from_secs(1)).await.advanced(), 0);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(set.rearm("primary"));
+    assert!(!set.rearm("primary"));
+    assert!(matches!(
+        set.advance(Duration::from_secs(1)).await.outcomes.as_slice(),
+        [MemberOutcome::Progressed { caught_up: true, .. }]
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
 #[tokio::test]
@@ -379,6 +585,7 @@ async fn test_accessors_ignore_an_unknown_peer() {
     assert_eq!(set.frontier("ghost"), None);
     assert_eq!(set.buffered("ghost"), None);
     assert!(set.drain("ghost").is_empty());
+    assert!(!set.rearm("ghost"));
     set.commit("ghost", 9);
     assert_eq!(set.frontier("ghost"), None);
 }

@@ -210,6 +210,7 @@ impl AvailabilityNode {
                     ("lag".to_owned(), json!(lag)),
                     ("synced_changes".to_owned(), json!(observation.changes)),
                     ("sync_errors".to_owned(), json!(observation.errors)),
+                    ("retired_members".to_owned(), json!(observation.retired)),
                 ]);
             }
             if audience == AvailabilityAudience::Administrator {

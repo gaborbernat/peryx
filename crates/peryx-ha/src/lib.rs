@@ -959,6 +959,15 @@ impl TransportError {
             Self::EmptyBatch { .. } => Some("empty_batch"),
         }
     }
+
+    /// Source and frontier protocol violations require an operator to restore trust.
+    #[must_use]
+    pub const fn requires_explicit_rearm(&self) -> bool {
+        matches!(
+            self,
+            Self::SourceChanged { .. } | Self::FrontierGap { .. } | Self::EmptyBatch { .. }
+        )
+    }
 }
 
 /// Proof that one peer durably holds an artifact.

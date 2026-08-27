@@ -8,7 +8,7 @@ use peryx_core::{BrowseBadge, BrowseCell, BrowseLink, BrowsePage, BrowseProperty
 use super::copy_to_clipboard;
 use super::{ErrorMessage, human_size};
 use crate::data::load_browse;
-use crate::markdown::external_link_rel;
+use crate::markdown::link_destination;
 
 #[component]
 pub fn Browse() -> impl IntoView {
@@ -84,7 +84,12 @@ fn BrowseBreadcrumbs(links: Vec<BrowseLink>) -> impl IntoView {
             <nav class="breadcrumb">
                 {links.into_iter().enumerate().map(|(position, link)| view! {
                     {(position > 0).then_some(" / ")}
-                <a href=link.href.clone() rel=external_link_rel(&link.href)>{link.label}</a>
+                    {match link_destination(link.href) {
+                        Some(destination) => view! {
+                            <a href=destination.href rel=destination.rel>{link.label}</a>
+                        }.into_any(),
+                        None => view! { <span>{link.label}</span> }.into_any(),
+                    }}
                 }).collect_view()}
             </nav>
         }
@@ -157,7 +162,12 @@ fn BrowseSectionView(section: BrowseSection) -> impl IntoView {
                 <h2>{heading}</h2>
                 {size.map(|size| view! { <p class="dim">{format!("{} at byte {offset}", human_size(size))}</p> })}
                 <pre class="browse-content"><code>{text}</code></pre>
-                {next.map(|link| view! { <a class="page-link" href=link.href>{link.label}</a> })}
+                {next.map(|link| match link_destination(link.href) {
+                    Some(destination) => view! {
+                        <a class="page-link" href=destination.href rel=destination.rel>{link.label}</a>
+                    }.into_any(),
+                    None => view! { <span>{link.label}</span> }.into_any(),
+                })}
             </section>
         }
         .into_any(),
@@ -168,8 +178,10 @@ fn BrowseSectionView(section: BrowseSection) -> impl IntoView {
 fn BrowsePropertyView(entry: BrowseProperty) -> impl IntoView {
     view! {
         <dt>{entry.label}</dt>
-        <dd>{match entry.href {
-            Some(href) => view! { <a href=href.clone() rel=external_link_rel(&href)>{entry.value}</a> }.into_any(),
+        <dd>{match entry.href.and_then(link_destination) {
+            Some(destination) => view! {
+                <a href=destination.href rel=destination.rel>{entry.value}</a>
+            }.into_any(),
             None => view! { <span>{entry.value}</span> }.into_any(),
         }}</dd>
     }
@@ -183,7 +195,12 @@ fn BrowseLinks(links: Vec<BrowseLink>, empty: String) -> impl IntoView {
     view! {
         <ul class="links-list">
             {links.into_iter().map(|link| view! {
-                <li><a href=link.href.clone() rel=external_link_rel(&link.href)>{link.label}</a></li>
+                <li>{match link_destination(link.href) {
+                    Some(destination) => view! {
+                        <a href=destination.href rel=destination.rel>{link.label}</a>
+                    }.into_any(),
+                    None => view! { <span>{link.label}</span> }.into_any(),
+                }}</li>
             }).collect_view()}
         </ul>
     }
@@ -224,8 +241,10 @@ fn BrowseCellView(cell: BrowseCell) -> impl IntoView {
     } else {
         view! { <span>{cell.text}</span> }.into_any()
     };
-    view! { <td>{match cell.href {
-        Some(href) => view! { <a href=href.clone() rel=external_link_rel(&href)>{content}</a> }.into_any(),
+    view! { <td>{match cell.href.and_then(link_destination) {
+        Some(destination) => view! {
+            <a href=destination.href rel=destination.rel>{content}</a>
+        }.into_any(),
         None => content,
     }}</td> }
 }

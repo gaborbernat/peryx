@@ -2,10 +2,12 @@
 //! [group readiness](crate::group_readiness). Heartbeats report health but do not establish membership;
 //! the writer rejects nodes outside its configured roster.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::{Client, Url};
+use reqwest::{Client, StatusCode, Url};
 
+use crate::AvailabilityMetrics;
 use crate::liveness::HeartbeatReport;
 use peryx_storage::meta::MetaStore;
 
@@ -23,6 +25,20 @@ pub enum BeaconError {
     InvalidBase(String),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum HeartbeatError {
+    #[error("heartbeat authentication rejected with {status}")]
+    Authentication { status: StatusCode },
+    #[error("heartbeat incarnation or sequence is stale")]
+    StaleIncarnation,
+    #[error("heartbeat server returned {status}")]
+    Server { status: StatusCode },
+    #[error("heartbeat request was rejected with {status}")]
+    Rejected { status: StatusCode },
+    #[error("heartbeat transport failed: {0}")]
+    Transport(#[source] reqwest::Error),
+}
+
 pub struct BeaconSender {
     http: Client,
     endpoint: Url,
@@ -31,6 +47,7 @@ pub struct BeaconSender {
     incarnation: u64,
     meta: MetaStore,
     interval: Duration,
+    metrics: Option<Arc<AvailabilityMetrics>>,
 }
 
 impl BeaconSender {
@@ -81,7 +98,14 @@ impl BeaconSender {
             incarnation,
             meta,
             interval,
+            metrics: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<AvailabilityMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     fn report(&self, sequence: u64) -> HeartbeatReport {
@@ -93,17 +117,31 @@ impl BeaconSender {
         }
     }
 
-    /// Returns transport failures without losing frontier state; the next beat reports it again.
-    pub(crate) async fn beat(&self, sequence: u64) -> Result<(), reqwest::Error> {
+    /// Sends the current durable frontier without advancing local state.
+    ///
+    /// # Errors
+    /// Returns a typed failure when the writer rejects the heartbeat or the request fails.
+    ///
+    /// # Panics
+    /// Panics if serialization of the fixed heartbeat report fails.
+    pub async fn beat(&self, sequence: u64) -> Result<(), HeartbeatError> {
         let body = serde_json::to_vec(&self.report(sequence)).expect("a heartbeat report serializes");
-        self.http
+        let result = match self
+            .http
             .post(self.endpoint.clone())
             .bearer_auth(&self.token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
             .send()
-            .await?;
-        Ok(())
+            .await
+        {
+            Ok(response) => heartbeat_status(response.status()),
+            Err(error) => Err(HeartbeatError::Transport(error)),
+        };
+        if let (Err(error), Some(metrics)) = (&result, &self.metrics) {
+            metrics.record_heartbeat_error(error);
+        }
+        result
     }
 
     /// Runs until cancellation and discards failed beats so a writer outage does not stop reporting.
@@ -114,5 +152,15 @@ impl BeaconSender {
             let _ = self.beat(sequence).await;
             tokio::time::sleep(self.interval).await;
         }
+    }
+}
+
+fn heartbeat_status(status: StatusCode) -> Result<(), HeartbeatError> {
+    match status {
+        status if status.is_success() => Ok(()),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(HeartbeatError::Authentication { status }),
+        StatusCode::CONFLICT => Err(HeartbeatError::StaleIncarnation),
+        status if status.is_server_error() => Err(HeartbeatError::Server { status }),
+        status => Err(HeartbeatError::Rejected { status }),
     }
 }

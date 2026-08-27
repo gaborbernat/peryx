@@ -513,6 +513,7 @@ fn replica_beacon(
     context: &DistributedRuntimeContext,
     upstream: &str,
     token: &str,
+    metrics: Arc<AvailabilityMetrics>,
 ) -> Option<BeaconSender> {
     let node = config.node_identity.as_deref()?;
     Some(
@@ -524,7 +525,8 @@ fn replica_beacon(
             context.meta.clone(),
             DEFAULT_BEACON_INTERVAL,
         )
-        .expect("the validated upstream and token also build the frontier beacon"),
+        .expect("the validated upstream and token also build the frontier beacon")
+        .with_metrics(metrics),
     )
 }
 
@@ -689,11 +691,11 @@ impl DistributedRuntime {
                 let resume = context.meta.current_serial().context("read the replica serial")?;
                 let (metadata, transport) = replica_transports(config, upstream, token, resume, *page_size)?;
                 let (local_dc, delegates) = replica_blob_deferral(config, token)?;
-                let beacon = replica_beacon(config, context, upstream, token);
                 let follower = follower_router(token.clone(), context.meta.clone())
                     .context("build the follower change-feed routes")?;
                 let monitor = Arc::new(ReplicaMonitor::new(resume));
                 let metrics = Arc::new(AvailabilityMetrics::default());
+                let beacon = replica_beacon(config, context, upstream, token, metrics.clone());
                 let workers = Arc::new(WorkerShared::for_replica());
                 let node = AvailabilityNode {
                     meta: context.meta.clone(),

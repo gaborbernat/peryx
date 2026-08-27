@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::{SyncError, SyncOutcome};
+use crate::{HeartbeatError, SyncError, SyncOutcome};
 use peryx_core::PrometheusSource;
 
 /// Error text does not affect cardinality because labels use a closed set.
@@ -44,6 +44,55 @@ impl SyncErrorClass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatErrorClass {
+    Authentication,
+    StaleIncarnation,
+    Server,
+    Transport,
+    Rejected,
+}
+
+impl HeartbeatErrorClass {
+    const ALL: [Self; 5] = [
+        Self::Authentication,
+        Self::StaleIncarnation,
+        Self::Server,
+        Self::Transport,
+        Self::Rejected,
+    ];
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::StaleIncarnation => "stale_incarnation",
+            Self::Server => "server",
+            Self::Transport => "transport",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Authentication => 0,
+            Self::StaleIncarnation => 1,
+            Self::Server => 2,
+            Self::Transport => 3,
+            Self::Rejected => 4,
+        }
+    }
+
+    const fn of(error: &HeartbeatError) -> Self {
+        match error {
+            HeartbeatError::Authentication { .. } => Self::Authentication,
+            HeartbeatError::StaleIncarnation => Self::StaleIncarnation,
+            HeartbeatError::Server { .. } => Self::Server,
+            HeartbeatError::Transport(_) => Self::Transport,
+            HeartbeatError::Rejected { .. } => Self::Rejected,
+        }
+    }
+}
+
 /// Fixed bucket bounds keep cardinality independent of observations. Prometheus exposition derives
 /// `+Inf` from the total count.
 const LATENCY_BUCKETS_SECONDS: [f64; 6] = [0.005, 0.025, 0.1, 0.5, 2.5, 10.0];
@@ -72,6 +121,7 @@ impl LatencyHistogram {
 struct AvailabilityState {
     cycles: u64,
     errors: [u64; SyncErrorClass::ALL.len()],
+    heartbeat_errors: [u64; HeartbeatErrorClass::ALL.len()],
     pending_serials: u64,
     latency: LatencyHistogram,
 }
@@ -104,6 +154,11 @@ impl AvailabilityMetrics {
             state.latency.observe(elapsed);
         });
     }
+
+    pub(crate) fn record_heartbeat_error(&self, error: &HeartbeatError) {
+        let class = HeartbeatErrorClass::of(error);
+        self.with(|state| state.heartbeat_errors[class.index()] += 1);
+    }
 }
 
 impl PrometheusSource for AvailabilityMetrics {
@@ -124,6 +179,18 @@ impl PrometheusSource for AvailabilityMetrics {
                 "peryx_availability_sync_errors_total{{class=\"{}\"}} {}",
                 class.as_str(),
                 state.errors[class.index()]
+            );
+        }
+        body.push_str(
+            "# HELP peryx_availability_heartbeat_errors_total Replica heartbeats that failed, by class.\n\
+             # TYPE peryx_availability_heartbeat_errors_total counter\n",
+        );
+        for class in HeartbeatErrorClass::ALL {
+            let _ = writeln!(
+                body,
+                "peryx_availability_heartbeat_errors_total{{class=\"{}\"}} {}",
+                class.as_str(),
+                state.heartbeat_errors[class.index()]
             );
         }
         body.push_str(

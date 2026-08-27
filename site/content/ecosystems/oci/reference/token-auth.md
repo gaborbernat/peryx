@@ -24,9 +24,10 @@ default_anonymous_read = true                       # per-index anonymous_read d
 
 The key signs an HS256 JWT whose `aud` claim is `peryx`. Keep it secret and stable: rotating it invalidates every token
 minted under the old key, and sharing it across replicas lets any replica verify a token the primary minted. Audience
-validation prevents another service that shares the key from presenting its tokens to this registry. `signing_key` and
-`signing_key_file` must contain at least one non-whitespace character; otherwise peryx exits during startup.
-`token_ttl_secs` accepts 60 through 86400 seconds when an OCI index enables the realm and defaults to 300.
+validation prevents another service that shares the key from presenting its tokens to this registry. Peryx requires at
+least 32 bytes after resolving `signing_key` or `signing_key_file`; startup and `check-config` reject shorter values.
+See the shared [signing-key guidance](@/core/access/authentication.md#signing-key) before generating or rotating the
+key. `token_ttl_secs` accepts 60 through 86400 seconds when an OCI index enables the realm and defaults to 300.
 
 ## Version check
 

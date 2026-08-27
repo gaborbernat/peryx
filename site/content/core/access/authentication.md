@@ -125,6 +125,24 @@ The `[auth]` table holds the settings every index's access rules share. All keys
 to sign scoped tokens. Peryx requires 60 through 86400 seconds when a signing key and OCI index enable the OCI token
 realm. A deployment with no OCI index accepts 1 through 86400. Set at most one of `signing_key` and `signing_key_file`.
 
+### Signing key
+
+The resolved signing key must contain at least 32 bytes. This meets the
+[HS256 minimum in RFC 7518](https://www.rfc-editor.org/rfc/rfc7518.html#section-3.2), but length alone does not provide
+entropy. Generate the key with a CSPRNG instead of choosing a long phrase. For example,
+[`openssl rand`](https://docs.openssl.org/master/man1/openssl-rand/) can encode 32 random bytes as 64 hexadecimal
+characters:
+
+```console
+$ umask 077
+$ openssl rand -hex 32 > peryx-signing-key
+```
+
+Nodes that mint or verify realm tokens or browser state must use the same value. To rotate it, drain those nodes,
+replace the key on each one, restart them, and restore traffic after the final node has the new value. Draining traffic
+prevents a mixed-key serving window. Rotation invalidates outstanding realm JWTs, browser sessions, and
+pre-authentication cookies. Do not retain an undersized key as a fallback.
+
 ### LDAP providers
 
 Each `[[auth.ldap_provider]]` names one StartTLS directory. Peryx constructs these providers at startup without opening

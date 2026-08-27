@@ -20,8 +20,9 @@ signing_key_file = "/run/secrets/peryx-signing-key"
 ```
 
 Keep the key in a file instead of inline. `signing_key_file` accepts a mounted Docker or Kubernetes secret, a systemd
-credential, or a Vault-rendered file. Check the mounted file before starting peryx; an empty or whitespace-only key
-stops startup. The key signs each token; rotating it invalidates all outstanding tokens.
+credential, or a Vault-rendered file. Follow the shared
+[signing-key guidance](@/core/access/authentication.md#signing-key) for secure generation, the 32-byte minimum, and
+coordinated rotation.
 
 ## Restrict index reads
 

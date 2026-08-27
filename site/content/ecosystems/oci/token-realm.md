@@ -11,7 +11,8 @@ Distribution Bearer flow.
 ## Activation
 
 Set `[auth].signing_key` or `[auth].signing_key_file` to enable `/v2/token`. The authentication service issues and
-verifies HS256 tokens without exposing key material to OCI request handling. Startup rejects an empty key.
+verifies HS256 tokens without exposing key material to OCI request handling. Startup and `check-config` reject a key
+shorter than 32 bytes.
 
 An OCI index with restricted reads or a named credential challenges `GET /v2/`. Public OCI indexes without credentials
 answer the probe directly and do not require token exchange.

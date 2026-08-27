@@ -152,20 +152,36 @@ fn test_log_writer_accepts_flush() {
     assert!(std::io::Write::flush(&mut LogWriter(None)).is_ok());
 }
 
-async fn exchange_request(state: Arc<AppState>, identity: &str, request_id: Option<&str>) -> axum::response::Response {
+async fn exchange_request(
+    state: Arc<AppState>,
+    identity: &str,
+    request_id: Option<&str>,
+    content_type: &str,
+) -> axum::response::Response {
+    mint_request(
+        state,
+        serde_json::json!({"token": identity}).to_string(),
+        request_id,
+        content_type,
+    )
+    .await
+}
+
+async fn mint_request(
+    state: Arc<AppState>,
+    body: impl Into<Body>,
+    request_id: Option<&str>,
+    content_type: &str,
+) -> axum::response::Response {
     let mut request = Request::builder()
         .method(Method::POST)
         .uri("/_/oidc/mint-token")
-        .header("content-type", "application/json");
+        .header("content-type", content_type);
     if let Some(request_id) = request_id {
         request = request.header("x-request-id", request_id);
     }
     peryx_http::router(state)
-        .oneshot(
-            request
-                .body(Body::from(serde_json::json!({"token": identity}).to_string()))
-                .unwrap(),
-        )
+        .oneshot(request.body(body.into()).unwrap())
         .await
         .unwrap()
 }
@@ -242,7 +258,7 @@ async fn test_oidc_exchange_rejects_a_malformed_identity_without_echoing_it() {
 #[tokio::test]
 async fn test_oidc_exchange_returns_the_minted_token_without_cache() {
     let (_dir, state) = state_with_exchange(successful_exchange());
-    let response = exchange_request(state, "external.identity.secret", None).await;
+    let response = exchange_request(state, "external.identity.secret", None, "application/json").await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         (
@@ -258,6 +274,41 @@ async fn test_oidc_exchange_returns_the_minted_token_without_cache() {
     );
 }
 
+#[tokio::test]
+async fn test_oidc_exchange_accepts_the_documented_curl_media_type() {
+    let (_dir, state) = state_with_exchange(successful_exchange());
+    let response = exchange_request(
+        state,
+        "external.identity.secret",
+        None,
+        "application/x-www-form-urlencoded",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"token": "internal.identity.secret", "expires": 123})
+    );
+}
+
+#[rstest::rstest]
+#[case::json("application/json", "{")]
+#[case::curl_media_type("application/x-www-form-urlencoded", "{")]
+#[case::form_body("application/x-www-form-urlencoded", "token=value")]
+#[case::unknown_field("application/json", r#"{"token":"value","unknown":true}"#)]
+#[tokio::test]
+async fn test_oidc_exchange_rejects_invalid_request_bodies(#[case] content_type: &str, #[case] body: &str) {
+    let (_dir, state) = state_with_exchange(successful_exchange());
+    let response = mint_request(state, body.to_owned(), None, content_type).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"message": "invalid request body"})
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn test_oidc_exchange_logs_stable_ids_without_credentials() {
     let external = "external.identity.secret";
@@ -265,7 +316,7 @@ async fn test_oidc_exchange_logs_stable_ids_without_credentials() {
     let (_dir, state) = state_with_exchange(successful_exchange());
     let logs = LogCapture::default();
     let guard = logs.install();
-    let _response = exchange_request(state, external, Some("request-42")).await;
+    let _response = exchange_request(state, external, Some("request-42"), "application/json").await;
 
     drop(guard);
     let logs = logs.text();
@@ -307,7 +358,7 @@ async fn test_oidc_exchange_logs_stable_ids_without_credentials() {
 async fn test_oidc_exchange_reports_an_unavailable_issuer_without_echoing_the_identity() {
     let identity = "external.identity.secret";
     let (_dir, state) = state_with_exchange(StubExchange::new(ExchangeResult::IssuerUnavailable));
-    let response = exchange_request(state, identity, None).await;
+    let response = exchange_request(state, identity, None, "application/json").await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert_eq!(
@@ -322,9 +373,9 @@ async fn test_oidc_exchange_body_is_bounded() {
     let (_dir, state) = state(true);
     let body = serde_json::json!({"token": "x".repeat(41 * 1024)}).to_string();
     assert_eq!(
-        request(state, Method::POST, "/_/oidc/mint-token", Body::from(body))
+        mint_request(state, body, None, "application/x-www-form-urlencoded")
             .await
-            .0,
+            .status(),
         StatusCode::PAYLOAD_TOO_LARGE
     );
 }

@@ -34,6 +34,7 @@ const MAX_GRAPH_DEPTH: usize = 32;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MirrorRow {
     pub kind: &'static str,
+    pub index: String,
     pub repo: String,
     pub reference: String,
     pub digest: String,
@@ -43,6 +44,33 @@ pub struct MirrorRow {
 }
 
 impl MirrorRow {
+    pub(super) fn selected(index: &str, raw: &str) -> Self {
+        parse_ref(raw).map_or_else(
+            || Self::row("manifest", raw, "", "", "selected", 0, String::new()).with_index(index),
+            |image| {
+                Self::row(
+                    "manifest",
+                    &image.repo,
+                    &image.reference,
+                    "",
+                    "selected",
+                    0,
+                    String::new(),
+                )
+                .with_index(index)
+            },
+        )
+    }
+
+    pub(super) fn count(index: &str, name: &'static str, value: u64) -> Self {
+        Self::row("summary", "", name, "", name, value, String::new()).with_index(index)
+    }
+
+    fn with_index(mut self, index: &str) -> Self {
+        index.clone_into(&mut self.index);
+        self
+    }
+
     fn synced(kind: &'static str, repo: &str, reference: &str, digest: &str, bytes: u64) -> Self {
         Self::row(kind, repo, reference, digest, "synced", bytes, String::new())
     }
@@ -66,6 +94,7 @@ impl MirrorRow {
     ) -> Self {
         Self {
             kind,
+            index: String::new(),
             repo: repo.to_owned(),
             reference: reference.to_owned(),
             digest: digest.to_owned(),
@@ -143,13 +172,9 @@ pub async fn mirror(
             .proxy_client()
             .map(|client| (client.base_url().to_owned(), client.auth().clone()))
     }) else {
-        rows.push(MirrorRow::error(
-            "summary",
-            &index.name,
-            "",
-            "",
-            "index has no cached upstream".to_owned(),
-        ));
+        rows.push(
+            MirrorRow::error("summary", "", "", "", "index has no cached upstream".to_owned()).with_index(&index.name),
+        );
         return Ok(rows);
     };
     let upstream = Upstream::new();
@@ -183,13 +208,16 @@ pub async fn mirror(
         });
     rows.push(MirrorRow::row(
         "summary",
-        &index.name,
+        "",
         "",
         "",
         if errors == 0 { "synced" } else { "error" },
         synced,
         format!("{synced} synced, {errors} errors"),
     ));
+    for row in &mut rows {
+        row.index.clone_from(&index.name);
+    }
     Ok(rows)
 }
 

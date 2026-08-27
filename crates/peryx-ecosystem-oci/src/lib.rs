@@ -29,6 +29,7 @@ use peryx_identity::Denial;
 
 /// Stable identity of the OCI distribution ecosystem.
 pub const ECOSYSTEM: Ecosystem = Ecosystem::new("oci");
+const MIRROR_REPORT_HEADER: &str = "kind\tindex\tproject\tfilename\tdigest\turl\tbytes\tstatus\treason\n";
 
 pub const DEFAULT_INDEXES: &[peryx_core::DefaultIndex] = &[
     peryx_core::DefaultIndex {
@@ -523,21 +524,14 @@ impl<S: std::hash::BuildHasher + Send + Sync> MirrorDriver for registry::OciRegi
             );
         }
         output
-            .write_all(b"kind\tindex\tproject\tfilename\tdigest\turl\tbytes\tstatus\treason\n")
+            .write_all(MIRROR_REPORT_HEADER.as_bytes())
             .map_err(error_message)?;
         let mode = match request.action {
             MirrorAction::Plan => {
                 for image in &images {
-                    writeln!(output, "manifest\t{}\t{image}\t{image}\t\t\t0\tselected\t", index.name)
-                        .map_err(error_message)?;
+                    write_mirror_row(output, &MirrorRow::selected(&index.name, image))?;
                 }
-                writeln!(
-                    output,
-                    "summary\t{}\t\timages\t\t\t{}\timages\t",
-                    index.name,
-                    images.len()
-                )
-                .map_err(error_message)?;
+                write_mirror_row(output, &MirrorRow::count(&index.name, "images", images.len() as u64))?;
                 return Ok(());
             }
             MirrorAction::Sync => MirrorMode::Sync,
@@ -551,12 +545,7 @@ impl<S: std::hash::BuildHasher + Send + Sync> MirrorDriver for registry::OciRegi
         let mut errors = 0_u64;
         for row in rows {
             errors += u64::from(row.status == "error");
-            writeln!(
-                output,
-                "{}\t{}\t{}\t{}\t{}\t\t{}\t{}\t{}",
-                row.kind, row.repo, row.reference, row.reference, row.digest, row.bytes, row.status, row.reason
-            )
-            .map_err(error_message)?;
+            write_mirror_row(output, &row)?;
         }
         if errors == 0 {
             Ok(())
@@ -571,6 +560,15 @@ fn validate_mirror_options(options: &toml::Table, supported: &[&str]) -> Result<
         return Err(format!("prefetch option {key:?} is not supported by oci"));
     }
     Ok(())
+}
+
+fn write_mirror_row(output: &mut (dyn std::io::Write + Send), row: &MirrorRow) -> Result<(), String> {
+    writeln!(
+        output,
+        "{}\t{}\t{}\t{}\t{}\t\t{}\t{}\t{}",
+        row.kind, row.index, row.repo, row.reference, row.digest, row.bytes, row.status, row.reason
+    )
+    .map_err(error_message)
 }
 
 fn table_strings(table: &toml::Table, key: &str) -> Result<Vec<String>, String> {

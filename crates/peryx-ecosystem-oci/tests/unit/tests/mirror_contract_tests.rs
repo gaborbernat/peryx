@@ -1,7 +1,9 @@
 use peryx_driver::serving::{MirrorAction, MirrorDriver, MirrorRequest};
 use peryx_index::IndexKind;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{app_with, oci_index};
+use super::{app_with, oci_digest, oci_index, proxy};
 use crate::registry::OciRegistry;
 
 #[rstest::rstest]
@@ -39,6 +41,19 @@ fn prefetch_options_reject_unsupported_keys(#[case] key: &str, #[case] override_
 )]
 fn prefetch_options_accept_consumed_keys(#[case] configured: toml::Table, #[case] overrides: toml::Table) {
     assert_eq!(OciRegistry::default().validate_options(&configured, &overrides), Ok(()));
+}
+
+fn report_rows(output: &str) -> Vec<[&str; 9]> {
+    let mut lines = output.lines();
+    assert_eq!(lines.next(), Some(crate::MIRROR_REPORT_HEADER.trim_end()));
+    lines
+        .map(|line| {
+            line.split('\t')
+                .collect::<Vec<_>>()
+                .try_into()
+                .expect("mirror report rows have nine columns")
+        })
+        .collect()
 }
 
 fn images(values: &[&str]) -> toml::Table {
@@ -82,11 +97,19 @@ async fn mirror_rejects_invalid_image_options(#[case] value: toml::Value, #[case
     assert_eq!(error, expected);
 }
 
+#[rstest::rstest]
+#[case::tag("library/example:latest", "library/example", "latest")]
+#[case::digest("library/example@sha256:abc", "library/example", "sha256:abc")]
+#[case::invalid("@", "@", "")]
 #[tokio::test]
-async fn mirror_plan_reports_selected_images() {
+async fn mirror_plan_reports_selected_images(
+    #[case] image: &str,
+    #[case] expected_project: &str,
+    #[case] expected_filename: &str,
+) {
     let dir = tempfile::tempdir().unwrap();
     let (state, _) = app_with(&dir, oci_index("store", "oci", IndexKind::Hosted { volatile: false }));
-    let configured = images(&["library/example:latest"]);
+    let configured = images(&[image]);
     let empty = toml::Table::new();
     let mut output = Vec::new();
 
@@ -105,9 +128,108 @@ async fn mirror_plan_reports_selected_images() {
         .await
         .unwrap();
 
-    let output = String::from_utf8(output).unwrap();
-    assert!(output.contains("manifest\tstore\tlibrary/example:latest"));
-    assert!(output.contains("summary\tstore\t\timages\t\t\t1\timages"));
+    assert_eq!(
+        report_rows(std::str::from_utf8(&output).unwrap()),
+        [
+            [
+                "manifest",
+                "store",
+                expected_project,
+                expected_filename,
+                "",
+                "",
+                "0",
+                "selected",
+                "",
+            ],
+            ["summary", "store", "", "images", "", "", "1", "images", ""],
+        ]
+    );
+}
+
+#[tokio::test]
+async fn mirror_reports_stable_columns_across_actions() {
+    let server = MockServer::start().await;
+    let manifest = b"{}";
+    Mock::given(method("GET"))
+        .and(path("/v2/library/example/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest, "application/vnd.oci.image.manifest.v1+json"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let configured = images(&["library/example:latest"]);
+    let empty = toml::Table::new();
+    let digest = oci_digest(manifest);
+
+    for (action, expected_detail, expected_summary_filename) in [
+        (
+            MirrorAction::Plan,
+            [
+                "manifest",
+                "hub",
+                "library/example",
+                "latest",
+                "",
+                "",
+                "0",
+                "selected",
+                "",
+            ],
+            "images",
+        ),
+        (
+            MirrorAction::Sync,
+            [
+                "manifest",
+                "hub",
+                "library/example",
+                "latest",
+                &digest,
+                "",
+                "2",
+                "synced",
+                "",
+            ],
+            "",
+        ),
+        (
+            MirrorAction::Verify,
+            [
+                "manifest",
+                "hub",
+                "library/example",
+                "latest",
+                &digest,
+                "",
+                "0",
+                "cached",
+                "",
+            ],
+            "",
+        ),
+    ] {
+        let mut output = Vec::new();
+        OciRegistry::default()
+            .mirror(
+                state.clone(),
+                MirrorRequest {
+                    action,
+                    index: "hub",
+                    settings: &empty,
+                    configured: &configured,
+                    overrides: &empty,
+                },
+                &mut output,
+            )
+            .await
+            .unwrap();
+
+        let rows = report_rows(std::str::from_utf8(&output).unwrap());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], expected_detail);
+        assert_eq!(&rows[1][..4], &["summary", "hub", "", expected_summary_filename]);
+    }
 }
 
 #[tokio::test]

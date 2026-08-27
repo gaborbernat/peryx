@@ -1,5 +1,5 @@
 use std::io::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -7,8 +7,11 @@ use peryx_core::{BrowsePage, BrowseSection};
 use peryx_driver::serving::EcosystemBrowse as _;
 use rstest::rstest;
 
-use super::{app_with, auth, hosted_writable, oci_digest, oci_index, proxy, send_body, virtual_stack, writer_acl};
-use crate::OciPlugin;
+use super::{
+    app_with, auth, hosted_writable, oci_digest, oci_index, proxy, proxy_with_settings, send, send_body, virtual_stack,
+    writer_acl,
+};
+use crate::{IndexSettings, LibraryPrefix, OciPlugin};
 
 const TOKEN: &str = "s3cret";
 
@@ -348,6 +351,66 @@ async fn test_browse_repository_unions_proxy_tags() {
     let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
     let page = browse(&state, 0, "project=library%2Fnginx").await.unwrap();
     assert_eq!(link_labels(&section_json(&page.sections[0])), vec!["1.25", "latest"]);
+}
+
+#[rstest]
+#[case::always(LibraryPrefix::Always, "library/")]
+#[case::never(LibraryPrefix::Never, "")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_registered_browse_uses_compiled_library_prefix(
+    #[case] library_prefix: LibraryPrefix,
+    #[case] upstream_prefix: &str,
+) {
+    let server = wiremock::MockServer::start().await;
+    let protocol_request = observe_tag_list(&server, "protocol").await;
+    let browse_request = observe_tag_list(&server, "browse").await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy_with_settings(&dir, &format!("{}/", server.uri()), IndexSettings { library_prefix });
+    let protocol = tokio::spawn(async move { send(&app, Method::GET, "/v2/hub/protocol/tags/list").await });
+    let protocol_path = protocol_request.await.unwrap();
+    let browse = tokio::spawn({
+        let driver = state.driver_set().get_browse(&crate::ECOSYSTEM).unwrap().clone();
+        let serving = state.serving.clone();
+        async move { driver.browse(serving, 0, "project=browse".to_owned()).await }
+    });
+    let browse_path = browse_request.await.unwrap();
+
+    assert_eq!(
+        (protocol_path, browse_path),
+        (
+            format!("/v2/{upstream_prefix}protocol/tags/list"),
+            format!("/v2/{upstream_prefix}browse/tags/list"),
+        )
+    );
+    assert_eq!(protocol.await.unwrap().0, StatusCode::OK);
+    assert!(browse.await.unwrap().unwrap().is_some());
+}
+
+async fn observe_tag_list(server: &wiremock::MockServer, repository: &str) -> tokio::sync::oneshot::Receiver<String> {
+    use wiremock::matchers::{method, path_regex};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let sender = Mutex::new(Some(sender));
+    let response = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "name": repository,
+        "tags": [],
+    }));
+    Mock::given(method("GET"))
+        .and(path_regex(format!(r"^/v2/(library/)?{repository}/tags/list$")))
+        .respond_with(move |request: &wiremock::Request| {
+            sender
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(request.url.path().to_owned())
+                .unwrap();
+            response.clone()
+        })
+        .mount(server)
+        .await;
+    receiver
 }
 
 #[tokio::test]

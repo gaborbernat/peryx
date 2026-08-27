@@ -433,6 +433,7 @@ impl<'a> AuthInstallContext<'a> {
 
 pub struct RuntimeInstallContext<'a> {
     serving: &'a mut ServingState,
+    drivers: &'a mut crate::DriverSet,
     protocols: &'a mut HashMap<Ecosystem, ProtocolDriver>,
     absolute_prefixes: &'a mut Vec<(&'static str, Arc<dyn AbsoluteProtocolDriver>)>,
     idle_reclaimers: &'a mut HashMap<Ecosystem, Arc<dyn IdleReclaimer>>,
@@ -445,6 +446,7 @@ pub struct RuntimeInstallContext<'a> {
 
 pub(crate) struct RuntimeInstallDependencies<'a> {
     pub serving: &'a mut ServingState,
+    pub drivers: &'a mut crate::DriverSet,
     pub protocols: &'a mut HashMap<Ecosystem, ProtocolDriver>,
     pub absolute_prefixes: &'a mut Vec<(&'static str, Arc<dyn AbsoluteProtocolDriver>)>,
     pub idle_reclaimers: &'a mut HashMap<Ecosystem, Arc<dyn IdleReclaimer>>,
@@ -459,6 +461,7 @@ impl<'a> RuntimeInstallContext<'a> {
     pub(crate) const fn new(dependencies: RuntimeInstallDependencies<'a>) -> Self {
         let RuntimeInstallDependencies {
             serving,
+            drivers,
             protocols,
             absolute_prefixes,
             idle_reclaimers,
@@ -470,6 +473,7 @@ impl<'a> RuntimeInstallContext<'a> {
         } = dependencies;
         Self {
             serving,
+            drivers,
             protocols,
             absolute_prefixes,
             idle_reclaimers,
@@ -504,6 +508,10 @@ impl<'a> RuntimeInstallContext<'a> {
         }
         self.protocols.insert(ecosystem, protocol);
         self.serving.search.add_indexer(indexer);
+    }
+
+    pub fn register_browse(&mut self, ecosystem: Ecosystem, driver: Arc<dyn BrowseDriver>) {
+        self.drivers.register_browse(ecosystem, driver);
     }
 
     pub fn register_idle_reclaimer(&mut self, ecosystem: Ecosystem, driver: Arc<dyn IdleReclaimer>) {

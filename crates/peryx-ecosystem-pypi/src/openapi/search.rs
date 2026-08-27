@@ -1,4 +1,7 @@
-use super::shared::{OperationBuilder, api_json_response, json, route_param};
+use super::shared::{
+    OperationBuilder, ParameterIn, api_json_response, bounded_integer_parameter, enum_parameter, json, parameter,
+    route_param,
+};
 
 pub(super) fn package_search() -> OperationBuilder {
     OperationBuilder::new()
@@ -8,30 +11,40 @@ pub(super) fn package_search() -> OperationBuilder {
             "Searches PyPI projects derived from cached listings, uploads, and metadata. `q` uses substring matching; \
              prefix it with `re:` for a regex. Policy-denied projects are not indexed.",
         ))
-        .parameter(peryx_driver::openapi::query_param(
+        .parameter(parameter(
             "q",
+            ParameterIn::Query,
             "Search text. Prefix with `re:` to use a regex.",
             json!("widget"),
         ))
-        .parameter(peryx_driver::openapi::query_param(
+        .parameter(enum_parameter(
             "type",
+            ParameterIn::Query,
             "`uploaded`, `cached`, or `override`; omit for all sources.",
             json!("override"),
+            [json!("uploaded"), json!("cached"), json!("override")],
         ))
-        .parameter(peryx_driver::openapi::query_param(
+        .parameter(enum_parameter(
             "availability",
+            ParameterIn::Query,
             "`local` returns projects with locally available files; omit or use `all` for every indexed project.",
             json!("local"),
+            [json!("local"), json!("all")],
         ))
-        .parameter(peryx_driver::openapi::query_param(
+        .parameter(bounded_integer_parameter(
             "page",
+            ParameterIn::Query,
             "One-based page number.",
             json!(1),
+            Some(1),
+            None,
         ))
-        .parameter(peryx_driver::openapi::query_param(
+        .parameter(enum_parameter(
             "page_size",
+            ParameterIn::Query,
             "Page size: 25, 50, or 100.",
             json!(25),
+            [json!(25), json!(50), json!(100)],
         ))
         .parameter(route_param())
         .response(

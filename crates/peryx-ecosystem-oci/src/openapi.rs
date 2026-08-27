@@ -2,9 +2,9 @@
 
 use serde_json::json;
 use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder};
-use utoipa::openapi::{PathsBuilder, Required, ResponseBuilder, SecurityRequirement};
+use utoipa::openapi::{PathsBuilder, ResponseBuilder, SecurityRequirement};
 
-use peryx_driver::openapi::{api_json_response, query_param};
+use peryx_driver::openapi::{api_json_response, bounded_integer_parameter, parameter, query_param};
 
 /// The OCI distribution-spec `/v2/` routes an OCI index serves, plus peryx's own layer browser. The
 /// composition root folds each ecosystem's paths into one document.
@@ -73,39 +73,39 @@ pub fn openapi_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 fn name_param() -> ParameterBuilder {
-    ParameterBuilder::new()
-        .name("name")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("The repository name, carrying the OCI index route as a prefix"))
-        .example(Some(json!("dockerhub/library/alpine")))
+    parameter(
+        "name",
+        ParameterIn::Path,
+        "The repository name, carrying the OCI index route as a prefix",
+        json!("dockerhub/library/alpine"),
+    )
 }
 
 fn reference_param() -> ParameterBuilder {
-    ParameterBuilder::new()
-        .name("reference")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("A tag or an `algorithm:hex` digest"))
-        .example(Some(json!("latest")))
+    parameter(
+        "reference",
+        ParameterIn::Path,
+        "A tag or an `algorithm:hex` digest",
+        json!("latest"),
+    )
 }
 
 fn digest_param() -> ParameterBuilder {
-    ParameterBuilder::new()
-        .name("digest")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("A content digest; blob digests must be `sha256:...`"))
-        .example(Some(json!("sha256:2c3e...")))
+    parameter(
+        "digest",
+        ParameterIn::Path,
+        "A content digest; blob digests must be `sha256:...`",
+        json!("sha256:2c3e..."),
+    )
 }
 
 fn session_param() -> ParameterBuilder {
-    ParameterBuilder::new()
-        .name("session")
-        .parameter_in(ParameterIn::Path)
-        .required(Required::True)
-        .description(Some("An in-progress upload session id"))
-        .example(Some(json!("0000000000000000000000000000abcd")))
+    parameter(
+        "session",
+        ParameterIn::Path,
+        "An in-progress upload session id",
+        json!("0000000000000000000000000000abcd"),
+    )
 }
 
 fn oci_version_check() -> OperationBuilder {
@@ -161,13 +161,12 @@ fn oci_manifest_delete() -> OperationBuilder {
         .security(SecurityRequirement::new("uploadToken", Vec::<String>::new()))
         .parameter(name_param())
         .parameter(reference_param())
-        .parameter(
-            ParameterBuilder::new()
-                .name("reason")
-                .parameter_in(ParameterIn::Query)
-                .description(Some("Optional deletion reason retained for audit"))
-                .example(Some(json!("build metadata is incorrect"))),
-        )
+        .parameter(parameter(
+            "reason",
+            ParameterIn::Query,
+            "Optional deletion reason retained for audit",
+            json!("build metadata is incorrect"),
+        ))
         .response("202", ResponseBuilder::new().description("Hidden and retained"))
         .response("404", ResponseBuilder::new().description("`MANIFEST_UNKNOWN`"))
 }
@@ -199,13 +198,12 @@ fn oci_blob_pull() -> OperationBuilder {
         ))
         .parameter(name_param())
         .parameter(digest_param())
-        .parameter(
-            ParameterBuilder::new()
-                .name("If-Range")
-                .parameter_in(ParameterIn::Header)
-                .description(Some("The entity tag the client's partial copy was cut from"))
-                .example(Some(json!("\"sha256:2c3e...\""))),
-        )
+        .parameter(parameter(
+            "If-Range",
+            ParameterIn::Header,
+            "The entity tag the client's partial copy was cut from",
+            json!("\"sha256:2c3e...\""),
+        ))
         .response("200", ResponseBuilder::new().description("Blob body"))
         .response("206", ResponseBuilder::new().description("A requested byte range"))
         .response("404", ResponseBuilder::new().description("`BLOB_UNKNOWN`"))
@@ -316,7 +314,14 @@ fn oci_tags_list() -> OperationBuilder {
             "Answers `{\"name\", \"tags\"}`, with `n`/`last` pagination and a `Link` next-page header.",
         ))
         .parameter(name_param())
-        .parameter(query_param("n", "Page size", json!(50)))
+        .parameter(bounded_integer_parameter(
+            "n",
+            ParameterIn::Query,
+            "Page size",
+            json!(50),
+            Some(0),
+            None,
+        ))
         .parameter(query_param("last", "The tag to resume after", json!("1.0")))
         .response(
             "200",

@@ -1,8 +1,8 @@
 use serde_json::json;
-use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder};
+use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterIn, PathItemBuilder};
 use utoipa::openapi::{PathsBuilder, Required, ResponseBuilder, SecurityRequirement};
 
-use peryx_driver::openapi::api_json_response;
+use peryx_driver::openapi::{api_json_response, bounded_integer_parameter, enum_parameter, parameter};
 
 pub(super) fn trash_paths(paths: PathsBuilder) -> PathsBuilder {
     paths
@@ -94,7 +94,6 @@ fn list_trash() -> OperationBuilder {
             json!("hosted"),
         ),
         ("ecosystem", "Filter by registered ecosystem", json!("example")),
-        ("state", "Filter by `restorable` or `expired`", json!("restorable")),
         (
             "deadline_before",
             "Keep records whose recovery deadline is at or before this Unix time",
@@ -105,17 +104,25 @@ fn list_trash() -> OperationBuilder {
             "Exclusive cursor from the prior page",
             json!("0009223372036800000\u{1f}example\u{1f}hosted\u{1f}example\u{1f}example-1.0.bin\u{1f}sha256:0123"),
         ),
-        ("limit", "Rows to return, from 1 through 100; defaults to 25", json!(25)),
     ] {
-        operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
-                .description(Some(description))
-                .example(Some(example)),
-        );
+        operation = operation.parameter(parameter(name, ParameterIn::Query, description, example));
     }
     operation
+        .parameter(enum_parameter(
+            "state",
+            ParameterIn::Query,
+            "Filter by `restorable` or `expired`",
+            json!("restorable"),
+            [json!("restorable"), json!("expired")],
+        ))
+        .parameter(bounded_integer_parameter(
+            "limit",
+            ParameterIn::Query,
+            "Rows to return, from 1 through 100; defaults to 25",
+            json!(25),
+            Some(1),
+            Some(100),
+        ))
 }
 
 fn inspect_trash() -> OperationBuilder {
@@ -177,12 +184,9 @@ fn inspect_trash() -> OperationBuilder {
         ),
     ] {
         operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
+            parameter(name, ParameterIn::Query, description, example)
                 .required(if required { Required::True } else { Required::False })
-                .description(Some(description))
-                .example(Some(example)),
+                .build(),
         );
     }
     operation

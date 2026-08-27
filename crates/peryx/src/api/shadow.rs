@@ -1,8 +1,8 @@
 use serde_json::json;
-use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder};
+use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterIn, PathItemBuilder};
 use utoipa::openapi::{PathsBuilder, Required, ResponseBuilder, SecurityRequirement};
 
-use peryx_driver::openapi::api_json_response;
+use peryx_driver::openapi::{api_json_response, bounded_integer_parameter, parameter};
 
 pub(super) fn shadow_paths(paths: PathsBuilder) -> PathsBuilder {
     paths.path(
@@ -63,23 +63,21 @@ fn shadow_parameters(mut operation: OperationBuilder) -> OperationBuilder {
             "Exclusive cursor from the prior page",
             json!("artifact.bin\u{1f}0\u{1f}hosted"),
         ),
-        (
-            "limit",
-            false,
-            "Rows to return, from 1 through 100; defaults to 25",
-            json!(25),
-        ),
     ] {
         operation = operation.parameter(
-            ParameterBuilder::new()
-                .name(name)
-                .parameter_in(ParameterIn::Query)
+            parameter(name, ParameterIn::Query, description, example)
                 .required(if required { Required::True } else { Required::False })
-                .description(Some(description))
-                .example(Some(example)),
+                .build(),
         );
     }
-    operation
+    operation.parameter(bounded_integer_parameter(
+        "limit",
+        ParameterIn::Query,
+        "Rows to return, from 1 through 100; defaults to 25",
+        json!(25),
+        Some(1),
+        Some(100),
+    ))
 }
 
 fn shadow_candidates() -> OperationBuilder {

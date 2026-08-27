@@ -164,6 +164,122 @@ fn test_repository_state_filter_has_a_closed_enum() {
 }
 
 #[test]
+fn test_openapi_parameters_declare_exactly_one_shape() {
+    let spec = serde_json::to_value(openapi()).unwrap();
+    let invalid = spec["paths"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .flat_map(|(path, item)| {
+            item.as_object().unwrap().iter().flat_map(move |(method, operation)| {
+                operation["parameters"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(move |parameter| {
+                        ["schema", "content"]
+                            .into_iter()
+                            .filter(|field| parameter.get(field).is_some())
+                            .count()
+                            != 1
+                    })
+                    .map(move |parameter| format!("{method} {path}: {} {}", parameter["in"], parameter["name"]))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    assert!(invalid.is_empty(), "parameters without one shape: {invalid:?}");
+}
+
+#[test]
+fn test_openapi_path_parameters_match_templates() {
+    let spec = serde_json::to_value(openapi()).unwrap();
+
+    for (path, item) in spec["paths"].as_object().unwrap() {
+        let templates = path
+            .split('{')
+            .skip(1)
+            .map(|suffix| suffix.split_once('}').unwrap().0)
+            .collect::<BTreeSet<_>>();
+        for (method, operation) in item.as_object().unwrap() {
+            let parameters = operation["parameters"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|parameter| parameter["in"] == "path")
+                .collect::<Vec<_>>();
+            let declared = parameters
+                .iter()
+                .map(|parameter| parameter["name"].as_str().unwrap())
+                .collect::<BTreeSet<_>>();
+
+            assert_eq!(declared, templates, "{method} {path}");
+            assert!(
+                parameters
+                    .iter()
+                    .all(|parameter| parameter["required"].as_bool().is_some_and(|required| required))
+            );
+        }
+    }
+}
+
+#[test]
+fn test_openapi_parameter_schemas_match_request_contracts() {
+    let spec = serde_json::to_value(openapi()).unwrap();
+
+    for (path, name, expected) in [
+        (
+            "/+search",
+            "type",
+            serde_json::json!({"type": "string", "enum": ["uploaded", "cached", "override"]}),
+        ),
+        ("/+search", "page", serde_json::json!({"type": "integer", "minimum": 1})),
+        (
+            "/+search",
+            "page_size",
+            serde_json::json!({"type": "integer", "enum": [25, 50, 100]}),
+        ),
+        (
+            "/+repositories",
+            "state",
+            serde_json::json!({"type": "string", "enum": ["enabled", "disabled"]}),
+        ),
+        (
+            "/+repositories",
+            "limit",
+            serde_json::json!({"type": "integer", "minimum": 1, "maximum": 100}),
+        ),
+        ("/+ready", "writes", serde_json::json!({"type": "boolean"})),
+        (
+            concat!("/v2/", "{name}", "/tags/list"),
+            "n",
+            serde_json::json!({"type": "integer", "minimum": 0}),
+        ),
+        (
+            "/{route}/inspect/{sha256}/{filename}",
+            "container",
+            serde_json::json!({"type": "array", "items": {"type": "string"}}),
+        ),
+        (
+            "/{route}/inspect/{sha256}/{filename}",
+            "limit",
+            serde_json::json!({"type": "integer", "minimum": 1, "maximum": 1_048_576}),
+        ),
+    ] {
+        assert_eq!(openapi_parameter(&spec, path, "get", name)["schema"], expected);
+    }
+}
+
+#[test]
+fn test_openapi_repeated_query_parameter_uses_default_serialization() {
+    let spec = serde_json::to_value(openapi()).unwrap();
+    let parameter = openapi_parameter(&spec, "/{route}/inspect/{sha256}/{filename}", "get", "container");
+
+    assert!(parameter.get("style").is_none());
+    assert!(parameter.get("explode").is_none());
+}
+
+#[test]
 fn test_openapi_json_has_stable_object_order() {
     assert_json_objects_are_sorted(&serde_json::from_str(&openapi_json()).unwrap());
 }
@@ -228,4 +344,13 @@ fn seed_shadow_candidate(state: &peryx_driver::AppState) {
         .meta
         .put_project("hosted", "acme-pkg", "acme-pkg")
         .unwrap();
+}
+
+fn openapi_parameter<'a>(spec: &'a serde_json::Value, path: &str, method: &str, name: &str) -> &'a serde_json::Value {
+    spec["paths"][path][method]["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parameter| parameter["name"] == name)
+        .unwrap()
 }

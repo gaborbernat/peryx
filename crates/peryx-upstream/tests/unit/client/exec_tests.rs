@@ -1,5 +1,6 @@
 use std::fmt::Display;
 use std::fs::File;
+use std::future::Future;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -22,12 +23,14 @@ use crate::{
 };
 
 const VALID_EXPIRY: &str = "2099-01-01T00:00:00Z";
+const NORMAL_HELPER_DEADLINE: Duration = Duration::from_mins(5);
 
 struct Helper {
     _directory: TempDir,
     executable: PathBuf,
     executions: PathBuf,
     requests: PathBuf,
+    start_event: AsyncFd<File>,
 }
 
 struct ProcessSignal {
@@ -52,9 +55,15 @@ impl Helper {
         let executable = directory.path().join("credential-helper");
         let executions = directory.path().join("executions");
         let requests = directory.path().join("requests");
+        let started_path = directory.path().join("started");
+        let start_event = fifo(&started_path);
         std::fs::write(
             &executable,
-            format!("#!/bin/sh\nset -u\n{}", body(&executions, &requests)),
+            format!(
+                "#!/bin/sh\nset -u\nprintf x > {}\n{}",
+                shell_quote(started_path.display()),
+                body(&executions, &requests),
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -63,13 +72,14 @@ impl Helper {
             executable,
             executions,
             requests,
+            start_event,
         }
     }
 
     fn config(&self, failure: CredentialFailure) -> ExecCredentialConfig {
         ExecCredentialConfig::new(
             vec![self.executable.display().to_string()],
-            Duration::from_secs(5),
+            NORMAL_HELPER_DEADLINE,
             Vec::new(),
             failure,
         )
@@ -81,16 +91,20 @@ impl Helper {
     }
 
     fn requests_fifo(&self) -> AsyncFd<File> {
-        assert!(Command::new("mkfifo").arg(&self.requests).status().unwrap().success());
-        AsyncFd::new(File::from(
-            rustix::fs::open(
-                &self.requests,
-                rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )
-            .unwrap(),
-        ))
-        .unwrap()
+        fifo(&self.requests)
+    }
+
+    async fn run_after_start<T>(&self, operation: impl Future<Output = T>) -> T {
+        let ((), result) = tokio::join!(self.await_start(), operation);
+        result
+    }
+
+    async fn await_start(&self) {
+        let mut signal = [0];
+        self.start_event
+            .async_io(Interest::READABLE, |mut file| file.read_exact(&mut signal))
+            .await
+            .unwrap();
     }
 
     fn process_signal(&self) -> ProcessSignal {
@@ -118,6 +132,19 @@ impl Helper {
             .await
             .unwrap();
     }
+}
+
+fn fifo(path: &Path) -> AsyncFd<File> {
+    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+    AsyncFd::new(File::from(
+        rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap(),
+    ))
+    .unwrap()
 }
 
 impl ProcessSignal {
@@ -307,7 +334,7 @@ async fn test_helper_returns_basic() {
         .provider("https://resources.example/api/", CredentialScope::Read)
         .unwrap();
 
-    let snapshot = provider.credential().await.unwrap();
+    let snapshot = helper.run_after_start(provider.credential()).await.unwrap();
 
     assert_eq!(
         snapshot.auth(),
@@ -329,7 +356,7 @@ async fn test_helper_receives_only_the_origin_and_scope() {
         )
         .unwrap();
 
-    provider.credential().await.unwrap();
+    helper.run_after_start(provider.credential()).await.unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&helper.requests).unwrap(),
@@ -345,7 +372,7 @@ async fn test_cached_credential_skips_the_helper() {
         .provider("https://resources.example/api/", CredentialScope::Read)
         .unwrap();
 
-    provider.credential().await.unwrap();
+    helper.run_after_start(provider.credential()).await.unwrap();
     provider.credential().await.unwrap();
 
     assert_eq!(helper.execution_count(), 1);
@@ -359,7 +386,7 @@ async fn test_helper_returns_bearer() {
         .provider("https://resources.example/api/", CredentialScope::Read)
         .unwrap();
 
-    let snapshot = provider.credential().await.unwrap();
+    let snapshot = helper.run_after_start(provider.credential()).await.unwrap();
 
     assert_eq!(snapshot.auth(), &Auth::Bearer("token".to_owned()));
 }
@@ -394,7 +421,7 @@ async fn test_helper_rejects_invalid_responses(#[case] response: &str, #[case] m
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let error = provider.credential().await.unwrap_err();
+    let error = helper.run_after_start(provider.credential()).await.unwrap_err();
 
     assert_eq!(error.to_string(), message);
 }
@@ -412,7 +439,7 @@ async fn test_helper_rejects_a_credential_inside_the_expiry_margin() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let error = provider.credential().await.unwrap_err();
+    let error = helper.run_after_start(provider.credential()).await.unwrap_err();
 
     assert_eq!(
         error.to_string(),
@@ -432,7 +459,7 @@ async fn test_helper_rejects_empty_credentials(#[case] response: &str) {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let error = provider.credential().await.unwrap_err();
+    let error = helper.run_after_start(provider.credential()).await.unwrap_err();
 
     assert_eq!(error.to_string(), "credential helper returned an empty credential");
 }
@@ -445,7 +472,7 @@ async fn test_helper_anonymous_failure_mode_returns_no_auth() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let snapshot = provider.credential().await.unwrap();
+    let snapshot = helper.run_after_start(provider.credential()).await.unwrap();
 
     assert_eq!(snapshot.auth(), &Auth::None);
 }
@@ -455,7 +482,7 @@ async fn test_helper_nonzero_exit_is_redacted() {
     let helper = Helper::script(|_, _| "printf '%s' secret-output >&2\nexit 7\n".to_owned());
     let config = ExecCredentialConfig::new(
         vec![helper.executable.display().to_string(), "secret-argument".to_owned()],
-        Duration::from_secs(5),
+        NORMAL_HELPER_DEADLINE,
         Vec::new(),
         CredentialFailure::Fail,
     )
@@ -464,7 +491,11 @@ async fn test_helper_nonzero_exit_is_redacted() {
         .provider("https://secret-origin.example", CredentialScope::Read)
         .unwrap();
 
-    let error = provider.credential().await.unwrap_err().to_string();
+    let error = helper
+        .run_after_start(provider.credential())
+        .await
+        .unwrap_err()
+        .to_string();
 
     assert_eq!(error, "credential helper exited unsuccessfully");
 }
@@ -497,7 +528,7 @@ async fn test_helper_output_is_bounded() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let error = provider.credential().await.unwrap_err();
+    let error = helper.run_after_start(provider.credential()).await.unwrap_err();
 
     assert_eq!(error.to_string(), "credential helper output exceeded its limit");
 }
@@ -522,9 +553,7 @@ async fn test_helper_timeout_kills_descendants() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
     let credential = tokio::spawn(async move { provider.credential().await });
-    let processes = tokio::time::timeout(Duration::from_secs(5), signal.read())
-        .await
-        .unwrap();
+    let processes = signal.read().await;
     signal.release_guard();
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(61)).await;
@@ -555,9 +584,7 @@ async fn test_helper_cancellation_kills_descendants() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
     let credential = tokio::spawn(async move { provider.credential().await });
-    let processes = tokio::time::timeout(Duration::from_secs(5), signal.read())
-        .await
-        .unwrap();
+    let processes = signal.read().await;
     signal.release_guard();
     let descendant = processes.split_once(' ').unwrap().1;
     let mut child_exits = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).unwrap();
@@ -599,9 +626,8 @@ async fn test_helper_timeout_after_closing_stdout() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
     let credential = tokio::spawn(async move { provider.credential().await });
-    tokio::time::timeout(Duration::from_secs(5), Helper::signal_requests(&requests))
-        .await
-        .unwrap();
+    helper.await_start().await;
+    Helper::signal_requests(&requests).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(61)).await;
 
@@ -627,9 +653,8 @@ async fn test_helper_can_close_stdout_before_exiting() {
         .unwrap();
     let credential = tokio::spawn(async move { provider.credential().await });
 
-    tokio::time::timeout(Duration::from_secs(5), Helper::signal_requests(&requests))
-        .await
-        .unwrap();
+    helper.await_start().await;
+    Helper::signal_requests(&requests).await;
 
     let snapshot = credential.await.unwrap().unwrap();
 
@@ -651,7 +676,7 @@ async fn test_helper_can_exit_before_a_descendant_finishes_stdout() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let snapshot = provider.credential().await.unwrap();
+    let snapshot = helper.run_after_start(provider.credential()).await.unwrap();
 
     assert_eq!(snapshot.auth(), &Auth::Bearer("token".to_owned()));
 }
@@ -670,7 +695,7 @@ async fn test_helper_environment_is_cleared_then_allowlisted(#[case] environment
     });
     let config = ExecCredentialConfig::new(
         vec![helper.executable.display().to_string()],
-        Duration::from_secs(5),
+        NORMAL_HELPER_DEADLINE,
         environment,
         CredentialFailure::Fail,
     )
@@ -679,7 +704,7 @@ async fn test_helper_environment_is_cleared_then_allowlisted(#[case] environment
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let snapshot = provider.credential().await.unwrap();
+    let snapshot = helper.run_after_start(provider.credential()).await.unwrap();
 
     assert_eq!(snapshot.auth(), &Auth::Bearer(expected.to_owned()));
 }
@@ -701,10 +726,10 @@ async fn test_concurrent_requests_execute_one_helper() {
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
 
-    let (snapshots, ()) = tokio::join!(
-        join_all((0..50).map(|_| provider.credential())),
-        Helper::signal_requests(&requests)
-    );
+    let (snapshots, ()) = tokio::join!(join_all((0..50).map(|_| provider.credential())), async {
+        helper.await_start().await;
+        Helper::signal_requests(&requests).await;
+    });
 
     assert_eq!(helper.execution_count(), 1);
     assert!(
@@ -721,9 +746,13 @@ async fn test_unauthorized_generation_executes_one_refresh() {
         .config(CredentialFailure::Fail)
         .provider("https://resources.example", CredentialScope::Read)
         .unwrap();
-    let first = provider.credential().await.unwrap();
+    let first = helper.run_after_start(provider.credential()).await.unwrap();
 
-    let snapshots = join_all((0..50).map(|_| provider.refresh_after_unauthorized(first.generation()))).await;
+    let snapshots = helper
+        .run_after_start(join_all(
+            (0..50).map(|_| provider.refresh_after_unauthorized(first.generation())),
+        ))
+        .await;
 
     assert_eq!(helper.execution_count(), 2);
     assert!(
@@ -764,8 +793,8 @@ async fn test_client_replays_one_unauthorized_exec_credential() {
     )
     .unwrap();
 
-    let response = client
-        .send_conditional(client.base().join("resource/").unwrap(), "application/json", None)
+    let response = helper
+        .run_after_start(client.send_conditional(client.base().join("resource/").unwrap(), "application/json", None))
         .await
         .unwrap();
 

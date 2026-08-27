@@ -308,6 +308,8 @@ async fn collect_body(get: S3Get) -> Vec<u8> {
 #[rstest]
 #[case::single_byte(5..6, "bytes 5-5/10", b"x", 10)]
 #[case::multi_byte(1..5, "bytes 1-4/7", b"acka", 7)]
+#[case::mixed_case_unit(1..5, "Bytes 1-4/7", b"acka", 7)]
+#[case::uppercase_unit(1..5, "BYTES 1-4/7", b"acka", 7)]
 #[tokio::test]
 async fn test_get_accepts_a_partial_response_matching_the_request(
     #[case] range: std::ops::Range<u64>,

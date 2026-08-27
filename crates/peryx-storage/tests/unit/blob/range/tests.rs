@@ -19,6 +19,8 @@ fn test_parse_range() {
             RangeRequest::Whole,
         ),
         ("closed span", Some("bytes=2-5"), 10, RangeRequest::Partial(2..6)),
+        ("mixed-case unit", Some("Bytes=2-5"), 10, RangeRequest::Partial(2..6)),
+        ("uppercase unit", Some("BYTES=2-5"), 10, RangeRequest::Partial(2..6)),
         ("overshooting end", Some("bytes=2-99"), 10, RangeRequest::Partial(2..10)),
         ("open end", Some("bytes=4-"), 10, RangeRequest::Partial(4..10)),
         ("suffix", Some("bytes=-3"), 10, RangeRequest::Partial(7..10)),

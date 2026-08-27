@@ -13,6 +13,7 @@ use futures_util::StreamExt as _;
 use futures_util::stream::BoxStream;
 use tokio::sync::OnceCell;
 
+use super::super::range::strip_bytes_unit;
 use super::config::S3Config;
 
 #[derive(Debug, thiserror::Error)]
@@ -394,7 +395,7 @@ fn resolve_total_bytes(
 
 /// Rejects wildcard totals and deviations from `bytes START-END/TOTAL` instead of guessing.
 fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
-    let (interval, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (interval, total) = strip_bytes_unit(value, ' ')?.split_once('/')?;
     let (start, end) = interval.split_once('-')?;
     Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
 }

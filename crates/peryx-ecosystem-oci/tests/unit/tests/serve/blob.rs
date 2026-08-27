@@ -525,12 +525,12 @@ async fn test_blob_suffix_and_open_ended_ranges() {
     crate::store::record_blob_membership(&state.serving.meta, "store", "app", &digest).unwrap();
     let uri = format!("/v2/store/app/blobs/{digest}");
 
-    let (status, headers, got) = send_with(&app, Method::GET, &uri, &[("range", "bytes=-3")]).await;
+    let (status, headers, got) = send_with(&app, Method::GET, &uri, &[("range", "Bytes=-3")]).await;
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 7-9/{}", blob.len()));
     assert_eq!(got, &blob[7..]);
 
-    let (status, headers, got) = send_with(&app, Method::GET, &uri, &[("range", "bytes=8-")]).await;
+    let (status, headers, got) = send_with(&app, Method::GET, &uri, &[("range", "BYTES=8-")]).await;
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(headers[header::CONTENT_RANGE], format!("bytes 8-9/{}", blob.len()));
     assert_eq!(got, &blob[8..]);

@@ -17,7 +17,16 @@ pub enum RangeRequest {
 /// oversized end and treats a suffix longer than the representation as the whole representation.
 #[must_use]
 pub fn parse_range(header: Option<&str>, size: u64) -> RangeRequest {
-    let Some(spec) = header.and_then(|value| value.strip_prefix("bytes=")) else {
+    let Some(header) = header else {
+        return RangeRequest::Whole;
+    };
+    parse_range_header(header, size)
+}
+
+// Keep full GETs on the no-frame fast path.
+#[inline(never)]
+fn parse_range_header(header: &str, size: u64) -> RangeRequest {
+    let Some(spec) = strip_bytes_unit(header, '=') else {
         return RangeRequest::Whole;
     };
     let spec = spec.trim();
@@ -47,6 +56,12 @@ pub fn parse_range(header: Option<&str>, size: u64) -> RangeRequest {
             _ => RangeRequest::Whole,
         },
     }
+}
+
+#[inline]
+pub(super) fn strip_bytes_unit(value: &str, separator: char) -> Option<&str> {
+    let (unit, spec) = value.split_once(separator)?;
+    unit.eq_ignore_ascii_case("bytes").then_some(spec)
 }
 
 #[cfg(test)]

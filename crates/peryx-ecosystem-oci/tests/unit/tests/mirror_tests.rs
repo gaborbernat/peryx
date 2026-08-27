@@ -503,11 +503,13 @@ async fn test_mirror_rejects_malformed_references_before_network_access() {
 
         assert!(server.received_requests().await.unwrap().is_empty(), "{raw}");
         assert_eq!(send(&app, Method::GET, "/v2/_catalog").await, catalog, "{raw}");
+        let index = state.serving.indexes[0].name.clone();
         assert_eq!(
             rows,
             vec![
                 MirrorRow {
                     kind: "manifest",
+                    index: index.clone(),
                     repo: reference,
                     reference: String::new(),
                     digest: String::new(),
@@ -517,7 +519,8 @@ async fn test_mirror_rejects_malformed_references_before_network_access() {
                 },
                 MirrorRow {
                     kind: "summary",
-                    repo: state.serving.indexes[0].name.clone(),
+                    index,
+                    repo: String::new(),
                     reference: String::new(),
                     digest: String::new(),
                     status: "error",

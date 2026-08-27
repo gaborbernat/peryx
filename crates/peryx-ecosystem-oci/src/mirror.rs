@@ -46,13 +46,14 @@ pub struct MirrorRow {
 
 impl MirrorRow {
     pub(super) fn selected(index: &str, raw: &str) -> Self {
-        parse_ref(raw).map_or_else(
+        parse_image_reference(raw).map_or_else(
             || Self::row("manifest", raw, "", "", "selected", 0, String::new()).with_index(index),
             |image| {
+                let (Reference::Tag(reference) | Reference::Digest(reference)) = &image.reference;
                 Self::row(
                     "manifest",
-                    &image.repo,
-                    &image.reference,
+                    &image.repository,
+                    reference,
                     "",
                     "selected",
                     0,

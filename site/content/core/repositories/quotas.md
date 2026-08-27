@@ -1,11 +1,12 @@
 +++
 title = "Repository quotas"
-description = "Reserve repository capacity and repair pending reservations with durable accounting."
+description = "Reserve hosted repository capacity and repair pending reservations with durable accounting."
 weight = 9
 +++
 
-Repository quotas reserve capacity before an ecosystem owner commits metadata. The owner commits the reservation in the
-same metadata transaction or releases it after a failed write. Repositories without quotas use the direct write path.
+Repository quotas reserve capacity before an ecosystem owner commits hosted content metadata. The owner commits the
+reservation in the same metadata transaction or releases it after a failed write. Repositories without quotas use the
+direct write path.
 
 ## Limits
 
@@ -22,16 +23,11 @@ Each reservation checks an optional `QuotaLimits` value:
 
 An unset limit has no bound. A virtual repository owns no content and does not need storage limits.
 
-## Accounting categories
+## Accounted content
 
-| Class       | Content                                  |
-| ----------- | ---------------------------------------- |
-| `hosted`    | Accepted from a client                   |
-| `cached`    | Fetched from an upstream repository      |
-| `generated` | Derived and stored by an ecosystem owner |
-| `trash`     | Retained for restore or purge            |
-
-All categories consume quota. Moving content to trash retains its allocation until purge or deletion.
+Hosted repositories create quota reservations for accepted content. Pull-through cache entries and generated derivatives
+do not change `GET /+quota`. Moving hosted content to trash retains its existing allocation until purge or deletion;
+cached content remains outside the quota counters if an owner moves it to trash.
 
 `artifact_bytes` adds the logical size of each allocation. `accounted_bytes` charges one digest once per repository. Two
 artifacts in one repository can share one accounted digest. The same digest in two repositories consumes capacity in
@@ -81,6 +77,8 @@ the configured repository order and uses an opaque cursor. Responses omit subjec
 Each repository reports `limits` and meters for `artifact_bytes`, `accounted_bytes`, and `resources`. A meter contains
 `committed`, `reserved`, `limit`, and `remaining`. An unlimited meter has null `limit` and `remaining`.
 
+Reservations use the `hosted` accounting class, so responses do not need a class breakdown.
+
 The CLI reads the same counters:
 
 ```console
@@ -96,7 +94,8 @@ Opening the metadata store creates missing quota tables and the pending index. I
 counters start at zero and grow through later reservations. File-level backups include quota state.
 
 Durable usage includes committed and reserved logical bytes, accounted bytes, resource counts, and group counts.
-Allocation records contain their class, state, creation time, digest, size, resource-byte flag, and audit violations.
+Allocation records contain the hosted class, state, creation time, digest, size, resource-byte flag, and audit
+violations.
 
 Prometheus metrics omit repository and resource names to keep label cardinality bounded. Billing, per-user limits,
 retention planning, and cost allocation remain outside repository quota accounting.

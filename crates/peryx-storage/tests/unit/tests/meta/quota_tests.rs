@@ -95,7 +95,7 @@ fn test_quota_allows_content_without_resource_or_group_counts() {
                 group: None,
                 digest: "sha256:first",
                 bytes: 7,
-                class: AccountingClass::Generated,
+                class: AccountingClass::Hosted,
                 created_at_unix: 10,
             },
             QuotaLimits {
@@ -624,7 +624,7 @@ fn test_quota_releasing_pending_duplicate_preserves_committed_digest() {
 }
 
 #[test]
-fn test_quota_classes_account_shared_digest_without_double_charging_repository() {
+fn test_quota_allocations_share_a_digest_without_double_charging_repository() {
     let (_dir, meta) = store();
     let hosted = meta
         .reserve_quota(
@@ -632,11 +632,14 @@ fn test_quota_classes_account_shared_digest_without_double_charging_repository()
             QuotaLimits::default(),
         )
         .unwrap();
-    let mut trashed = request("resource-a", "group-a", "sha256:shared", 7);
-    trashed.class = AccountingClass::Trash;
-    let trashed = meta.reserve_quota(trashed, QuotaLimits::default()).unwrap();
+    let duplicate = meta
+        .reserve_quota(
+            request("resource-a", "group-a", "sha256:shared", 7),
+            QuotaLimits::default(),
+        )
+        .unwrap();
     meta.commit_quota_reservation(hosted.id).unwrap();
-    meta.commit_quota_reservation(trashed.id).unwrap();
+    meta.commit_quota_reservation(duplicate.id).unwrap();
     let usage = meta.quota_usage("private").unwrap();
 
     assert_eq!(
@@ -645,48 +648,21 @@ fn test_quota_classes_account_shared_digest_without_double_charging_repository()
     );
 }
 
-#[test]
-fn test_quota_accounts_every_content_class() {
-    let (_dir, meta) = store();
-    let mut reservations = Vec::new();
-    for (position, class) in [
-        AccountingClass::Hosted,
-        AccountingClass::Cached,
-        AccountingClass::Generated,
-        AccountingClass::Trash,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let identity = format!("item-{position}");
-        let mut item = request(&identity, "group-a", &identity, 7);
-        item.class = class;
-        let reservation = meta.reserve_quota(item, QuotaLimits::default()).unwrap();
-        meta.commit_quota_reservation(reservation.id).unwrap();
-        reservations.push(meta.quota_reservation(reservation.id).unwrap().unwrap());
-    }
-
+#[rstest]
+#[case::hosted("hosted")]
+#[case::cached("cached")]
+#[case::generated("generated")]
+#[case::trash("trash")]
+fn test_accounting_class_reads_existing_names_as_hosted(#[case] encoded: &str) {
     assert_eq!(
-        (
-            reservations
-                .into_iter()
-                .map(|reservation| reservation.class)
-                .collect::<Vec<_>>(),
-            meta.quota_usage("private").unwrap().accounted_bytes,
-        ),
-        (
-            vec![
-                AccountingClass::Hosted,
-                AccountingClass::Cached,
-                AccountingClass::Generated,
-                AccountingClass::Trash,
-            ],
-            QuotaValue {
-                committed: 28,
-                reserved: 0,
-            },
-        )
+        serde_json::from_str::<AccountingClass>(&format!(r#""{encoded}""#)).unwrap(),
+        AccountingClass::Hosted
     );
+}
+
+#[test]
+fn test_accounting_class_writes_the_hosted_name() {
+    assert_eq!(serde_json::to_string(&AccountingClass::Hosted).unwrap(), r#""hosted""#);
 }
 
 #[test]

@@ -12,10 +12,8 @@ const MAX_IDENTITY_BYTES: usize = 512;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountingClass {
+    #[serde(alias = "cached", alias = "generated", alias = "trash")]
     Hosted,
-    Cached,
-    Generated,
-    Trash,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

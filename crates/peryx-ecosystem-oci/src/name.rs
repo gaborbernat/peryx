@@ -36,6 +36,11 @@ pub enum Reference {
     Digest(String),
 }
 
+pub struct ImageReference {
+    pub repository: String,
+    pub reference: Reference,
+}
+
 /// The scheme keeps OCI repository authorities in a distinct keyspace.
 const AUTHORITY_SCHEME: &str = "oci:";
 
@@ -123,11 +128,12 @@ pub fn classify(path: &str) -> Option<OciRoute> {
 
 /// Join validated name components back into the repository name, rejecting an empty name.
 fn join_name(components: &[&str]) -> Option<String> {
-    if components.is_empty() || !components.iter().all(|component| valid_name_component(component)) {
-        return None;
-    }
     let name = components.join("/");
-    (name.len() <= 255).then_some(name)
+    valid_repository(&name).then_some(name)
+}
+
+fn valid_repository(repository: &str) -> bool {
+    !repository.is_empty() && repository.len() <= 255 && repository.split('/').all(valid_name_component)
 }
 
 /// A single `<name>` path component: lowercase alphanumerics with `.`/`_`/`-` separators, never a
@@ -167,6 +173,34 @@ pub fn parse_reference(reference: &str) -> Option<Reference> {
     } else {
         None
     }
+}
+
+pub fn parse_image_reference(raw: &str) -> Option<ImageReference> {
+    let (repository, reference) = if let Some((repository, digest)) = raw.split_once('@') {
+        if !valid_content_digest(digest) {
+            return None;
+        }
+        (repository, Reference::Digest(digest.to_owned()))
+    } else {
+        let component_start = raw.rfind('/').map_or(0, |index| index + 1);
+        if let Some(colon) = raw[component_start..].rfind(':') {
+            let split = component_start + colon;
+            let tag = &raw[split + 1..];
+            if !valid_tag(tag) {
+                return None;
+            }
+            (&raw[..split], Reference::Tag(tag.to_owned()))
+        } else {
+            (raw, Reference::Tag("latest".to_owned()))
+        }
+    };
+    let has_authority = repository
+        .split_once('/')
+        .is_some_and(|(first, _)| first == "localhost" || first.contains('.') || first.contains(':'));
+    (valid_repository(repository) && !has_authority).then(|| ImageReference {
+        repository: repository.to_owned(),
+        reference,
+    })
 }
 
 fn valid_tag(tag: &str) -> bool {

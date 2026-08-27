@@ -467,19 +467,67 @@ async fn test_mirror_reports_an_unreachable_reference() {
 }
 
 #[tokio::test]
-async fn test_mirror_rejects_a_bad_reference() {
-    let dir = tempfile::tempdir().unwrap();
-    let (state, _app) = proxy(&dir, "http://127.0.0.1:1/", false);
-    let rows = mirror(
-        &state.serving,
-        &state.serving.indexes[0],
-        &["@".to_owned()],
-        MirrorMode::Sync,
-    )
-    .await
-    .unwrap();
-    assert_eq!(rows[0].status, "error");
-    assert!(rows[0].reason.contains("valid image reference"));
+async fn test_mirror_rejects_malformed_references_before_network_access() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"{}".to_vec(), MANIFEST_TYPE))
+        .mount(&server)
+        .await;
+    for raw in [
+        "",
+        "team/app:",
+        "team/app:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "team/app@latest",
+        "team/app@sha256:1111111111111111111111111111111111111111111111111111111111111111@extra",
+        " team/app:latest",
+        "team/app@sha256:short",
+        "registry.example.com/team/app:latest",
+        "registry:5000/team/app:latest",
+        "localhost/team/app:latest",
+        "team//app:latest",
+        "team/App:latest",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+        let reference = raw.to_owned();
+        let catalog = send(&app, Method::GET, "/v2/_catalog").await;
+
+        let rows = mirror(
+            &state.serving,
+            &state.serving.indexes[0],
+            std::slice::from_ref(&reference),
+            MirrorMode::Sync,
+        )
+        .await
+        .unwrap();
+
+        assert!(server.received_requests().await.unwrap().is_empty(), "{raw}");
+        assert_eq!(send(&app, Method::GET, "/v2/_catalog").await, catalog, "{raw}");
+        assert_eq!(
+            rows,
+            vec![
+                MirrorRow {
+                    kind: "manifest",
+                    repo: reference,
+                    reference: String::new(),
+                    digest: String::new(),
+                    status: "error",
+                    bytes: 0,
+                    reason: "not a valid image reference".to_owned(),
+                },
+                MirrorRow {
+                    kind: "summary",
+                    repo: state.serving.indexes[0].name.clone(),
+                    reference: String::new(),
+                    digest: String::new(),
+                    status: "error",
+                    bytes: 0,
+                    reason: "0 synced, 1 errors".to_owned(),
+                },
+            ],
+            "{raw}"
+        );
+    }
 }
 
 #[tokio::test]

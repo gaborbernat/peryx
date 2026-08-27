@@ -11,6 +11,7 @@ use peryx_storage::blob::Digest;
 use peryx_upstream::CredentialProvider;
 use serde::Serialize;
 
+use crate::name::{ImageReference, Reference, parse_image_reference};
 use crate::registry::{MAX_MANIFEST_BYTES, bounded_body, download_blob, serving_members};
 use crate::settings::{IndexSettings, upstream_repo};
 use crate::store::{self, Manifest};
@@ -84,38 +85,6 @@ pub enum MirrorMode {
     Verify,
 }
 
-/// A parsed image reference: `repo[:tag]` or `repo@sha256:...`. Tags never contain `/`, so the split
-/// point is the last `:` after the final `/`; a bare name defaults to the `latest` tag.
-struct ImageRef {
-    repo: String,
-    reference: String,
-    by_digest: bool,
-}
-
-fn parse_ref(raw: &str) -> Option<ImageRef> {
-    if let Some((repo, digest)) = raw.split_once('@') {
-        return (!repo.is_empty() && !digest.is_empty()).then(|| ImageRef {
-            repo: repo.to_owned(),
-            reference: digest.to_owned(),
-            by_digest: true,
-        });
-    }
-    let last_slash = raw.rfind('/').map_or(0, |index| index + 1);
-    let Some(colon) = raw[last_slash..].rfind(':') else {
-        return Some(ImageRef {
-            repo: raw.to_owned(),
-            reference: "latest".to_owned(),
-            by_digest: false,
-        });
-    };
-    let split = last_slash + colon;
-    Some(ImageRef {
-        repo: raw[..split].to_owned(),
-        reference: raw[split + 1..].to_owned(),
-        by_digest: false,
-    })
-}
-
 /// The read-only context for one mirror run: the stores, the upstream client, and where to pull from.
 struct Mirror<'a> {
     state: &'a Arc<ServingState>,
@@ -163,7 +132,7 @@ pub async fn mirror(
         mode,
     };
     for raw in refs {
-        match parse_ref(raw) {
+        match parse_image_reference(raw) {
             Some(image) => context.one_ref(&image, &mut rows).await?,
             None => rows.push(MirrorRow::error(
                 "manifest",
@@ -231,10 +200,13 @@ impl Mirror<'_> {
         upstream_repo(self.settings.library_prefix, &self.base, repo)
     }
 
-    async fn one_ref(&self, image: &ImageRef, rows: &mut Vec<MirrorRow>) -> anyhow::Result<()> {
-        let tag = (!image.by_digest).then_some(image.reference.as_str());
-        if let Some(manifest) = self.manifest_of(&image.repo, &image.reference, tag, rows).await? {
-            self.walk_manifest(&image.repo, &manifest, rows).await?;
+    async fn one_ref(&self, image: &ImageReference, rows: &mut Vec<MirrorRow>) -> anyhow::Result<()> {
+        let (reference, tag) = match &image.reference {
+            Reference::Tag(tag) => (tag.as_str(), Some(tag.as_str())),
+            Reference::Digest(digest) => (digest.as_str(), None),
+        };
+        if let Some(manifest) = self.manifest_of(&image.repository, reference, tag, rows).await? {
+            self.walk_manifest(&image.repository, &manifest, rows).await?;
         }
         Ok(())
     }

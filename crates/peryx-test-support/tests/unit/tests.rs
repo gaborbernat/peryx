@@ -274,10 +274,16 @@ fn cluster_public_behavior() {
                 .expect("observe restored leader"),
             "dc-a"
         );
-        assert!(matches!(
-            cluster.await_authority_transfer("dc-a", Duration::ZERO),
-            Err(HarnessError::NoTransfer { observed: Some(ref leader), .. }) if leader == "dc-a"
-        ));
+        let error = cluster
+            .await_authority_transfer("dc-a", Duration::ZERO)
+            .expect_err("reject unchanged leader");
+        assert!(
+            matches!(
+                &error,
+                HarnessError::NoTransfer { observed: Some(leader), .. } if leader == "dc-a"
+            ),
+            "unexpected transfer error: {error:?}"
+        );
 
         for state in ["control-500", "control-invalid", "control-empty"] {
             fs::write(fixture.state(), state).expect("set control response");
@@ -292,6 +298,26 @@ fn cluster_public_behavior() {
         let report = cluster.failure_report();
         assert_eq!(report.nodes.len(), 2);
         assert!(report.render().contains("== node writer =="));
+    });
+}
+
+#[test]
+fn cluster_transfer_failure_preserves_last_observed_leader() {
+    with_fixture(|fixture| {
+        let cluster = start_dc_cluster(fixture);
+        fs::write(fixture.state(), "leader-until-stream-error").expect("schedule topology stream error");
+
+        let error = cluster
+            .await_authority_transfer("dc-a", FAILURE_TIMEOUT)
+            .expect_err("reject unchanged leader");
+
+        assert!(
+            matches!(
+                &error,
+                HarnessError::NoTransfer { observed: Some(leader), .. } if leader == "dc-a"
+            ),
+            "unexpected transfer error: {error:?}"
+        );
     });
 }
 

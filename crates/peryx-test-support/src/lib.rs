@@ -600,14 +600,15 @@ impl Cluster {
     }
 
     fn await_observed_leader(&self, within: Duration, accept: impl Fn(&str) -> bool) -> Result<String, Option<String>> {
-        self.await_topology_signal(within, |cluster| {
-            let observed = cluster.observed_leader();
+        let mut observed = None;
+        let result = self.await_topology_signal(within, |cluster| {
+            observed = cluster.observed_leader();
             (
                 observed.as_deref().filter(|leader| accept(leader)).map(str::to_owned),
                 format!("last observed leader: {observed:?}"),
             )
-        })
-        .map_err(|_| self.observed_leader())
+        });
+        result.map_err(|_| observed)
     }
 
     /// Wait for `observe` to accept state after a topology stream event.

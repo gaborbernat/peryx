@@ -177,7 +177,12 @@ fn serve_peryx(listener: &TcpListener, state_path: &Path, control: bool) {
         }
         let state = fs::read_to_string(state_path).expect("read state");
         if path == "/+availability/topology/stream" {
-            write_topology_stream(&mut stream, &state);
+            if state == "leader-until-stream-error" {
+                fs::write(state_path, "control-500").expect("invalidate leader observation");
+                write_topology_stream(&mut stream, "stream-503");
+            } else {
+                write_topology_stream(&mut stream, &state);
+            }
             continue;
         }
         let (status, body, declared) = peryx_response(path, control, &state);

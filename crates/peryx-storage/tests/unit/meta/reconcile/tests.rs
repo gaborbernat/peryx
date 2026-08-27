@@ -100,6 +100,48 @@ fn test_scan_paginates_records_and_reads_status_partitions() {
 }
 
 #[test]
+fn test_scan_exact_limit_has_no_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = store(&dir);
+    for serial in 1..=2 {
+        meta.enqueue_reconcile(&entry(serial), NOW).unwrap();
+    }
+
+    let page = ReconcileStore::scan_reconcile(&meta, None, NonZeroUsize::new(2).unwrap()).unwrap();
+
+    assert_eq!(
+        (
+            page.records.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+            page.next_cursor.as_deref(),
+        ),
+        (vec!["east:4:1", "east:4:2"], None)
+    );
+}
+
+#[test]
+fn test_scan_cursor_resumes_at_the_extra_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = store(&dir);
+    for serial in 1..=3 {
+        meta.enqueue_reconcile(&entry(serial), NOW).unwrap();
+    }
+
+    let first = ReconcileStore::scan_reconcile(&meta, None, NonZeroUsize::new(2).unwrap()).unwrap();
+    let second =
+        ReconcileStore::scan_reconcile(&meta, first.next_cursor.as_deref(), NonZeroUsize::new(2).unwrap()).unwrap();
+
+    assert_eq!(
+        (
+            first.records.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+            first.next_cursor.as_deref(),
+            second.records.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+            second.next_cursor.as_deref(),
+        ),
+        (vec!["east:4:1", "east:4:2"], Some("east:4:2"), vec!["east:4:3"], None,)
+    );
+}
+
+#[test]
 fn test_scan_reads_empty_state_before_the_table_exists() {
     let dir = tempfile::tempdir().unwrap();
     let meta = store(&dir);

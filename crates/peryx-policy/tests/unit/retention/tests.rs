@@ -562,6 +562,21 @@ fn a_config_deserializes_every_selector_from_json() {
     );
 }
 
+#[rstest]
+#[case::section(r#"{"keeep":[{"selector":"cached"}],"expire":[{"selector":"trash"}]}"#, "keeep")]
+#[case::selector_property(
+    r#"{"keep":[{"selector":"age","older_than_seconds":86400,"older_than_second":1}],"expire":[{"selector":"trash"}]}"#,
+    "older_than_second"
+)]
+fn a_config_rejects_an_unknown_key(#[case] input: &str, #[case] key: &str) {
+    assert!(
+        serde_json::from_str::<RetentionConfig>(input)
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("unknown field `{key}`"))
+    );
+}
+
 #[test]
 fn a_config_rejects_a_negative_age() {
     assert!(

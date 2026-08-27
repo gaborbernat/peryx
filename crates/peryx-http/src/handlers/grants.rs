@@ -80,7 +80,7 @@ pub async fn list_grants(
 
 pub async fn create_grant(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
     let headers = request.headers().clone();
-    if !is_json(&headers) {
+    if !super::is_json(&headers) {
         return problem(StatusCode::UNSUPPORTED_MEDIA_TYPE, "request body must be JSON");
     }
     let (actor, grants) = match caller(&state, &headers).await {
@@ -269,14 +269,6 @@ fn parse_etag(value: &str) -> Option<u64> {
 
 fn etag(version: u64) -> HeaderValue {
     HeaderValue::from_str(&format!("\"{version}\"")).expect("a version etag is a valid header value")
-}
-
-fn is_json(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
 }
 
 fn unauthorized() -> Response {

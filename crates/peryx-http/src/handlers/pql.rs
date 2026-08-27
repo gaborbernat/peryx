@@ -34,7 +34,7 @@ pub async fn pql_query(
 }
 
 async fn query_response(state: &AppState, services: &HttpDomainServices, headers: &HeaderMap, body: Body) -> Response {
-    if !is_json(headers) {
+    if !super::is_json(headers) {
         return problem(StatusCode::UNSUPPORTED_MEDIA_TYPE, "request body must be JSON");
     }
     let body = match read_body(body).await {
@@ -311,14 +311,6 @@ fn apply_cache_policy(mut response: Response) -> Response {
         .map_or(ProtectedCachePolicy::NoStore, |policy| policy.0);
     policy.apply(response.headers_mut());
     response
-}
-
-fn is_json(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
 }
 
 #[derive(serde::Deserialize)]

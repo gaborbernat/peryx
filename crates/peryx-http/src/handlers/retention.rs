@@ -146,7 +146,7 @@ impl Prepared {
     async fn from_request(state: &AppState, request: Request<Body>) -> Result<Self, Response> {
         let (parts, body) = request.into_parts();
         administrator(state, &parts.headers).await?;
-        if !is_json(&parts.headers) {
+        if !super::is_json(&parts.headers) {
             return Err(problem(StatusCode::UNSUPPORTED_MEDIA_TYPE, "request body must be JSON"));
         }
         let Ok(body) = axum::body::to_bytes(body, MAX_BODY_BYTES).await else {
@@ -212,14 +212,6 @@ async fn administrator(state: &AppState, headers: &HeaderMap) -> Result<UserId, 
         return Err(not_found());
     }
     Ok(actor)
-}
-
-fn is_json(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
 }
 
 fn plan_etag(summary: RetentionSummary) -> HeaderValue {

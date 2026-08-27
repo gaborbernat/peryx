@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use http_body_util::BodyExt as _;
@@ -283,6 +283,33 @@ impl Fixture {
         self.run(request).await
     }
 
+    async fn create_with_content_types(&self, route: &str, content_types: &[&str]) -> (StatusCode, HeaderMap, Value) {
+        let mut request = Request::builder().method(Method::POST).uri("/+repositories").header(
+            header::AUTHORIZATION,
+            format!("Basic {}", STANDARD.encode(format!("{}:{}", ADMIN.0, ADMIN.1))),
+        );
+        for content_type in content_types {
+            request
+                .headers_mut()
+                .unwrap()
+                .append(header::CONTENT_TYPE, HeaderValue::try_from(*content_type).unwrap());
+        }
+        self.run(
+            request
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "route": route,
+                        "display_name": "Media type test",
+                        "ecosystem": "alpha",
+                        "definition": {}
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+    }
+
     async fn run(&self, request: Request<Body>) -> (StatusCode, HeaderMap, Value) {
         let response = self.app.clone().oneshot(request).await.unwrap();
         let status = response.status();
@@ -383,6 +410,52 @@ async fn test_create_rejects_a_non_json_or_malformed_body() {
         )
         .await;
     assert_eq!(malformed.0, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[rstest]
+#[case::mixed_case("media/mixed", "Application/JSON")]
+#[case::parameters("media/parameters", "application/json ; Charset=\"utf-8\"")]
+#[case::quoted_comma("media/quoted", "application/json; profile=\"a,b\"")]
+#[case::empty_parameter("media/empty-parameter", "application/json;")]
+#[tokio::test]
+async fn test_create_accepts_json_media_types(#[case] route: &str, #[case] content_type: &str) {
+    let fixture = Fixture::new().await;
+    let response = fixture.create_with_content_types(route, &[content_type]).await;
+    assert_eq!(response.0, StatusCode::CREATED, "{}", response.2);
+
+    let response = fixture.send(Method::GET, "/+repositories", Some(ADMIN), None).await;
+    assert!(
+        response.2["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|repository| repository["route"] == route)
+    );
+}
+
+#[rstest]
+#[case::missing("media/missing", &[])]
+#[case::jsonp("media/jsonp", &["application/jsonp"])]
+#[case::sequence("media/sequence", &["application/json-seq"])]
+#[case::malformed_parameter("media/malformed", &["application/json; charset =utf-8"])]
+#[case::combined("media/combined", &["application/json, application/json"])]
+#[case::duplicate("media/duplicate", &["application/json", "application/json"])]
+#[tokio::test]
+async fn test_create_rejects_non_json_media_types(#[case] route: &str, #[case] content_types: &[&str]) {
+    let fixture = Fixture::new().await;
+    fixture.create("media/existing").await;
+    let response = fixture.create_with_content_types(route, content_types).await;
+    assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(response.2, json!({"error": "expected application/json"}));
+
+    let response = fixture.send(Method::GET, "/+repositories", Some(ADMIN), None).await;
+    assert!(
+        response.2["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|repository| repository["route"] != route)
+    );
 }
 
 #[tokio::test]

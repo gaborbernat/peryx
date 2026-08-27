@@ -248,7 +248,7 @@ impl Rejection {
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(headers: &HeaderMap, body: &Bytes) -> Result<T, Rejection> {
-    if !is_json(headers) {
+    if !super::is_json(headers) {
         return Err(Rejection {
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
             message: "expected application/json",
@@ -258,13 +258,6 @@ fn parse_json<T: serde::de::DeserializeOwned>(headers: &HeaderMap, body: &Bytes)
         status: StatusCode::UNPROCESSABLE_ENTITY,
         message: "malformed repository body",
     })
-}
-
-fn is_json(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("application/json"))
 }
 
 fn if_match(headers: &HeaderMap) -> Result<u64, Rejection> {

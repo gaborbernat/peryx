@@ -36,7 +36,6 @@ pub const fn quota_reservation<'a>(
     version: Option<&'a str>,
     digest: &'a str,
     bytes: u64,
-    class: AccountingClass,
     created_at_unix: i64,
 ) -> NewQuotaReservation<'a> {
     NewQuotaReservation {
@@ -45,7 +44,7 @@ pub const fn quota_reservation<'a>(
         group: version,
         digest,
         bytes,
-        class,
+        class: AccountingClass::Hosted,
         created_at_unix,
     }
 }

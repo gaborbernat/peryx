@@ -16,15 +16,7 @@ fn test_quota_reservation_preserves_oci_identity() {
         assert_eq!(
             (
                 case,
-                quota_reservation(
-                    "images",
-                    "team/api",
-                    tag,
-                    "sha256:abc",
-                    42,
-                    AccountingClass::Generated,
-                    100,
-                ),
+                quota_reservation("images", "team/api", tag, "sha256:abc", 42, 100),
             ),
             (
                 case,
@@ -34,7 +26,7 @@ fn test_quota_reservation_preserves_oci_identity() {
                     group: tag,
                     digest: "sha256:abc",
                     bytes: 42,
-                    class: AccountingClass::Generated,
+                    class: AccountingClass::Hosted,
                     created_at_unix: 100,
                 },
             )

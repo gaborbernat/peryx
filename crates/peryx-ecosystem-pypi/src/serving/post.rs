@@ -390,7 +390,6 @@ fn project_quota_reservation(
         Some(prepared.record.version.as_str()),
         prepared.digest.as_str(),
         incoming,
-        peryx_storage::meta::AccountingClass::Hosted,
         (state.clock)(),
     );
     let admission = quota::admit_upload(&state.meta, request, limit, audit);

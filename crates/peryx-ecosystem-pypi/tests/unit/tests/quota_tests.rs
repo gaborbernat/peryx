@@ -8,15 +8,7 @@ fn test_quota_reservation_normalizes_project_identity() {
     let project = PackageName::new("Zope.Interface");
 
     assert_eq!(
-        quota_reservation(
-            "private",
-            &project,
-            Some("7.2"),
-            "sha256:abc",
-            42,
-            AccountingClass::Hosted,
-            100,
-        ),
+        quota_reservation("private", &project, Some("7.2"), "sha256:abc", 42, 100),
         NewQuotaReservation {
             repository: "private",
             resource: Some("zope-interface"),
@@ -57,15 +49,7 @@ fn test_quota_admission_commits_project_bytes() {
 fn test_quota_admission_rejects_the_projected_total() {
     let (_dir, meta) = store();
     let project = PackageName::new("flask");
-    let first = quota_reservation(
-        "private",
-        &project,
-        Some("1.0"),
-        "sha256:first",
-        7,
-        AccountingClass::Hosted,
-        1,
-    );
+    let first = quota_reservation("private", &project, Some("1.0"), "sha256:first", 7, 1);
     let first = meta.reserve_resource_quota(first, 10, false).unwrap();
     meta.commit_quota_reservation(first.id).unwrap();
 
@@ -146,13 +130,5 @@ const fn request<'a>(
     bytes: u64,
     created_at_unix: i64,
 ) -> NewQuotaReservation<'a> {
-    quota_reservation(
-        "private",
-        resource,
-        Some(group),
-        digest,
-        bytes,
-        AccountingClass::Hosted,
-        created_at_unix,
-    )
+    quota_reservation("private", resource, Some(group), digest, bytes, created_at_unix)
 }

@@ -29,7 +29,6 @@ pub const fn quota_reservation<'a>(
     tag: Option<&'a str>,
     digest: &'a str,
     bytes: u64,
-    class: AccountingClass,
     created_at_unix: i64,
 ) -> NewQuotaReservation<'a> {
     NewQuotaReservation {
@@ -38,7 +37,7 @@ pub const fn quota_reservation<'a>(
         group: tag,
         digest,
         bytes,
-        class,
+        class: AccountingClass::Hosted,
         created_at_unix,
     }
 }
@@ -94,15 +93,7 @@ pub fn admit_push(
     let Some(limits) = quota_limits(&index.policy) else {
         return Ok(Admission::Unmetered);
     };
-    let request = quota_reservation(
-        &index.name,
-        repo,
-        version,
-        digest,
-        bytes,
-        AccountingClass::Hosted,
-        (state.clock)(),
-    );
+    let request = quota_reservation(&index.name, repo, version, digest, bytes, (state.clock)());
     match reserve(&state.meta, request, limits)? {
         ReserveOutcome::Admitted(record) => {
             record_quota_metric(state, index, repo, QUOTA_ADMITTED_FAMILY.key);

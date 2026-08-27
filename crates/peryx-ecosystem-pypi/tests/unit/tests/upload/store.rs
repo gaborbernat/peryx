@@ -49,7 +49,6 @@ fn pending_quota(meta: &MetaStore, wheel: &[u8], limit: u64) -> Result<PendingQu
         Some("1.0"),
         digest.as_str(),
         wheel.len() as u64,
-        peryx_storage::meta::AccountingClass::Hosted,
         1000,
     );
     match admit_upload(meta, request, limit, false).unwrap() {

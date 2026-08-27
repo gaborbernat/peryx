@@ -1,4 +1,4 @@
-use peryx_storage::meta::{AccountingClass, MetaStore, QuotaLimit, QuotaLimits};
+use peryx_storage::meta::{MetaStore, QuotaLimit, QuotaLimits};
 
 use super::{ReserveOutcome, finalize, quota_reservation, reserve};
 use crate::registry::ServeError;
@@ -12,7 +12,7 @@ fn store() -> (tempfile::TempDir, MetaStore) {
 #[test]
 fn test_reserve_admits_within_the_limit() {
     let (_dir, meta) = store();
-    let request = quota_reservation("store", "app", None, "sha256:a", 4, AccountingClass::Hosted, 1);
+    let request = quota_reservation("store", "app", None, "sha256:a", 4, 1);
     let limits = QuotaLimits {
         max_accounted_bytes: Some(8),
         ..QuotaLimits::default()
@@ -26,7 +26,7 @@ fn test_reserve_admits_within_the_limit() {
 #[test]
 fn test_reserve_rejects_over_the_limit_in_enforce_mode() {
     let (_dir, meta) = store();
-    let request = quota_reservation("store", "app", None, "sha256:a", 9, AccountingClass::Hosted, 1);
+    let request = quota_reservation("store", "app", None, "sha256:a", 9, 1);
     let limits = QuotaLimits {
         max_accounted_bytes: Some(8),
         ..QuotaLimits::default()
@@ -42,14 +42,14 @@ fn test_reserve_maps_a_validation_fault_to_a_serve_error() {
     let (_dir, meta) = store();
     // Identity faults must not be reported as quota decisions.
     let long = "r".repeat(600);
-    let request = quota_reservation(&long, "app", None, "sha256:a", 1, AccountingClass::Hosted, 1);
+    let request = quota_reservation(&long, "app", None, "sha256:a", 1, 1);
     assert!(reserve(&meta, request, QuotaLimits::default()).is_err());
 }
 
 #[test]
 fn test_finalize_releases_the_reservation_after_a_driver_failure() {
     let (_dir, meta) = store();
-    let request = quota_reservation("store", "app", None, "sha256:a", 4, AccountingClass::Hosted, 1);
+    let request = quota_reservation("store", "app", None, "sha256:a", 4, 1);
     let record = meta.reserve_quota(request, QuotaLimits::default()).unwrap();
     let id = record.id;
 

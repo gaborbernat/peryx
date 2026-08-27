@@ -19,17 +19,7 @@ use crate::policy::RemoteMetadataMode;
 #[case::empty_publisher_kind(Some("application/json"), r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"","claims":{}},"attestations":[{"version":1,"verification_material":{"certificate":"Zm9v","transparency_entries":[]},"envelope":{"statement":"e30=","signature":"YmFy"}}]}]}"#, "PEP 740")]
 #[case::invalid_claims(
     Some("application/json"),
-    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"test","claims":[]},"attestations":[{}]}]}"#,
-    "PEP 740"
-)]
-#[case::missing_claims(
-    Some("application/json"),
-    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"test"},"attestations":[{}]}]}"#,
-    "PEP 740"
-)]
-#[case::null_claims(
-    Some("application/json"),
-    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"test","claims":null},"attestations":[{}]}]}"#,
+    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"test","claims":[]},"attestations":[{"version":1,"verification_material":{"certificate":"Zm9v","transparency_entries":[]},"envelope":{"statement":"e30=","signature":"YmFy"}}]}]}"#,
     "PEP 740"
 )]
 #[case::empty_attestations(
@@ -62,6 +52,28 @@ async fn test_upstream_attestation_rejects_an_invalid_response(
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(body.contains(message), "{body}");
+}
+
+#[tokio::test]
+async fn test_upstream_attestation_accepts_null_publisher_claims() {
+    let harness = upstream_harness(RemoteMetadataMode::Proxy).await;
+    let mut document: serde_json::Value = serde_json::from_str(PYPI_PROVENANCE).unwrap();
+    document["attestation_bundles"][0]["publisher"]["claims"] = serde_json::Value::Null;
+    let provenance = serde_json::to_string(&document).unwrap();
+    mount_provenance(
+        &harness,
+        ResponseTemplate::new(200).set_body_raw(provenance.as_str(), "application/vnd.pypi.integrity.v1+json"),
+    )
+    .await;
+    let digest = "ab".repeat(32);
+    upstream_page(&harness, &digest, "application/json").await;
+
+    let (status, headers, body) = get(&harness.state, &upstream_provenance_uri(&digest), None).await;
+
+    assert_eq!(
+        (status, headers[header::CONTENT_TYPE].to_str().unwrap(), body,),
+        (StatusCode::OK, "application/vnd.pypi.integrity.v1+json", provenance,)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

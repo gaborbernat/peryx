@@ -8,12 +8,12 @@ use tokio::sync::oneshot;
 
 pub(super) const FILENAME: &str = "peryxpkg-1.0-py3-none-any.whl";
 pub(super) const PYPI_PROVENANCE: &str = concat!(
-    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"PyPI","claims":{}},"attestations":[{"version":1,"#,
+    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"GitHub","repository":"sigstore/sigstore-python","workflow":"release.yml","environment":null},"attestations":[{"version":1,"#,
     r#""verification_material":{"certificate":"Zm9v","transparency_entries":[]},"#,
     r#""envelope":{"statement":"e30=","signature":"YmFy"}}]}]}"#,
 );
 pub(super) const REVISED_PYPI_PROVENANCE: &str = concat!(
-    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"PyPI","claims":{}},"attestations":[{"version":1,"#,
+    r#"{"version":1,"attestation_bundles":[{"publisher":{"kind":"GitHub","repository":"sigstore/sigstore-python","workflow":"release.yml","environment":null},"attestations":[{"version":1,"#,
     r#""verification_material":{"certificate":"Zm9v","transparency_entries":[]},"#,
     r#""envelope":{"statement":"e30=","signature":"YmFy"}}]}],"revision":2}"#,
 );

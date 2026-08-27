@@ -146,13 +146,13 @@ because the provenance URL may keep pointing at a changed document.
 
 #### Validation and failure
 
-peryx accepts the PEP 740 media type or `application/json`. The document must use version 1 and contain a publisher with
-string `kind`, object `claims`, and one or more typed attestations. Its size cannot exceed 2 MiB. Fetches use the
-upstream client's redirect, timeout, retry, and credential controls. A separate per-source concurrency pool prevents
-attestation latency from consuming project-page slots. `no-cache` forces revalidation; `no-store` clears any retained
-body and validators. A transient refresh failure may serve the previous structurally accepted body within the
-repository's stale bound. peryx rejects an invalid replacement without overwriting the previous body or affecting the
-distribution.
+peryx accepts the PEP 740 media type or `application/json`; each version 1 document must contain a publisher with a
+non-empty string `kind` and one or more typed attestations. `claims` is optional and accepts an object or `null`. The
+limit is 2 MiB. peryx follows upstream redirects and credential controls. It also honors configured timeouts and
+retries. A separate per-source concurrency pool reserves project-page slots while peryx fetches attestations. `no-cache`
+forces revalidation; `no-store` clears any retained body and validators. After a transient refresh failure, peryx may
+serve the previous accepted body within the repository's stale bound. peryx rejects an invalid replacement without
+overwriting the previous body or affecting the distribution.
 
 #### Security claim
 

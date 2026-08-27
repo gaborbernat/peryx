@@ -36,12 +36,14 @@ async fn shadow_admin() -> axum::response::Html<&'static str> {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct ShadowParams {
+struct ShadowParams {
     repository: String,
     project: String,
     cursor: Option<String>,
     limit: Option<usize>,
 }
+
+struct InvalidShadowParams(&'static str);
 
 pub async fn shadow_candidates(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
     let (request, _) = request.into_parts();
@@ -55,8 +57,9 @@ async fn shadow_candidates_response(state: &AppState, headers: &HeaderMap, uri: 
         Ok(identity) => identity,
         Err(rejection) => return rejection.response(),
     };
-    let Ok(Query(params)) = Query::<ShadowParams>::try_from_uri(uri) else {
-        return invalid_query();
+    let params = match ShadowParams::parse(uri) {
+        Ok(params) => params,
+        Err(error) => return invalid_query(error.0),
     };
     let authorization = match authorize(state, headers, &params.repository, &identity) {
         Ok(authorization) => authorization,
@@ -71,6 +74,39 @@ async fn shadow_candidates_response(state: &AppState, headers: &HeaderMap, uri: 
     match inspect_shadowed(state, &query) {
         Ok(page) => shadow_page(page, authorization.response),
         Err(error) => shadow_error_response(&error),
+    }
+}
+
+impl ShadowParams {
+    fn parse(uri: &Uri) -> Result<Self, InvalidShadowParams> {
+        let mut seen = 0_u8;
+        for (name, _) in url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()) {
+            let parameter = match name.as_ref() {
+                "repository" => 1,
+                "project" => 2,
+                "cursor" => 4,
+                "limit" => 8,
+                "resource" => {
+                    return Err(InvalidShadowParams(
+                        "unknown shadow query parameter `resource`; use `project`",
+                    ));
+                }
+                _ => return Err(InvalidShadowParams("unknown shadow query parameter")),
+            };
+            if seen & parameter != 0 {
+                return Err(InvalidShadowParams("duplicate shadow query parameter"));
+            }
+            seen |= parameter;
+        }
+        if seen & 1 == 0 {
+            return Err(InvalidShadowParams("missing shadow query parameter `repository`"));
+        }
+        if seen & 2 == 0 {
+            return Err(InvalidShadowParams("missing shadow query parameter `project`"));
+        }
+        Query::<Self>::try_from_uri(uri)
+            .map(|Query(params)| params)
+            .map_err(|_| InvalidShadowParams("shadow query parameter `limit` must be an unsigned integer"))
     }
 }
 
@@ -290,10 +326,10 @@ fn unavailable() -> Response {
         .into_response()
 }
 
-fn invalid_query() -> Response {
+fn invalid_query(message: &'static str) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        axum::Json(serde_json::json!({"error": "invalid shadow query"})),
+        axum::Json(serde_json::json!({"error": message})),
     )
         .into_response()
 }

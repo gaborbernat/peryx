@@ -6,7 +6,7 @@ use bytes::Bytes;
 use peryx_ha::{ArtifactSource, BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId};
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{DriverBlobReference, JournalEntry, MetaStore};
 
 use crate::blob::{BlobRequest, BlobTransport, LoopbackBlobSource};
 use crate::blob_plane::{
@@ -238,11 +238,21 @@ async fn test_pull_referenced_fails_closed_on_a_wrong_sized_blob() {
 }
 
 fn seed_serial(meta: &MetaStore, after: u64, blobs: &[(&str, u64)]) {
-    meta.commit_replica_txn(after, |txn| {
-        for (sha256, size) in blobs {
-            txn.reference_blob(sha256, *size);
-        }
-        Ok::<_, SyncError>(((), vec![format!("event-{}", after + 1).into_bytes()]))
+    meta.commit_replica_txn(after, |_| {
+        Ok::<_, SyncError>((
+            (),
+            vec![JournalEntry {
+                payload: format!("event-{}", after + 1).into_bytes(),
+                mutations: Vec::new(),
+                blobs: blobs
+                    .iter()
+                    .map(|(sha256, size)| DriverBlobReference {
+                        sha256: (*sha256).to_owned(),
+                        size: *size,
+                    })
+                    .collect(),
+            }],
+        ))
     })
     .unwrap();
 }

@@ -3,7 +3,7 @@ use redb::ReadableTable as _;
 use super::error::{MetaError, MetaScanError};
 use super::{
     BLOB_RECLAIM_GUARD, DRIVER_KV, DriverBatch, DriverBlobReference, DriverMutation, JOURNAL, JOURNAL_BLOBS,
-    JOURNAL_MUTATIONS, MetaStore, POLICY_INPUT_GENERATION, PolicyInputGeneration, SERIAL, SERIAL_KEY,
+    JOURNAL_MUTATIONS, JournalEntry, MetaStore, POLICY_INPUT_GENERATION, PolicyInputGeneration, SERIAL, SERIAL_KEY,
 };
 
 impl MetaStore {
@@ -282,8 +282,8 @@ impl MetaStore {
         self.commit_driver_txn_at(None, Some((repository, catalog_generation)), true, |_, _| Ok(()), body)
     }
 
-    /// Commits replicated rows, journal, and serial only at `expected_serial`, preventing duplicate pages
-    /// and writes over divergent local state.
+    /// Commits replicated rows and serial-ordered journal entries only at `expected_serial`. Each entry
+    /// retains its metadata mutations and blob references.
     ///
     /// # Errors
     /// Returns [`MetaError::ReplicaSerialConflict`] through `E` when the local serial differs, the
@@ -291,9 +291,16 @@ impl MetaStore {
     pub fn commit_replica_txn<T, E: From<MetaError>>(
         &self,
         expected_serial: u64,
-        body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
+        body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<JournalEntry>), E>,
     ) -> Result<T, E> {
-        self.commit_driver_txn_at(Some(expected_serial), None, true, |_, _| Ok(()), body)
+        self.commit_driver_txn_with_journal(
+            Some(expected_serial),
+            None,
+            true,
+            |_, _| Ok(()),
+            |txn| body(txn).map(|(value, entries)| (value, PendingJournal::Entries(entries))),
+        )
+        .map(|commit| commit.value)
     }
 
     pub(super) fn commit_driver_txn_at<T, E: From<MetaError>>(
@@ -316,34 +323,58 @@ impl MetaStore {
         finalize: impl FnOnce(&redb::WriteTransaction, &T) -> Result<(), E>,
         body: impl FnOnce(&mut DriverTxn) -> Result<(T, Vec<Vec<u8>>), E>,
     ) -> Result<super::DriverCommit<T>, E> {
+        self.commit_driver_txn_with_journal(expected_serial, catalog_generation, durable, finalize, |txn| {
+            body(txn).map(|(value, entries)| (value, PendingJournal::Payloads(entries)))
+        })
+    }
+
+    fn commit_driver_txn_with_journal<T, E: From<MetaError>>(
+        &self,
+        expected_serial: Option<u64>,
+        catalog_generation: Option<(&str, u64)>,
+        durable: bool,
+        finalize: impl FnOnce(&redb::WriteTransaction, &T) -> Result<(), E>,
+        body: impl FnOnce(&mut DriverTxn) -> Result<(T, PendingJournal), E>,
+    ) -> Result<super::DriverCommit<T>, E> {
         let mut txn = self.db.begin_write().map_err(MetaError::from)?;
         if !durable {
             txn.set_durability(redb::Durability::None)
                 .expect("no savepoints in this transaction");
         }
         check_replica_serial(&txn, expected_serial)?;
-        let (value, journal, mutations, blobs) = {
+        let (value, journal) = {
             let mut driver = DriverTxn {
                 table: txn.open_table(DRIVER_KV).map_err(MetaError::from)?,
                 touched: std::collections::BTreeSet::new(),
                 blobs: std::collections::BTreeSet::new(),
             };
             let (value, journal) = body(&mut driver)?;
-            let mutations = if journal.is_empty() {
-                Vec::new()
-            } else {
-                driver.mutations().map_err(E::from)?
+            let journal = match journal {
+                PendingJournal::Payloads(payloads) => {
+                    let mut entries: Vec<_> = payloads
+                        .into_iter()
+                        .map(|payload| JournalEntry {
+                            payload,
+                            mutations: Vec::new(),
+                            blobs: Vec::new(),
+                        })
+                        .collect();
+                    if let Some(last) = entries.last_mut() {
+                        last.mutations = driver.mutations().map_err(E::from)?;
+                        last.blobs = driver.blobs.into_iter().collect();
+                    }
+                    entries
+                }
+                PendingJournal::Entries(entries) => entries,
             };
-            let blobs = if journal.is_empty() {
-                Vec::new()
-            } else {
-                driver.blobs.into_iter().collect()
-            };
-            (value, journal, mutations, blobs)
+            (value, journal)
         };
-        if expected_serial.is_none() && !blobs.is_empty() {
+        if expected_serial.is_none()
+            && let Some(last) = journal.last()
+            && !last.blobs.is_empty()
+        {
             let guards = txn.open_table(BLOB_RECLAIM_GUARD).map_err(MetaError::from)?;
-            for blob in &blobs {
+            for blob in &last.blobs {
                 if guards.get(blob.sha256.as_str()).map_err(MetaError::from)?.is_some() {
                     return Err(MetaError::BlobReclaiming {
                         digest: blob.sha256.clone(),
@@ -352,36 +383,7 @@ impl MetaStore {
                 }
             }
         }
-        let journal_commit = if journal.is_empty() {
-            None
-        } else {
-            let mut serials = txn.open_table(SERIAL).map_err(MetaError::from)?;
-            let mut journal_table = txn.open_table(JOURNAL).map_err(MetaError::from)?;
-            let mut next = serials
-                .get(SERIAL_KEY)
-                .map_err(MetaError::from)?
-                .map_or(0, |value| value.value());
-            for entry in &journal {
-                next += 1;
-                journal_table.insert(next, entry.as_slice()).map_err(MetaError::from)?;
-            }
-            if !mutations.is_empty() {
-                let encoded = serde_json::to_vec(&mutations).map_err(MetaError::from)?;
-                txn.open_table(JOURNAL_MUTATIONS)
-                    .map_err(MetaError::from)?
-                    .insert(next, encoded.as_slice())
-                    .map_err(MetaError::from)?;
-            }
-            if !blobs.is_empty() {
-                let encoded = serde_json::to_vec(&blobs).map_err(MetaError::from)?;
-                txn.open_table(JOURNAL_BLOBS)
-                    .map_err(MetaError::from)?
-                    .insert(next, encoded.as_slice())
-                    .map_err(MetaError::from)?;
-            }
-            serials.insert(SERIAL_KEY, next).map_err(MetaError::from)?;
-            Some(super::JournalCommit::new(next))
-        };
+        let journal_commit = commit_journal(&txn, &journal)?;
         if let Some((repository, catalog)) = catalog_generation {
             let mut generations = txn.open_table(POLICY_INPUT_GENERATION).map_err(MetaError::from)?;
             let mut generation = generations
@@ -412,6 +414,11 @@ impl MetaStore {
     }
 }
 
+enum PendingJournal {
+    Payloads(Vec<Vec<u8>>),
+    Entries(Vec<JournalEntry>),
+}
+
 fn check_replica_serial<E: From<MetaError>>(txn: &redb::WriteTransaction, expected: Option<u64>) -> Result<(), E> {
     let Some(expected) = expected else {
         return Ok(());
@@ -425,6 +432,41 @@ fn check_replica_serial<E: From<MetaError>>(txn: &redb::WriteTransaction, expect
         return Err(MetaError::ReplicaSerialConflict { expected, actual }.into());
     }
     Ok(())
+}
+
+fn commit_journal<E: From<MetaError>>(
+    txn: &redb::WriteTransaction,
+    journal: &[JournalEntry],
+) -> Result<Option<super::JournalCommit>, E> {
+    if journal.is_empty() {
+        return Ok(None);
+    }
+    let mut serials = txn.open_table(SERIAL).map_err(MetaError::from)?;
+    let mut events = txn.open_table(JOURNAL).map_err(MetaError::from)?;
+    let mut next = serials
+        .get(SERIAL_KEY)
+        .map_err(MetaError::from)?
+        .map_or(0, |value| value.value());
+    for entry in journal {
+        next += 1;
+        events.insert(next, entry.payload.as_slice()).map_err(MetaError::from)?;
+        if !entry.mutations.is_empty() {
+            let encoded = serde_json::to_vec(&entry.mutations).map_err(MetaError::from)?;
+            txn.open_table(JOURNAL_MUTATIONS)
+                .map_err(MetaError::from)?
+                .insert(next, encoded.as_slice())
+                .map_err(MetaError::from)?;
+        }
+        if !entry.blobs.is_empty() {
+            let encoded = serde_json::to_vec(&entry.blobs).map_err(MetaError::from)?;
+            txn.open_table(JOURNAL_BLOBS)
+                .map_err(MetaError::from)?
+                .insert(next, encoded.as_slice())
+                .map_err(MetaError::from)?;
+        }
+    }
+    serials.insert(SERIAL_KEY, next).map_err(MetaError::from)?;
+    Ok(Some(super::JournalCommit::new(next)))
 }
 
 /// Gives a [`MetaStore::commit_driver_txn`] body atomic access to opaque driver rows.

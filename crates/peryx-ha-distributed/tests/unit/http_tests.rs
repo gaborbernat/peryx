@@ -16,8 +16,9 @@ use crate::protocol::Change;
 use crate::replica::Replica;
 use crate::support::TestServer;
 use crate::{
-    ChangePage, DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, PROTOCOL_VERSION, Primary,
-    PrimaryHttpConfigError, follower_router, primary_router, primary_router_with_stream_limit,
+    BlobReference, ChangePage, DEFAULT_MAX_CHANGE_PAGE_SIZE, HttpPrimary, HttpPrimaryError, MetadataMutation,
+    PROTOCOL_VERSION, Primary, PrimaryHttpConfigError, follower_router, primary_router,
+    primary_router_with_stream_limit,
 };
 
 const TOKEN: &str = "replica-secret";
@@ -66,6 +67,73 @@ async fn test_follower_serves_the_authoritative_source_up_to_its_applied_serial(
         page.changes.iter().map(|change| change.serial).collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
+}
+
+#[tokio::test]
+async fn test_follower_preserves_state_at_each_replicated_serial() {
+    let middle = TestStores::new();
+    let downstream = TestStores::new();
+    let changes = vec![artifact_change(1, b"first"), artifact_change(2, b"second")];
+    Replica::new(&middle.meta, NonZeroUsize::new(2).unwrap())
+        .apply_page(ChangePage {
+            version: PROTOCOL_VERSION,
+            source: "writer-a".to_owned(),
+            after: 0,
+            current_serial: 2,
+            changes: changes.clone(),
+        })
+        .unwrap();
+    let downstream_replica = Replica::new(&downstream.meta, NonZeroUsize::new(1).unwrap());
+
+    let first_page = follower_page(&middle.meta, 0, 1).await;
+    downstream_replica.apply_page(first_page.clone()).unwrap();
+
+    assert_eq!(
+        (
+            first_page.changes,
+            downstream.meta.get_driver_value("artifact").unwrap()
+        ),
+        (vec![changes[0].clone()], Some(b"first".to_vec()))
+    );
+
+    let second_page = follower_page(&middle.meta, 1, 1).await;
+    downstream_replica.apply_page(second_page.clone()).unwrap();
+
+    assert_eq!(
+        (
+            second_page.changes,
+            downstream.meta.get_driver_value("artifact").unwrap()
+        ),
+        (vec![changes[1].clone()], Some(b"second".to_vec()))
+    );
+}
+
+fn artifact_change(serial: u64, value: &[u8]) -> Change {
+    Change {
+        serial,
+        event: format!("event-{serial}").into_bytes(),
+        metadata: vec![MetadataMutation::Put {
+            key: "artifact".to_owned(),
+            value: value.to_vec(),
+        }],
+        blobs: vec![BlobReference {
+            sha256: Digest::of(value).as_str().to_owned(),
+            size: value.len() as u64,
+        }],
+    }
+}
+
+async fn follower_page(meta: &MetaStore, after: u64, limit: usize) -> ChangePage {
+    let response = follower_router(TOKEN, meta.clone())
+        .unwrap()
+        .oneshot(authenticated_request(
+            &format!("/+replication/v1/changes?after={after}&limit={limit}"),
+            TOKEN,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
 #[tokio::test]

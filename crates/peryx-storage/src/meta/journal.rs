@@ -28,6 +28,13 @@ pub enum DriverMutation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalEntry {
+    pub payload: Vec<u8>,
+    pub mutations: Vec<DriverMutation>,
+    pub blobs: Vec<DriverBlobReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalRecord {
     pub serial: u64,
     pub payload: Vec<u8>,

@@ -55,7 +55,9 @@ pub use job::{
     JobState, NewJobRun,
 };
 pub use job_lease::{ClaimOutcome, JobLease, JobLeaseError, LeaseState};
-pub use journal::{DriverBlobReference, DriverCommit, DriverMutation, JournalCommit, JournalRecord, JournalSnapshot};
+pub use journal::{
+    DriverBlobReference, DriverCommit, DriverMutation, JournalCommit, JournalEntry, JournalRecord, JournalSnapshot,
+};
 pub use migration::{
     LegacyMetadataSource, MetadataMigration, MetadataMigrationError, MetadataMigrationReport, MetadataRecord,
     MetadataRecordSet, MetadataValueKind,

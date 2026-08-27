@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -20,7 +20,7 @@ use peryx_storage::meta::{JobOutcome, MetaError, NewJobRun};
 
 use super::attempts::{CancelJobRun, JobAttemptError};
 use super::metrics::{JobMetrics, Outcome, Reject};
-use super::{JobContext, JobFailure, JobReport, LeaseScope, NodeJob};
+use super::{JobCompletion, JobContext, JobFailure, JobReport, LeaseScope, NodeJob};
 use crate::state::ServingState;
 
 /// How long a cluster-singleton lease stays held before it lapses absent a renewal. A run claims at
@@ -119,6 +119,7 @@ struct Shared {
     per_repository: KeyedLimiter,
     inflight: Mutex<Inflight>,
     metrics: Arc<JobMetrics>,
+    completions: broadcast::Sender<JobCompletion>,
     cancel: CancellationToken,
 }
 
@@ -153,6 +154,7 @@ pub struct JobScheduler {
 impl JobScheduler {
     #[must_use]
     pub fn new(state: Arc<ServingState>, limits: JobLimits) -> Self {
+        let (completions, _) = broadcast::channel(limits.queue.get());
         let shared = Shared {
             state,
             workers: Arc::new(Semaphore::new(limits.workers.get())),
@@ -161,6 +163,7 @@ impl JobScheduler {
             per_repository: KeyedLimiter::new(limits.per_repository),
             inflight: Mutex::new(Inflight::new()),
             metrics: Arc::new(JobMetrics::default()),
+            completions,
             cancel: CancellationToken::new(),
         };
         Self {
@@ -173,6 +176,14 @@ impl JobScheduler {
     #[must_use]
     pub fn metrics(&self) -> Arc<JobMetrics> {
         self.shared.metrics.clone()
+    }
+
+    /// Subscribe to completions published after this call.
+    ///
+    /// A receiver that falls behind the admitted-job bound gets [`broadcast::error::RecvError::Lagged`].
+    #[must_use]
+    pub fn subscribe_completions(&self) -> broadcast::Receiver<JobCompletion> {
+        self.shared.completions.subscribe()
     }
 
     /// Refusal is a normal outcome, not an error: a duplicate is a [`Conflict`](Submit::Conflict), a
@@ -284,6 +295,9 @@ async fn execute(job: &dyn NodeJob, shared: &Shared, cancel: &CancellationToken)
         (outcome, result)
     };
     shared.metrics.finished(kind, outcome);
+    let _ = shared
+        .completions
+        .send(JobCompletion::new(kind, outcome, result.as_ref().ok().copied()));
     result
 }
 

@@ -18,9 +18,10 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use super::attempts::JobAttemptError;
 use super::scheduler::{JobLimits, Submit};
 use super::{
-    CacheRefreshJob, CancelJobRun, IdleReclaimJob, IntentFinalizeJob, JobContext, JobFailure, JobHistoryCleanup,
-    JobReport, JobScheduler, LeaseScope, NodeJob, NodeJobMetadata, PluginScheduledJob, RegisteredScheduledJob,
-    Schedule, ScheduledJob, ScheduledJobFactory, SearchRebuildJob, run_schedules, scheduled_job, submit_maintenance,
+    CacheRefreshJob, CancelJobRun, IdleReclaimJob, IntentFinalizeJob, JobCompletionOutcome, JobContext, JobFailure,
+    JobHistoryCleanup, JobReport, JobScheduler, LeaseScope, NodeJob, NodeJobMetadata, PluginScheduledJob,
+    RegisteredScheduledJob, Schedule, ScheduledJob, ScheduledJobFactory, SearchRebuildJob, run_schedules,
+    scheduled_job, submit_maintenance,
 };
 use crate::serving::{CacheRefresher, IdleReclaimer, IntentFinalizer, RefreshSweep};
 use crate::state::{AppState, Clock, ServingState};
@@ -1567,17 +1568,31 @@ async fn test_no_schedules_still_runs_history_cleanup() {
             .unwrap();
     }
     let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
+    let mut completions = scheduler.subscribe_completions();
     let cancel = CancellationToken::new();
-    let timer = start_schedules(app.clone(), scheduler.clone(), Vec::new(), cancel.clone()).await;
-    scheduler
-        .run(TestJob::new("sentinel", "", Action::Return(Ok(JobReport::default()))))
-        .await
+    let timer = start_timer(
+        app.clone(),
+        scheduler.clone(),
+        super::timer::ScheduleTimer::new(Vec::new(), 16),
+        cancel.clone(),
+    )
+    .await;
+
+    let completed = [completions.recv().await.unwrap(), completions.recv().await.unwrap()];
+    let cleanup = completed
+        .into_iter()
+        .find(|event| event.kind() == "job_history_cleanup")
         .unwrap();
+    assert_eq!(cleanup.outcome(), JobCompletionOutcome::Succeeded);
+    let removed = cleanup.report().unwrap().changed;
+    assert!(removed > 0);
 
     cancel.cancel();
     timer.await.unwrap();
-    assert_eq!(job_runs(&app.serving.meta).len(), 17);
     scheduler.shutdown().await;
+    let remaining = u64::try_from(job_runs(&app.serving.meta).len()).unwrap();
+    assert!((16..=17).contains(&remaining));
+    assert_eq!(remaining + removed, 18);
 }
 
 #[rstest]
@@ -1676,9 +1691,23 @@ async fn start_schedules(
     plan: Vec<Schedule>,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
+    start_timer(
+        app,
+        scheduler,
+        super::timer::ScheduleTimer::new(plan, super::MAX_JOB_RUNS),
+        cancel,
+    )
+    .await
+}
+
+async fn start_timer(
+    app: Arc<AppState>,
+    scheduler: Arc<JobScheduler>,
+    timer: super::timer::ScheduleTimer,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
     let (started, ready) = oneshot::channel();
     let timer = tokio::spawn(async move {
-        let timer = super::timer::ScheduleTimer::new(plan);
         started.send(()).unwrap();
         timer.run(&app, &scheduler, cancel).await;
     });

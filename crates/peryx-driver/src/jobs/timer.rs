@@ -183,17 +183,20 @@ pub async fn run_schedules(
     plan: Vec<Schedule>,
     cancel: CancellationToken,
 ) {
-    ScheduleTimer::new(plan).run(&app, &scheduler, cancel).await;
+    ScheduleTimer::new(plan, super::MAX_JOB_RUNS)
+        .run(&app, &scheduler, cancel)
+        .await;
 }
 
 pub(super) struct ScheduleTimer {
     plan: Vec<Schedule>,
     cleanup: usize,
+    history_retention: usize,
     due: BinaryHeap<Reverse<(Instant, usize)>>,
 }
 
 impl ScheduleTimer {
-    pub(super) fn new(plan: Vec<Schedule>) -> Self {
+    pub(super) fn new(plan: Vec<Schedule>, history_retention: usize) -> Self {
         let start = Instant::now();
         let cleanup = plan.len();
         let due = plan
@@ -202,7 +205,12 @@ impl ScheduleTimer {
             .map(|(index, schedule)| Reverse((start + schedule.interval, index)))
             .chain(std::iter::once(Reverse((start, cleanup))))
             .collect();
-        Self { plan, cleanup, due }
+        Self {
+            plan,
+            cleanup,
+            history_retention,
+            due,
+        }
     }
 
     pub(super) async fn run(mut self, app: &AppState, scheduler: &JobScheduler, cancel: CancellationToken) {
@@ -212,7 +220,7 @@ impl ScheduleTimer {
                 () = tokio::time::sleep_until(at) => {}
             }
             let interval = if index == self.cleanup {
-                scheduler.submit(Arc::new(JobHistoryCleanup::default()));
+                scheduler.submit(Arc::new(JobHistoryCleanup::retaining(self.history_retention)));
                 scheduler.submit(Arc::new(WriteLedgerReap::default()));
                 MAINTENANCE_INTERVAL
             } else {

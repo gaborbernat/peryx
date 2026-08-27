@@ -32,6 +32,7 @@ use crate::state::{AppState, ServingState};
 
 pub use attempts::{CancelJobRun, JobAttemptControl};
 pub use metrics::JobMetrics;
+pub use metrics::Outcome as JobCompletionOutcome;
 pub use scheduler::{JobLimits, JobScheduler, Submit};
 pub use timer::{
     PluginScheduledJob, RegisteredScheduledJob, Schedule, ScheduledJob, ScheduledJobFactory, run_schedules,
@@ -57,6 +58,35 @@ pub struct JobReport {
     pub quota_released: u64,
     /// Eligible quota reservations left for a later bounded pass.
     pub quota_remaining: u64,
+}
+
+/// A node-local job lifecycle event published after metrics and durable history are final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobCompletion {
+    kind: &'static str,
+    outcome: JobCompletionOutcome,
+    report: Option<JobReport>,
+}
+
+impl JobCompletion {
+    const fn new(kind: &'static str, outcome: JobCompletionOutcome, report: Option<JobReport>) -> Self {
+        Self { kind, outcome, report }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn outcome(self) -> JobCompletionOutcome {
+        self.outcome
+    }
+
+    #[must_use]
+    pub const fn report(self) -> Option<JobReport> {
+        self.report
+    }
 }
 
 /// A bounded public failure category and message safe for durable history and operator responses.
@@ -320,9 +350,9 @@ pub(super) struct JobHistoryCleanup {
     retain: usize,
 }
 
-impl Default for JobHistoryCleanup {
-    fn default() -> Self {
-        Self { retain: MAX_JOB_RUNS }
+impl JobHistoryCleanup {
+    const fn retaining(retain: usize) -> Self {
+        Self { retain }
     }
 }
 

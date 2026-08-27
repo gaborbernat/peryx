@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -61,8 +62,15 @@ async fn oidc_mint_token(
     State(state): State<Arc<AppState>>,
     Extension(runtime): Extension<Arc<dyn IdentityExchange>>,
     headers: HeaderMap,
-    Json(request): Json<MintRequest>,
+    body: Bytes,
 ) -> Response {
+    let Ok(request) = serde_json::from_slice::<MintRequest>(&body) else {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"message": "invalid request body"})),
+        )
+            .into_response();
+    };
     exchange_response(
         &headers,
         runtime.exchange(&request.token, (state.serving.clock)()).await,

@@ -14,6 +14,8 @@ use super::{get, get_authorized, seed_administrator};
 use crate::config::{Config, IndexConfig, IndexKind, SecretSource, TokenConfig};
 use crate::server::{build_router, build_state, router_for};
 
+const TOKEN_SIGNING_KEY: &str = "private-oci-ui-test-signing-key-32-bytes";
+
 #[fixture]
 fn private_oci_ui_router() -> (tempfile::TempDir, axum::Router) {
     let dir = tempfile::tempdir().unwrap();
@@ -308,7 +310,7 @@ async fn test_ui_private_oci_project_list_rejects_bearer_for_another_index(
         .unwrap()
         .as_secs()
         .cast_signed();
-    let token = Signer::new(b"signing-secret", peryx_ecosystem_oci::TOKEN_SERVICE).mint(
+    let token = Signer::new(TOKEN_SIGNING_KEY.as_bytes(), peryx_ecosystem_oci::TOKEN_SERVICE).mint(
         &Principal::Named {
             subject: "reader".to_owned(),
         },
@@ -365,7 +367,7 @@ fn private_oci_ui_config(dir: &tempfile::TempDir) -> Config {
     public.anonymous_read = None;
     public.tokens.clear();
     config.indexes.push(public);
-    config.auth.signing_key = Some(SecretSource::Literal("signing-secret".to_owned()));
+    config.auth.signing_key = Some(SecretSource::Literal(TOKEN_SIGNING_KEY.to_owned()));
     config
 }
 

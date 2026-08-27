@@ -247,6 +247,8 @@ async fn test_live_stream_surfaces_truncated_pages() {
 #[rstest]
 #[case(r#"{"meta":{"api-version":"1.4"},"name":"flask","versions":["1.0"],"files":[]}trailing"#)]
 #[case(r#"{"meta":{"api-version":"1.4"},"name":"flask","versions":["1.0"],"files":[],"unknown":,}"#)]
+#[case("{\"meta\":{\"api-version\":\"1.4\"},\"name\":\"flask\"\u{000b},\"files\":[]}")]
+#[case("{\"meta\":{\"api-version\":\"1.4\"},\"name\":\"flask\"\u{000c},\"files\":[]}")]
 #[tokio::test]
 async fn test_live_stream_invalid_document_errors_and_never_persists(#[case] page: &str) {
     let h = harness().await;

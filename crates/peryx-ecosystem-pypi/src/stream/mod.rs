@@ -17,3 +17,8 @@ pub(crate) use context::{hidden_override, yanked_override};
 pub use transformer::PageTransformer;
 pub(crate) use transformer::{MAX_PAGE_BYTES, metadata_sibling};
 pub use types::{PageContext, PageSummary, Registration, TransformError};
+
+/// RFC 8259 allows space, horizontal tab, line feed, and carriage return between JSON tokens.
+const fn is_json_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}

@@ -8,7 +8,7 @@
 //! only unbounded state is a container-kind stack proportional to nesting depth, which
 //! [`MAX_PAGE_BYTES`](super::MAX_PAGE_BYTES) already caps.
 
-use super::TransformError;
+use super::{TransformError, is_json_whitespace};
 
 /// The container a close bracket must match and a comma must continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,7 +173,7 @@ impl JsonValidator {
     }
 
     fn feed_structural(&mut self, byte: u8, state: State) {
-        if byte.is_ascii_whitespace() {
+        if is_json_whitespace(byte) {
             return;
         }
         match state {

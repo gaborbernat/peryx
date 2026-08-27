@@ -62,13 +62,15 @@ impl MetaStore {
             None => table.iter()?,
         };
         let mut page = BlobPlacementPage::default();
+        let mut last_key = None;
         for entry in entries {
             let (key, value) = entry?;
-            page.records.push(serde_json::from_slice(value.value())?);
             if page.records.len() == limit.get() {
-                page.next_cursor = Some(key.value().to_owned());
+                page.next_cursor = last_key;
                 break;
             }
+            page.records.push(serde_json::from_slice(value.value())?);
+            last_key = Some(key.value().to_owned());
         }
         Ok(page)
     }

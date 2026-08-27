@@ -553,6 +553,38 @@ fn test_reconcile_pass_repairs_and_retires_under_a_live_term() {
 }
 
 #[test]
+fn test_reconcile_pass_continues_after_a_nonlocal_page() {
+    let (_dir, meta) = meta();
+    let (_sdir, store, _root, backend) = filesystem();
+    let remote = ArtifactDigest::from_sha256("1".repeat(64)).unwrap();
+    let local = ArtifactDigest::from_sha256("2".repeat(64)).unwrap();
+    let remote_key = key(&remote, &backend, "remote", remote.sha256());
+    let local_key = key(&local, &backend, "home", local.sha256());
+    seed_verified(&meta, &remote_key, 1);
+    seed_verified(&meta, &local_key, 1);
+
+    let report = reconciler("home", store, &["home", "remote"])
+        .reconcile_pass(&meta, &clock(), 9, &|| false, batch(1))
+        .unwrap();
+
+    assert_eq!(
+        (
+            report,
+            placement_state(&meta, &remote_key).status(),
+            placement_state(&meta, &local_key).status()
+        ),
+        (
+            peryx_ha::AvailabilityTaskReport {
+                processed: 3,
+                changed: 1
+            },
+            BlobPlacementStatus::Verified,
+            BlobPlacementStatus::Failed
+        )
+    );
+}
+
+#[test]
 fn test_reconciler_requires_multiple_datacenters() {
     let (_dir, store, _root, _backend) = filesystem();
 

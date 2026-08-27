@@ -6,6 +6,7 @@ use peryx_ha::{
     BlobPlacementState, BlobPlacementStore, CompareWrite, DataCenterId,
 };
 use peryx_identity::ArtifactDigest;
+use rstest::rstest;
 
 use crate::meta::MetaStore;
 
@@ -39,21 +40,61 @@ fn put(store: &MetaStore, key: BlobPlacementKey) -> BlobPlacementRecord {
     record
 }
 
+#[rstest]
+#[case::below(1)]
+#[case::equal(2)]
+fn test_row_scan_omits_cursor_without_an_extra_row(#[case] row_count: u8) {
+    let (_directory, store) = store();
+    let records = (1..=row_count)
+        .map(|suffix| put(&store, key(suffix, &format!("east/{suffix:02}"))))
+        .collect::<Vec<_>>();
+
+    let page = BlobPlacementStore::scan_blob_placements(&store, None, NonZeroUsize::new(2).unwrap()).unwrap();
+
+    assert_eq!(
+        page,
+        BlobPlacementPage {
+            records,
+            next_cursor: None
+        }
+    );
+}
+
 #[test]
-fn test_row_scan_pages_in_key_order() {
+fn test_row_scan_continues_from_the_extra_row() {
     let (_directory, store) = store();
     let first_record = put(&store, key(1, "east/01"));
     let second_record = put(&store, key(2, "east/02"));
+    let third_record = put(&store, key(3, "east/03"));
 
-    let first = BlobPlacementStore::scan_blob_placements(&store, None, NonZeroUsize::new(1).unwrap()).unwrap();
+    let first = BlobPlacementStore::scan_blob_placements(&store, None, NonZeroUsize::new(2).unwrap()).unwrap();
     let second =
         BlobPlacementStore::scan_blob_placements(&store, first.next_cursor.as_deref(), NonZeroUsize::new(2).unwrap())
             .unwrap();
 
-    assert_eq!(first.records, [first_record]);
-    assert!(first.next_cursor.is_some());
-    assert_eq!(second.records, [second_record]);
-    assert_eq!(second.next_cursor, None);
+    assert_eq!(
+        (first, second),
+        (
+            BlobPlacementPage {
+                records: vec![first_record, second_record.clone()],
+                next_cursor: Some(encoded_cursor(&second_record))
+            },
+            BlobPlacementPage {
+                records: vec![third_record],
+                next_cursor: None
+            }
+        )
+    );
+}
+
+fn encoded_cursor(record: &BlobPlacementRecord) -> String {
+    format!(
+        "{}\0{}\0{}\0{}",
+        record.key.digest.canonical(),
+        record.key.backend.as_str(),
+        record.key.data_center.as_str(),
+        record.key.location.as_str()
+    )
 }
 
 #[test]

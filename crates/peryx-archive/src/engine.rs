@@ -5,7 +5,7 @@ use zip::read::HasZipMetadata;
 
 use super::model::{ArchiveError, ArchiveFormat, ArchiveProfile, Member, MemberChunk, MemberKind};
 use super::source::{ArchiveSource, resolve_container_stack};
-use super::{MAX_DECOMPRESSED_INSPECT_BYTES, MAX_LISTED_ENTRIES, read_error, safe_member_name};
+use super::{MAX_DECOMPRESSED_INSPECT_BYTES, MAX_LISTED_ENTRIES, read_error, safe_member_name, zip_member_position};
 
 /// # Errors
 /// Returns [`ArchiveError::Unsupported`] for other filename extensions and
@@ -178,8 +178,9 @@ fn list_zip(profile: &dyn ArchiveProfile, reader: impl Read + Seek) -> Result<Ve
     let mut members = Vec::with_capacity(archive.len().min(MAX_LISTED_ENTRIES));
     for position in 0..archive.len() {
         let entry = archive.by_index(position).map_err(read_error)?;
-        if entry.is_file() {
-            let name = safe_member_name(entry.name())?;
+        if entry.is_file()
+            && let Ok(name) = safe_member_name(entry.name())
+        {
             push_member(profile, &mut members, name, entry.size())?;
         }
     }
@@ -195,32 +196,18 @@ fn read_zip_member(
 ) -> Result<MemberChunk, ArchiveError> {
     let member = safe_member_name(member)?;
     let mut archive = zip::ZipArchive::new(reader).map_err(read_error)?;
-    {
-        let entry = match archive.by_name(&member) {
-            Ok(entry) => entry,
-            Err(zip::result::ZipError::FileNotFound) => return Err(ArchiveError::MemberNotFound),
-            Err(error) => return Err(read_error(error)),
-        };
-        if !entry.is_file() {
-            return Err(ArchiveError::MemberNotFound);
-        }
-    }
+    let position = zip_member_position(&mut archive, &member)?.ok_or(ArchiveError::MemberNotFound)?;
     if offset > 0
-        && let Ok(mut entry) = archive.by_name_seek(&member)
+        && let Ok(mut entry) = archive.by_index_seek(position)
     {
-        let size = {
-            let metadata = entry.get_metadata();
-            safe_member_name(&metadata.file_name)?;
-            metadata.uncompressed_size
-        };
+        let size = entry.get_metadata().uncompressed_size;
         if offset > size {
             return Err(ArchiveError::InvalidRange { offset, size });
         }
         entry.seek(SeekFrom::Start(offset)).map_err(read_error)?;
         return read_from_current(entry, size, offset, limit);
     }
-    let entry = archive.by_name(&member).map_err(read_error)?;
-    safe_member_name(entry.name())?;
+    let entry = archive.by_index(position).map_err(read_error)?;
     let size = entry.size();
     // Capping the reachable range prevents compressed members from forcing unbounded decompression.
     let inspectable = size.min(MAX_DECOMPRESSED_INSPECT_BYTES);
@@ -240,8 +227,9 @@ fn list_tar(profile: &dyn ArchiveProfile, reader: impl Read) -> Result<Vec<Membe
         let entry = entry.map_err(read_error)?;
         if entry.header().entry_type().is_file() {
             let path = entry.path().map_err(read_error)?.to_string_lossy().into_owned();
-            let path = safe_member_name(&path)?;
-            push_member(profile, &mut members, path, entry.size())?;
+            if let Ok(path) = safe_member_name(&path) {
+                push_member(profile, &mut members, path, entry.size())?;
+            }
         }
     }
     members.sort();
@@ -255,8 +243,7 @@ fn read_tar_member(reader: impl Read, member: &str, offset: u64, limit: u64) -> 
         let entry = entry.map_err(read_error)?;
         if entry.header().entry_type().is_file() {
             let path = entry.path().map_err(read_error)?.to_string_lossy().into_owned();
-            let path = safe_member_name(&path)?;
-            if path == member {
+            if safe_member_name(&path).is_ok_and(|path| path == member) {
                 let size = entry.size();
                 return read_slice(entry, size, offset, limit);
             }

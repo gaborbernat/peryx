@@ -132,22 +132,41 @@ pub fn generic_member_kind(path: &str) -> MemberKind {
     }
 }
 
+/// Returns a storage-safe relative member name with `.` components removed.
+///
 /// # Errors
 /// Returns [`ArchiveError::UnsafeMember`] when the name could escape a storage key or URL path.
 pub fn safe_member_name(path: &str) -> Result<String, ArchiveError> {
-    let safe = !path.is_empty()
-        && !path.starts_with('/')
-        && !path.starts_with('\\')
-        && !path.contains('\\')
-        && !path.contains('\0')
-        && path
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..");
-    if safe {
-        Ok(path.to_owned())
-    } else {
-        Err(ArchiveError::UnsafeMember(path.to_owned()))
+    if path.is_empty() || path.starts_with('/') || path.starts_with('\\') || path.contains('\\') || path.contains('\0')
+    {
+        return Err(ArchiveError::UnsafeMember(path.to_owned()));
     }
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "." => {}
+            "" | ".." => return Err(ArchiveError::UnsafeMember(path.to_owned())),
+            _ => components.push(component),
+        }
+    }
+    if components.is_empty() {
+        Err(ArchiveError::UnsafeMember(path.to_owned()))
+    } else {
+        Ok(components.join("/"))
+    }
+}
+
+fn zip_member_position(
+    archive: &mut zip::ZipArchive<impl std::io::Read + std::io::Seek>,
+    member: &str,
+) -> Result<Option<usize>, ArchiveError> {
+    for position in 0..archive.len() {
+        let entry = archive.by_index(position).map_err(read_error)?;
+        if entry.is_file() && safe_member_name(entry.name()).is_ok_and(|name| name == member) {
+            return Ok(Some(position));
+        }
+    }
+    Ok(None)
 }
 
 pub fn read_error(err: impl std::fmt::Display) -> ArchiveError {

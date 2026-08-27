@@ -731,19 +731,26 @@ fn test_text_preview_keeps_chunk_boundaries_on_utf8_chars() {
 }
 
 #[test]
-fn test_zip_listing_rejects_unsafe_member_names() {
+fn test_zip_listing_skips_unsafe_member_names() {
     let mut buf = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("../bad.py", options).unwrap();
         zip.write_all(b"bad = True\n").unwrap();
+        zip.start_file("pkg/good.py", options).unwrap();
+        zip.write_all(b"good = True\n").unwrap();
         zip.finish().unwrap();
     }
-    assert!(matches!(
-        list_members("pkg-1.0-py3-none-any.whl", &buf),
-        Err(ArchiveError::UnsafeMember(path)) if path == "../bad.py"
-    ));
+    assert_eq!(
+        list_members("pkg-1.0-py3-none-any.whl", &buf).unwrap(),
+        vec![Member {
+            path: "pkg/good.py".to_owned(),
+            size: 12,
+            kind: MemberKind::Text,
+            previewable: true,
+        }]
+    );
 }
 
 #[test]

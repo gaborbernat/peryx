@@ -63,10 +63,12 @@ fn tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut archive = tar::Builder::new(Vec::new());
     for (path, body) in entries {
         let mut header = tar::Header::new_gnu();
+        assert!(path.len() <= 100);
+        header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
         header.set_mode(0o644);
         header.set_size(body.len() as u64);
         header.set_cksum();
-        archive.append_data(&mut header, path, *body).unwrap();
+        archive.append(&header, *body).unwrap();
     }
     archive.into_inner().unwrap()
 }
@@ -187,13 +189,55 @@ fn test_member_kind_names_match_serialized_values() {
 }
 
 #[rstest]
-#[case("dir/file.txt", true)]
-#[case("", false)]
-#[case("/absolute", false)]
-#[case("../parent", false)]
-#[case("dir\\file", false)]
-fn test_safe_member_name_rejects_paths_that_escape_the_archive(#[case] path: &str, #[case] valid: bool) {
-    assert_eq!(safe_member_name(path).is_ok(), valid);
+#[case("dir/file.txt", Ok("dir/file.txt"))]
+#[case("./dir/./file.txt", Ok("dir/file.txt"))]
+#[case("", Err(()))]
+#[case(".", Err(()))]
+#[case("./", Err(()))]
+#[case("/absolute", Err(()))]
+#[case("../parent", Err(()))]
+#[case("dir/../parent", Err(()))]
+#[case("dir//file", Err(()))]
+#[case("dir\\file", Err(()))]
+#[case("nul\0byte", Err(()))]
+fn test_safe_member_name_normalizes_dot_components(#[case] path: &str, #[case] expected: Result<&str, ()>) {
+    assert_eq!(safe_member_name(path).as_deref().map_err(|_| ()), expected);
+}
+
+#[rstest]
+#[case("bundle.zip", zip(&[("./safe/./file.txt", BODY)], zip::CompressionMethod::Stored))]
+#[case("bundle.tar", tar(&[("./safe/./file.txt", BODY)]))]
+fn test_archive_listings_normalize_dot_components(#[case] filename: &str, #[case] bytes: Vec<u8>) {
+    assert_eq!(
+        list_members(&PROFILE, filename, &bytes).unwrap(),
+        vec![listed_text_member("safe/file.txt")]
+    );
+}
+
+#[rstest]
+#[case("bundle.zip", zip(&[("../escape.txt", b"escape"), ("safe/file.txt", BODY)], zip::CompressionMethod::Stored))]
+#[case("bundle.tar", tar(&[("../escape.txt", b"escape"), ("safe/file.txt", BODY)]))]
+fn test_archive_listings_skip_unsafe_members(#[case] filename: &str, #[case] bytes: Vec<u8>) {
+    assert_eq!(
+        list_members(&PROFILE, filename, &bytes).unwrap(),
+        vec![listed_text_member("safe/file.txt")]
+    );
+}
+
+#[rstest]
+#[case("bundle.zip", zip(&[("./safe/./file.txt", b"zip")], zip::CompressionMethod::Stored), b"zip")]
+#[case("bundle.tar", tar(&[("./safe/./file.txt", b"tar")]), b"tar")]
+fn test_normalized_archive_members_read_back(#[case] filename: &str, #[case] bytes: Vec<u8>, #[case] body: &[u8]) {
+    assert_eq!(read_member(&PROFILE, filename, &bytes, "safe/file.txt").unwrap(), body);
+}
+
+fn listed_text_member(path: &str) -> Member {
+    Member {
+        path: path.to_owned(),
+        size: BODY.len() as u64,
+        kind: MemberKind::Text,
+        previewable: true,
+    }
 }
 
 #[test]

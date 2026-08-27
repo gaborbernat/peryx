@@ -316,11 +316,28 @@ fn test_parse_metadata_preserves_keyword_spaces() {
     );
 }
 
+#[rstest]
+#[case::legacy_description(
+    "Description: first line\n        second line\n            code block\n",
+    ("first line\nsecond line\n    code block", None)
+)]
+#[case::specified_description(
+    "Description: first line\n       |\n       |second paragraph\n       |\n       |    code block\n",
+    ("first line\n\nsecond paragraph\n\n    code block", None)
+)]
+#[case::license(
+    "License: first line\n        second line\n",
+    ("", Some("first line\nsecond line"))
+)]
+fn test_parse_metadata_preserves_folded_field_lines(#[case] field: &str, #[case] expected: (&str, Option<&str>)) {
+    let doc = parse_metadata(&format!("Name: x\nVersion: 1\n{field}")).unwrap();
+    assert_eq!((doc.description.as_str(), doc.license.as_deref()), expected);
+}
+
 #[test]
-fn test_parse_metadata_description_header_and_folding() {
-    let text = "Name: x\nVersion: 1\nDescription: first line\n continued here\n";
-    let doc = parse_metadata(text).unwrap();
-    assert_eq!(doc.description, "first line continued here");
+fn test_parse_metadata_unfolds_scalar_field_to_spaces() {
+    let doc = parse_metadata("Name: x\nVersion: 1\nSummary: first line\n        second line\n").unwrap();
+    assert_eq!(doc.summary.as_deref(), Some("first line second line"));
 }
 
 #[rstest]

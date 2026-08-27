@@ -2,6 +2,7 @@
 //! [`Drop`] reaps descendants after failures.
 
 mod driver;
+mod process_fixture;
 pub mod toxiproxy;
 
 #[cfg(test)]
@@ -25,9 +26,7 @@ pub use toxiproxy::{Proxy, Toxiproxy};
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(90);
 const TEST_TMPDIR_ENV: &str = "PERYX_TEST_TMPDIR";
-#[cfg(unix)]
 const PUBLIC_LISTENER_FD_ENV: &str = "PERYX_INHERITED_PUBLIC_LISTENER_FD";
-#[cfg(unix)]
 const AVAILABILITY_LISTENER_FD_ENV: &str = "PERYX_INHERITED_AVAILABILITY_LISTENER_FD";
 // Keep an individual request deadline inside the overall readiness deadline.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,6 +43,12 @@ pub(crate) fn http_client(timeout: Duration) -> reqwest::blocking::Client {
 /// Credentials installed by [`Topology::with_admin`] for privileged endpoint tests.
 pub const ADMIN_USER: &str = "harness-admin";
 pub const ADMIN_PASSWORD: &str = "harness-admin-secret";
+
+/// Runs the package's process fixture with the current executable name and arguments.
+#[must_use]
+pub fn run_process_fixture() -> std::process::ExitCode {
+    process_fixture::run()
+}
 
 #[must_use]
 /// Resolves a package binary for the current Cargo or Nextest integration test.

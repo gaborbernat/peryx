@@ -276,6 +276,27 @@ fn domain_services_page_and_filter_policy_queries() {
     ));
 }
 
+#[test]
+fn domain_services_preserve_policy_filter_validation() {
+    let fixture = Fixture::new(Vec::new());
+    let services = HttpDomainServices::for_state(&fixture.state);
+    let query = bind(
+        parse(&format!(
+            "from policy.decisions where resource == \"{}\"",
+            "x".repeat(513)
+        ))
+        .unwrap(),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        services
+            .pql()
+            .execute(&query, &QueryScope::new(RepoScope::All, "all".to_owned()), None),
+        Err(PqlError::Validation("resource filter exceeds 512 bytes".to_owned()))
+    );
+}
+
 struct OneRetentionDriver;
 
 impl RetentionDriver for OneRetentionDriver {

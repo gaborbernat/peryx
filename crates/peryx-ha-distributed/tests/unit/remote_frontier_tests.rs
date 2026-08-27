@@ -85,11 +85,13 @@ async fn test_gather_reaches_durability_from_one_eligible_remote() {
 #[tokio::test(start_paused = true)]
 async fn test_gather_queries_a_healthy_remote_while_the_first_remote_is_stalled() {
     let (blocker, started, cancelled) = RequestBlocker::new();
+    let stalled_source = BlockedRemoteFrontierSource {
+        datacenter: "west".to_owned(),
+        blocker,
+    };
+    assert_eq!(stalled_source.datacenter(), "west");
     let sources: Vec<Arc<dyn RemoteFrontierSource + Send + Sync>> = vec![
-        Arc::new(BlockedRemoteFrontierSource {
-            datacenter: "west".to_owned(),
-            blocker,
-        }),
+        Arc::new(stalled_source),
         Arc::new(LoopbackRemoteFrontierSource::reporting("east", 3, 100).available_after(1)),
     ];
     let mut acks = Vec::new();

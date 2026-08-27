@@ -1,6 +1,8 @@
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
@@ -34,24 +36,37 @@ impl RequestBlocker {
         )
     }
 
-    pub async fn wait<T>(&self) -> T {
+    pub fn wait<T>(&self) -> impl Future<Output = T> + Send + use<T> {
         let (started, cancelled) = self
             .signals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
             .unwrap();
-        let _cancelled = DropSignal(Some(cancelled));
         let _ = started.send(());
-        std::future::pending().await
+        PendingRequest {
+            cancelled: Some(cancelled),
+            output: std::marker::PhantomData,
+        }
     }
 }
 
-struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+struct PendingRequest<T> {
+    cancelled: Option<tokio::sync::oneshot::Sender<()>>,
+    output: std::marker::PhantomData<fn() -> T>,
+}
 
-impl Drop for DropSignal {
+impl<T> Future for PendingRequest<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for PendingRequest<T> {
     fn drop(&mut self) {
-        if let Some(signal) = self.0.take() {
+        if let Some(signal) = self.cancelled.take() {
             let _ = signal.send(());
         }
     }

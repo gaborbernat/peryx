@@ -420,7 +420,13 @@ type ShutdownWorker = (
 struct ShutdownOwner {
     stage: AvailabilityShutdownStage,
     worker: Option<ShutdownWorker>,
-    reaper_completion: Option<tokio::sync::oneshot::Sender<()>>,
+    completion_sender: tokio::sync::watch::Sender<bool>,
+}
+
+struct ShutdownFailure {
+    stage: AvailabilityShutdownStage,
+    error: std::io::Error,
+    completion: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl ShutdownOwner {
@@ -431,6 +437,7 @@ impl ShutdownOwner {
         E: std::fmt::Display + Send + 'static,
     {
         let (completed, result) = tokio::sync::oneshot::channel();
+        let completion_sender = tokio::sync::watch::channel(false).0;
         let thread = std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shutdown(owner)))
                 .map_err(|payload| {
@@ -442,28 +449,30 @@ impl ShutdownOwner {
         Self {
             stage,
             worker: Some((result, thread)),
-            reaper_completion: None,
+            completion_sender,
         }
     }
 
-    #[cfg(test)]
-    fn observe_reaper_completion(&mut self) -> tokio::sync::oneshot::Receiver<()> {
-        let (completed, completion) = tokio::sync::oneshot::channel();
-        self.reaper_completion = Some(completed);
-        completion
-    }
-
-    async fn wait(&mut self, deadline: Duration) -> Option<(AvailabilityShutdownStage, std::io::Error)> {
+    async fn wait(&mut self, deadline: Duration) -> Option<ShutdownFailure> {
         let (mut result, thread) = self.worker.take()?;
         let completed = tokio::time::timeout(deadline, &mut result).await;
         let Ok(result) = completed else {
             self.worker = Some((result, thread));
-            return Some((self.stage, std::io::Error::other("shutdown deadline exceeded")));
+            return Some(ShutdownFailure {
+                stage: self.stage,
+                error: std::io::Error::other("shutdown deadline exceeded"),
+                completion: Some(self.completion_sender.subscribe()),
+            });
         };
         thread.join().expect("shutdown owner catches task panics");
+        self.completion_sender.send_replace(true);
         match result.unwrap_or_else(|_| Err(std::io::Error::other("shutdown owner stopped without reporting"))) {
             Ok(()) => None,
-            Err(error) => Some((self.stage, error)),
+            Err(error) => Some(ShutdownFailure {
+                stage: self.stage,
+                error,
+                completion: None,
+            }),
         }
     }
 }
@@ -471,7 +480,7 @@ impl ShutdownOwner {
 impl Drop for ShutdownOwner {
     fn drop(&mut self) {
         if let Some((result, thread)) = self.worker.take() {
-            let reaper_completion = self.reaper_completion.take();
+            let completion_sender = self.completion_sender.clone();
             drop(reap_process_resource_observed(
                 "availability shutdown",
                 move || {
@@ -482,9 +491,7 @@ impl Drop for ShutdownOwner {
                     result
                 },
                 move || {
-                    if let Some(completed) = reaper_completion {
-                        let _ = completed.send(());
-                    }
+                    completion_sender.send_replace(true);
                 },
             ));
         }
@@ -497,7 +504,7 @@ impl<T: Send + 'static> OwnedResource<T> {
         stage: AvailabilityShutdownStage,
         deadline: Duration,
         shutdown: F,
-    ) -> Option<(AvailabilityShutdownStage, std::io::Error)>
+    ) -> Option<ShutdownFailure>
     where
         F: FnOnce(T) -> Result<(), E> + Send + 'static,
         E: std::fmt::Display + Send + 'static,
@@ -510,7 +517,7 @@ impl<T: Send + 'static> OwnedResource<T> {
         self.wait_shutdown(deadline).await
     }
 
-    async fn wait_shutdown(&mut self, deadline: Duration) -> Option<(AvailabilityShutdownStage, std::io::Error)> {
+    async fn wait_shutdown(&mut self, deadline: Duration) -> Option<ShutdownFailure> {
         let mut owner = match std::mem::replace(self, Self::Complete) {
             Self::Joining(owner) => owner,
             Self::Absent => {
@@ -524,7 +531,7 @@ impl<T: Send + 'static> OwnedResource<T> {
             }
         };
         let failure = owner.wait(deadline).await;
-        if matches!(failure, Some((_, ref error)) if error.to_string() == "shutdown deadline exceeded") {
+        if failure.as_ref().is_some_and(|failure| failure.completion.is_some()) {
             *self = Self::Joining(owner);
         }
         failure
@@ -584,7 +591,7 @@ impl ActiveDistributed {
         let (listener, consensus, runtime) = tokio::join!(listener, consensus, runtime);
         let mut failure = None;
         for result in <[_; 3]>::from((listener, consensus, runtime)).into_iter().flatten() {
-            record_shutdown_failure(&mut failure, result.0, result.1);
+            record_shutdown_failure(&mut failure, result.stage, result.error);
         }
         failure.map_or(Ok(()), Err)
     }

@@ -97,54 +97,63 @@ async fn mirror_rejects_invalid_image_options(#[case] value: toml::Value, #[case
     assert_eq!(error, expected);
 }
 
-#[rstest::rstest]
-#[case::tag("library/example:latest", "library/example", "latest")]
-#[case::digest("library/example@sha256:abc", "library/example", "sha256:abc")]
-#[case::invalid("@", "@", "")]
 #[tokio::test]
-async fn mirror_plan_reports_selected_images(
-    #[case] image: &str,
-    #[case] expected_project: &str,
-    #[case] expected_filename: &str,
-) {
-    let dir = tempfile::tempdir().unwrap();
-    let (state, _) = app_with(&dir, oci_index("store", "oci", IndexKind::Hosted { volatile: false }));
-    let configured = images(&[image]);
-    let empty = toml::Table::new();
-    let mut output = Vec::new();
+async fn mirror_plan_reports_selected_images() {
+    for (image, expected_project, expected_filename) in [
+        ("library/example:latest", "library/example", "latest"),
+        (
+            "library/example@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "library/example",
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        ),
+        ("library/example", "library/example", "latest"),
+        ("library/example:bad+tag", "library/example:bad+tag", ""),
+        (
+            "registry.example/library/example:latest",
+            "registry.example/library/example:latest",
+            "",
+        ),
+        ("@", "@", ""),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = app_with(&dir, oci_index("store", "oci", IndexKind::Hosted { volatile: false }));
+        let configured = images(&[image]);
+        let empty = toml::Table::new();
+        let mut output = Vec::new();
 
-    OciRegistry::default()
-        .mirror(
-            state,
-            MirrorRequest {
-                action: MirrorAction::Plan,
-                index: "oci",
-                settings: &empty,
-                configured: &configured,
-                overrides: &empty,
-            },
-            &mut output,
-        )
-        .await
-        .unwrap();
+        OciRegistry::default()
+            .mirror(
+                state,
+                MirrorRequest {
+                    action: MirrorAction::Plan,
+                    index: "oci",
+                    settings: &empty,
+                    configured: &configured,
+                    overrides: &empty,
+                },
+                &mut output,
+            )
+            .await
+            .unwrap();
 
-    assert_eq!(
-        report_rows(std::str::from_utf8(&output).unwrap()),
-        [
+        assert_eq!(
+            report_rows(std::str::from_utf8(&output).unwrap()),
             [
-                "manifest",
-                "store",
-                expected_project,
-                expected_filename,
-                "",
-                "",
-                "0",
-                "selected",
-                "",
-            ],
-            ["summary", "store", "", "images", "", "", "1", "images", ""],
-        ]
-    );
+                [
+                    "manifest",
+                    "store",
+                    expected_project,
+                    expected_filename,
+                    "",
+                    "",
+                    "0",
+                    "selected",
+                    "",
+                ],
+                ["summary", "store", "", "images", "", "", "1", "images", ""],
+            ]
+        );
+    }
 }
 
 #[tokio::test]

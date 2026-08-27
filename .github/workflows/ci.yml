@@ -12,6 +12,7 @@ on:
         type: boolean
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -48,6 +49,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
+      baseline: ${{ steps.baseline.outputs.sha }}
       packages: ${{ steps.packages.outputs.value }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -58,6 +60,14 @@ jobs:
         with:
           tools: >-
             just jq uv cargo:cargo-dist cargo:cargo-insta cargo:cargo-nextest
+      - id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty')
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - run: just snapshots
       - id: packages
         run: echo "value=$(just publishable-packages)" >> "$GITHUB_OUTPUT"
@@ -86,7 +96,7 @@ jobs:
       - run: just semver-package "$PACKAGE" "$BASE_REV"
         env:
           PACKAGE: ${{ matrix.package }}
-          BASE_REV: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
+          BASE_REV: ${{ needs.contracts.outputs.baseline }}
 
   platform:
     name: platform (${{ matrix.os }})

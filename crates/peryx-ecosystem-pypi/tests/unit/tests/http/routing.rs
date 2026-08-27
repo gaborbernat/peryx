@@ -99,6 +99,7 @@ async fn test_get_route_without_trailing_slash_is_not_found() {
 #[rstest]
 #[case::index("/pypi/simple", "/pypi/simple/")]
 #[case::project("/pypi/simple/flask", "/pypi/simple/flask/")]
+#[case::hosted("/hosted/simple/Flask.Test", "/hosted/simple/flask-test/")]
 #[case::nested_route("/root/pypi/simple/flask", "/root/pypi/simple/flask/")]
 #[case::normalized_with_query("/pypi/simple/Flask.Test?extra=1", "/pypi/simple/flask-test/?extra=1")]
 #[tokio::test]
@@ -107,6 +108,31 @@ async fn test_simple_url_without_trailing_slash_redirects(#[case] requested: &st
     let (status, headers, _) = get(&h.state, requested, None).await;
     assert_eq!(status, StatusCode::MOVED_PERMANENTLY);
     assert_eq!(headers.get(header::LOCATION).unwrap(), location);
+}
+#[rstest]
+#[case::empty("/pypi/simple//", StatusCode::NOT_FOUND)]
+#[case::nested("/pypi/simple/flask/bad/", StatusCode::NOT_FOUND)]
+#[case::invalid_name("/pypi/simple/-flask/", StatusCode::NOT_FOUND)]
+#[case::encoded_slash("/pypi/simple/flask%2Fbad/", StatusCode::BAD_REQUEST)]
+#[case::encoded_slash_without_trailing_slash("/pypi/simple/flask%2Fbad", StatusCode::BAD_REQUEST)]
+#[case::encoded_backslash("/pypi/simple/flask%5Cbad/", StatusCode::BAD_REQUEST)]
+#[tokio::test]
+async fn test_simple_project_path_rejects_invalid_segments_before_upstream_or_storage(
+    #[case] uri: &str,
+    #[case] expected_status: StatusCode,
+) {
+    let h = harness().await;
+    let metadata_keys_before = h.state.serving.meta.driver_prefix_keys("").unwrap();
+
+    let (status, ..) = get(&h.state, uri, Some("application/json")).await;
+
+    assert_eq!(status, expected_status, "{uri}");
+    assert!(h.server.received_requests().await.unwrap().is_empty(), "{uri}");
+    assert_eq!(
+        h.state.serving.meta.driver_prefix_keys("").unwrap(),
+        metadata_keys_before,
+        "{uri}"
+    );
 }
 #[tokio::test]
 async fn test_project_list_html() {

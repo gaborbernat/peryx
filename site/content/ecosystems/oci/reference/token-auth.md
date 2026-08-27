@@ -26,6 +26,7 @@ The key signs an HS256 JWT whose `aud` claim is `peryx`. Keep it secret and stab
 minted under the old key, and sharing it across replicas lets any replica verify a token the primary minted. Audience
 validation prevents another service that shares the key from presenting its tokens to this registry. `signing_key` and
 `signing_key_file` must contain at least one non-whitespace character; otherwise peryx exits during startup.
+`token_ttl_secs` accepts 60 through 86400 seconds when an OCI index enables the realm and defaults to 300.
 
 ## Version check
 

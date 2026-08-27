@@ -20,9 +20,10 @@ use peryx_driver::AppState;
 use peryx_driver::access::ReadAccess;
 use peryx_driver::discovery::BaseUrl;
 use peryx_driver::serving::{
-    BrowseDriver, CapabilityRegistrar, ClientDiscovery, CompiledEcosystemSettings, DistributedInstallContext,
-    DistributedRuntime, EcosystemBrowse, EcosystemConfig, EcosystemOpenApi, EcosystemRegistration, EcosystemRuntime,
-    MirrorAction, MirrorDriver, MirrorRequest, ProtocolDriver, RateLimitPrincipal, RuntimeInstallContext,
+    AuthInstallContext, BrowseDriver, CapabilityRegistrar, ClientDiscovery, CompiledEcosystemSettings,
+    DistributedInstallContext, DistributedRuntime, EcosystemAuth, EcosystemBrowse, EcosystemConfig, EcosystemOpenApi,
+    EcosystemRegistration, EcosystemRuntime, MirrorAction, MirrorDriver, MirrorRequest, PluginAuthConfig,
+    ProtocolDriver, RateLimitPrincipal, RuntimeInstallContext,
 };
 use peryx_identity::Denial;
 
@@ -166,6 +167,33 @@ impl EcosystemConfig for OciPlugin {
     }
 }
 
+impl EcosystemAuth for OciPlugin {
+    fn fields(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn defaults(&self) -> toml::Table {
+        toml::Table::new()
+    }
+
+    fn validate(&self, config: PluginAuthConfig<'_>) -> Result<(), String> {
+        if config.signing_key_configured
+            && config.token_ttl_secs < 60
+            && config.indexes.iter().any(|index| index.ecosystem == ECOSYSTEM)
+        {
+            return Err(
+                "auth: `token_ttl_secs` must be at least 60 when a signing key and OCI index enable token authentication"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    fn install(&self, _context: &mut AuthInstallContext<'_>, _values: &toml::Table) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 impl EcosystemRuntime for OciPlugin {
     fn install(
         &self,
@@ -248,7 +276,7 @@ pub fn registration() -> peryx_plugin_registry::PluginRegistration {
         rate_limit_principal: Some(&OciPlugin),
         client_discovery: Some(&OciPlugin),
         openapi: &OciPlugin,
-        auth: None,
+        auth: Some(&OciPlugin),
         browse: Some(&OciPlugin),
         snippets: None,
         metadata_migration: None,

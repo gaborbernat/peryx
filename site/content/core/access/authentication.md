@@ -114,15 +114,16 @@ Because `*` crosses `/`, `team/*` covers a resource subtree at any nesting depth
 
 The `[auth]` table holds the settings every index's access rules share. All keys are optional.
 
-| Key                      | Meaning                                                                              | Default |
-| ------------------------ | ------------------------------------------------------------------------------------ | ------- |
-| `signing_key`            | Secret peryx signs its own tokens with                                               | (none)  |
-| `signing_key_file`       | Path to read `signing_key` from instead of inlining it                               | (none)  |
-| `token_ttl_secs`         | Lifetime of a minted token, in seconds; must be positive and at most 86400 (one day) | `300`   |
-| `default_anonymous_read` | What an index's `anonymous_read` defaults to when the index omits it                 | `true`  |
+| Key                      | Meaning                                                              | Default |
+| ------------------------ | -------------------------------------------------------------------- | ------- |
+| `signing_key`            | Secret peryx signs its own tokens with                               | (none)  |
+| `signing_key_file`       | Path to read `signing_key` from instead of inlining it               | (none)  |
+| `token_ttl_secs`         | Lifetime from 1 through 86400 seconds; OCI token realm minimum is 60 | `300`   |
+| `default_anonymous_read` | What an index's `anonymous_read` defaults to when the index omits it | `true`  |
 
 `signing_key` and `token_ttl_secs` configure token-minting implementations. peryx reads the key at startup and uses it
-to sign scoped tokens. Set at most one of `signing_key` and `signing_key_file`.
+to sign scoped tokens. Peryx requires 60 through 86400 seconds when a signing key and OCI index enable the OCI token
+realm. A deployment with no OCI index accepts 1 through 86400. Set at most one of `signing_key` and `signing_key_file`.
 
 ### LDAP providers
 

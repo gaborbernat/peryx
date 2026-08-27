@@ -75,6 +75,7 @@ async fn test_v2_accepts_forwarded_realm_only_from_a_trusted_proxy(
             trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
             ..RateLimitConfig::default()
         },
+        300,
     );
     let mut request = Request::builder()
         .uri("/v2/")
@@ -139,6 +140,7 @@ async fn test_refreshed_bearers_for_one_principal_share_a_rate_limit_bucket() {
             artifact: RouteLimit::new(1, 60),
             ..RateLimitConfig::enabled_defaults()
         },
+        300,
     );
     let query = "service=peryx&scope=repository:store/team/app:pull";
     let (_, first_token) = request_token(&app, query, Some(&auth(SECRET))).await;
@@ -633,7 +635,14 @@ async fn test_token_endpoint_advertises_an_expiry_that_matches_the_signed_token(
     use base64::Engine as _;
 
     let dir = tempfile::tempdir().unwrap();
-    let app = team_registry(&dir);
+    let index = scoped_index("store", "store", "ci", SECRET, "team/*", &[Action::Read, Action::Write]);
+    let (_, app) = realm_app_with_clock_and_limits(
+        &dir,
+        vec![index],
+        Arc::new(current_unix_time),
+        RateLimitConfig::default(),
+        60,
+    );
     let before = current_unix_time();
     let (status, _, body) = send_with(
         &app,
@@ -656,7 +665,7 @@ async fn test_token_endpoint_advertises_an_expiry_that_matches_the_signed_token(
     let exp = claims["exp"].as_i64().unwrap();
 
     assert!(exp > before, "signed expiry {exp} is not in the future of {before}");
-    assert_eq!(exp - claims["iat"].as_i64().unwrap(), expires_in);
+    assert_eq!((expires_in, exp - claims["iat"].as_i64().unwrap()), (60, 60));
 }
 
 #[tokio::test]

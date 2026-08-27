@@ -371,7 +371,13 @@ fn writable_index(name: &str, route: &str, volatile: bool, token: &str) -> Index
 
 /// `jsonwebtoken` validates expiry against wall time.
 fn realm_app(dir: &TempDir, indexes: Vec<Index>) -> (Arc<AppState>, axum::Router) {
-    realm_app_with_clock_and_limits(dir, indexes, Arc::new(current_unix_time), RateLimitConfig::default())
+    realm_app_with_clock_and_limits(
+        dir,
+        indexes,
+        Arc::new(current_unix_time),
+        RateLimitConfig::default(),
+        300,
+    )
 }
 
 fn realm_app_with_clock_and_limits(
@@ -379,6 +385,7 @@ fn realm_app_with_clock_and_limits(
     indexes: Vec<Index>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
     rate_limit: RateLimitConfig,
+    token_ttl_secs: i64,
 ) -> (Arc<AppState>, axum::Router) {
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
     let blobs = BlobStore::new(dir.path().join("blobs"));
@@ -393,7 +400,10 @@ fn realm_app_with_clock_and_limits(
     );
     install_oci(&mut state, HashMap::new(), false);
     state
-        .set_token_realm(Signer::new(b"realm-test-signing-key", crate::TOKEN_SERVICE), 300)
+        .set_token_realm(
+            Signer::new(b"realm-test-signing-key", crate::TOKEN_SERVICE),
+            token_ttl_secs,
+        )
         .unwrap();
     let state = Arc::new(state);
     (state.clone(), router(state))
@@ -625,21 +635,30 @@ async fn test_version_check_answers_head() {
     assert_eq!(status, StatusCode::OK);
 }
 
+#[rstest]
+#[case::version("/v2/")]
+#[case::token("/v2/token?service=peryx")]
 #[tokio::test]
-async fn test_v2_without_an_oci_index_is_not_found() {
+async fn test_oci_routes_are_not_found_without_an_oci_index(#[case] path: &str) {
     let dir = tempfile::tempdir().unwrap();
-    let (_state, app) = app_with(
+    let (_state, app) = app_with_setup(
         &dir,
-        Index {
+        vec![Index {
             name: "pypi".to_owned(),
             route: "pypi".to_owned(),
             ecosystem: Ecosystem::new("other"),
             kind: IndexKind::Hosted { volatile: false },
             policy: Policy::default(),
             acl: IndexAcl::default(),
+        }],
+        false,
+        |state| {
+            state
+                .set_token_realm(Signer::new(b"signing-key", crate::TOKEN_SERVICE), 1)
+                .unwrap();
         },
     );
-    let (status, _, body) = send(&app, Method::GET, "/v2/").await;
+    let (status, _, body) = send(&app, Method::GET, path).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, Bytes::from_static(b"not found"));
 }

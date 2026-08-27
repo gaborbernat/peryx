@@ -78,7 +78,8 @@ async fn rosterless_local_write_is_durable_without_peer_work() {
                 scope: BlobDurability::Filesystem
             },
             ByteAckDecision::Acknowledged {
-                nodes: vec!["local".to_owned()]
+                nodes: vec!["local".to_owned()],
+                required: 1,
             }
         )]
     );
@@ -162,7 +163,8 @@ async fn elapsed_byte_quorum_is_unknown() {
             DcAck::Unknown,
             ByteAckDecision::Pending {
                 nodes: vec!["node-a".to_owned()],
-                remaining: 1
+                required: 2,
+                remaining: 1,
             }
         )
     );

@@ -1011,11 +1011,18 @@ pub struct WriteAckRequest<'a> {
     pub operation: MetadataOperation,
 }
 
-/// A byte-quorum decision and its collected node identities.
+/// A byte-quorum decision with its counted nodes and configured threshold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ByteAckDecision {
-    Acknowledged { nodes: Vec<String> },
-    Pending { nodes: Vec<String>, remaining: usize },
+    Acknowledged {
+        nodes: Vec<String>,
+        required: usize,
+    },
+    Pending {
+        nodes: Vec<String>,
+        required: usize,
+        remaining: usize,
+    },
 }
 
 impl ByteAckDecision {

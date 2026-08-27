@@ -610,16 +610,10 @@ fn generated_value_contracts_distinguish_fields_and_variants() {
         &DurabilityPolicy::AtLeast(NonZeroUsize::new(2).unwrap()),
     );
     assert_derived_contract(
-        &ByteAckDecision::Acknowledged {
+        &ByteEvidence::Filesystem(ByteAckDecision::Acknowledged {
             nodes: vec!["one".into()],
-        },
-        &ByteAckDecision::Pending {
-            nodes: vec!["one".into()],
-            remaining: 1,
-        },
-    );
-    assert_derived_contract(
-        &ByteEvidence::Filesystem(ByteAckDecision::Acknowledged { nodes: Vec::new() }),
+            required: 1,
+        }),
         &ByteEvidence::ObjectStore { acknowledged: true },
     );
 }
@@ -951,15 +945,30 @@ fn transport_error_contract(
 }
 
 #[rstest]
-#[case(ByteAckDecision::Acknowledged { nodes: vec!["one".into()] }, true)]
-#[case(ByteAckDecision::Pending { nodes: Vec::new(), remaining: 1 }, false)]
+#[case(ByteAckDecision::Acknowledged { nodes: vec!["one".into()], required: 1 }, true)]
+#[case(ByteAckDecision::Pending { nodes: Vec::new(), required: 1, remaining: 1 }, false)]
 fn byte_ack_decision_contract(#[case] decision: ByteAckDecision, #[case] acknowledged: bool) {
     assert_eq!(decision.is_acknowledged(), acknowledged);
 }
 
+#[test]
+fn byte_ack_decision_derives_preserve_variants() {
+    assert_derived_contract(
+        &ByteAckDecision::Acknowledged {
+            nodes: vec!["one".into()],
+            required: 1,
+        },
+        &ByteAckDecision::Pending {
+            nodes: vec!["one".into()],
+            required: 2,
+            remaining: 1,
+        },
+    );
+}
+
 #[rstest]
-#[case(ByteEvidence::Filesystem(ByteAckDecision::Acknowledged { nodes: vec!["one".into()] }), true, BlobDurability::Filesystem)]
-#[case(ByteEvidence::Filesystem(ByteAckDecision::Pending { nodes: Vec::new(), remaining: 1 }), false, BlobDurability::Filesystem)]
+#[case(ByteEvidence::Filesystem(ByteAckDecision::Acknowledged { nodes: vec!["one".into()], required: 1 }), true, BlobDurability::Filesystem)]
+#[case(ByteEvidence::Filesystem(ByteAckDecision::Pending { nodes: Vec::new(), required: 1, remaining: 1 }), false, BlobDurability::Filesystem)]
 #[case(ByteEvidence::ObjectStore { acknowledged: true }, true, BlobDurability::ObjectStore)]
 #[case(ByteEvidence::ObjectStore { acknowledged: false }, false, BlobDurability::ObjectStore)]
 fn byte_evidence_contract(#[case] evidence: ByteEvidence, #[case] durable: bool, #[case] scope: BlobDurability) {
@@ -1200,25 +1209,33 @@ fn transport_dtos_preserve_peer_and_write_context() {
 
 #[rstest]
 #[case::acknowledged(
-    ByteAckDecision::Acknowledged { nodes: vec!["east".into(), "west".into()] },
+    ByteAckDecision::Acknowledged { nodes: vec!["east".into(), "west".into()], required: 2 },
     &["east", "west"],
+    2,
     None
 )]
 #[case::pending(
-    ByteAckDecision::Pending { nodes: vec!["east".into()], remaining: 1 },
+    ByteAckDecision::Pending { nodes: vec!["east".into()], required: 2, remaining: 1 },
     &["east"],
+    2,
     Some(1)
 )]
 fn byte_ack_decision_preserves_evidence(
     #[case] decision: ByteAckDecision,
     #[case] expected_nodes: &[&str],
+    #[case] expected_required: usize,
     #[case] expected_remaining: Option<usize>,
 ) {
-    let (nodes, remaining) = match &decision {
-        ByteAckDecision::Acknowledged { nodes } => (nodes, None),
-        ByteAckDecision::Pending { nodes, remaining } => (nodes, Some(*remaining)),
+    let (nodes, required, remaining) = match &decision {
+        ByteAckDecision::Acknowledged { nodes, required } => (nodes, *required, None),
+        ByteAckDecision::Pending {
+            nodes,
+            required,
+            remaining,
+        } => (nodes, *required, Some(*remaining)),
     };
     assert_eq!(nodes, expected_nodes);
+    assert_eq!(required, expected_required);
     assert_eq!(remaining, expected_remaining);
 }
 

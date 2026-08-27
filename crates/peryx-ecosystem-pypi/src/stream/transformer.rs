@@ -7,7 +7,7 @@ use peryx_policy::PolicyAction;
 use serde::Serialize;
 
 use super::validator::JsonValidator;
-use super::{PageContext, PageSummary, Registration, TransformError};
+use super::{PageContext, PageSummary, Registration, TransformError, is_json_whitespace};
 use crate::policy::{PypiPolicy, RemoteMetadataMode};
 use crate::simple::absolutize;
 use crate::{CoreMetadata, File, parse_meta};
@@ -253,7 +253,7 @@ impl PageTransformer {
             return;
         }
         // Anything but whitespace once the root has closed is trailing garbage, whatever its kind.
-        if self.document.closed && !byte.is_ascii_whitespace() {
+        if self.document.closed && !is_json_whitespace(byte) {
             self.document.trailing = true;
         }
         match byte {
@@ -321,7 +321,7 @@ impl PageTransformer {
             }
             _ => {
                 // A non-string, non-container `name` value (null, number, ...) closes the name slot.
-                if !byte.is_ascii_whitespace() {
+                if !is_json_whitespace(byte) {
                     self.string.expect_name = false;
                 }
                 out.push(byte);
@@ -477,7 +477,7 @@ impl PageTransformer {
                 }
             }
             b',' if self.depth == self.array_depth => {}
-            _ if self.capture.is_empty() && byte.is_ascii_whitespace() => {}
+            _ if self.capture.is_empty() && is_json_whitespace(byte) => {}
             _ => self.capture.push(byte),
         }
         Ok(())

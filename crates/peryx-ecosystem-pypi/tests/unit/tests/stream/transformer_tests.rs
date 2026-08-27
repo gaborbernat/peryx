@@ -913,6 +913,21 @@ fn test_malformed_top_level_punctuation_is_rejected() {
     }
 }
 
+#[rstest]
+#[case::space(' ', true)]
+#[case::horizontal_tab('\t', true)]
+#[case::line_feed('\n', true)]
+#[case::carriage_return('\r', true)]
+#[case::vertical_tab('\u{000b}', false)]
+#[case::form_feed('\u{000c}', false)]
+fn test_streaming_and_buffered_parsers_agree_on_json_whitespace(#[case] whitespace: char, #[case] accepted: bool) {
+    let page = format!(r#"{{"meta":{{"api-version":"1.4"}},"name":"demo"{whitespace},"versions":[],"files":[]}}"#);
+    assert_eq!(parse_detail(page.as_bytes()).is_ok(), accepted);
+    for chunk in [1, page.len()] {
+        assert_eq!(stream_result(&page, chunk).is_ok(), accepted, "chunk {chunk}");
+    }
+}
+
 #[test]
 fn test_non_hex_unicode_escape_in_a_key_is_rejected() {
     // `\u` must be followed by four hex digits; the structural lexer passes the malformed key
@@ -932,7 +947,7 @@ fn test_grammar_guard_accepts_every_json_scalar_shape() {
     // pages: signs, fractions, exponents, escapes, and the three keywords all appear here, carried
     // by an unrecognized member the structural lexer copies through untouched.
     let page = r#"{"meta":{"api-version":"1.4"},"name":"demo","versions":["1.0"],
-        "extra":[null,true,false,0,-0,0e1,12,3.14,-1.5e10,1E+3,-0.0e-2,"a\tbé","",{}],
+        "extra":[null,true,false,0,-0,0e1,12,3.14,-1.5e10,1E+3,-0.0e-2,"a\t\f\u000cbé","",{}],
         "files":[{"filename":"demo-1.0-py3-none-any.whl","url":"https://up/demo.whl",
          "hashes":{"sha256":"aa11"},"gpg-sig":true,"yanked":false}]}"#;
     for chunk in [1, 5, page.len()] {

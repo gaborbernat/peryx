@@ -35,7 +35,8 @@ fn test_empty_table_resolves_to_the_defaults() {
 #[test]
 fn test_selected_bounds_override_only_their_own_defaults() {
     let fragment = "[availability.read-through]\n\
-         concurrency = 3\nchunk-bytes = 1024\nmax-fanout = 2\ntrip-after = 5\ncooldown-secs = 90\n";
+         concurrency = 3\nchunk-bytes = 1024\nmax-fanout = 2\ntrip-after = 5\ncooldown-secs = 90\n\
+         probe-timeout-secs = 12\n";
     let limits = toml_config(&dc_toml(fragment)).read_through.unwrap();
 
     assert_eq!(limits.concurrency, NonZeroUsize::new(3).unwrap());
@@ -43,6 +44,7 @@ fn test_selected_bounds_override_only_their_own_defaults() {
     assert_eq!(limits.max_fanout, NonZeroUsize::new(2).unwrap());
     assert_eq!(limits.circuit.trip_after, 5);
     assert_eq!(limits.circuit.cooldown, Duration::from_secs(90));
+    assert_eq!(limits.circuit.probe_timeout, Duration::from_secs(12));
     assert_eq!(limits.per_fetch_bytes, DEFAULT_READ_THROUGH_LIMITS.per_fetch_bytes);
     assert_eq!(limits.policy, DEFAULT_READ_THROUGH_LIMITS.policy);
 }
@@ -74,5 +76,11 @@ fn test_none_mode_rejects_a_read_through_table() {
 #[test]
 fn test_a_zero_bound_is_rejected_at_parse_time() {
     let err = apply(&dc_toml("[availability.read-through]\nconcurrency = 0\n")).unwrap_err();
+    assert!(matches!(err, ConfigError::Parse { .. }));
+}
+
+#[test]
+fn test_a_zero_probe_timeout_is_rejected_at_parse_time() {
+    let err = apply(&dc_toml("[availability.read-through]\nprobe-timeout-secs = 0\n")).unwrap_err();
     assert!(matches!(err, ConfigError::Parse { .. }));
 }

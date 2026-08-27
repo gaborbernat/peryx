@@ -5,13 +5,13 @@
 
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
-    BlobTransport, ChunkUnavailable, CircuitBreaker, CircuitConfig, DEFAULT_CIRCUIT, DEFAULT_RECONNECT_POLICY,
-    FetchPlan, PlacementDescriptor, PullError, ReconnectPolicy, Retry, TransportError, chunk_ranges, plan_blob_fetch,
-    pull_chunk_verified, pull_ranged, route_blob_placements,
+    BlobTransport, ChunkUnavailable, CircuitBreaker, CircuitConfig, CircuitPermit, DEFAULT_CIRCUIT,
+    DEFAULT_RECONNECT_POLICY, FetchPlan, PlacementDescriptor, PullError, ReconnectPolicy, Retry, TransportError,
+    chunk_ranges, plan_blob_fetch, pull_chunk_verified, pull_ranged, route_blob_placements,
 };
 use bytes::Bytes;
 use peryx_ha::{
@@ -82,17 +82,21 @@ struct Source {
     size: u64,
 }
 
+struct AdmittedSource<'a> {
+    source: &'a Source,
+    permit: Option<CircuitPermit>,
+}
+
 /// Shares per-data-center transports and circuit state across requests.
 pub struct RemotePlacementReader {
     meta: MetaStore,
     blobs: BlobStorage,
     local_dc: DataCenterId,
     delegates: HashMap<String, DcTransport>,
-    circuit: Mutex<CircuitBreaker>,
+    circuit: CircuitBreaker,
     chunk_bytes: NonZeroUsize,
     max_fanout: NonZeroUsize,
     policy: ReconnectPolicy,
-    clock: MonotonicClock,
 }
 
 impl RemotePlacementReader {
@@ -111,11 +115,13 @@ impl RemotePlacementReader {
             blobs,
             local_dc,
             delegates,
-            circuit: Mutex::new(CircuitBreaker::new(limits.circuit)),
+            circuit: CircuitBreaker::new(
+                limits.circuit,
+                Arc::new(move || Duration::from_secs((clock)().max(0).unsigned_abs())),
+            ),
             chunk_bytes: limits.chunk_bytes,
             max_fanout: limits.max_fanout,
             policy: limits.policy,
-            clock,
         }
     }
 
@@ -202,26 +208,22 @@ impl RemotePlacementReader {
         let ranges = chunk_ranges(total_length, self.chunk_bytes.get());
         let mut attempt = 1u32;
         loop {
-            let now = self.now();
-            let open: Vec<&Source> = sources
-                .iter()
-                .filter(|source| self.available(&source.data_center, now))
-                .collect();
-            if open.is_empty() {
+            let mut admitted = self.admit(sources);
+            if admitted.is_empty() {
                 return Ok(ReadThroughOutcome::Unavailable);
             }
             let transports: Vec<&(dyn BlobTransport + Send + Sync)> =
-                open.iter().map(|source| source.transport.as_ref()).collect();
+                admitted.iter().map(|source| source.source.transport.as_ref()).collect();
             match pull_ranged(&transports, digest, &ranges, total_length, digest).await {
                 Ok(bytes) => {
-                    self.record_success(&open[0].data_center);
+                    admitted[0].success();
                     let chunked = ChunkedDigest::of(&bytes, CHUNK_BYTES);
                     let metadata = self.commit(blobs, digest, bytes).await?;
                     catalog_chunks(meta, artifact, digest, &chunked);
                     return Ok(ReadThroughOutcome::Served(metadata));
                 }
                 Err(PullError::Exhausted { failures, .. }) => {
-                    self.record_failures(&open, &failures, now);
+                    record_failures(&mut admitted, &failures);
                     match self.policy.on_error(representative(&failures), attempt) {
                         Retry::After(delay) => {
                             tokio::time::sleep(delay).await;
@@ -247,23 +249,22 @@ impl RemotePlacementReader {
     ) -> Result<ReadThroughOutcome, ReadThroughError> {
         let mut attempt = 1u32;
         loop {
-            let now = self.now();
-            let open: Vec<&Source> = sources
-                .iter()
-                .filter(|source| self.available(&source.data_center, now))
-                .collect();
-            if open.is_empty() {
+            let mut admitted = self.admit(sources);
+            if admitted.is_empty() {
                 return Ok(ReadThroughOutcome::Unavailable);
             }
-            match self.stream_chunks(blobs, digest, chunked, total_length, &open).await? {
+            match self
+                .stream_chunks(blobs, digest, chunked, total_length, &admitted)
+                .await?
+            {
                 StreamOutcome::Committed(metadata) => {
-                    self.record_success(&open[0].data_center);
+                    admitted[0].success();
                     return Ok(ReadThroughOutcome::Served(metadata));
                 }
                 StreamOutcome::WholeMismatch => return Ok(ReadThroughOutcome::Unavailable),
                 StreamOutcome::ChunkUnavailable(unavailable) => {
                     let failures = unavailable.transport_failures();
-                    self.record_failures(&open, &failures, now);
+                    record_failures(&mut admitted, &failures);
                     if failures.is_empty() {
                         return Ok(ReadThroughOutcome::Unavailable);
                     }
@@ -287,10 +288,10 @@ impl RemotePlacementReader {
         digest: &Digest,
         chunked: &ChunkedDigest,
         total_length: usize,
-        open: &[&Source],
+        admitted: &[AdmittedSource<'_>],
     ) -> Result<StreamOutcome, ReadThroughError> {
         let transports: Vec<&(dyn BlobTransport + Send + Sync)> =
-            open.iter().map(|source| source.transport.as_ref()).collect();
+            admitted.iter().map(|source| source.source.transport.as_ref()).collect();
         let mut write = blobs.begin().await.map_err(ReadThroughError::Blob)?;
         for index in 0..chunked.len() {
             match pull_chunk_verified(&transports, digest, chunked, index, total_length as u64).await {
@@ -327,30 +328,38 @@ impl RemotePlacementReader {
             .map_err(ReadThroughError::Blob)
     }
 
-    /// Floors pre-epoch clock values at zero to prevent cooldown underflow.
-    fn now(&self) -> Duration {
-        Duration::from_secs((self.clock)().max(0).unsigned_abs())
+    fn admit<'a>(&self, sources: &'a [Source]) -> Vec<AdmittedSource<'a>> {
+        sources
+            .iter()
+            .filter_map(|source| {
+                self.circuit.admit(&source.data_center).map(|permit| AdmittedSource {
+                    source,
+                    permit: Some(permit),
+                })
+            })
+            .collect()
+    }
+}
+
+impl AdmittedSource<'_> {
+    fn success(&mut self) {
+        self.permit
+            .take()
+            .expect("an admitted source has one unresolved permit")
+            .success();
     }
 
-    fn available(&self, data_center: &str, now: Duration) -> bool {
-        self.circuit
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .available(data_center, now)
+    fn failure(&mut self) {
+        self.permit
+            .take()
+            .expect("an admitted source has one unresolved permit")
+            .failure();
     }
+}
 
-    fn record_success(&self, data_center: &str) {
-        self.circuit
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record_success(data_center);
-    }
-
-    fn record_failures(&self, open: &[&Source], failures: &[(usize, TransportError)], now: Duration) {
-        let mut breaker = self.circuit.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (index, _) in failures {
-            breaker.record_failure(&open[*index].data_center, now);
-        }
+fn record_failures(admitted: &mut [AdmittedSource<'_>], failures: &[(usize, TransportError)]) {
+    for (index, _) in failures {
+        admitted[*index].failure();
     }
 }
 

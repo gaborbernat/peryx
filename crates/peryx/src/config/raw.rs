@@ -130,8 +130,8 @@ pub enum RawWriteAckPolicy {
 
 /// The raw `[availability.read-through]` table before its bounds are resolved against their defaults.
 ///
-/// Every field is optional and falls back to the built-in default; a zero is rejected at parse time by
-/// the non-zero field types.
+/// Every field is optional and falls back to the built-in default. Fields with non-zero integer types
+/// reject zero during parsing.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct RawReadThrough {
@@ -141,6 +141,7 @@ pub struct RawReadThrough {
     pub max_fanout: Option<NonZeroUsize>,
     pub trip_after: Option<u32>,
     pub cooldown_secs: Option<u64>,
+    pub probe_timeout_secs: Option<NonZeroU64>,
     /// The `[availability.read-through.retry]` sub-table: the whole reconnect schedule, tuned together or
     /// left at its default.
     pub retry: Option<RawReadThroughRetry>,

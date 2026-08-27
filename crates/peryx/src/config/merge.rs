@@ -479,6 +479,9 @@ fn classify_read_through(
         circuit: CircuitConfig {
             trip_after: raw.trip_after.unwrap_or(base.circuit.trip_after),
             cooldown: raw.cooldown_secs.map_or(base.circuit.cooldown, Duration::from_secs),
+            probe_timeout: raw
+                .probe_timeout_secs
+                .map_or(base.circuit.probe_timeout, |seconds| Duration::from_secs(seconds.get())),
         },
         policy: raw.retry.map_or(base.policy, |retry| {
             ReconnectPolicy::new(

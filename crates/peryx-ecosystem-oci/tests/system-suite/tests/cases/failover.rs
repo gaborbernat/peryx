@@ -60,7 +60,7 @@ trait OciNodeExt {
     ) -> Result<(u16, String), reqwest::Error>;
     fn oci_get_manifest(&self, repo: &str, reference: &str) -> Option<(u16, Option<String>, Vec<u8>)>;
     fn oci_tags(&self, repo: &str) -> Vec<String>;
-    fn oci_mutate(&self, method: reqwest::Method, path: &str) -> Option<(u16, String)>;
+    fn oci_mutate(&self, method: reqwest::Method, path: &str) -> Option<(u16, Option<String>, String)>;
 }
 
 impl OciNodeExt for Node {
@@ -135,14 +135,19 @@ impl OciNodeExt for Node {
             .collect()
     }
 
-    fn oci_mutate(&self, method: reqwest::Method, path: &str) -> Option<(u16, String)> {
+    fn oci_mutate(&self, method: reqwest::Method, path: &str) -> Option<(u16, Option<String>, String)> {
         let response = self
             .request(method, path)
             .basic_auth("_", Some(UPLOAD_TOKEN))
             .send()
             .ok()?;
         let code = response.status().as_u16();
-        Some((code, response.text().unwrap_or_default()))
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        Some((code, retry_after, response.text().unwrap_or_default()))
     }
 }
 
@@ -277,12 +282,12 @@ fn assert_replica_refuses_oci_mutations(replica: &Node) {
         ),
     ];
     for (method, path) in cases {
-        let (code, body) = replica
+        let (code, retry_after, body) = replica
             .oci_mutate(method.clone(), &path)
             .expect("mutation reaches the replica");
         assert_eq!(
-            (code, body.as_str()),
-            (503, READ_ONLY_BODY),
+            (code, retry_after.as_deref(), body.as_str()),
+            (503, Some("1"), READ_ONLY_BODY),
             "the replica refuses a {method} {path}",
         );
     }

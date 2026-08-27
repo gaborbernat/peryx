@@ -2,6 +2,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use peryx_core::{Ecosystem, LexiconRegistry, PrometheusSource};
 use peryx_storage::blob::BlobStorage;
@@ -49,6 +50,7 @@ pub struct ServingState {
     pub requests: AtomicU64,
     /// Whether this process serves as a replica and rejects client mutations.
     pub read_only: bool,
+    pub(super) read_only_retry_after: Option<Duration>,
     pub(super) availability: AvailabilityState,
     /// Immutable repository-route positions for request dispatch.
     pub(super) route_resolver: RouteResolver,
@@ -376,6 +378,12 @@ impl AppState {
 }
 
 impl ServingState {
+    /// How long a configured replica waits between synchronization attempts.
+    #[must_use]
+    pub const fn read_only_retry_after(&self) -> Option<Duration> {
+        self.read_only_retry_after
+    }
+
     #[must_use]
     pub fn plugin_service<T: Send + Sync + 'static>(&self) -> Option<&T> {
         self.plugin_services.get(&TypeId::of::<T>())?.downcast_ref()

@@ -44,6 +44,9 @@ pub async fn run_with_active_plugins(
     let configured = mirror_configuration(config, index)?;
     let overrides = mirror_overrides(&options.overrides)?;
     driver
+        .validate_options(&configured, &overrides)
+        .map_err(anyhow::Error::msg)?;
+    driver
         .mirror(
             state.clone(),
             MirrorRequest {

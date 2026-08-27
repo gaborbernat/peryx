@@ -4,6 +4,43 @@ use peryx_index::IndexKind;
 use super::{app_with, oci_index};
 use crate::registry::OciRegistry;
 
+#[rstest::rstest]
+#[case::configured_requirements("requirements", false)]
+#[case::configured_mode("mode", false)]
+#[case::configured_python_tags("python_tags", false)]
+#[case::configured_metadata_only("metadata_only", false)]
+#[case::override_requirements("requirements", true)]
+#[case::override_mode("mode", true)]
+#[case::override_python_tags("python_tags", true)]
+#[case::override_metadata_only("metadata_only", true)]
+#[case::override_packages("packages", true)]
+fn prefetch_options_reject_unsupported_keys(#[case] key: &str, #[case] override_option: bool) {
+    let mut configured = toml::Table::new();
+    let mut overrides = toml::Table::new();
+    if override_option {
+        overrides.insert(key.to_owned(), toml::Value::Boolean(true));
+    } else {
+        configured.insert(key.to_owned(), toml::Value::Boolean(true));
+    }
+
+    assert_eq!(
+        OciRegistry::default()
+            .validate_options(&configured, &overrides)
+            .unwrap_err(),
+        format!("prefetch option {key:?} is not supported by oci")
+    );
+}
+
+#[rstest::rstest]
+#[case::images(images(&[]), images(&[]))]
+#[case::packages(
+    toml::Table::from_iter([("packages".to_owned(), toml::Value::Array(Vec::new()))]),
+    toml::Table::new()
+)]
+fn prefetch_options_accept_consumed_keys(#[case] configured: toml::Table, #[case] overrides: toml::Table) {
+    assert_eq!(OciRegistry::default().validate_options(&configured, &overrides), Ok(()));
+}
+
 fn images(values: &[&str]) -> toml::Table {
     toml::Table::from_iter([(
         "images".to_owned(),

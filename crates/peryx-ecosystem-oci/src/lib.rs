@@ -490,6 +490,11 @@ fn register_capabilities(registrar: &mut dyn CapabilityRegistrar, driver: Arc<Oc
 
 #[async_trait::async_trait]
 impl<S: std::hash::BuildHasher + Send + Sync> MirrorDriver for registry::OciRegistryWithHasher<S> {
+    fn validate_options(&self, configured: &toml::Table, overrides: &toml::Table) -> Result<(), String> {
+        validate_mirror_options(configured, &["images", "packages"])?;
+        validate_mirror_options(overrides, &["images"])
+    }
+
     async fn mirror(
         &self,
         state: Arc<AppState>,
@@ -554,6 +559,13 @@ impl<S: std::hash::BuildHasher + Send + Sync> MirrorDriver for registry::OciRegi
             Err(format!("mirror found {errors} error(s)"))
         }
     }
+}
+
+fn validate_mirror_options(options: &toml::Table, supported: &[&str]) -> Result<(), String> {
+    if let Some(key) = options.keys().find(|key| !supported.contains(&key.as_str())) {
+        return Err(format!("prefetch option {key:?} is not supported by oci"));
+    }
+    Ok(())
 }
 
 fn table_strings(table: &toml::Table, key: &str) -> Result<Vec<String>, String> {

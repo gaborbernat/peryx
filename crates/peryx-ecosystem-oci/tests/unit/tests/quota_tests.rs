@@ -3,9 +3,11 @@ use std::sync::Arc;
 use axum::http::{Method, StatusCode};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{Policy, PolicyConfig};
-use peryx_storage::meta::{AccountingClass, NewQuotaReservation};
+use peryx_storage::meta::{AccountingClass, NewQuotaReservation, QuotaLimit};
+use rstest::rstest;
 
 use super::{app_with, auth, bind_ownership, body_has_code, oci_digest, send, send_body, send_with};
+use crate::quota::{Admission, admit_push};
 use crate::quota_reservation;
 
 #[test]
@@ -62,6 +64,35 @@ fn quota_index(limits: &PolicyConfig) -> Index {
     }
 }
 
+fn quota_limit_index(limit: QuotaLimit) -> Index {
+    let limits = match limit {
+        QuotaLimit::ArtifactBytes => PolicyConfig {
+            max_artifact_size_bytes: Some(1),
+            max_accounted_bytes: Some(u64::MAX),
+            ..PolicyConfig::default()
+        },
+        QuotaLimit::AccountedBytes => PolicyConfig {
+            max_accounted_bytes: Some(1),
+            ..PolicyConfig::default()
+        },
+        QuotaLimit::Resources => PolicyConfig {
+            max_resources: Some(1),
+            ..PolicyConfig::default()
+        },
+        QuotaLimit::GroupsPerResource => PolicyConfig::default(),
+    };
+    let mut index = quota_index(&limits);
+    if limit == QuotaLimit::GroupsPerResource {
+        index.policy =
+            index
+                .policy
+                .with_capabilities(crate::policy::compile_capabilities(&crate::policy::OciPolicyConfig {
+                    max_tags_per_repository: Some(1),
+                }));
+    }
+    index
+}
+
 fn tag_quota_store(
     dir: &tempfile::TempDir,
     max_tags_per_repository: u64,
@@ -116,6 +147,55 @@ async fn push_manifest(app: &axum::Router, repo: &str, tag: &str, body: &[u8]) -
     )
     .await
     .0
+}
+
+#[rstest]
+#[case::artifact_bytes(QuotaLimit::ArtifactBytes, "blob size")]
+#[case::accounted_bytes(QuotaLimit::AccountedBytes, "registry bytes")]
+#[case::resources(QuotaLimit::Resources, "repositories")]
+#[case::groups_per_resource(QuotaLimit::GroupsPerResource, "tags")]
+#[tokio::test]
+async fn test_quota_denial_uses_the_ecosystem_vocabulary(#[case] limit: QuotaLimit, #[case] label: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_with(&dir, quota_limit_index(limit)).0;
+    let index = quota_limit_index(limit);
+    if matches!(limit, QuotaLimit::Resources | QuotaLimit::GroupsPerResource) {
+        assert!(matches!(
+            admit_push(
+                &state.serving,
+                &index,
+                "app",
+                (limit == QuotaLimit::GroupsPerResource).then_some("v1"),
+                "sha256:a",
+                0,
+            )
+            .unwrap(),
+            Admission::Reserved(_)
+        ));
+    }
+    let Admission::Rejected(response) = admit_push(
+        &state.serving,
+        &index,
+        if limit == QuotaLimit::Resources { "other" } else { "app" },
+        (limit == QuotaLimit::GroupsPerResource).then_some("v2"),
+        "sha256:b",
+        u64::from(matches!(limit, QuotaLimit::ArtifactBytes | QuotaLimit::AccountedBytes)) * 2,
+    )
+    .unwrap() else {
+        panic!("quota violation was admitted")
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        )
+        .unwrap(),
+        serde_json::json!({
+            "errors": [{
+                "code": "DENIED",
+                "message": format!("repository quota exceeded: {label}"),
+            }],
+        })
+    );
 }
 
 #[tokio::test]

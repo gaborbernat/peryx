@@ -19,6 +19,8 @@ use super::config::S3Config;
 pub enum S3Error {
     #[error("object not found")]
     NotFound,
+    #[error("bucket not found")]
+    NoSuchBucket,
     #[error("object already exists")]
     AlreadyExists,
     #[error("conditional write conflicted with another request")]
@@ -401,7 +403,8 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
 
 fn map_sdk_error(error: &aws_sdk_s3::Error) -> S3Error {
     match error.code() {
-        Some("NoSuchBucket" | "NoSuchKey" | "NotFound") => S3Error::NotFound,
+        Some("NoSuchBucket") => S3Error::NoSuchBucket,
+        Some("NoSuchKey" | "NotFound") => S3Error::NotFound,
         Some("PreconditionFailed") => S3Error::AlreadyExists,
         Some("ConditionalRequestConflict") => S3Error::Conflict,
         Some("NoSuchUpload") => S3Error::NoSuchUpload,

@@ -20,8 +20,10 @@ use tower::ServiceExt as _;
 use utoipa::openapi::PathsBuilder;
 
 use super::support::{
-    AuthInstallMarker, MISMATCHED_REGISTRATION, NO_JOBS_REGISTRATION, PRIMARY, RuntimeInstallMarker, SECONDARY,
-    SECONDARY_AUTH, SECONDARY_REGISTRATION, driver_factory_calls, registrations, reset_driver_factory_calls,
+    AuthInstallMarker, MISMATCHED_REGISTRATION, NO_JOBS_REGISTRATION, PRIMARY, PRIMARY_V2_REGISTRATION,
+    PRIMARY_V2_UPLOADS_REGISTRATION, RuntimeInstallMarker, SECONDARY, SECONDARY_AUTH, SECONDARY_REGISTRATION,
+    SECONDARY_V2_REGISTRATION, SECONDARY_V2_UPLOADS_REGISTRATION, SECONDARY_V20_REGISTRATION, driver_factory_calls,
+    registrations, reset_driver_factory_calls,
 };
 
 const THIRD: peryx_core::Ecosystem = peryx_core::Ecosystem::new("gamma");
@@ -53,6 +55,64 @@ fn duplicate_registration_values_are_rejected(#[case] case: DuplicateCase, #[cas
         DuplicateCase::AuthField => registrations[1].auth = Some(&SECONDARY_AUTH),
     }
     assert_eq!(PluginRegistry::new(registrations).err(), Some(expected));
+}
+
+#[rstest]
+#[case::duplicate(
+    &SECONDARY_V2_REGISTRATION,
+    &PRIMARY_V2_REGISTRATION,
+    RegistryError::AbsolutePrefixConflict {
+        first_ecosystem: SECONDARY,
+        first_prefix: "/v2/",
+        second_ecosystem: PRIMARY,
+        second_prefix: "/v2/",
+    },
+)]
+#[case::parent_before_child(
+    &SECONDARY_V2_REGISTRATION,
+    &PRIMARY_V2_UPLOADS_REGISTRATION,
+    RegistryError::AbsolutePrefixConflict {
+        first_ecosystem: SECONDARY,
+        first_prefix: "/v2/",
+        second_ecosystem: PRIMARY,
+        second_prefix: "/v2/uploads/",
+    },
+)]
+#[case::child_before_parent(
+    &SECONDARY_V2_UPLOADS_REGISTRATION,
+    &PRIMARY_V2_REGISTRATION,
+    RegistryError::AbsolutePrefixConflict {
+        first_ecosystem: SECONDARY,
+        first_prefix: "/v2/uploads/",
+        second_ecosystem: PRIMARY,
+        second_prefix: "/v2/",
+    },
+)]
+fn conflicting_absolute_prefixes_are_rejected(
+    #[case] secondary: &'static super::support::Registration,
+    #[case] primary: &'static super::support::Registration,
+    #[case] expected: RegistryError,
+) {
+    let mut registrations = registrations();
+    registrations[0].registration = secondary;
+    registrations[1].registration = primary;
+
+    assert_eq!(PluginRegistry::new(registrations).err(), Some(expected));
+}
+
+#[test]
+fn sibling_absolute_prefix_segments_are_accepted() {
+    let mut registrations = registrations();
+    registrations[0].registration = &SECONDARY_V20_REGISTRATION;
+    registrations[1].registration = &PRIMARY_V2_REGISTRATION;
+
+    assert_eq!(
+        PluginRegistry::new(registrations)
+            .unwrap()
+            .absolute_prefixes()
+            .collect::<Vec<_>>(),
+        vec![(SECONDARY, "/v20/"), (PRIMARY, "/v2/")]
+    );
 }
 
 #[test]
@@ -115,6 +175,12 @@ fn registry_errors_name_the_conflict() {
             RegistryError::DuplicatePriority(10),
             RegistryError::DuplicateOperatorJob("run"),
             RegistryError::DuplicateAuthField("token"),
+            RegistryError::AbsolutePrefixConflict {
+                first_ecosystem: PRIMARY,
+                first_prefix: "/v2/",
+                second_ecosystem: SECONDARY,
+                second_prefix: "/v2/uploads/",
+            },
             RegistryError::DriverEcosystem {
                 registration: PRIMARY,
                 driver: SECONDARY,
@@ -129,6 +195,7 @@ fn registry_errors_name_the_conflict() {
             "duplicate ecosystem priority 10",
             "duplicate operator job command \"run\"",
             "duplicate auth field \"token\"",
+            "ecosystems alpha and beta declare conflicting absolute prefixes \"/v2/\" and \"/v2/uploads/\"",
             "ecosystem alpha registration returned a beta protocol driver",
         ]
     );

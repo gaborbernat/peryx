@@ -282,6 +282,10 @@ impl EcosystemRegistration for Registration {
         &[]
     }
 
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        &["/artifacts"]
+    }
+
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new(Driver))
     }
@@ -904,8 +908,14 @@ async fn test_install_contexts_publish_registered_behavior() {
 fn test_registration_defaults_and_read_only_mutation_are_observable() {
     let registration = Registration;
     let ecosystem = registration.ecosystem();
-    assert!(registration.default_indexes().is_empty());
-    assert_eq!(registration.driver().ecosystem(), ecosystem);
+    assert_eq!(
+        (
+            registration.default_indexes(),
+            registration.absolute_prefixes(),
+            registration.driver().ecosystem(),
+        ),
+        (&[][..], &["/artifacts"][..], ecosystem)
+    );
     let mut drivers = crate::DriverSet::default();
     registration.register_capabilities(&mut drivers);
     assert!(drivers.present().next().is_none());

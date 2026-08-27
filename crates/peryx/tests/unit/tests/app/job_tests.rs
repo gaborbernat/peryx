@@ -575,6 +575,10 @@ impl EcosystemRegistration for Registration {
         self.default_indexes
     }
 
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new((*self.driver).clone()))
     }

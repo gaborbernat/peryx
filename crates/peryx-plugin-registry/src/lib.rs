@@ -84,7 +84,16 @@ pub enum RegistryError {
     DuplicatePriority(u16),
     DuplicateOperatorJob(&'static str),
     DuplicateAuthField(&'static str),
-    DriverEcosystem { registration: Ecosystem, driver: Ecosystem },
+    AbsolutePrefixConflict {
+        first_ecosystem: Ecosystem,
+        first_prefix: &'static str,
+        second_ecosystem: Ecosystem,
+        second_prefix: &'static str,
+    },
+    DriverEcosystem {
+        registration: Ecosystem,
+        driver: Ecosystem,
+    },
 }
 
 impl Display for RegistryError {
@@ -97,6 +106,16 @@ impl Display for RegistryError {
             Self::DuplicatePriority(priority) => write!(formatter, "duplicate ecosystem priority {priority}"),
             Self::DuplicateOperatorJob(command) => write!(formatter, "duplicate operator job command {command:?}"),
             Self::DuplicateAuthField(field) => write!(formatter, "duplicate auth field {field:?}"),
+            Self::AbsolutePrefixConflict {
+                first_ecosystem,
+                first_prefix,
+                second_ecosystem,
+                second_prefix,
+            } => write!(
+                formatter,
+                "ecosystems {first_ecosystem} and {second_ecosystem} declare conflicting absolute prefixes \
+                 {first_prefix:?} and {second_prefix:?}"
+            ),
             Self::DriverEcosystem { registration, driver } => write!(
                 formatter,
                 "ecosystem {registration} registration returned a {driver} protocol driver"
@@ -260,6 +279,17 @@ impl PluginRegistry {
     #[must_use]
     pub fn browse_paths(&self) -> &[&'static str] {
         &self.browse_paths
+    }
+
+    pub fn absolute_prefixes(&self) -> impl Iterator<Item = (Ecosystem, &'static str)> + '_ {
+        self.registrations.iter().flat_map(|registration| {
+            let ecosystem = registration.registration.ecosystem();
+            registration
+                .registration
+                .absolute_prefixes()
+                .iter()
+                .map(move |&prefix| (ecosystem.clone(), prefix))
+        })
     }
 
     /// # Errors
@@ -586,6 +616,7 @@ fn validate_registrations(registrations: &[PluginRegistration]) -> Result<(), Re
     let mut ecosystems = HashSet::new();
     let mut priorities = HashSet::new();
     let mut auth_fields = HashSet::new();
+    let mut absolute_prefixes: Vec<(Ecosystem, &'static str)> = Vec::new();
     for registration in registrations {
         let ecosystem = registration.registration.ecosystem();
         if !ecosystems.insert(ecosystem.clone()) {
@@ -602,8 +633,30 @@ fn validate_registrations(registrations: &[PluginRegistration]) -> Result<(), Re
         {
             return Err(RegistryError::DuplicateAuthField(field));
         }
+        for &prefix in registration.registration.absolute_prefixes() {
+            if let Some((first_ecosystem, first_prefix)) = absolute_prefixes
+                .iter()
+                .find(|(_, registered)| path_prefix(prefix, registered) || path_prefix(registered, prefix))
+            {
+                return Err(RegistryError::AbsolutePrefixConflict {
+                    first_ecosystem: first_ecosystem.clone(),
+                    first_prefix,
+                    second_ecosystem: ecosystem,
+                    second_prefix: prefix,
+                });
+            }
+            absolute_prefixes.push((ecosystem.clone(), prefix));
+        }
     }
     Ok(())
+}
+
+fn path_prefix(prefix: &str, path: &str) -> bool {
+    let mut path = path.split('/').filter(|segment| !segment.is_empty());
+    prefix
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .all(|segment| path.next() == Some(segment))
 }
 
 fn validate_operator_jobs(jobs: &[&dyn OperatorJob]) -> Result<(), RegistryError> {

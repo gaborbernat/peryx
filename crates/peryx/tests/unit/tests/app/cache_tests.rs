@@ -456,6 +456,10 @@ impl EcosystemRegistration for CachePlugin {
         &DEFAULT_INDEXES
     }
 
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        &["/cache-fixture"]
+    }
+
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new(*self))
     }

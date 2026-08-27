@@ -284,7 +284,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> PolicyDriver for OciRegis
 #[async_trait]
 impl<S: BuildHasher + Default + Send + Sync + 'static> AbsoluteProtocolDriver for OciRegistryWithHasher<S> {
     fn prefixes(&self) -> &'static [&'static str] {
-        &["/v2/"]
+        ABSOLUTE_PREFIXES
     }
 
     fn classify_route(&self, path: &str) -> peryx_driver::rate_limit::RouteClass {
@@ -313,6 +313,8 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> AbsoluteProtocolDriver fo
         self.serve_request(state, request).boxed().await
     }
 }
+
+pub const ABSOLUTE_PREFIXES: &[&str] = &["/v2/"];
 
 impl<S: BuildHasher + Default + Send + Sync + 'static> MetricsDriver for OciRegistryWithHasher<S> {
     fn metric_families(&self) -> &'static [peryx_events::metrics::MetricFamily] {

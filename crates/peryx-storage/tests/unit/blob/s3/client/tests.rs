@@ -55,6 +55,7 @@ fn capturing_client(config: S3Config, response: Option<http::Response<SdkBody>>)
 #[test]
 fn test_error_messages_cover_every_variant() {
     assert_eq!(S3Error::NotFound.to_string(), "object not found");
+    assert_eq!(S3Error::NoSuchBucket.to_string(), "bucket not found");
     assert_eq!(S3Error::AlreadyExists.to_string(), "object already exists");
     assert_eq!(
         S3Error::Conflict.to_string(),

@@ -653,7 +653,10 @@ async fn run_wire_failure_child(storage: &BlobStorage, scenario: WireFailureScen
             storage.head(&Digest::of(b"package")).await.unwrap_err().kind(),
             BlobErrorKind::Io
         ),
-        WireFailureScenario::HugeTimeout | WireFailureScenario::Get | WireFailureScenario::GetMissingLength => {
+        WireFailureScenario::HugeTimeout
+        | WireFailureScenario::Get
+        | WireFailureScenario::GetMissingLength
+        | WireFailureScenario::GetMissingBucket => {
             assert_eq!(
                 storage.open(&Digest::of(b"package"), None).await.err().unwrap().kind(),
                 BlobErrorKind::Io
@@ -666,6 +669,10 @@ async fn run_wire_failure_child(storage: &BlobStorage, scenario: WireFailureScen
         }
         WireFailureScenario::Put => assert_eq!(
             storage.put_bytes(b"package").await.unwrap_err().kind(),
+            BlobErrorKind::Io
+        ),
+        WireFailureScenario::DeleteMissingBucket => assert_eq!(
+            storage.delete(&Digest::of(b"package")).await.unwrap_err().kind(),
             BlobErrorKind::Io
         ),
         WireFailureScenario::DeleteNotFound => assert!(!storage.delete(&Digest::of(b"missing")).await.unwrap()),
@@ -767,7 +774,9 @@ enum WireFailureScenario {
     SendTimeout,
     GetMissingLength,
     Get,
+    GetMissingBucket,
     Put,
+    DeleteMissingBucket,
     DeleteNotFound,
 }
 
@@ -828,7 +837,9 @@ impl ChildScenario {
             "wire_send_timeout" => Ok(Self::Failure(WireFailureScenario::SendTimeout)),
             "wire_get_missing_length" => Ok(Self::Failure(WireFailureScenario::GetMissingLength)),
             "wire_get_error" => Ok(Self::Failure(WireFailureScenario::Get)),
+            "wire_get_missing_bucket" => Ok(Self::Failure(WireFailureScenario::GetMissingBucket)),
             "wire_put_error" => Ok(Self::Failure(WireFailureScenario::Put)),
+            "wire_delete_missing_bucket" => Ok(Self::Failure(WireFailureScenario::DeleteMissingBucket)),
             "wire_delete_not_found" => Ok(Self::Failure(WireFailureScenario::DeleteNotFound)),
             "wire_multipart" => Ok(Self::Multipart(WireMultipartScenario::Multipart)),
             "wire_parallel_multipart" => Ok(Self::Multipart(WireMultipartScenario::ParallelMultipart)),

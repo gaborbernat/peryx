@@ -66,7 +66,9 @@ enum WireBehavior {
     HeadError,
     HugeTimeout,
     GetError,
+    GetMissingBucket,
     PutError,
+    DeleteMissingBucket,
     DeleteNotFound,
     CreateFailure,
     CreateMissingId,
@@ -105,7 +107,9 @@ enum WireFailureBehavior {
     Head,
     HugeTimeout,
     Get,
+    GetMissingBucket,
     Put,
+    DeleteMissingBucket,
     DeleteNotFound,
 }
 
@@ -141,7 +145,9 @@ impl WireBehavior {
             Self::HeadError => "wire_head_error",
             Self::HugeTimeout => "wire_huge_timeout",
             Self::GetError => "wire_get_error",
+            Self::GetMissingBucket => "wire_get_missing_bucket",
             Self::PutError => "wire_put_error",
+            Self::DeleteMissingBucket => "wire_delete_missing_bucket",
             Self::DeleteNotFound => "wire_delete_not_found",
             Self::CreateFailure => "wire_create_failure",
             Self::CreateMissingId => "wire_create_missing_id",
@@ -277,7 +283,11 @@ async fn mount_wire_behavior(server: &MockServer, behavior: WireBehavior) {
         WireBehavior::HeadError => mount_wire_failures(server, WireFailureBehavior::Head).await,
         WireBehavior::HugeTimeout => mount_wire_failures(server, WireFailureBehavior::HugeTimeout).await,
         WireBehavior::GetError => mount_wire_failures(server, WireFailureBehavior::Get).await,
+        WireBehavior::GetMissingBucket => mount_wire_failures(server, WireFailureBehavior::GetMissingBucket).await,
         WireBehavior::PutError => mount_wire_failures(server, WireFailureBehavior::Put).await,
+        WireBehavior::DeleteMissingBucket => {
+            mount_wire_failures(server, WireFailureBehavior::DeleteMissingBucket).await;
+        }
         WireBehavior::DeleteNotFound => mount_wire_failures(server, WireFailureBehavior::DeleteNotFound).await,
         WireBehavior::CreateFailure => {
             mount_wire_multipart_failures(server, WireMultipartFailureBehavior::Create).await;
@@ -439,12 +449,28 @@ async fn mount_wire_failures(server: &MockServer, behavior: WireFailureBehavior)
                 .mount(server)
                 .await;
         }
+        WireFailureBehavior::GetMissingBucket => {
+            Mock::given(method("GET"))
+                .respond_with(service_error(404, "NoSuchBucket"))
+                .mount(server)
+                .await;
+        }
         WireFailureBehavior::Put => {
             Mock::given(method("PUT"))
                 .respond_with(
                     ResponseTemplate::new(500)
                         .set_body_raw("<Error><Code>InternalError</Code></Error>", "application/xml"),
                 )
+                .mount(server)
+                .await;
+        }
+        WireFailureBehavior::DeleteMissingBucket => {
+            Mock::given(method("HEAD"))
+                .respond_with(ResponseTemplate::new(200).insert_header("Content-Length", "7"))
+                .mount(server)
+                .await;
+            Mock::given(method("DELETE"))
+                .respond_with(service_error(404, "NoSuchBucket"))
                 .mount(server)
                 .await;
         }
@@ -722,7 +748,9 @@ fn assert_child_succeeded(output: &Output) {
 #[case::head_error(WireBehavior::HeadError)]
 #[case::huge_timeout(WireBehavior::HugeTimeout)]
 #[case::get_error(WireBehavior::GetError)]
+#[case::get_missing_bucket(WireBehavior::GetMissingBucket)]
 #[case::put_error(WireBehavior::PutError)]
+#[case::delete_missing_bucket(WireBehavior::DeleteMissingBucket)]
 #[case::delete_not_found(WireBehavior::DeleteNotFound)]
 #[case::create_failure(WireBehavior::CreateFailure)]
 #[case::create_missing_id(WireBehavior::CreateMissingId)]

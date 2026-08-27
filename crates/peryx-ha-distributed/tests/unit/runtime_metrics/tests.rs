@@ -1,6 +1,7 @@
 use super::*;
 
-const SERIES_BUDGET: usize = 1 + SyncErrorClass::ALL.len() + 1 + LATENCY_BUCKETS_SECONDS.len() + 3;
+const SERIES_BUDGET: usize =
+    1 + SyncErrorClass::ALL.len() + HeartbeatErrorClass::ALL.len() + 1 + LATENCY_BUCKETS_SECONDS.len() + 3;
 
 fn rendered(metrics: &AvailabilityMetrics) -> String {
     let mut body = String::new();

@@ -107,7 +107,7 @@ pub use authority_transfer::{
 };
 pub use availability_http::DistributedHttpRoutes;
 pub use backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED, ReconnectPolicy, Retry};
-pub use beacon::{BeaconError, BeaconSender, DEFAULT_BEACON_INTERVAL};
+pub use beacon::{BeaconError, BeaconSender, DEFAULT_BEACON_INTERVAL, HeartbeatError};
 pub use blob::{BlobRequest, BlobTransport, ByteRange, CapacityLimited, LoopbackBlobSource};
 pub use blob_availability::{BlobAvailability, ReferencedBlob, blob_availability};
 pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};

@@ -446,24 +446,14 @@ impl UpstreamClient {
         Ok(FileHead { len })
     }
 
-    /// Fetches the inclusive byte range `start..=end`.
+    /// Fetches the inclusive byte range `start..=end` within `memory_limit`.
     ///
     /// # Errors
     /// Returns [`RangeError::Unsupported`] or [`RangeError::Invalid`] when upstream cannot satisfy
-    /// the requested range, and [`RangeError::Upstream`] on other request failures.
-    pub async fn fetch_range(&self, url: &str, start: u64, end: u64) -> Result<Bytes, RangeError> {
-        if end < start {
-            return Err(RangeError::Invalid(format!("start {start} is after end {end}")));
-        }
-        let Some(range_len) = (end - start).checked_add(1) else {
-            return Err(RangeError::Invalid("requested range length overflowed".to_owned()));
-        };
-        #[cfg(target_pointer_width = "64")]
-        let expected_len = usize::try_from(range_len).unwrap_or(usize::MAX);
-        #[cfg(not(target_pointer_width = "64"))]
-        let Ok(expected_len) = usize::try_from(range_len) else {
-            return Err(RangeError::Invalid("requested range does not fit memory".to_owned()));
-        };
+    /// the requested range or it exceeds `memory_limit`, and [`RangeError::Upstream`] on other
+    /// request failures.
+    pub async fn fetch_range(&self, url: &str, start: u64, end: u64, memory_limit: usize) -> Result<Bytes, RangeError> {
+        let (range_len, expected_len) = range_lengths(start, end, memory_limit)?;
         let url = Url::parse(url).map_err(UpstreamError::from)?;
         self.guard.check_url(&url).map_err(RangeError::from)?;
         let response = self
@@ -491,7 +481,25 @@ impl UpstreamClient {
             self.disable_ranges();
             return Err(err);
         }
-        let bytes = response.bytes().await.map_err(UpstreamError::from)?;
+        if let Some(content_length) = response.content_length()
+            && content_length != range_len
+        {
+            self.disable_ranges();
+            return Err(RangeError::Invalid(format!(
+                "expected {expected_len} bytes, received Content-Length {content_length}"
+            )));
+        }
+        let mut response = response;
+        let mut bytes = BytesMut::with_capacity(expected_len);
+        while let Some(chunk) = response.chunk().await.map_err(UpstreamError::from)? {
+            if chunk.len() > expected_len - bytes.len() {
+                self.disable_ranges();
+                return Err(RangeError::Invalid(format!(
+                    "response body exceeds the expected {expected_len} bytes"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         if bytes.len() != expected_len {
             self.disable_ranges();
             return Err(RangeError::Invalid(format!(
@@ -500,7 +508,7 @@ impl UpstreamClient {
             )));
         }
         self.range_support.store(RANGE_SUPPORTED, Ordering::Relaxed);
-        Ok(bytes)
+        Ok(bytes.freeze())
     }
 
     /// Removes user info, query, and fragment for display.
@@ -716,6 +724,22 @@ const fn head_status_disables_ranges(status: reqwest::StatusCode) -> bool {
             | reqwest::StatusCode::METHOD_NOT_ALLOWED
             | reqwest::StatusCode::NOT_IMPLEMENTED
     )
+}
+
+pub(crate) fn range_lengths(start: u64, end: u64, memory_limit: usize) -> Result<(u64, usize), RangeError> {
+    if end < start {
+        return Err(RangeError::Invalid(format!("start {start} is after end {end}")));
+    }
+    let Some(range_len) = (end - start).checked_add(1) else {
+        return Err(RangeError::Invalid("requested range length overflowed".to_owned()));
+    };
+    if range_len > u64::try_from(memory_limit).expect("memory limits fit in range lengths") {
+        return Err(RangeError::Invalid(format!(
+            "requested range of {range_len} bytes exceeds the {memory_limit}-byte memory limit"
+        )));
+    }
+    let expected_len = usize::try_from(range_len).expect("range length is within the memory limit");
+    Ok((range_len, expected_len))
 }
 
 fn validate_content_range(headers: &HeaderMap, start: u64, end: u64) -> Result<(), RangeError> {

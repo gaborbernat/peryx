@@ -205,7 +205,9 @@ async fn wheel_metadata_by_range(
         return Ok(RemoteMetadata::Unsupported);
     }
     let tail_start = head.len.saturating_sub(ZIP_TAIL_BYTES);
-    let tail = client.fetch_range(url, tail_start, head.len - 1).await?;
+    let tail = client
+        .fetch_range(url, tail_start, head.len - 1, usize::try_from(ZIP_TAIL_BYTES).unwrap())
+        .await?;
     let Some(directory) = central_directory(&tail) else {
         return Ok(RemoteMetadata::Unsupported);
     };
@@ -213,7 +215,14 @@ async fn wheel_metadata_by_range(
         return Ok(RemoteMetadata::Unsupported);
     }
     let directory_end = directory.offset + directory.len - 1;
-    let directory_bytes = client.fetch_range(url, directory.offset, directory_end).await?;
+    let directory_bytes = client
+        .fetch_range(
+            url,
+            directory.offset,
+            directory_end,
+            usize::try_from(directory.len).unwrap_or(usize::MAX),
+        )
+        .await?;
     let entry = match find_central_directory_entry(&directory_bytes, &metadata_path) {
         DirectoryEntrySearch::Found(entry) => entry,
         DirectoryEntrySearch::Missing => return Ok(RemoteMetadata::Missing),
@@ -229,7 +238,12 @@ async fn wheel_metadata_by_range(
         Bytes::new()
     } else {
         client
-            .fetch_range(url, data_start, data_start + entry.compressed_size - 1)
+            .fetch_range(
+                url,
+                data_start,
+                data_start + entry.compressed_size - 1,
+                usize::try_from(entry.compressed_size).unwrap_or(usize::MAX),
+            )
             .await?
     };
     match entry.compression_method {
@@ -254,7 +268,7 @@ async fn wheel_metadata_by_range(
 
 async fn zip_data_start(client: &ArtifactClient, url: &str, local_header_offset: u64) -> Result<u64, RangeError> {
     let header = client
-        .fetch_range(url, local_header_offset, local_header_offset + 29)
+        .fetch_range(url, local_header_offset, local_header_offset + 29, 30)
         .await?;
     if !header.starts_with(&ZIP_LOCAL_SIGNATURE) {
         return Err(RangeError::Invalid("hosted file header signature mismatch".to_owned()));

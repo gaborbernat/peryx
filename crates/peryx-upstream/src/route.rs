@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 
+use crate::client::range_lengths;
 use crate::{RangeError, UpstreamClient, UpstreamError};
 
 #[derive(Debug, Clone)]
@@ -84,20 +85,22 @@ impl ArtifactClient {
         self.origin.head_file_for_range(url).await
     }
 
-    /// Tries the mirror before the advertised URL when `fallback` is true.
+    /// Tries the mirror before the advertised URL when `fallback` is true and rejects ranges above
+    /// `memory_limit` before selecting either source.
     ///
     /// # Errors
     /// Returns [`RangeError`] if no eligible source provides the requested range.
-    pub async fn fetch_range(&self, url: &str, start: u64, end: u64) -> Result<Bytes, RangeError> {
+    pub async fn fetch_range(&self, url: &str, start: u64, end: u64, memory_limit: usize) -> Result<Bytes, RangeError> {
+        range_lengths(start, end, memory_limit)?;
         if let Some(mirror) = &self.mirror {
             let mirror_url = Self::mirror_url(mirror, url)?;
-            match mirror.fetch_range(mirror_url.as_str(), start, end).await {
+            match mirror.fetch_range(mirror_url.as_str(), start, end, memory_limit).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(err) if !self.fallback => return Err(err),
                 Err(_) => {}
             }
         }
-        self.origin.fetch_range(url, start, end).await
+        self.origin.fetch_range(url, start, end, memory_limit).await
     }
 }
 

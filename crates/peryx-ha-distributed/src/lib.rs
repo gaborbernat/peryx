@@ -124,7 +124,7 @@ pub use blob_reassembly::{BlobPiece, ReassemblyError, reassemble_verified};
 pub use blob_routing::RoutingBlobTransport;
 pub use byte_ack::{ByteAckDecision, decide_byte_ack};
 pub use channel::{BoundedChannel, BufferOutcome, ChannelFull, buffer_batch};
-pub use circuit::{CircuitBreaker, CircuitConfig, DEFAULT_CIRCUIT};
+pub use circuit::{CircuitBreaker, CircuitClock, CircuitConfig, CircuitPermit, DEFAULT_CIRCUIT};
 pub use completeness::{ProducerCoverage, assess};
 pub use completeness_query::{DistributedAnalyticsCompleteness, assess_completeness};
 pub use consensus_runtime::{ConsensusMember, ConsensusPlan, OwnershipGroup};

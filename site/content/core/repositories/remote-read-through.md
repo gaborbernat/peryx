@@ -58,6 +58,7 @@ chunk-bytes = 8388608
 max-fanout = 4
 trip-after = 3
 cooldown-secs = 30
+probe-timeout-secs = 30
 
 [availability.read-through.retry]
 base-ms = 100
@@ -67,4 +68,5 @@ max-attempts = 10
 ```
 
 Fields are optional. The `retry` table sets the reconnect schedule when present. Bounds that require a positive value
-reject zero during configuration loading.
+reject zero during configuration loading. `cooldown-secs` controls the open-state delay. `probe-timeout-secs` bounds the
+single half-open request; expiry or cancellation begins another cooldown.

@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::{
-    BlobRequest, BlobTransport, ByteRange, CapacityLimited, CircuitConfig, DEFAULT_RECONNECT_POLICY, ReconnectPolicy,
-    TransportError,
+    BlobRequest, BlobTransport, ByteRange, CapacityLimited, CircuitConfig, DEFAULT_CIRCUIT, DEFAULT_RECONNECT_POLICY,
+    ReconnectPolicy, TransportError,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -362,7 +362,7 @@ async fn test_retries_a_transient_failure_then_serves() {
     let limits = ReadThroughLimits {
         circuit: CircuitConfig {
             trip_after: 5,
-            cooldown: Duration::from_secs(30),
+            ..DEFAULT_CIRCUIT
         },
         ..DEFAULT_READ_THROUGH_LIMITS
     };
@@ -385,6 +385,7 @@ async fn test_open_circuit_skips_a_source_then_recovers_after_cooldown() {
         circuit: CircuitConfig {
             trip_after: 1,
             cooldown: Duration::from_secs(45),
+            ..DEFAULT_CIRCUIT
         },
         policy: ReconnectPolicy::new(
             Duration::from_millis(1),
@@ -666,7 +667,7 @@ async fn test_streaming_retries_a_transient_chunk_loss_then_serves() {
     let limits = ReadThroughLimits {
         circuit: CircuitConfig {
             trip_after: 5,
-            cooldown: Duration::from_secs(30),
+            ..DEFAULT_CIRCUIT
         },
         ..DEFAULT_READ_THROUGH_LIMITS
     };
@@ -742,7 +743,7 @@ async fn test_streaming_becomes_unavailable_when_the_only_source_trips_open() {
     let limits = ReadThroughLimits {
         circuit: CircuitConfig {
             trip_after: 1,
-            cooldown: Duration::from_secs(30),
+            ..DEFAULT_CIRCUIT
         },
         ..DEFAULT_READ_THROUGH_LIMITS
     };

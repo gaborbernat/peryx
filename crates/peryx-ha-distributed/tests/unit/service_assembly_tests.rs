@@ -1076,10 +1076,8 @@ async fn active_shutdown_cancels_its_runtime() {
 #[tokio::test]
 async fn stalled_shutdown_moves_to_the_process_reaper() {
     let (release, released) = std::sync::mpsc::channel();
-    let (completed, completion) = tokio::sync::oneshot::channel();
     let mut owner = OwnedResource::Owned(move || -> Result<(), std::io::Error> {
         released.recv().unwrap();
-        completed.send(()).unwrap();
         Ok(())
     });
 
@@ -1089,12 +1087,16 @@ async fn stalled_shutdown_moves_to_the_process_reaper() {
         })
         .await
         .unwrap();
+    let reaper_completion = match &mut owner {
+        OwnedResource::Joining(owner) => owner.observe_reaper_completion(),
+        _ => panic!("stalled shutdown must remain owned by its reaper"),
+    };
     drop(owner);
     release.send(()).unwrap();
 
     assert_eq!(failure.0, AvailabilityShutdownStage::Runtime);
     assert_eq!(failure.1.to_string(), "shutdown deadline exceeded");
-    completion.await.unwrap();
+    reaper_completion.await.unwrap();
 }
 
 #[tokio::test]

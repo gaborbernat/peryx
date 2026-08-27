@@ -378,9 +378,23 @@ pub fn reap_process_resource<E>(
 where
     E: std::fmt::Display + Send + 'static,
 {
+    reap_process_resource_observed(name, reap, || {})
+}
+
+fn reap_process_resource_observed<E>(
+    name: &'static str,
+    reap: impl FnOnce() -> Result<(), E> + Send + 'static,
+    completed: impl FnOnce() + Send + 'static,
+) -> std::thread::JoinHandle<()>
+where
+    E: std::fmt::Display + Send + 'static,
+{
     std::thread::Builder::new()
         .name("peryx-resource-reaper".to_owned())
-        .spawn(move || run_reaper_job(name, reap))
+        .spawn(move || {
+            run_reaper_job(name, reap);
+            completed();
+        })
         .expect("spawn process resource reaper")
 }
 
@@ -406,6 +420,7 @@ type ShutdownWorker = (
 struct ShutdownOwner {
     stage: AvailabilityShutdownStage,
     worker: Option<ShutdownWorker>,
+    reaper_completion: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl ShutdownOwner {
@@ -427,7 +442,15 @@ impl ShutdownOwner {
         Self {
             stage,
             worker: Some((result, thread)),
+            reaper_completion: None,
         }
+    }
+
+    #[cfg(test)]
+    fn observe_reaper_completion(&mut self) -> tokio::sync::oneshot::Receiver<()> {
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        self.reaper_completion = Some(completed);
+        completion
     }
 
     async fn wait(&mut self, deadline: Duration) -> Option<(AvailabilityShutdownStage, std::io::Error)> {
@@ -448,13 +471,22 @@ impl ShutdownOwner {
 impl Drop for ShutdownOwner {
     fn drop(&mut self) {
         if let Some((result, thread)) = self.worker.take() {
-            drop(reap_process_resource("availability shutdown", move || {
-                let result = result
-                    .blocking_recv()
-                    .unwrap_or_else(|_| Err(std::io::Error::other("shutdown owner stopped without reporting")));
-                thread.join().expect("shutdown owner catches task panics");
-                result
-            }));
+            let reaper_completion = self.reaper_completion.take();
+            drop(reap_process_resource_observed(
+                "availability shutdown",
+                move || {
+                    let result = result
+                        .blocking_recv()
+                        .unwrap_or_else(|_| Err(std::io::Error::other("shutdown owner stopped without reporting")));
+                    thread.join().expect("shutdown owner catches task panics");
+                    result
+                },
+                move || {
+                    if let Some(completed) = reaper_completion {
+                        let _ = completed.send(());
+                    }
+                },
+            ));
         }
     }
 }

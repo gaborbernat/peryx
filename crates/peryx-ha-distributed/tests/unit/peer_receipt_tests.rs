@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use peryx_storage::blob::Digest;
 
 use crate::dc_ack::Deadline;
@@ -10,6 +11,7 @@ use crate::peer::TransportError;
 use crate::peer_receipt::{LoopbackReceiptSource, PeerReceipt, ReceiptSource, gather_receipts};
 use crate::readiness::DurabilityPolicy;
 use crate::receipt_quorum::ReceiptAck;
+use crate::support::RequestBlocker;
 
 const BUDGET: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(50);
@@ -36,6 +38,22 @@ fn sources(sources: Vec<LoopbackReceiptSource>) -> Vec<Arc<dyn ReceiptSource + S
         .into_iter()
         .map(|source| Arc::new(source) as Arc<dyn ReceiptSource + Send + Sync>)
         .collect()
+}
+
+struct BlockedReceiptSource {
+    node: String,
+    blocker: RequestBlocker,
+}
+
+#[async_trait]
+impl ReceiptSource for BlockedReceiptSource {
+    fn node(&self) -> &str {
+        &self.node
+    }
+
+    async fn fetch_receipt(&self, _digest: &Digest) -> Result<Option<PeerReceipt>, TransportError> {
+        self.blocker.wait().await
+    }
 }
 
 #[test]
@@ -112,6 +130,47 @@ async fn test_gather_reaches_quorum_from_a_peer_receipt() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn test_gather_queries_a_healthy_peer_while_the_first_peer_is_stalled() {
+    let (blocker, started, cancelled) = RequestBlocker::new();
+    let sources: Vec<Arc<dyn ReceiptSource + Send + Sync>> = vec![
+        Arc::new(BlockedReceiptSource {
+            node: "c".to_owned(),
+            blocker,
+        }),
+        Arc::new(LoopbackReceiptSource::holding("b", digest(), 7).available_after(1)),
+    ];
+    let mut ack = local_ack(DurabilityPolicy::Majority, &["a", "b", "c"], "a");
+    let digest = digest();
+    let gather = tokio::spawn(async move {
+        let deadline = gather_receipts(&sources, &digest, &mut ack, BUDGET, POLL).await;
+        (deadline, ack)
+    });
+
+    started.await.unwrap();
+    let (deadline, ack) = gather.await.unwrap();
+
+    assert_eq!((deadline, ack.is_byte_durable()), (Deadline::Live, true));
+    assert_eq!(cancelled.await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_gather_returns_before_a_later_peer_finishes() {
+    let (blocker, _, _) = RequestBlocker::new();
+    let sources: Vec<Arc<dyn ReceiptSource + Send + Sync>> = vec![
+        Arc::new(LoopbackReceiptSource::holding("b", digest(), 7)),
+        Arc::new(BlockedReceiptSource {
+            node: "c".to_owned(),
+            blocker,
+        }),
+    ];
+    let mut ack = local_ack(DurabilityPolicy::Majority, &["a", "b", "c"], "a");
+
+    let deadline = gather_receipts(&sources, &digest(), &mut ack, BUDGET, POLL).await;
+
+    assert_eq!((deadline, ack.is_byte_durable()), (Deadline::Live, true));
+}
+
+#[tokio::test(start_paused = true)]
 async fn test_gather_expires_when_peers_never_deliver() {
     let mut ack = local_ack(DurabilityPolicy::Majority, &["a", "b", "c"], "a");
     let sources = sources(vec![
@@ -127,6 +186,15 @@ async fn test_gather_expires_when_peers_never_deliver() {
         "a short gather is retry-safe, never durable"
     );
     assert!(!ack.is_byte_durable());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_gather_expires_without_an_eligible_peer() {
+    let mut ack = local_ack(DurabilityPolicy::Majority, &["a", "b", "c"], "a");
+
+    let deadline = gather_receipts(&[], &digest(), &mut ack, BUDGET, POLL).await;
+
+    assert_eq!((deadline, ack.is_byte_durable()), (Deadline::Expired, false));
 }
 
 #[tokio::test(start_paused = true)]

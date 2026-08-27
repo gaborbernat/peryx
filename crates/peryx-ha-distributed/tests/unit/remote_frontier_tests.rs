@@ -1,10 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+
 use crate::dc_ack::Deadline;
 use crate::peer::TransportError;
 use crate::remote_durability::{MetadataOperation, RemoteAck, assess_remote_metadata_durability};
 use crate::remote_frontier::{LoopbackRemoteFrontierSource, RemoteFrontierSource, gather_remote_acks};
+use crate::support::RequestBlocker;
 
 const BUDGET: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(50);
@@ -27,6 +30,22 @@ async fn gather(
     let mut acks = Vec::new();
     let deadline = gather_remote_acks(sources, AUTHORITY, operation, &mut acks, BUDGET, POLL).await;
     (deadline, acks)
+}
+
+struct BlockedRemoteFrontierSource {
+    datacenter: String,
+    blocker: RequestBlocker,
+}
+
+#[async_trait]
+impl RemoteFrontierSource for BlockedRemoteFrontierSource {
+    fn datacenter(&self) -> &str {
+        &self.datacenter
+    }
+
+    async fn fetch_frontier(&self, _authority: &str) -> Result<Option<RemoteAck>, TransportError> {
+        self.blocker.wait().await
+    }
 }
 
 #[test]
@@ -61,6 +80,60 @@ async fn test_gather_reaches_durability_from_one_eligible_remote() {
 
     assert_eq!(deadline, Deadline::Live);
     assert!(assess_remote_metadata_durability(&op(3, 100), &acks).is_durable());
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_gather_queries_a_healthy_remote_while_the_first_remote_is_stalled() {
+    let (blocker, started, cancelled) = RequestBlocker::new();
+    let stalled_source = BlockedRemoteFrontierSource {
+        datacenter: "west".to_owned(),
+        blocker,
+    };
+    assert_eq!(stalled_source.datacenter(), "west");
+    let sources: Vec<Arc<dyn RemoteFrontierSource + Send + Sync>> = vec![
+        Arc::new(stalled_source),
+        Arc::new(LoopbackRemoteFrontierSource::reporting("east", 3, 100).available_after(1)),
+    ];
+    let mut acks = Vec::new();
+    let gather = tokio::spawn(async move {
+        let deadline = gather_remote_acks(&sources, AUTHORITY, &op(3, 100), &mut acks, BUDGET, POLL).await;
+        (deadline, acks)
+    });
+
+    started.await.unwrap();
+    let (deadline, acks) = gather.await.unwrap();
+
+    assert_eq!(
+        (
+            deadline,
+            assess_remote_metadata_durability(&op(3, 100), &acks).is_durable()
+        ),
+        (Deadline::Live, true)
+    );
+    assert_eq!(cancelled.await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_gather_returns_before_a_later_remote_finishes() {
+    let (blocker, _, _) = RequestBlocker::new();
+    let sources: Vec<Arc<dyn RemoteFrontierSource + Send + Sync>> = vec![
+        Arc::new(LoopbackRemoteFrontierSource::reporting("east", 3, 100)),
+        Arc::new(BlockedRemoteFrontierSource {
+            datacenter: "west".to_owned(),
+            blocker,
+        }),
+    ];
+    let mut acks = Vec::new();
+
+    let deadline = gather_remote_acks(&sources, AUTHORITY, &op(3, 100), &mut acks, BUDGET, POLL).await;
+
+    assert_eq!(
+        (
+            deadline,
+            assess_remote_metadata_durability(&op(3, 100), &acks).is_durable()
+        ),
+        (Deadline::Live, true)
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -127,5 +200,31 @@ async fn test_gather_keeps_only_a_remotes_latest_report() {
         acks.len(),
         1,
         "the remote holds one acknowledgement, not one per poll round"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_gather_sorts_retained_reports_by_datacenter() {
+    let sources = sources(vec![
+        LoopbackRemoteFrontierSource::reporting("west", 3, 99),
+        LoopbackRemoteFrontierSource::reporting("east", 3, 99),
+    ]);
+
+    let (_, acks) = gather(&sources, &op(3, 100)).await;
+
+    assert_eq!(
+        acks,
+        vec![
+            RemoteAck {
+                datacenter: "east".to_owned(),
+                epoch: 3,
+                applied_frontier: 99,
+            },
+            RemoteAck {
+                datacenter: "west".to_owned(),
+                epoch: 3,
+                applied_frontier: 99,
+            },
+        ]
     );
 }

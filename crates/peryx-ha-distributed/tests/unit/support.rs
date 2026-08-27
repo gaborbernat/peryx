@@ -1,5 +1,8 @@
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
@@ -11,6 +14,63 @@ use peryx_storage::meta::MetaStore;
 use peryx_test_support::EcosystemDriverFixture;
 
 use crate::{DcDurabilityMetrics, DistributedAnalyticsCompleteness, DistributedBlobDurability};
+
+pub struct RequestBlocker {
+    signals: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Sender<()>)>>,
+}
+
+impl RequestBlocker {
+    pub fn new() -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (cancelled, dropped) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                signals: Mutex::new(Some((started, cancelled))),
+            },
+            entered,
+            dropped,
+        )
+    }
+
+    pub fn wait<T>(&self) -> impl Future<Output = T> + Send + use<T> {
+        let (started, cancelled) = self
+            .signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap();
+        let _ = started.send(());
+        PendingRequest {
+            cancelled: Some(cancelled),
+            output: std::marker::PhantomData,
+        }
+    }
+}
+
+struct PendingRequest<T> {
+    cancelled: Option<tokio::sync::oneshot::Sender<()>>,
+    output: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Future for PendingRequest<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for PendingRequest<T> {
+    fn drop(&mut self) {
+        if let Some(signal) = self.cancelled.take() {
+            let _ = signal.send(());
+        }
+    }
+}
 
 pub mod http_contract;
 

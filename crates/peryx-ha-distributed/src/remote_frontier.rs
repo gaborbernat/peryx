@@ -11,6 +11,7 @@ pub use peryx_ha::RemoteFrontierSource;
 use peryx_ha::{RemoteAck, TransportError};
 
 use crate::dc_ack::Deadline;
+use crate::evidence_gather::{Observation, gather};
 use crate::remote_durability::{MetadataOperation, assess_remote_metadata_durability};
 
 pub const DEFAULT_FRONTIER_POLL: Duration = Duration::from_millis(50);
@@ -28,26 +29,32 @@ pub async fn gather_remote_acks(
     poll: Duration,
 ) -> Deadline {
     if assess_remote_metadata_durability(operation, acks).is_durable() {
+        sort_acks(acks);
         return Deadline::Live;
     }
-    let gather = async {
-        loop {
-            for source in sources {
-                if let Ok(Some(ack)) = source.fetch_frontier(authority).await {
-                    acks.retain(|held| held.datacenter != ack.datacenter);
-                    acks.push(ack);
-                }
-            }
+    let deadline = gather(
+        sources.iter().map(AsRef::as_ref).collect(),
+        authority,
+        budget,
+        poll,
+        |source, authority| Box::pin(async move { source.fetch_frontier(authority).await.ok().flatten() }),
+        |ack| {
+            acks.retain(|held| held.datacenter != ack.datacenter);
+            acks.push(ack);
             if assess_remote_metadata_durability(operation, acks).is_durable() {
-                return;
+                Observation::Durable
+            } else {
+                Observation::Pending
             }
-            tokio::time::sleep(poll).await;
-        }
-    };
-    match tokio::time::timeout(budget, gather).await {
-        Ok(()) => Deadline::Live,
-        Err(_) => Deadline::Expired,
-    }
+        },
+    )
+    .await;
+    sort_acks(acks);
+    deadline
+}
+
+fn sort_acks(acks: &mut [RemoteAck]) {
+    acks.sort_by(|left, right| left.datacenter.cmp(&right.datacenter));
 }
 
 #[derive(Debug)]

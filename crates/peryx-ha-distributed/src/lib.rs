@@ -40,6 +40,7 @@ mod drain;
 mod driver;
 mod envelope;
 mod error;
+mod evidence_gather;
 mod failover;
 mod filesystem_ack;
 mod http;

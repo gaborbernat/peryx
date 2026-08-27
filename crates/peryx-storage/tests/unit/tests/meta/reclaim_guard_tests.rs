@@ -1,6 +1,6 @@
 use peryx_ha::{ReclaimGuard, ReclaimGuardArm, ReclaimGuardStore as _};
 
-use crate::meta::MetaError;
+use crate::meta::{DriverBlobReference, DriverMutation, JournalEntry, MetaError};
 
 fn guard(expires_at_unix: i64) -> ReclaimGuard {
     ReclaimGuard { expires_at_unix }
@@ -150,8 +150,20 @@ fn test_replica_apply_bypasses_a_reclaim_guard() {
     store
         .commit_replica_txn(0, |txn| {
             txn.put("mirror/ref", b"v")?;
-            txn.reference_blob("mirror", 4);
-            Ok::<_, MetaError>(((), vec![b"{}".to_vec()]))
+            Ok::<_, MetaError>((
+                (),
+                vec![JournalEntry {
+                    payload: b"{}".to_vec(),
+                    mutations: vec![DriverMutation::Put {
+                        key: "mirror/ref".to_owned(),
+                        value: b"v".to_vec(),
+                    }],
+                    blobs: vec![DriverBlobReference {
+                        sha256: "mirror".to_owned(),
+                        size: 4,
+                    }],
+                }],
+            ))
         })
         .unwrap();
     assert_eq!(

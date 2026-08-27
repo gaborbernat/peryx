@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
 use peryx_storage::blob::Digest;
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{DriverBlobReference, DriverMutation, JournalEntry, MetaStore};
 use serde::{Deserialize, Serialize};
 
 use crate::error::SyncError;
@@ -86,47 +86,70 @@ impl<'store> Replica<'store> {
     pub fn apply_page(&self, page: ChangePage) -> Result<AppliedPage, SyncError> {
         let state = self.state()?;
         let after = state.as_ref().map_or(0, |state| state.serial);
-        let validated = ValidatedPage::new(page, after, self.page_limit.get(), state.as_ref())?;
-        let referenced: Vec<(Digest, u64)> = validated.blobs.values().cloned().collect();
-        if validated.journal.is_empty() {
+        let ValidatedPage {
+            source,
+            through,
+            primary_serial,
+            changes,
+            changed_keys,
+            referenced,
+        } = ValidatedPage::new(page, after, self.page_limit.get(), state.as_ref())?;
+        let referenced = referenced.into_values().collect();
+        if changes.is_empty() {
             return Ok((
                 SyncOutcome {
                     changes: 0,
                     serial: after,
-                    primary_serial: validated.primary_serial,
+                    primary_serial,
                 },
                 Vec::new(),
                 referenced,
             ));
         }
         let next_state = serde_json::to_vec(&ReplicaState {
-            source: validated.source,
-            serial: validated.through,
+            source,
+            serial: through,
         })?;
-        let changes = validated.journal.len();
-        let changed_keys = validated.metadata.keys().cloned().collect();
+        let change_count = changes.len();
         self.meta.commit_replica_txn(after, |txn| {
-            for (key, value) in validated.metadata {
-                match value {
-                    Some(value) => txn.put(&key, &value)?,
-                    None => {
-                        txn.remove(&key)?;
+            let mut journal = Vec::with_capacity(changes.len());
+            for change in changes {
+                let mut mutations = Vec::with_capacity(change.metadata.len());
+                for mutation in change.metadata {
+                    match mutation {
+                        MetadataMutation::Put { key, value } => {
+                            txn.put(&key, &value)?;
+                            mutations.push(DriverMutation::Put { key, value });
+                        }
+                        MetadataMutation::Delete { key } => {
+                            txn.remove(&key)?;
+                            mutations.push(DriverMutation::Delete { key });
+                        }
                     }
                 }
-            }
-            for (digest, size) in validated.blobs.values() {
-                txn.reference_blob(digest.as_str(), *size);
+                journal.push(JournalEntry {
+                    payload: change.event,
+                    mutations,
+                    blobs: change
+                        .blobs
+                        .into_iter()
+                        .map(|(digest, size)| DriverBlobReference {
+                            sha256: digest.as_str().to_owned(),
+                            size,
+                        })
+                        .collect(),
+                });
             }
             txn.put_local(REPLICA_STATE_KEY, &next_state)?;
-            Ok::<_, SyncError>(((), validated.journal))
+            Ok::<_, SyncError>(((), journal))
         })?;
         Ok((
             SyncOutcome {
-                changes,
-                serial: validated.through,
-                primary_serial: validated.primary_serial,
+                changes: change_count,
+                serial: through,
+                primary_serial,
             },
-            changed_keys,
+            changed_keys.into_iter().collect(),
             referenced,
         ))
     }
@@ -136,9 +159,15 @@ struct ValidatedPage {
     source: String,
     through: u64,
     primary_serial: u64,
-    journal: Vec<Vec<u8>>,
-    metadata: BTreeMap<String, Option<Vec<u8>>>,
-    blobs: BTreeMap<String, (Digest, u64)>,
+    changes: Vec<ValidatedChange>,
+    changed_keys: BTreeSet<String>,
+    referenced: BTreeMap<String, (Digest, u64)>,
+}
+
+struct ValidatedChange {
+    event: Vec<u8>,
+    metadata: Vec<MetadataMutation>,
+    blobs: Vec<(Digest, u64)>,
 }
 
 impl ValidatedPage {
@@ -171,9 +200,9 @@ impl ValidatedPage {
             });
         }
         let mut through = after;
-        let mut journal = Vec::with_capacity(page.changes.len());
-        let mut metadata = BTreeMap::new();
-        let mut blobs = BTreeMap::new();
+        let mut changes = Vec::with_capacity(page.changes.len());
+        let mut changed_keys = BTreeSet::new();
+        let mut referenced = BTreeMap::new();
         for change in page.changes {
             if change.serial.checked_sub(1) != Some(through) {
                 return Err(SyncError::SerialGap {
@@ -182,24 +211,17 @@ impl ValidatedPage {
                 });
             }
             through = change.serial;
-            journal.push(change.event);
-            for mutation in change.metadata {
+            for mutation in &change.metadata {
                 if mutation.key().starts_with(REPLICA_KEY_PREFIX) {
                     return Err(SyncError::ReservedMetadataKey(mutation.key().to_owned()));
                 }
-                match mutation {
-                    MetadataMutation::Put { key, value } => {
-                        metadata.insert(key, Some(value));
-                    }
-                    MetadataMutation::Delete { key } => {
-                        metadata.insert(key, None);
-                    }
-                }
+                changed_keys.insert(mutation.key().to_owned());
             }
+            let mut blobs = Vec::with_capacity(change.blobs.len());
             for blob in change.blobs {
                 let digest =
                     Digest::from_hex(&blob.sha256).ok_or_else(|| SyncError::InvalidDigest(blob.sha256.clone()))?;
-                if let Some((_, first)) = blobs.insert(blob.sha256.clone(), (digest, blob.size))
+                if let Some((_, first)) = referenced.insert(blob.sha256.clone(), (digest.clone(), blob.size))
                     && first != blob.size
                 {
                     return Err(SyncError::ConflictingBlobSize {
@@ -208,7 +230,13 @@ impl ValidatedPage {
                         second: blob.size,
                     });
                 }
+                blobs.push((digest, blob.size));
             }
+            changes.push(ValidatedChange {
+                event: change.event,
+                metadata: change.metadata,
+                blobs,
+            });
         }
         if page.current_serial < through {
             return Err(SyncError::PrimaryBehind {
@@ -216,7 +244,7 @@ impl ValidatedPage {
                 page: through,
             });
         }
-        if journal.is_empty() && page.current_serial > after {
+        if changes.is_empty() && page.current_serial > after {
             return Err(SyncError::MissingChanges {
                 after,
                 current: page.current_serial,
@@ -226,9 +254,9 @@ impl ValidatedPage {
             source: page.source,
             through,
             primary_serial: page.current_serial,
-            journal,
-            metadata,
-            blobs,
+            changes,
+            changed_keys,
+            referenced,
         })
     }
 }

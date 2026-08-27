@@ -1,9 +1,22 @@
-use crate::meta::MetaError;
+use crate::meta::{DriverBlobReference, DriverMutation, JournalEntry, MetaError};
 
-fn write_replica(txn: &mut crate::meta::DriverTxn<'_>) -> Result<((), Vec<Vec<u8>>), MetaError> {
+fn write_replica(txn: &mut crate::meta::DriverTxn<'_>) -> Result<((), Vec<JournalEntry>), MetaError> {
     txn.put("alpha\0upload", b"record")?;
     txn.put_local("replication\0state", b"1")?;
-    Ok(((), vec![b"event".to_vec()]))
+    Ok((
+        (),
+        vec![JournalEntry {
+            payload: b"event".to_vec(),
+            mutations: vec![DriverMutation::Put {
+                key: "alpha\0upload".to_owned(),
+                value: b"record".to_vec(),
+            }],
+            blobs: vec![DriverBlobReference {
+                sha256: "digest".to_owned(),
+                size: 6,
+            }],
+        }],
+    ))
 }
 
 #[test]
@@ -26,7 +39,10 @@ fn test_replica_txn_copies_rows_journal_and_serial() {
                 key: "alpha\0upload".to_owned(),
                 value: b"record".to_vec(),
             }],
-            blobs: Vec::new(),
+            blobs: vec![DriverBlobReference {
+                sha256: "digest".to_owned(),
+                size: 6,
+            }],
         }]
     );
 }

@@ -237,6 +237,9 @@ impl MetaStore {
     /// # Errors
     /// Returns a store error when a table cannot be read or a record decoded.
     pub fn list_pending_intents(&self, limit: usize) -> Result<Vec<(String, StagedIntent)>, MetaError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let txn = self.db.begin_read()?;
         let Some(order) = open_optional_table(&txn, INGRESS_INTENT_ORDER)? else {
             return Ok(Vec::new());

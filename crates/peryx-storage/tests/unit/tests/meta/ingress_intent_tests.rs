@@ -1,3 +1,5 @@
+use rstest::rstest;
+
 use crate::meta::{
     BackpressureState, IntentAdmission, IntentLimits, IntentPhase, IntentStageOutcome, IntentStageResult,
     IntentTransition, IntentUsage, MetaStore, StagedIntent,
@@ -382,22 +384,26 @@ fn test_staged_intent_is_none_for_an_unknown_key() {
     assert_eq!(store.count_staged_intents().unwrap(), 0);
 }
 
-#[test]
-fn test_list_pending_intents_returns_only_pending_in_admission_order_bounded() {
+#[rstest]
+#[case::zero(0, &[])]
+#[case::one(1, &["key-c"])]
+#[case::equal(3, &["key-c", "key-a", "key-b"])]
+#[case::above(4, &["key-c", "key-a", "key-b"])]
+fn test_list_pending_intents_honors_limit_in_admission_order(#[case] limit: usize, #[case] expected: &[&str]) {
     let (_dir, store) = store();
     for key in ["key-c", "key-a", "key-d", "key-b"] {
         stage(&store, key, "digest", 1, b"x", 1);
     }
     store.advance_intent("key-d", IntentPhase::Admitted, 2).unwrap();
 
-    let records = store.list_pending_intents(2).unwrap();
-
     assert_eq!(
-        records,
-        vec![
-            ("key-c".to_owned(), pending(0, "digest", 1, b"x", 1)),
-            ("key-a".to_owned(), pending(1, "digest", 1, b"x", 1)),
-        ]
+        store
+            .list_pending_intents(limit)
+            .unwrap()
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>(),
+        expected
     );
 }
 

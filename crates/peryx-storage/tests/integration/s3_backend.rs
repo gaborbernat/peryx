@@ -2258,7 +2258,7 @@ async fn mount_public(server: &MockServer, scenario: PublicScenario) {
         .and(header("Range", "bytes=1-4"))
         .respond_with(
             ResponseTemplate::new(206)
-                .insert_header("Content-Range", "bytes 1-4/7")
+                .insert_header("Content-Range", "Bytes 1-4/7")
                 .set_body_bytes(b"acka"),
         )
         .with_priority(2)

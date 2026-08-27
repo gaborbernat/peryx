@@ -335,8 +335,8 @@ async fn test_cached_file_without_a_range_serves_the_whole_wheel() {
 }
 #[rstest]
 #[case::bounded("bytes=2-5", 2, 5)]
-#[case::open_ended("bytes=6-", 6, 11)]
-#[case::suffix("bytes=-4", 8, 11)]
+#[case::open_ended("BYTES=6-", 6, 11)]
+#[case::suffix("Bytes=-4", 8, 11)]
 #[case::suffix_past_the_start("bytes=-99", 0, 11)]
 #[case::end_past_the_last_byte("bytes=8-99", 8, 11)]
 #[tokio::test]

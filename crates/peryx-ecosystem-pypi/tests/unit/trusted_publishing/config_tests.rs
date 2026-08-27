@@ -1,8 +1,10 @@
-use peryx_driver::AppState;
 use peryx_driver::serving::PluginIndexConfig;
-use peryx_identity::Signer;
+use peryx_driver::state::{AppState, Index, IndexKind};
+use peryx_identity::{IndexAcl, Signer};
+use peryx_policy::Policy;
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
+use rstest::rstest;
 
 use super::*;
 
@@ -146,7 +148,7 @@ fn test_validate_prefixes_deserialization_errors() {
 
 #[test]
 fn test_unconfigured_auth_allocates_no_runtime_service() {
-    let (_dir, mut state) = state();
+    let (_dir, mut state) = state("private");
 
     install_auth(&mut state, &auth_defaults()).unwrap();
 
@@ -156,7 +158,7 @@ fn test_unconfigured_auth_allocates_no_runtime_service() {
 
 #[test]
 fn test_install_requires_the_validated_signing_key() {
-    let (_dir, mut state) = state();
+    let (_dir, mut state) = state("private");
 
     assert_eq!(
         install_auth(&mut state, &publisher()),
@@ -166,7 +168,7 @@ fn test_install_requires_the_validated_signing_key() {
 
 #[test]
 fn test_install_registers_runtime_and_routes() {
-    let (_dir, mut state) = state();
+    let (_dir, mut state) = state("private");
     state.set_token_realm(Signer::new(b"key", "peryx"), 300).unwrap();
 
     install_auth(&mut state, &publisher()).unwrap();
@@ -176,14 +178,42 @@ fn test_install_registers_runtime_and_routes() {
 }
 
 #[test]
-fn test_install_reports_invalid_runtime_configuration() {
-    let (_dir, mut state) = state();
+fn test_install_accepts_a_virtual_write_route() {
+    let (_dir, mut state) = state("private");
     state.set_token_realm(Signer::new(b"key", "peryx"), 300).unwrap();
     let mut values = publisher();
-    values["trusted_publisher"].as_array_mut().unwrap()[0]["repository"] = toml::Value::String("../private".to_owned());
+    values["trusted_publisher"].as_array_mut().unwrap()[0]["repository"] = toml::Value::String("root-pypi".to_owned());
+
+    install_auth(&mut state, &values).unwrap();
+
+    assert!(crate::trusted_publishing_enabled(&state));
+}
+
+#[rstest]
+#[case::unknown("missing")]
+#[case::read_only("read-only")]
+fn test_install_rejects_an_unwritable_repository(#[case] repository: &str) {
+    let (_dir, mut state) = state("private");
+    state.set_token_realm(Signer::new(b"key", "peryx"), 300).unwrap();
+    let mut values = publisher();
+    values["trusted_publisher"].as_array_mut().unwrap()[0]["repository"] = toml::Value::String(repository.to_owned());
 
     assert_eq!(
         install_auth(&mut state, &values),
+        Err(
+            "trusted publisher release: repository must name a writable index with trusted publishing support"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn test_install_reports_invalid_runtime_configuration() {
+    let (_dir, mut state) = state("../private");
+    state.set_token_realm(Signer::new(b"key", "peryx"), 300).unwrap();
+
+    assert_eq!(
+        install_auth(&mut state, &publisher()),
         Err("trusted publishing is misconfigured".to_owned())
     );
 }
@@ -192,13 +222,44 @@ fn install_auth(state: &mut AppState, values: &toml::Table) -> Result<(), String
     install(&mut state.auth_install_context()?, values)
 }
 
-fn state() -> (tempfile::TempDir, AppState) {
+fn state(route: &str) -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::new(
         MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
         BlobStorage::filesystem(dir.path().join("blobs")),
         60,
-        Vec::new(),
+        vec![
+            Index {
+                name: "hosted".to_owned(),
+                route: route.to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Hosted { volatile: false },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "root-pypi".to_owned(),
+                route: "root/pypi".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: Some(0),
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "read-only".to_owned(),
+                route: "read-only".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: None,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+        ],
     );
     (dir, state)
 }

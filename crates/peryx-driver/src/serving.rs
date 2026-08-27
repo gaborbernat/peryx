@@ -422,6 +422,26 @@ impl<'a> AuthInstallContext<'a> {
         self.serving.token_ttl_secs
     }
 
+    #[must_use]
+    pub fn writable_index_route(&self, ecosystem: &Ecosystem, name: &str) -> Option<&str> {
+        self.serving
+            .indexes
+            .iter()
+            .find(|index| {
+                &index.ecosystem == ecosystem
+                    && index.name == name
+                    && matches!(
+                        &index.kind,
+                        crate::state::IndexKind::Hosted { .. }
+                            | crate::state::IndexKind::Virtual {
+                                write_target: Some(_),
+                                ..
+                            }
+                    )
+            })
+            .map(|index| index.route.as_str())
+    }
+
     pub fn register_service<T: Send + Sync + 'static>(&mut self, service: Arc<T>) {
         self.serving.install_plugin_service(service);
     }

@@ -34,14 +34,19 @@ fn home_dc_group() -> Cluster {
     .expect("the ha group starts")
 }
 
-fn mutate(node: &Node, method: reqwest::Method, path: &str) -> (u16, String) {
+fn mutate(node: &Node, method: reqwest::Method, path: &str) -> (u16, Option<String>, String) {
     let response = node
         .request(method, path)
         .basic_auth("__token__", Some(UPLOAD_TOKEN))
         .send()
         .expect("mutation reaches the node");
     let code = response.status().as_u16();
-    (code, response.text().unwrap_or_default())
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    (code, retry_after, response.text().unwrap_or_default())
 }
 
 fn writer_serial(node: &Node) -> Option<u64> {
@@ -159,10 +164,10 @@ fn assert_replica_refuses_mutations(replica: &Node) {
         (reqwest::Method::PUT, "/hosted/veloxdemo/1.0.0/yank"),
         (reqwest::Method::DELETE, "/hosted/veloxdemo/1.0.0/"),
     ] {
-        let (code, body) = mutate(replica, method.clone(), path);
+        let (code, retry_after, body) = mutate(replica, method.clone(), path);
         assert_eq!(
-            (code, body.as_str()),
-            (StatusCode::SERVICE_UNAVAILABLE.as_u16(), READ_ONLY_BODY),
+            (code, retry_after.as_deref(), body.as_str()),
+            (StatusCode::SERVICE_UNAVAILABLE.as_u16(), Some("1"), READ_ONLY_BODY),
             "the replica refuses a {method} {path}",
         );
     }

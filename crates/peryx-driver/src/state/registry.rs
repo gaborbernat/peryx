@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use peryx_core::Ecosystem;
 
@@ -343,6 +344,15 @@ impl AppState {
     /// Returns an error after request-serving code has cloned the serving state.
     pub fn set_read_only(&mut self, read_only: bool) -> Result<(), String> {
         self.serving_mut()?.read_only = read_only;
+        Ok(())
+    }
+
+    /// Set the retry cadence exposed when this process rejects a mutation as read-only.
+    ///
+    /// # Errors
+    /// Returns an error after request-serving code has cloned the serving state.
+    pub fn set_read_only_retry_after(&mut self, retry_after: Option<Duration>) -> Result<(), String> {
+        self.serving_mut()?.read_only_retry_after = retry_after;
         Ok(())
     }
 

@@ -247,10 +247,14 @@ fn claim_writer(dir: &tempfile::TempDir, identity: &str) {
         .unwrap();
 }
 fn availability_replica() -> AvailabilityConfig {
+    availability_replica_with_poll(Duration::from_secs(1))
+}
+
+fn availability_replica_with_poll(poll_interval: Duration) -> AvailabilityConfig {
     AvailabilityConfig::Dc(ReplicationConfig::Replica {
         upstream: "https://writer.example/".to_owned(),
         token: SecretSource::Literal("secret".to_owned()),
-        poll_interval: Duration::from_secs(1),
+        poll_interval,
         page_size: NonZeroUsize::MIN,
     })
 }
@@ -534,6 +538,41 @@ fn test_build_state_replica_does_not_claim_writer_identity() {
     assert_eq!(
         state.serving.meta.writer_identity().unwrap().as_deref(),
         Some("writer-a")
+    );
+}
+
+#[test]
+fn test_configured_replica_reports_its_poll_interval_on_rejected_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    claim_writer(&dir, "writer-a");
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        writer_identity: Some("writer-a".to_owned()),
+        availability: availability_replica_with_poll(Duration::from_secs(7)),
+        ..neutral_config()
+    };
+
+    tokio::task::LocalSet::new().block_on(
+        &tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+        async {
+            let response = build_router(&config)
+                .unwrap()
+                .oneshot(
+                    Request::builder()
+                        .method(axum::http::Method::POST)
+                        .uri("/+repositories")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[header::RETRY_AFTER], "7");
+        },
     );
 }
 

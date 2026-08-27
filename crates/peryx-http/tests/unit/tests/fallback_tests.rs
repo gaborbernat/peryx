@@ -91,6 +91,7 @@ async fn test_unwired_state_serves_503_when_a_driver_is_missing() {
             StatusCode::SERVICE_UNAVAILABLE,
             "{method} {uri} should be 503 without a driver",
         );
+        assert!(!response.headers().contains_key(axum::http::header::RETRY_AFTER));
     }
 }
 
@@ -399,6 +400,31 @@ async fn test_read_only_node_rejects_unclassified_service_posts() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key(axum::http::header::RETRY_AFTER));
+}
+
+#[tokio::test]
+async fn test_replica_retry_interval_rounds_up_to_delta_seconds() {
+    let (_dir, state) = unwired_state_with(vec![test_index("alpha")]);
+    let mut state = std::sync::Arc::into_inner(state).unwrap();
+    state.set_read_only(true).unwrap();
+    state
+        .set_read_only_retry_after(Some(std::time::Duration::from_millis(1501)))
+        .unwrap();
+
+    let response = crate::router(std::sync::Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/+repositories/alpha")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "2");
 }
 
 #[tokio::test]

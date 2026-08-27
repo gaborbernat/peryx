@@ -258,6 +258,13 @@ fn configure_state(
         .set_read_only(read_only)
         .map_err(anyhow::Error::msg)
         .context("configure read-only state")?;
+    state
+        .set_read_only_retry_after(match config.availability.replication() {
+            Some(crate::config::ReplicationConfig::Replica { poll_interval, .. }) => Some(*poll_interval),
+            Some(crate::config::ReplicationConfig::Primary { .. }) | None => None,
+        })
+        .map_err(anyhow::Error::msg)
+        .context("configure read-only retry interval")?;
     plugins.register_activated_capabilities(&mut state.capability_install_context());
     match config.availability {
         crate::config::AvailabilityConfig::None => plugins.install_drivers(

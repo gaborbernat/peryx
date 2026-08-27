@@ -298,6 +298,7 @@ impl AppState {
                 clock,
                 requests: AtomicU64::new(0),
                 read_only: false,
+                read_only_retry_after: None,
                 availability: super::app::AvailabilityState { distributed: None },
                 route_resolver: peryx_index::RouteResolver::new(&indexes),
                 indexes,

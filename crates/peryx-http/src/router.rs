@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Extension;
 use axum::Router;
@@ -145,14 +146,23 @@ async fn reject_replica_mutation(State(state): State<Arc<AppState>>, request: Re
         return next.run(request).await;
     }
     discard_body(request.into_body());
-    (
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        axum::Json(serde_json::json!({
-            "error": "read_only_replica",
-            "message": "this replica does not accept mutations",
-        })),
-    )
-        .into_response()
+    let body = axum::Json(serde_json::json!({
+        "error": "read_only_replica",
+        "message": "this replica does not accept mutations",
+    }));
+    match state.serving.read_only_retry_after() {
+        Some(delay) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, retry_after_secs(delay).to_string())],
+            body,
+        )
+            .into_response(),
+        None => (axum::http::StatusCode::SERVICE_UNAVAILABLE, body).into_response(),
+    }
+}
+
+fn retry_after_secs(delay: Duration) -> u64 {
+    delay.as_secs().saturating_add(u64::from(delay.subsec_nanos() != 0))
 }
 
 fn discard_body(mut body: Body) {

@@ -373,7 +373,8 @@ impl BlobStore {
     /// `session` must be a generated ID containing one safe path component.
     ///
     /// # Errors
-    /// Returns [`super::BlobErrorKind::Io`] if the stage directory or file cannot be created or written.
+    /// Returns [`super::BlobErrorKind::InvalidRange`] if `offset` exceeds the stage length, or
+    /// [`super::BlobErrorKind::Io`] if the stage directory or file cannot be created or written.
     pub fn stage_upload_chunk(&self, session: &str, offset: u64, chunk: &[u8]) -> Result<u64, BlobError> {
         std::fs::create_dir_all(self.upload_dir())?;
         let mut file = std::fs::OpenOptions::new()
@@ -381,6 +382,10 @@ impl BlobStore {
             .write(true)
             .truncate(false)
             .open(self.upload_dir().join(session))?;
+        let bytes = file.metadata()?.len();
+        if offset > bytes {
+            return Err(BlobError::invalid_range(offset, offset, bytes));
+        }
         file.set_len(offset)?;
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(chunk)?;

@@ -397,6 +397,27 @@ fn test_stage_upload_chunk_accumulates_and_reports_length() {
     assert_eq!(store.staged_upload_len("sess-1").unwrap(), Some(11));
 }
 
+#[rstest]
+#[case::empty(b"", 5)]
+#[case::nonempty(b"hello", 8)]
+fn test_stage_upload_chunk_rejects_gaps_without_changing_bytes(#[case] initial: &[u8], #[case] offset: u64) {
+    let (_dir, store) = store();
+    store.stage_upload_chunk("sess-1", 0, initial).unwrap();
+
+    let error = store.stage_upload_chunk("sess-1", offset, b"x").unwrap_err();
+
+    assert_eq!(
+        (error.kind(), error.invalid_range_values()),
+        (
+            crate::blob::BlobErrorKind::InvalidRange,
+            Some((offset, offset, initial.len() as u64))
+        )
+    );
+    let digest = Digest::of(initial);
+    store.finish_upload("sess-1", &digest).unwrap();
+    assert_eq!(store.read(&digest).unwrap(), initial);
+}
+
 #[test]
 fn test_stage_upload_chunk_resumes_idempotently_past_a_lost_offset() {
     let dir = tempfile::tempdir().unwrap();

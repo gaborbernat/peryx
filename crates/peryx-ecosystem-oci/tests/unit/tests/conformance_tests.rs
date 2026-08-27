@@ -321,6 +321,23 @@ async fn test_out_of_order_chunk_on_patch_is_range_not_satisfiable() {
     assert_eq!(headers[header::RANGE], "0-0");
     assert_eq!(headers[header::LOCATION].to_str().unwrap(), location);
     assert!(headers.contains_key("docker-upload-uuid"));
+
+    let (status, headers, _) = send_with(&app, Method::GET, &location, &[("authorization", &auth(TOKEN))]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(headers[header::RANGE], "0-0");
+
+    let digest = oci_digest(b"");
+    let (status, _, _) = send_body(
+        &app,
+        Method::PUT,
+        &format!("{location}?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _, body) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    assert_eq!((status, body.as_ref()), (StatusCode::OK, b"".as_slice()));
 }
 
 #[tokio::test]

@@ -1,9 +1,12 @@
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::{Notify, oneshot};
+use futures_util::poll;
+use tokio::sync::{Notify, oneshot, watch};
 
 use peryx_ha::CommandOutcome;
 
@@ -12,8 +15,6 @@ use super::{
     KeyState, MembershipControl, evict_committed, percentile, plan_voter_roster,
 };
 use peryx_core::Clock;
-use std::collections::{BTreeSet, VecDeque};
-use tokio::sync::watch;
 
 fn receipt(index: u64) -> CommandReceipt {
     CommandReceipt {
@@ -57,6 +58,13 @@ struct GatedControl {
     submissions: Arc<AtomicUsize>,
 }
 
+struct GatedPlane {
+    plane: Arc<ControlPlane>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    submissions: Arc<AtomicUsize>,
+}
+
 #[async_trait::async_trait]
 impl MembershipControl for GatedControl {
     async fn submit(&self, _command: ControlCommand) -> Result<CommandReceipt, ControlError> {
@@ -64,6 +72,25 @@ impl MembershipControl for GatedControl {
         self.entered.notify_one();
         self.release.notified().await;
         Ok(receipt(1))
+    }
+}
+
+fn gated_plane() -> GatedPlane {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let submissions = Arc::new(AtomicUsize::new(0));
+    GatedPlane {
+        plane: Arc::new(ControlPlane::new(
+            Arc::new(GatedControl {
+                entered: entered.clone(),
+                release: release.clone(),
+                submissions: submissions.clone(),
+            }),
+            fixed_unix_clock(),
+        )),
+        entered,
+        release,
+        submissions,
     }
 }
 
@@ -169,32 +196,24 @@ async fn test_each_failure_kind_is_returned_and_audited(#[case] error: ControlEr
 
 #[tokio::test]
 async fn test_concurrent_requests_on_one_key_reach_the_command_once() {
-    let entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let submissions = Arc::new(AtomicUsize::new(0));
-    let control = Arc::new(GatedControl {
-        entered: entered.clone(),
-        release: release.clone(),
-        submissions: submissions.clone(),
-    });
-    let plane = Arc::new(ControlPlane::new(control, fixed_unix_clock()));
+    let gated = gated_plane();
 
     let owner = tokio::spawn({
-        let plane = plane.clone();
+        let plane = gated.plane.clone();
         async move { plane.execute("alice", Some("k1"), transfer()).await }
     });
-    entered.notified().await;
+    gated.entered.notified().await;
 
     let (started, waiter_started) = oneshot::channel();
     let waiter = tokio::spawn({
-        let plane = plane.clone();
+        let plane = gated.plane.clone();
         async move {
             started.send(()).unwrap();
             plane.execute("bob", Some("k1"), transfer()).await
         }
     });
     waiter_started.await.unwrap();
-    release.notify_one();
+    gated.release.notify_one();
 
     assert_eq!(owner.await.unwrap().unwrap(), receipt(1));
     assert_eq!(
@@ -203,10 +222,56 @@ async fn test_concurrent_requests_on_one_key_reach_the_command_once() {
         "the retry replayed the owner's receipt"
     );
     assert_eq!(
-        submissions.load(Ordering::SeqCst),
+        gated.submissions.load(Ordering::SeqCst),
         1,
         "the retry never reached a second submission"
     );
+}
+
+#[tokio::test]
+async fn test_dropping_a_command_releases_its_idempotency_key() {
+    let gated = gated_plane();
+    let owner = tokio::spawn({
+        let plane = gated.plane.clone();
+        async move { plane.execute("alice", Some("k1"), transfer()).await }
+    });
+    gated.entered.notified().await;
+
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    gated.release.notify_one();
+    let retry = gated
+        .plane
+        .execute(
+            "alice",
+            Some("k1"),
+            ControlCommand::AdvanceEpoch {
+                authority: "proj".to_owned(),
+            },
+        )
+        .await;
+
+    assert_eq!(retry, Ok(receipt(1)));
+    assert_eq!(gated.submissions.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_a_waiter_reclaims_an_idempotency_key_after_its_owner_is_dropped() {
+    let gated = gated_plane();
+    let owner = tokio::spawn({
+        let plane = gated.plane.clone();
+        async move { plane.execute("alice", Some("k1"), transfer()).await }
+    });
+    gated.entered.notified().await;
+    let mut retry = Box::pin(gated.plane.execute("bob", Some("k1"), transfer()));
+    assert_eq!(poll!(retry.as_mut()), Poll::Pending);
+
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    gated.release.notify_one();
+
+    assert_eq!(retry.await, Ok(receipt(1)));
+    assert_eq!(gated.submissions.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

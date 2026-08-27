@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::num::NonZeroUsize;
 
 use crate::envelope::{AuthorityEpoch, TraceError};
@@ -138,8 +139,8 @@ fn test_cleanup_is_release_reports_the_verdict() {
     assert!(!cleanup(5, 4, 5).is_release());
 }
 
-use peryx_ha::NewReconcileEntry;
-use peryx_storage::meta::MetaStore;
+use peryx_ha::{NewReconcileEntry, ReconcileEnqueue, ReconcileEntry, ReconcilePage, ReconcileStore};
+use peryx_storage::meta::{MetaError, MetaStore};
 
 use crate::reconcile::{ReconcileDrain, drain_reconcile};
 
@@ -276,4 +277,101 @@ fn test_prune_scans_past_a_page_of_pending_entries() {
         0
     );
     assert_eq!(meta.count_reconcile().unwrap(), 3);
+}
+
+#[test]
+fn test_prune_exact_pages_open_no_trailing_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("meta.redb")).unwrap();
+    for serial in 1..=4 {
+        meta.enqueue_reconcile(&backlog_entry(serial, true, false, false), DRAIN_NOW)
+            .unwrap();
+    }
+    let scans = Cell::new(0);
+    let store = ScanCountingStore {
+        inner: &meta,
+        scans: &scans,
+    };
+
+    assert_eq!(
+        (
+            prune_reconcile(&store, 10, 10, NonZeroUsize::new(2).unwrap()).unwrap(),
+            scans.get(),
+            meta.count_reconcile().unwrap(),
+        ),
+        (0, 2, 4)
+    );
+}
+
+#[test]
+fn test_scan_observer_preserves_the_store_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("meta.redb")).unwrap();
+    let scans = Cell::new(0);
+    let store = ScanCountingStore {
+        inner: &meta,
+        scans: &scans,
+    };
+    let entry = backlog_entry(1, true, false, false);
+
+    assert_eq!(
+        ReconcileStore::enqueue_reconcile(&store, &entry, DRAIN_NOW).unwrap(),
+        ReconcileEnqueue::Enqueued
+    );
+    assert_eq!(ReconcileStore::pending_reconcile(&store, 1).unwrap().len(), 1);
+    assert!(ReconcileStore::settled_reconcile(&store, 1).unwrap().is_empty());
+    assert_eq!(
+        (
+            ReconcileStore::scan_reconcile(&store, None, NonZeroUsize::MIN)
+                .unwrap()
+                .records
+                .len(),
+            scans.get(),
+        ),
+        (1, 1)
+    );
+    let key = entry.key();
+    let pending = ReconcileStore::reconcile_entry(&store, &key).unwrap().unwrap();
+    assert!(ReconcileStore::settle_reconcile(&store, &key, "replayable", DRAIN_NOW).unwrap());
+    assert!(!ReconcileStore::compare_and_remove_reconcile(&store, &key, &pending).unwrap());
+    let settled = ReconcileStore::reconcile_entry(&store, &key).unwrap().unwrap();
+    assert!(ReconcileStore::compare_and_remove_reconcile(&store, &key, &settled).unwrap());
+}
+
+struct ScanCountingStore<'a> {
+    inner: &'a MetaStore,
+    scans: &'a Cell<usize>,
+}
+
+impl ReconcileStore for ScanCountingStore<'_> {
+    type Error = MetaError;
+
+    fn enqueue_reconcile(&self, entry: &NewReconcileEntry<'_>, now: i64) -> Result<ReconcileEnqueue, Self::Error> {
+        self.inner.enqueue_reconcile(entry, now)
+    }
+
+    fn pending_reconcile(&self, limit: usize) -> Result<Vec<(String, ReconcileEntry)>, Self::Error> {
+        self.inner.pending_reconcile(limit)
+    }
+
+    fn settled_reconcile(&self, limit: usize) -> Result<Vec<(String, ReconcileEntry)>, Self::Error> {
+        self.inner.settled_reconcile(limit)
+    }
+
+    fn scan_reconcile(&self, cursor: Option<&str>, limit: NonZeroUsize) -> Result<ReconcilePage, Self::Error> {
+        self.scans.set(self.scans.get() + 1);
+        self.inner.scan_reconcile(cursor, limit)
+    }
+
+    fn settle_reconcile(&self, key: &str, outcome: &str, now: i64) -> Result<bool, Self::Error> {
+        self.inner.settle_reconcile(key, outcome, now)
+    }
+
+    fn compare_and_remove_reconcile(&self, key: &str, expected: &ReconcileEntry) -> Result<bool, Self::Error> {
+        self.inner.compare_and_remove_reconcile(key, expected)
+    }
+
+    fn reconcile_entry(&self, key: &str) -> Result<Option<ReconcileEntry>, Self::Error> {
+        self.inner.reconcile_entry(key)
+    }
 }

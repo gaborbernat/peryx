@@ -101,6 +101,8 @@ pub trait ReconcileStore {
     fn enqueue_reconcile(&self, entry: &NewReconcileEntry<'_>, now: i64) -> Result<ReconcileEnqueue, Self::Error>;
     fn pending_reconcile(&self, limit: usize) -> Result<Vec<(String, ReconcileEntry)>, Self::Error>;
     fn settled_reconcile(&self, limit: usize) -> Result<Vec<(String, ReconcileEntry)>, Self::Error>;
+    /// Returns the last emitted key as a cursor only when another row exists; passing it back starts at the
+    /// following row.
     fn scan_reconcile(&self, cursor: Option<&str>, limit: NonZeroUsize) -> Result<ReconcilePage, Self::Error>;
     fn settle_reconcile(&self, key: &str, outcome: &str, now: i64) -> Result<bool, Self::Error>;
     fn compare_and_remove_reconcile(&self, key: &str, expected: &ReconcileEntry) -> Result<bool, Self::Error>;

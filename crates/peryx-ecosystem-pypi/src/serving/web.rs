@@ -2,10 +2,11 @@
 //! a project page without any knowledge of the Simple API, wheels, or PEP 658.
 
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::Request;
+use axum::extract::{ConnectInfo, Request};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use peryx_core::{
@@ -13,6 +14,8 @@ use peryx_core::{
     UiActionMethod, UiArtifactSource, UiByteAvailability,
 };
 use peryx_driver::access::ReadAccess;
+use peryx_driver::discovery::BaseUrl;
+use peryx_driver::serving::BrowseDriver as _;
 use peryx_driver::{AppState, ServingState};
 use peryx_ha::{ArtifactPlacementStore, ArtifactSource, ByteAvailability};
 use peryx_identity::{Denial, ResourceMatch};
@@ -67,7 +70,18 @@ pub(super) async fn browse_http(state: Arc<AppState>, request: Request) -> Respo
     if let Err(denial) = authorized {
         return denial_response(denial);
     }
-    match browse(state.serving.clone(), position, &raw_query).await {
+    let base = BaseUrl::from_request(
+        request.headers(),
+        request.uri(),
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .is_some_and(|ConnectInfo(address)| state.serving.rate_limits.trusts_proxy(address.ip())),
+    );
+    match super::PypiServing
+        .browse(state.serving.clone(), position, raw_query, base.as_ref())
+        .await
+    {
         Ok(Some(page)) => no_store(Json(page).into_response()),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(message) => (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),

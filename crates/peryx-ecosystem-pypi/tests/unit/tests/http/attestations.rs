@@ -166,6 +166,7 @@ async fn browse_provenance(harness: &Harness, filename: &str) -> peryx_core::Bro
             harness.state.serving.clone(),
             2,
             format!("index=root%2Fpypi&project=peryxpkg&filename={filename}"),
+            None,
         )
         .await
         .unwrap()

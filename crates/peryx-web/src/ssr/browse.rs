@@ -1,8 +1,12 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::{ConnectInfo, OriginalUri};
+use axum::http::HeaderMap;
 use leptos::prelude::*;
 use peryx_core::BrowsePage;
-use peryx_driver::AppState;
+use peryx_driver::discovery::BaseUrl;
+use peryx_driver::{AppState, ServingState};
 
 use super::resolve;
 
@@ -30,5 +34,18 @@ pub async fn browse(raw_query: &str) -> Result<Option<BrowsePage>, String> {
     let Some(browse) = app.driver_set().get_browse(&app.serving.index_at(position).ecosystem) else {
         return Err(format!("index {route:?} does not support browsing"));
     };
-    browse.browse(app.serving.clone(), position, raw_query.to_owned()).await
+    let base = request_base(&app.serving).await;
+    browse
+        .browse(app.serving.clone(), position, raw_query.to_owned(), base.as_ref())
+        .await
+}
+
+async fn request_base(state: &ServingState) -> Option<BaseUrl> {
+    let headers = leptos_axum::extract::<HeaderMap>().await.ok()?;
+    let OriginalUri(uri) = leptos_axum::extract::<OriginalUri>().await.ok()?;
+    let trusted_proxy = leptos_axum::extract::<ConnectInfo<SocketAddr>>()
+        .await
+        .ok()
+        .is_some_and(|ConnectInfo(address)| state.rate_limits.trusts_proxy(address.ip()));
+    BaseUrl::from_request(&headers, &uri, trusted_proxy)
 }

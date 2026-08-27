@@ -28,6 +28,7 @@ async fn project_page_converts_metadata_lifecycle_and_provenance() {
             state.serving.clone(),
             0,
             "index=hosted&project=demo&version=1.0&filename=py3.*whl&filename_match=regex".to_owned(),
+            None,
         )
         .await
         .unwrap()
@@ -105,6 +106,7 @@ async fn project_page_supports_substring_filters() {
             state.serving.clone(),
             0,
             "index=hosted&project=demo&filename=PY3-NONE".to_owned(),
+            None,
         )
         .await
         .unwrap()
@@ -124,6 +126,7 @@ async fn project_page_rejects_invalid_filename_regexes() {
             state.serving.clone(),
             0,
             "index=hosted&project=demo&filename=%5B&filename_match=regex".to_owned(),
+            None,
         )
         .await
         .unwrap_err();

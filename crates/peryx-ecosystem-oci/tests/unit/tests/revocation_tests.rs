@@ -457,7 +457,7 @@ async fn test_proxy_tag_filter_resolves_and_caches_targets() {
         .driver_set()
         .get_browse(&crate::ECOSYSTEM)
         .unwrap()
-        .browse(state.serving.clone(), 0, "project=app".to_owned())
+        .browse(state.serving.clone(), 0, "project=app".to_owned(), None)
         .await
         .unwrap()
         .unwrap();

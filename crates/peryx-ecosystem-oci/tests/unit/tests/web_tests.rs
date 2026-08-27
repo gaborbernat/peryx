@@ -109,7 +109,7 @@ async fn browse(state: &Arc<peryx_driver::AppState>, position: usize, query: imp
         .driver_set()
         .get_browse(&crate::ECOSYSTEM)
         .unwrap()
-        .browse(state.serving.clone(), position, query.into())
+        .browse(state.serving.clone(), position, query.into(), None)
         .await
         .unwrap()
 }
@@ -286,7 +286,12 @@ async fn test_browse_absent_layer_reports_error() {
         .driver_set()
         .get_browse(&crate::ECOSYSTEM)
         .unwrap()
-        .browse(state.serving.clone(), 0, format!("project=app&ref=1.0&layer={absent}"))
+        .browse(
+            state.serving.clone(),
+            0,
+            format!("project=app&ref=1.0&layer={absent}"),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(error.contains("layer contents"), "{error}");
@@ -327,6 +332,7 @@ async fn test_browse_member_of_absent_layer_reports_error() {
             state.serving.clone(),
             0,
             format!("project=app&ref=1.0&layer={absent}&member=app%2Fconfig.toml&offset=0"),
+            None,
         )
         .await
         .unwrap_err();
@@ -371,7 +377,7 @@ async fn test_registered_browse_uses_compiled_library_prefix(
     let browse = tokio::spawn({
         let driver = state.driver_set().get_browse(&crate::ECOSYSTEM).unwrap().clone();
         let serving = state.serving.clone();
-        async move { driver.browse(serving, 0, "project=browse".to_owned()).await }
+        async move { driver.browse(serving, 0, "project=browse".to_owned(), None).await }
     });
     let browse_path = browse_request.await.unwrap();
 
@@ -437,6 +443,7 @@ async fn test_browse_content_of_unreachable_proxy_reports_error(#[case] suffix: 
                 state.serving.clone(),
                 0,
                 format!("project=library%2Fnginx&ref=1.0&layer={digest}{suffix}"),
+                None,
             )
             .await
             .is_err()

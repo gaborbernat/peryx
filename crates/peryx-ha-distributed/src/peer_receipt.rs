@@ -7,7 +7,8 @@ pub use peryx_ha::{PeerReceipt, ReceiptSource};
 use peryx_storage::blob::Digest;
 
 use crate::dc_ack::Deadline;
-use crate::filesystem_ack::FilesystemAck;
+use crate::evidence_gather::{Observation, gather};
+use crate::filesystem_ack::{FilesystemAck, ReceiptOutcome};
 use crate::peer::TransportError;
 use crate::receipt_quorum::ReceiptAck;
 
@@ -38,26 +39,23 @@ pub async fn gather_receipts(
     if ack.is_byte_durable() {
         return Deadline::Live;
     }
-    let gather = async {
-        loop {
-            for source in sources {
-                if ack.holds(source.node()) {
-                    continue;
-                }
-                if let Ok(Some(receipt)) = source.fetch_receipt(digest).await {
-                    ack.record(receipt.into());
-                }
-            }
-            if ack.is_byte_durable() {
-                return;
-            }
-            tokio::time::sleep(poll).await;
-        }
-    };
-    match tokio::time::timeout(budget, gather).await {
-        Ok(()) => Deadline::Live,
-        Err(_) => Deadline::Expired,
-    }
+    gather(
+        sources
+            .iter()
+            .filter(|source| !ack.holds(source.node()))
+            .map(AsRef::as_ref)
+            .collect(),
+        digest,
+        budget,
+        poll,
+        |source, digest| Box::pin(async move { source.fetch_receipt(digest).await.ok().flatten() }),
+        |receipt| match ack.record(receipt.into()) {
+            ReceiptOutcome::Recorded if ack.is_byte_durable() => Observation::Durable,
+            ReceiptOutcome::Recorded => Observation::Complete,
+            ReceiptOutcome::Ignored => Observation::Pending,
+        },
+    )
+    .await
 }
 
 #[derive(Debug)]

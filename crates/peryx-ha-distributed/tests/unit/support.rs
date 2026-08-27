@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::Router;
@@ -11,6 +12,50 @@ use peryx_storage::meta::MetaStore;
 use peryx_test_support::EcosystemDriverFixture;
 
 use crate::{DcDurabilityMetrics, DistributedAnalyticsCompleteness, DistributedBlobDurability};
+
+pub struct RequestBlocker {
+    signals: Mutex<Option<(tokio::sync::oneshot::Sender<()>, tokio::sync::oneshot::Sender<()>)>>,
+}
+
+impl RequestBlocker {
+    pub fn new() -> (
+        Self,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (cancelled, dropped) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                signals: Mutex::new(Some((started, cancelled))),
+            },
+            entered,
+            dropped,
+        )
+    }
+
+    pub async fn wait<T>(&self) -> T {
+        let (started, cancelled) = self
+            .signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap();
+        let _cancelled = DropSignal(Some(cancelled));
+        let _ = started.send(());
+        std::future::pending().await
+    }
+}
+
+struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        if let Some(signal) = self.0.take() {
+            let _ = signal.send(());
+        }
+    }
+}
 
 pub mod http_contract;
 

@@ -140,22 +140,56 @@ impl OperatorJob for TestOperatorJob {
 pub static PRIMARY_REGISTRATION: Registration = Registration {
     ecosystem: PRIMARY,
     driver_ecosystem: PRIMARY,
+    prefixes: &[],
     jobs: true,
 };
 pub static SECONDARY_REGISTRATION: Registration = Registration {
     ecosystem: SECONDARY,
     driver_ecosystem: SECONDARY,
+    prefixes: &[],
     jobs: true,
 };
 pub static MISMATCHED_REGISTRATION: Registration = Registration {
     ecosystem: PRIMARY,
     driver_ecosystem: SECONDARY,
+    prefixes: &[],
     jobs: true,
 };
 pub static NO_JOBS_REGISTRATION: Registration = Registration {
     ecosystem: PRIMARY,
     driver_ecosystem: PRIMARY,
+    prefixes: &[],
     jobs: false,
+};
+pub static PRIMARY_V2_REGISTRATION: Registration = Registration {
+    ecosystem: PRIMARY,
+    driver_ecosystem: PRIMARY,
+    prefixes: &["/v2/"],
+    jobs: true,
+};
+pub static PRIMARY_V2_UPLOADS_REGISTRATION: Registration = Registration {
+    ecosystem: PRIMARY,
+    driver_ecosystem: PRIMARY,
+    prefixes: &["/v2/uploads/"],
+    jobs: true,
+};
+pub static SECONDARY_V2_REGISTRATION: Registration = Registration {
+    ecosystem: SECONDARY,
+    driver_ecosystem: SECONDARY,
+    prefixes: &["/v2/"],
+    jobs: true,
+};
+pub static SECONDARY_V2_UPLOADS_REGISTRATION: Registration = Registration {
+    ecosystem: SECONDARY,
+    driver_ecosystem: SECONDARY,
+    prefixes: &["/v2/uploads/"],
+    jobs: true,
+};
+pub static SECONDARY_V20_REGISTRATION: Registration = Registration {
+    ecosystem: SECONDARY,
+    driver_ecosystem: SECONDARY,
+    prefixes: &["/v20/"],
+    jobs: true,
 };
 static PRIMARY_DEFAULT_INDEXES: [DefaultIndex; 1] = [DefaultIndex {
     name: "default",
@@ -183,6 +217,7 @@ static SNIPPETS: Snippets = Snippets;
 pub struct Registration {
     ecosystem: Ecosystem,
     driver_ecosystem: Ecosystem,
+    prefixes: &'static [&'static str],
     jobs: bool,
 }
 
@@ -199,6 +234,10 @@ impl EcosystemRegistration for Registration {
         }
     }
 
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        self.prefixes
+    }
+
     fn driver(&self) -> ProtocolDriver {
         DRIVER_FACTORY_CALLS.with(|calls| {
             let (primary, secondary) = calls.get();
@@ -210,6 +249,7 @@ impl EcosystemRegistration for Registration {
         });
         ProtocolDriver::Absolute(Arc::new(Driver {
             ecosystem: self.driver_ecosystem.clone(),
+            prefixes: self.prefixes,
         }))
     }
 
@@ -219,6 +259,7 @@ impl EcosystemRegistration for Registration {
                 self.ecosystem.clone(),
                 Arc::new(Driver {
                     ecosystem: self.driver_ecosystem.clone(),
+                    prefixes: self.prefixes,
                 }),
             );
         }
@@ -372,6 +413,7 @@ impl EcosystemSnippet for Snippets {
 
 struct Driver {
     ecosystem: Ecosystem,
+    prefixes: &'static [&'static str],
 }
 
 impl EcosystemDriver for Driver {
@@ -401,7 +443,7 @@ impl JobDriver for Driver {
 #[async_trait::async_trait]
 impl AbsoluteProtocolDriver for Driver {
     fn prefixes(&self) -> &'static [&'static str] {
-        &[]
+        self.prefixes
     }
 
     fn classify_route(&self, _: &str) -> RouteClass {

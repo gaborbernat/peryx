@@ -146,6 +146,10 @@ impl EcosystemRegistration for OciPlugin {
         DEFAULT_INDEXES
     }
 
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        registry::ABSOLUTE_PREFIXES
+    }
+
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new(OciRegistry::default()))
     }

@@ -191,6 +191,10 @@ impl EcosystemRegistration for PypiPlugin {
         DEFAULT_INDEXES
     }
 
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Indexed(Arc::new(PypiServing))
     }

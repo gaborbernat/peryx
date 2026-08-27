@@ -221,6 +221,10 @@ impl EcosystemRegistration for Registration {
         &CORE_DEFAULT_INDEXES
     }
 
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        &["/+fixture"]
+    }
+
     fn driver(&self) -> ProtocolDriver {
         ProtocolDriver::Absolute(Arc::new((*self.driver).clone()))
     }
@@ -241,6 +245,10 @@ impl EcosystemRegistration for PlainRegistration {
 
     fn default_indexes(&self) -> &'static [DefaultIndex] {
         self.default_indexes
+    }
+
+    fn absolute_prefixes(&self) -> &'static [&'static str] {
+        &[]
     }
 
     fn driver(&self) -> ProtocolDriver {

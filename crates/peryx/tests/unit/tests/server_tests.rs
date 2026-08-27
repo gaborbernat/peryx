@@ -289,6 +289,44 @@ fn test_build_router_serves_public_probes(#[case] uri: &str, #[case] expected: &
 }
 
 #[test]
+fn test_shipped_plugins_compose_and_serve_their_protocols() {
+    let plugins = peryx_plugin_registry::PluginRegistry::new(vec![
+        peryx_ecosystem_pypi::registration(),
+        peryx_ecosystem_oci::registration(),
+    ])
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    tokio::task::LocalSet::new().block_on(
+        &tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+        async {
+            let router = build_router_with_plugins(
+                &Config {
+                    data_dir: dir.path().to_path_buf(),
+                    ..Config::with_plugins(&plugins)
+                },
+                &plugins,
+            )
+            .unwrap();
+            let mut responses = Vec::new();
+            for uri in ["/hosted/simple/", "/v2/"] {
+                responses.push(
+                    router
+                        .clone()
+                        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                        .await
+                        .unwrap()
+                        .status(),
+                );
+            }
+            assert_eq!(responses, [StatusCode::OK, StatusCode::OK]);
+        },
+    );
+}
+
+#[test]
 fn test_build_router_installs_distributed_routes() {
     let dir = tempfile::tempdir().unwrap();
     tokio::task::LocalSet::new().block_on(

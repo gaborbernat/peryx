@@ -33,7 +33,9 @@ pub async fn resolve_detail(
     project: &str,
     serve_route: &str,
 ) -> Result<Option<ProjectDetail>, CacheError> {
-    let Some(mut page) = resolve_detail_page_with(state, index, project, serve_route, true).await? else {
+    let Some(mut page) =
+        resolve_detail_page_with(state, index, project, serve_route, ResolutionContext::root(true)).await?
+    else {
         return Ok(None);
     };
     filter_revoked_files(state, &mut page.detail)?;
@@ -47,7 +49,7 @@ pub(super) async fn resolve_detail_optional(
     project: &str,
     serve_route: &str,
 ) -> Result<Option<ProjectDetail>, CacheError> {
-    let mut page = resolve_detail_page_with(state, index, project, serve_route, false).await?;
+    let mut page = resolve_detail_page_with(state, index, project, serve_route, ResolutionContext::root(false)).await?;
     if let Some(page) = &mut page {
         rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     }
@@ -62,7 +64,9 @@ pub async fn resolve_detail_page(
     project: &str,
     serve_route: &str,
 ) -> Result<Option<DetailPage>, CacheError> {
-    let Some(mut page) = resolve_detail_page_with(state, index, project, serve_route, true).await? else {
+    let Some(mut page) =
+        resolve_detail_page_with(state, index, project, serve_route, ResolutionContext::root(true)).await?
+    else {
         return Ok(None);
     };
     page.revoked_files_removed = filter_revoked_files(state, &mut page.detail)?;
@@ -75,8 +79,24 @@ async fn resolve_detail_page_with(
     index: &Index,
     project: &str,
     serve_route: &str,
-    deny_no_fallback_miss: bool,
+    context: ResolutionContext<'_>,
 ) -> Result<Option<DetailPage>, CacheError> {
+    if let Some(start) = context.traversal_path.iter().position(|name| name == &index.name) {
+        return Err(CacheError::VirtualIndexCycle(
+            context.traversal_path[start..]
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(index.name.as_str()))
+                .collect::<Vec<_>>()
+                .join(" -> "),
+        ));
+    }
+    let mut traversal_path = context.traversal_path.to_vec();
+    traversal_path.push(index.name.clone());
+    let context = ResolutionContext {
+        traversal_path: &traversal_path,
+        ..context
+    };
     index.policy.check_resource(PolicyAction::Serve, project)?;
     let page = match &index.kind {
         IndexKind::Cached { client, offline } => {
@@ -98,21 +118,15 @@ async fn resolve_detail_page_with(
                 revoked_files_removed: false,
             })
         }
-        IndexKind::Virtual { layers, write_target } => virtual_detail(
-            state,
-            index,
-            layers,
-            *write_target,
-            project,
-            serve_route,
-            deny_no_fallback_miss,
-        )
-        .await?
-        .map(|detail| DetailPage {
-            detail,
-            last_serial: None,
-            revoked_files_removed: false,
-        }),
+        IndexKind::Virtual { layers, write_target } => {
+            virtual_detail(state, index, layers, *write_target, project, serve_route, context)
+                .await?
+                .map(|detail| DetailPage {
+                    detail,
+                    last_serial: None,
+                    revoked_files_removed: false,
+                })
+        }
     };
     page.map(|mut page| {
         page.detail = index
@@ -133,7 +147,7 @@ async fn virtual_detail(
     upload: Option<usize>,
     project: &str,
     serve_route: &str,
-    deny_no_fallback_miss: bool,
+    context: ResolutionContext<'_>,
 ) -> Result<Option<ProjectDetail>, CacheError> {
     let mode = index.policy.fallback_mode();
     let cached_denial = index.policy.check_resource(PolicyAction::Cached, project).err();
@@ -145,11 +159,9 @@ async fn virtual_detail(
     let resolved = futures_util::future::join_all(ordered.iter().map(|&pos| {
         let layer = state.index_at(pos);
         Box::pin(async move {
-            Ok(
-                resolve_detail_page_with(state, layer, project, serve_route, deny_no_fallback_miss)
-                    .await?
-                    .map(|page| page.detail),
-            )
+            Ok(resolve_detail_page_with(state, layer, project, serve_route, context)
+                .await?
+                .map(|page| page.detail))
         })
     }))
     .await;
@@ -162,6 +174,7 @@ async fn virtual_detail(
             Ok(None) => {}
             Err(err @ CacheError::OfflineMissing(_)) => offline_missing = Some(err),
             Err(err @ CacheError::RateLimited { .. }) => rate_limited = Some(err),
+            Err(err @ CacheError::VirtualIndexCycle(_)) => return Err(err),
             Err(err) => {
                 tracing::warn!(layer = %state.index_at(pos).name, error = ?err, "virtual-index layer unavailable, skipping");
             }
@@ -186,7 +199,7 @@ async fn virtual_detail(
         if let Some(denial) = cached_denial {
             return Err(denial.into());
         }
-        if mode == FallbackMode::NoFallback && deny_no_fallback_miss {
+        if mode == FallbackMode::NoFallback && context.deny_no_fallback_miss {
             return Err(no_fallback_denial(state, index, layers, project).into());
         }
         if let Some(err) = rate_limited {
@@ -231,6 +244,21 @@ async fn virtual_detail(
     };
     apply_project_status(&mut detail);
     Ok(Some(detail))
+}
+
+#[derive(Clone, Copy)]
+struct ResolutionContext<'a> {
+    deny_no_fallback_miss: bool,
+    traversal_path: &'a [String],
+}
+
+impl ResolutionContext<'_> {
+    const fn root(deny_no_fallback_miss: bool) -> Self {
+        Self {
+            deny_no_fallback_miss,
+            traversal_path: &[],
+        }
+    }
 }
 
 fn member_names(state: &ServingState, layers: &[usize], cached: bool) -> String {

@@ -138,6 +138,18 @@ fn test_layers_include_hosted_terminates_on_a_virtual_cycle() {
 }
 
 #[test]
+fn test_layers_include_hosted_allows_a_shared_descendant() {
+    let indexes = vec![
+        index("hosted", "hosted", hosted()),
+        index("left", "left", virtual_layers(&[0])),
+        index("right", "right", virtual_layers(&[0])),
+        index("root", "root", virtual_layers(&[1, 2])),
+    ];
+
+    assert!(layers_include_hosted(&indexes, &[3]));
+}
+
+#[test]
 fn test_reaches_cached_reads_a_direct_member_kind() {
     let indexes = vec![index("alpha", "c", cached()), index("hosted", "h", hosted())];
     assert!(reaches_cached(&indexes, 0));

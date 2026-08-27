@@ -72,8 +72,15 @@ fn hosted(name: &str) -> IndexConfig {
 
 fn virtual_index(layers: &[&str], upload: Option<&str>) -> IndexConfig {
     IndexConfig {
-        name: "team".to_owned(),
         route: "team/dev".to_owned(),
+        ..virtual_index_named("team", layers, upload)
+    }
+}
+
+fn virtual_index_named(name: &str, layers: &[&str], upload: Option<&str>) -> IndexConfig {
+    IndexConfig {
+        name: name.to_owned(),
+        route: name.to_owned(),
         policy: peryx_policy::PolicyConfig::default(),
         ecosystem_policy: toml::Table::new(),
         ecosystem_settings: toml::Table::new(),
@@ -622,6 +629,46 @@ fn test_build_state_rejects_a_virtual_index_naming_an_unknown_layer() {
     .expect("unknown virtual layer fails startup");
 
     assert!(error.to_string().contains("unknown index ghost"), "{error}");
+}
+
+#[rstest]
+#[case::self_cycle(vec![virtual_index_named("a", &["a"], None)], "a -> a")]
+#[case::two_node_cycle(
+    vec![virtual_index_named("a", &["b"], None), virtual_index_named("b", &["a"], None)],
+    "a -> b -> a"
+)]
+fn test_build_state_rejects_a_virtual_index_cycle(#[case] indexes: Vec<IndexConfig>, #[case] cycle: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let error = build_state(&config_with(&dir, indexes))
+        .err()
+        .expect("virtual cycle fails startup");
+
+    assert_eq!(error.to_string(), format!("virtual index composition cycle: {cycle}"));
+}
+
+#[test]
+fn test_check_config_accepts_shared_virtual_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    check_config(&config_with(
+        &dir,
+        vec![
+            hosted("store"),
+            virtual_index_named("left", &["store"], None),
+            virtual_index_named("right", &["store"], None),
+            virtual_index_named("root", &["left", "right"], None),
+        ],
+    ))
+    .unwrap();
+}
+
+#[test]
+fn test_check_config_accepts_the_shipped_static_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    check_config(&Config {
+        data_dir: dir.path().join("data"),
+        ..Config::default()
+    })
+    .unwrap();
 }
 
 #[test]

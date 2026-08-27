@@ -23,6 +23,102 @@ async fn test_overlay_project_missing_everywhere_is_not_found() {
     let (status, ..) = get(&h.state, "/root/pypi/simple/ghost/", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn test_resolve_detail_rejects_a_persisted_virtual_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, "https://example.invalid/simple/", |_client| {
+        vec![
+            runtime_index(
+                "a",
+                IndexKind::Virtual {
+                    layers: vec![1],
+                    write_target: None,
+                },
+            ),
+            runtime_index(
+                "b",
+                IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: None,
+                },
+            ),
+        ]
+    });
+
+    let (status, _, body) = get(&state, "/a/simple/flask/", Some("application/json")).await;
+
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "project detail on index \"a\" for project \"flask\": virtual index composition cycle: a -> b -> a"
+                .to_owned(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_detail_allows_a_shared_virtual_descendant() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, "https://example.invalid/simple/", |_client| {
+        vec![
+            runtime_index("hosted", IndexKind::Hosted { volatile: true }),
+            runtime_index(
+                "left",
+                IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: None,
+                },
+            ),
+            runtime_index(
+                "right",
+                IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: None,
+                },
+            ),
+            runtime_index(
+                "root",
+                IndexKind::Virtual {
+                    layers: vec![1, 2],
+                    write_target: Some(0),
+                },
+            ),
+        ]
+    });
+    put_local_project(&state, "flask", "flask-1.0-py3-none-any.whl", b"wheel", "1.0");
+
+    let detail = cache::resolve_detail(&state.serving, state.serving.index_at(3), "flask", "root")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        (
+            detail.name,
+            detail.versions,
+            detail.files.into_iter().map(|file| file.filename).collect::<Vec<_>>(),
+        ),
+        (
+            "flask".to_owned(),
+            vec!["1.0".to_owned()],
+            vec!["flask-1.0-py3-none-any.whl".to_owned()],
+        )
+    );
+}
+
+fn runtime_index(name: &str, kind: IndexKind) -> Index {
+    Index {
+        name: name.to_owned(),
+        route: name.to_owned(),
+        ecosystem: crate::ECOSYSTEM,
+        kind,
+        policy: Policy::default(),
+        acl: IndexAcl::default(),
+    }
+}
+
 #[tokio::test]
 async fn test_inspect_fetches_an_uncached_file_from_upstream() {
     let h = harness().await;

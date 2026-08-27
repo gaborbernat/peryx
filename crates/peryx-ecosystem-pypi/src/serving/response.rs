@@ -325,9 +325,11 @@ pub fn pypi_reason(reason: &str) -> String {
 
 fn cache_error_status(err: &CacheError, context: &CacheContext<'_>) -> StatusCode {
     match err {
-        CacheError::Meta(_) | CacheError::Blob(_) | CacheError::MissingSha256(_) | CacheError::Quota(_) => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        CacheError::Meta(_)
+        | CacheError::Blob(_)
+        | CacheError::MissingSha256(_)
+        | CacheError::Quota(_)
+        | CacheError::VirtualIndexCycle(_) => StatusCode::INTERNAL_SERVER_ERROR,
         CacheError::FileNotFound | CacheError::ArtifactRevoked | CacheError::NoPromotableFiles { .. } => {
             StatusCode::NOT_FOUND
         }

@@ -5,20 +5,21 @@ use axum::extract::Multipart;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use peryx_driver::not_found;
+use peryx_driver::quota::quota_limit_label;
 use peryx_driver::state::ServingState;
 use peryx_events::metrics::Observation;
 use peryx_ha::{AuthorityEpoch, CommittedBlob};
 use peryx_identity::Action;
 use peryx_index::Index;
-use peryx_policy::{PolicyAction, PolicyDenial};
-use peryx_storage::meta::{IntentPhase, OperationClaim, OperationResult, OperationState};
+use peryx_policy::{Policy, PolicyAction, PolicyDenial};
+use peryx_storage::meta::{IntentPhase, OperationClaim, OperationResult, OperationState, QuotaLimit, QuotaLimits};
 
 use crate::cache::{self, CacheError};
 use crate::policy::{PypiPolicy, REQUIRED_ATTESTATION_AUDIT_RULE};
-use crate::quota::{self, Admission, PendingQuota};
+use crate::quota::{self, Admission, PendingQuota, QuotaRejection};
 use crate::upload::{self, UploadError};
 use crate::webhook::{self, PypiWebhook};
-use crate::{PackageName, ProjectStatus, normalize_name};
+use crate::{PYPI_LEXICON, PackageName, ProjectStatus, normalize_name};
 
 use super::{acknowledge, admission};
 
@@ -371,7 +372,7 @@ fn project_quota_reservation(
     project: &str,
     filename: &str,
 ) -> Result<Option<PendingQuota>, Box<UploadStatusBlock>> {
-    let Some((limit, audit)) = effective_project_quota(index, hosted) else {
+    let Some(quota) = effective_project_quota(index, hosted) else {
         return Ok(None);
     };
     let exists = cache::upload_exists(state, &hosted.name, project, filename);
@@ -392,35 +393,81 @@ fn project_quota_reservation(
         incoming,
         (state.clock)(),
     );
-    let admission = quota::admit_upload(&state.meta, request, limit, audit);
+    let admission = quota::admit_upload(&state.meta, request, quota.limits, quota.max_project_bytes);
     let admission = upload_quota_result(admission, &index.route, project)?;
     match admission {
         Admission::Reserved(reservation) => {
             quota::record_decision(state, hosted, project, false);
             Ok(Some(reservation))
         }
-        Admission::Rejected { total } => {
+        Admission::Rejected(QuotaRejection::ProjectBytes { total }) => {
             quota::record_decision(state, hosted, project, true);
-            Err(Box::new(upload_quota_denial(limit, project, filename, total)))
+            Err(Box::new(upload_quota_denial(
+                quota
+                    .max_project_bytes
+                    .expect("a project-byte rejection has a configured limit"),
+                project,
+                filename,
+                total,
+            )))
+        }
+        Admission::Rejected(QuotaRejection::Limits(violations)) => {
+            quota::record_decision(state, hosted, project, true);
+            Err(Box::new(upload_limits_denial(&violations, project, filename)))
         }
     }
 }
 
-fn effective_project_quota(index: &Index, hosted: &Index) -> Option<(u64, bool)> {
+#[derive(Clone, Copy)]
+struct EffectiveQuota {
+    limits: QuotaLimits,
+    max_project_bytes: Option<u64>,
+}
+
+fn effective_project_quota(index: &Index, hosted: &Index) -> Option<EffectiveQuota> {
     match (
-        index.policy.max_resource_size(),
+        policy_quota(&index.policy),
         (hosted.name != index.name)
-            .then(|| hosted.policy.max_resource_size())
+            .then(|| policy_quota(&hosted.policy))
             .flatten(),
     ) {
-        (Some(index_limit), Some(hosted_limit)) => Some((
-            index_limit.min(hosted_limit),
-            index.policy.quota_audit() && hosted.policy.quota_audit(),
-        )),
-        (Some(limit), None) => Some((limit, index.policy.quota_audit())),
-        (None, Some(limit)) => Some((limit, hosted.policy.quota_audit())),
+        (Some(index), Some(hosted)) => Some(merge_quotas(index, hosted)),
+        (Some(quota), None) | (None, Some(quota)) => Some(quota),
         (None, None) => None,
     }
+}
+
+fn policy_quota(policy: &Policy) -> Option<EffectiveQuota> {
+    (policy.enforces_quota() || policy.has_resource_size_limit()).then(|| EffectiveQuota {
+        limits: QuotaLimits {
+            max_artifact_bytes: policy.max_artifact_size(),
+            max_accounted_bytes: policy.max_accounted_bytes(),
+            max_resources: policy.max_resources(),
+            max_groups_per_resource: policy.max_groups_per_resource(),
+            audit: policy.quota_audit(),
+        },
+        max_project_bytes: policy.max_resource_size(),
+    })
+}
+
+fn merge_quotas(first: EffectiveQuota, second: EffectiveQuota) -> EffectiveQuota {
+    EffectiveQuota {
+        limits: QuotaLimits {
+            max_artifact_bytes: minimum(first.limits.max_artifact_bytes, second.limits.max_artifact_bytes),
+            max_accounted_bytes: minimum(first.limits.max_accounted_bytes, second.limits.max_accounted_bytes),
+            max_resources: minimum(first.limits.max_resources, second.limits.max_resources),
+            max_groups_per_resource: minimum(
+                first.limits.max_groups_per_resource,
+                second.limits.max_groups_per_resource,
+            ),
+            audit: first.limits.audit && second.limits.audit,
+        },
+        max_project_bytes: minimum(first.max_project_bytes, second.max_project_bytes),
+    }
+}
+
+fn minimum(first: Option<u64>, second: Option<u64>) -> Option<u64> {
+    first.into_iter().chain(second).min()
 }
 
 fn upload_policy_response(
@@ -589,6 +636,29 @@ fn upload_quota_denial(limit: u64, project: &str, filename: &str, total: u64) ->
         None,
         "max-project-size",
         "project_size",
+        reason.clone(),
+    );
+    UploadStatusBlock {
+        response: policy_denial_response(&denial),
+        result: "denied",
+        reason,
+    }
+}
+
+fn upload_limits_denial(violations: &[QuotaLimit], project: &str, filename: &str) -> UploadStatusBlock {
+    let labels = violations
+        .iter()
+        .map(|limit| quota_limit_label(&PYPI_LEXICON, *limit))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let reason = format!("{} quota exceeded: {labels}", PYPI_LEXICON.repository);
+    let denial = PolicyDenial::new(
+        PolicyAction::Upload,
+        project,
+        Some(filename),
+        None,
+        "index-quota",
+        "quota",
         reason.clone(),
     );
     UploadStatusBlock {

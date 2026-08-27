@@ -69,6 +69,18 @@ pub fn fixture_zip_sdist_with_metadata(metadata: &[u8]) -> Vec<u8> {
 pub fn fixture_wheel_for(version: &str) -> Vec<u8> {
     fixture_wheel_with_body(version, b"VALUE = 1\n")
 }
+pub fn fixture_wheel_for_project(project: &str, version: &str) -> Vec<u8> {
+    fixture_wheel_for_project_with_body_compression(
+        project,
+        version,
+        b"VALUE = 1\n",
+        Some(
+            format!("Metadata-Version: 2.1\nName: {project}\nVersion: {version}\nRequires-Python: >=3.8\n").as_bytes(),
+        ),
+        &[],
+        zip::CompressionMethod::Deflated,
+    )
+}
 pub fn fixture_wheel_with_body(version: &str, body: &[u8]) -> Vec<u8> {
     fixture_wheel_with_body_compression(version, body, zip::CompressionMethod::Deflated)
 }
@@ -200,13 +212,23 @@ fn fixture_wheel_with_body_and_metadata_compression(
     license_files: &[&str],
     compression: zip::CompressionMethod,
 ) -> Vec<u8> {
+    fixture_wheel_for_project_with_body_compression("peryxpkg", version, body, metadata, license_files, compression)
+}
+fn fixture_wheel_for_project_with_body_compression(
+    project: &str,
+    version: &str,
+    body: &[u8],
+    metadata: Option<&[u8]>,
+    license_files: &[&str],
+    compression: zip::CompressionMethod,
+) -> Vec<u8> {
     let mut buf = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         let options = zip::write::SimpleFileOptions::default().compression_method(compression);
-        let dist_info = format!("peryxpkg-{version}.dist-info");
+        let dist_info = format!("{project}-{version}.dist-info");
         let wheel = b"Wheel-Version: 1.0\nGenerator: peryx-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n";
-        let mut entries = vec![("peryxpkg/__init__.py".to_owned(), body.to_vec())];
+        let mut entries = vec![(format!("{project}/__init__.py"), body.to_vec())];
         if let Some(metadata) = metadata {
             entries.push((format!("{dist_info}/METADATA"), metadata.to_vec()));
         }

@@ -2,7 +2,9 @@ use peryx_core::Role;
 use peryx_driver::ServingState;
 use peryx_events::metrics::{MetricFamily, Observation};
 use peryx_index::Index;
-use peryx_storage::meta::{AccountingClass, MetaStore, NewQuotaReservation, QuotaError, QuotaReservationRecord};
+use peryx_storage::meta::{
+    AccountingClass, MetaStore, NewQuotaReservation, QuotaError, QuotaLimit, QuotaLimits, QuotaReservationRecord,
+};
 
 use crate::PackageName;
 
@@ -85,7 +87,12 @@ fn log_release_error(err: Option<&QuotaError>, id: &dyn std::fmt::Display) {
 /// A metered upload's admission decision.
 pub enum Admission {
     Reserved(PendingQuota),
-    Rejected { total: u64 },
+    Rejected(QuotaRejection),
+}
+
+pub enum QuotaRejection {
+    ProjectBytes { total: u64 },
+    Limits(Vec<QuotaLimit>),
 }
 
 /// Reserve a project's upload bytes without scanning its stored files.
@@ -96,15 +103,16 @@ pub enum Admission {
 pub fn admit_upload(
     meta: &MetaStore,
     request: NewQuotaReservation<'_>,
-    limit: u64,
-    audit: bool,
+    limits: QuotaLimits,
+    max_project_bytes: Option<u64>,
 ) -> Result<Admission, QuotaError> {
-    match meta.reserve_resource_quota(request, limit, audit) {
+    match meta.reserve_resource_quota(request, limits, max_project_bytes) {
         Ok(record) => Ok(Admission::Reserved(PendingQuota {
             meta: meta.clone(),
             record: Some(record),
         })),
-        Err(QuotaError::ResourceExceeded { total }) => Ok(Admission::Rejected { total }),
+        Err(QuotaError::ResourceExceeded { total }) => Ok(Admission::Rejected(QuotaRejection::ProjectBytes { total })),
+        Err(QuotaError::Exceeded { violations }) => Ok(Admission::Rejected(QuotaRejection::Limits(violations))),
         Err(err) => Err(err),
     }
 }

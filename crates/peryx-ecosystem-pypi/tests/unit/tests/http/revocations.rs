@@ -43,6 +43,7 @@ async fn test_revoked_digest_is_removed_from_each_project_representation() {
         h.state.serving.clone(),
         0,
         "index=pypi&project=flask".to_owned(),
+        None,
     )
     .await
     .unwrap()

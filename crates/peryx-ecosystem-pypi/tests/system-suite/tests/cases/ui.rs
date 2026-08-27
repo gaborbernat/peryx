@@ -17,7 +17,7 @@ use rstest::{fixture, rstest};
 use sha2::{Digest as _, Sha256};
 use tower::ServiceExt as _;
 
-use super::{get, get_authorized, seed_administrator};
+use super::{get, get_authorized, get_with_origin, seed_administrator};
 use crate::config::{Config, IndexConfig, IndexKind, SecretSource, TokenConfig};
 use crate::server::{build_router, build_state, router_for};
 
@@ -381,6 +381,36 @@ async fn test_ui_browse_lists_projects_after_upload(ui_router: (tempfile::TempDi
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(r#"class="links-list""#));
     assert!(body.contains(r#"href="/browse?index=hosted&amp;project=veloxdemo""#));
+}
+
+#[tokio::test]
+async fn test_ui_project_command_uses_trusted_request_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = ui_config(&dir, false);
+    config.rate_limit.trusted_proxies = vec!["127.0.0.1/32".parse().unwrap()];
+    let router = build_router(&config).unwrap();
+    upload_fixture(&router).await;
+    let uri = "/browse?index=hosted&project=veloxdemo";
+    let (_, untrusted) = get_with_origin(&router, uri, None).await;
+    let (_, trusted) = get_with_origin(&router, uri, Some("127.0.0.1:443")).await;
+    let (_, json) = get_with_origin(&router, &format!("/+ui{uri}"), Some("127.0.0.1:443")).await;
+    let command = serde_json::from_str::<serde_json::Value>(&json).unwrap()["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    assert_eq!(
+        (
+            untrusted.contains("--index-url http://internal.test:8080/hosted/simple/"),
+            trusted.contains("--index-url https://packages.example/hosted/simple/"),
+            command,
+        ),
+        (
+            true,
+            true,
+            "uv pip install --index-url https://packages.example/hosted/simple/ veloxdemo==1.0.0".to_owned()
+        )
+    );
 }
 
 #[rstest]

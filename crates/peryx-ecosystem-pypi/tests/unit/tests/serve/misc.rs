@@ -632,7 +632,7 @@ async fn browse_project(
     index: &str,
 ) -> Result<Option<peryx_core::BrowsePage>, String> {
     crate::serving::PypiServing
-        .browse(state, position, format!("index={index}&project=flask"))
+        .browse(state, position, format!("index={index}&project=flask"), None)
         .await
 }
 
@@ -648,6 +648,7 @@ async fn browse_artifact(
             state,
             position,
             format!("index={index}&project=flask&sha256={digest}&file={filename}"),
+            None,
         )
         .await
 }

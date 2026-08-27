@@ -305,22 +305,23 @@ test("usage stats page lists indexes and drills into one", async ({
   await expect(page.locator(".breadcrumb")).toContainText("root/pypi");
 });
 
-test("project server render includes the portable install snippet", async ({
+test("project server render includes the request origin", async ({
   page,
 }) => {
   const response = await page.request.get(PROJECT_URL);
+  const origin = new URL(response.url()).origin;
   expect(await response.text()).toContain(
-    "uv pip install --index-url &lt;origin&gt;/root/pypi/simple/ veloxdemo==1.0.0",
+    `uv pip install --index-url ${origin}/root/pypi/simple/ veloxdemo==1.0.0`,
   );
 });
 
-test("project install snippet copies the portable command", async ({
+test("project install snippet copies the rendered command", async ({
   page,
 }) => {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await goto(page, PROJECT_URL);
-  const command =
-    "uv pip install --index-url <origin>/root/pypi/simple/ veloxdemo==1.0.0";
+  const origin = new URL(page.url()).origin;
+  const command = `uv pip install --index-url ${origin}/root/pypi/simple/ veloxdemo==1.0.0`;
   await expect(page.locator(".install code")).toHaveText(command);
   const copied = page.evaluate(
     () =>

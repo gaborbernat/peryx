@@ -287,6 +287,7 @@ async fn test_project_page_flags_a_mirrored_provenance_claim() {
             harness.state.serving.clone(),
             0,
             format!("index=pypi&project=peryxpkg&filename={FILENAME}"),
+            None,
         )
         .await
         .unwrap()

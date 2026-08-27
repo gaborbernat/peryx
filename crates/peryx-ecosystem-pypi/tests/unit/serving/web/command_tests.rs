@@ -38,6 +38,7 @@ async fn project_commands_quote_the_served_display_name() {
                 state.serving.clone(),
                 0,
                 "index=root%2Fpackages&project=demo".to_owned(),
+                None,
             )
             .await
             .unwrap()

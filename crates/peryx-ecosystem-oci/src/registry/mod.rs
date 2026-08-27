@@ -352,6 +352,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> BrowseDriver for OciRegis
         state: Arc<ServingState>,
         position: usize,
         raw_query: String,
+        base: Option<&peryx_driver::discovery::BaseUrl>,
     ) -> Result<Option<peryx_core::BrowsePage>, String> {
         let route = state.index_at(position).route.clone();
         let query = BrowseQuery::parse(&raw_query)?;
@@ -373,7 +374,15 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> BrowseDriver for OciRegis
             return Ok(self
                 .manifest_content(state, position, repository.clone(), reference.clone())
                 .await?
-                .map(|manifest| crate::web::manifest_page(&route, &repository, &reference, manifest)));
+                .map(|manifest| crate::web::manifest_page(&route, &repository, &reference, manifest))
+                .map(|mut page| {
+                    if let Some(command) = &mut page.command
+                        && let Some(base) = base
+                    {
+                        *command = command.replace("<host>", base.host_port());
+                    }
+                    page
+                }));
         };
         let Some(member) = query.member else {
             return Ok(Some(crate::web::members_page(

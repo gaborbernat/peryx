@@ -138,6 +138,7 @@ impl BrowseDriver for Driver {
         _state: Arc<peryx_driver::ServingState>,
         _position: usize,
         _raw_query: String,
+        _base: Option<&peryx_driver::discovery::BaseUrl>,
     ) -> Result<Option<peryx_core::BrowsePage>, String> {
         Err("browse".to_owned())
     }
@@ -279,7 +280,7 @@ async fn driver_set_dispatches_browse_capability() {
     assert_eq!(
         set.get_browse(&ecosystem)
             .unwrap()
-            .browse(state.serving.clone(), 0, String::new())
+            .browse(state.serving.clone(), 0, String::new(), None)
             .await,
         Err("browse".to_owned())
     );

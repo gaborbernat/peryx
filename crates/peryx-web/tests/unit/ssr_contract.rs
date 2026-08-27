@@ -406,7 +406,7 @@ async fn contract_driver_returns_declared_values() {
     );
     let (_directory, app) = state(vec![index]);
     assert_eq!(
-        BrowseDriver::browse(&driver, app.serving.clone(), 0, QUERY.to_owned()).await,
+        BrowseDriver::browse(&driver, app.serving.clone(), 0, QUERY.to_owned(), None).await,
         Ok(expected_page)
     );
 }
@@ -552,6 +552,7 @@ impl BrowseDriver for ContractDriver {
         _state: Arc<ServingState>,
         position: usize,
         raw_query: String,
+        _base: Option<&peryx_driver::discovery::BaseUrl>,
     ) -> Result<Option<BrowsePage>, String> {
         assert_eq!((position, raw_query.as_str()), (0, QUERY));
         Ok(self.browse_response.clone())

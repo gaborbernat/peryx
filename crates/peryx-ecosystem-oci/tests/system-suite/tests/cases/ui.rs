@@ -10,7 +10,7 @@ use peryx_storage::blob::Digest;
 use rstest::{fixture, rstest};
 use tower::ServiceExt as _;
 
-use super::{get, get_authorized, seed_administrator};
+use super::{get, get_authorized, get_with_origin, seed_administrator};
 use crate::config::{Config, IndexConfig, IndexKind, SecretSource, TokenConfig};
 use crate::server::{build_router, build_state, router_for};
 
@@ -209,6 +209,32 @@ async fn test_ui_oci_manifest_shows_config_and_layers() {
     assert!(body.contains(&config), "config blob missing: {body}");
     assert!(body.contains(&layer), "layer blob missing: {body}");
     assert!(body.contains("Layers"), "layer heading missing: {body}");
+}
+
+#[tokio::test]
+async fn test_ui_oci_manifest_command_uses_trusted_request_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = oci_ui_config(&dir);
+    config.rate_limit.trusted_proxies = vec!["127.0.0.1/32".parse().unwrap()];
+    let router = build_router(&config).unwrap();
+    push_oci_image(&router).await;
+    let uri = "/browse?index=images&project=app&ref=1.0";
+    let (_, untrusted) = get_with_origin(&router, uri, None).await;
+    let (_, trusted) = get_with_origin(&router, uri, Some("127.0.0.1:443")).await;
+    let (_, json) = get_with_origin(&router, &format!("/+ui{uri}"), Some("127.0.0.1:443")).await;
+    let command = serde_json::from_str::<serde_json::Value>(&json).unwrap()["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    assert_eq!(
+        (
+            untrusted.contains("docker pull internal.test:8080/images/app:1.0"),
+            trusted.contains("docker pull packages.example/images/app:1.0"),
+            command,
+        ),
+        (true, true, "docker pull packages.example/images/app:1.0".to_owned())
+    );
 }
 
 #[rstest]

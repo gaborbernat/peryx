@@ -875,7 +875,7 @@ async fn test_project_page_reports_an_unreachable_upstream() {
         }]
     });
     let result = crate::serving::PypiServing
-        .browse(state.serving.clone(), 0, "index=pypi&project=flask".to_owned())
+        .browse(state.serving.clone(), 0, "index=pypi&project=flask".to_owned(), None)
         .await;
     assert!(result.is_err(), "{result:?}");
 }

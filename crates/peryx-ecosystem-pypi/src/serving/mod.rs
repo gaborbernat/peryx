@@ -489,8 +489,18 @@ impl BrowseDriver for PypiServing {
         state: Arc<ServingState>,
         position: usize,
         raw_query: String,
+        base: Option<&peryx_driver::discovery::BaseUrl>,
     ) -> Result<Option<peryx_core::BrowsePage>, String> {
-        web::browse(state, position, &raw_query).await
+        web::browse(state, position, &raw_query).await.map(|page| {
+            page.map(|mut page| {
+                if let Some(command) = &mut page.command
+                    && let Some(base) = base
+                {
+                    *command = command.replace("<origin>", &base.join(""));
+                }
+                page
+            })
+        })
     }
 }
 

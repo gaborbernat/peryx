@@ -321,6 +321,7 @@ pub trait BrowseDriver: Send + Sync {
         state: Arc<ServingState>,
         position: usize,
         raw_query: String,
+        base: Option<&crate::discovery::BaseUrl>,
     ) -> Result<Option<BrowsePage>, String>;
 }
 

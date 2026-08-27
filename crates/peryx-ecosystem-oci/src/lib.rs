@@ -361,19 +361,17 @@ async fn browse_resource_response(
 ) -> Result<Response, Response> {
     match request.path {
         "/+ui/browse" => driver
-            .browse(state.serving.clone(), position, request.raw_query.to_owned())
+            .browse(
+                state.serving.clone(),
+                position,
+                request.raw_query.to_owned(),
+                request.base,
+            )
             .await
             .map(|page| {
                 page.map_or_else(
                     || StatusCode::NOT_FOUND.into_response(),
-                    |mut page| {
-                        if let Some(command) = &mut page.command
-                            && let Some(base) = request.base
-                        {
-                            *command = command.replace("<host>", base.host_port());
-                        }
-                        Json(page).into_response()
-                    },
+                    |page| Json(page).into_response(),
                 )
             })
             .map_err(browse_error),

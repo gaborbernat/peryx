@@ -1,4 +1,7 @@
+use std::net::SocketAddr;
+
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -71,12 +74,28 @@ async fn get_authorized(router: &axum::Router, uri: &str, authorization: &str) -
     if !authorization.is_empty() {
         request = request.header(header::AUTHORIZATION, authorization);
     }
-    let _render = render_gate().lock().await;
-    let response = router
-        .clone()
-        .oneshot(request.body(Body::empty()).unwrap())
-        .await
+    send(router, request.body(Body::empty()).unwrap()).await
+}
+
+async fn get_with_origin(router: &axum::Router, uri: &str, peer: Option<&str>) -> (StatusCode, String) {
+    let mut request = Request::builder()
+        .uri(uri)
+        .header(header::HOST, "internal.test:8080")
+        .header("x-forwarded-host", "packages.example")
+        .header("x-forwarded-proto", "https")
+        .body(Body::empty())
         .unwrap();
+    if let Some(peer) = peer {
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+    }
+    send(router, request).await
+}
+
+async fn send(router: &axum::Router, request: Request<Body>) -> (StatusCode, String) {
+    let _render = render_gate().lock().await;
+    let response = router.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())

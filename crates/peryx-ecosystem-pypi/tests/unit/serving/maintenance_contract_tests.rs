@@ -200,7 +200,7 @@ async fn serving_browses_and_inspects_a_hosted_archive() {
 
     let archive_query = format!("index=hosted&project=demo&file={digest}%2F{filename}");
     let archive = serving
-        .browse(state.serving.clone(), 0, archive_query.clone())
+        .browse(state.serving.clone(), 0, archive_query.clone(), None)
         .await
         .unwrap()
         .unwrap();
@@ -231,7 +231,12 @@ async fn serving_browses_and_inspects_a_hosted_archive() {
     );
 
     let member = serving
-        .browse(state.serving.clone(), 0, format!("{archive_query}&member=README.txt"))
+        .browse(
+            state.serving.clone(),
+            0,
+            format!("{archive_query}&member=README.txt"),
+            None,
+        )
         .await
         .unwrap()
         .unwrap();
@@ -260,7 +265,7 @@ async fn serving_browses_and_inspects_a_hosted_archive() {
 
 async fn assert_project_browse(serving: &PypiServing, state: &Arc<ServingState>) {
     let projects = serving
-        .browse(state.clone(), 0, "index=hosted".to_owned())
+        .browse(state.clone(), 0, "index=hosted".to_owned(), None)
         .await
         .unwrap()
         .unwrap();
@@ -279,7 +284,7 @@ async fn assert_project_browse(serving: &PypiServing, state: &Arc<ServingState>)
     );
 
     let project = serving
-        .browse(state.clone(), 0, "index=hosted&project=demo".to_owned())
+        .browse(state.clone(), 0, "index=hosted&project=demo".to_owned(), None)
         .await
         .unwrap()
         .unwrap();
@@ -301,7 +306,7 @@ async fn assert_nested_archive(
 ) {
     let nested_query = format!("{archive_query}&container=inner.zip");
     let nested = serving
-        .browse(state.clone(), 0, nested_query.clone())
+        .browse(state.clone(), 0, nested_query.clone(), None)
         .await
         .unwrap()
         .unwrap();
@@ -349,7 +354,7 @@ async fn assert_nested_archive(
     );
 
     let nested_member = serving
-        .browse(state.clone(), 0, format!("{nested_query}&member=pkg%2Fmodule.py"))
+        .browse(state.clone(), 0, format!("{nested_query}&member=pkg%2Fmodule.py"), None)
         .await
         .unwrap()
         .unwrap();

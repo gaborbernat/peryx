@@ -544,6 +544,7 @@ fn build_indexes_with_providers(
             bail!("duplicate index route {}", index.route);
         }
     }
+    validate_index_composition(configs, &positions)?;
     configs
         .iter()
         .map(|index| {
@@ -575,6 +576,64 @@ fn build_indexes_with_providers(
             })
         })
         .collect()
+}
+
+fn validate_index_composition(configs: &[IndexConfig], positions: &HashMap<&str, usize>) -> anyhow::Result<()> {
+    let mut visits = vec![IndexVisit::New; configs.len()];
+    let mut path = Vec::new();
+    for position in 0..configs.len() {
+        visit_index(position, configs, positions, &mut visits, &mut path)?;
+    }
+    Ok(())
+}
+
+fn visit_index(
+    position: usize,
+    configs: &[IndexConfig],
+    positions: &HashMap<&str, usize>,
+    visits: &mut [IndexVisit],
+    path: &mut Vec<usize>,
+) -> anyhow::Result<()> {
+    match visits[position] {
+        IndexVisit::Complete => return Ok(()),
+        IndexVisit::Active => {
+            let start = path
+                .iter()
+                .position(|&candidate| candidate == position)
+                .expect("an active index is on the traversal path");
+            let cycle = path[start..]
+                .iter()
+                .chain(std::iter::once(&position))
+                .map(|&candidate| configs[candidate].name.as_str())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            bail!("virtual index composition cycle: {cycle}");
+        }
+        IndexVisit::New => {}
+    }
+    visits[position] = IndexVisit::Active;
+    path.push(position);
+    if let ConfigKind::Virtual { layers, .. } = &configs[position].kind {
+        for layer in layers {
+            visit_index(
+                resolve_name(&configs[position].name, layer, positions)?,
+                configs,
+                positions,
+                visits,
+                path,
+            )?;
+        }
+    }
+    path.pop();
+    visits[position] = IndexVisit::Complete;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum IndexVisit {
+    New,
+    Active,
+    Complete,
 }
 
 /// Compile each index's `[index.settings]` table against the ecosystem it serves, keyed by index name.

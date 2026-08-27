@@ -34,7 +34,7 @@ fn prefetch_preserves_valid_selections(#[case] prefetch: &str, #[case] args: &[&
         (
             true,
             "kind\tindex\tproject\tfilename\tdigest\turl\tbytes\tstatus\treason\n\
-             manifest\tmirror\tlibrary/example:latest\tlibrary/example:latest\t\t\t0\tselected\t\n\
+             manifest\tmirror\tlibrary/example\tlatest\t\t\t0\tselected\t\n\
              summary\tmirror\t\timages\t\t\t1\timages\t\n"
                 .to_owned(),
             Vec::new(),

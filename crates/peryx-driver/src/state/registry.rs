@@ -175,6 +175,7 @@ impl AppState {
     pub fn runtime_install_context(&mut self) -> Result<crate::serving::RuntimeInstallContext<'_>, String> {
         let Self {
             serving,
+            drivers,
             protocols,
             absolute_prefixes,
             idle_reclaimers,
@@ -189,6 +190,7 @@ impl AppState {
         Ok(crate::serving::RuntimeInstallContext::new(
             crate::serving::RuntimeInstallDependencies {
                 serving,
+                drivers,
                 protocols,
                 absolute_prefixes,
                 idle_reclaimers,
@@ -210,6 +212,7 @@ impl AppState {
     pub fn distributed_install_context(&mut self) -> Result<crate::serving::DistributedInstallContext<'_>, String> {
         let Self {
             serving,
+            drivers,
             protocols,
             absolute_prefixes,
             idle_reclaimers,
@@ -225,6 +228,7 @@ impl AppState {
         Ok(crate::serving::DistributedInstallContext::new(
             crate::serving::RuntimeInstallContext::new(crate::serving::RuntimeInstallDependencies {
                 serving,
+                drivers,
                 protocols,
                 absolute_prefixes,
                 idle_reclaimers,

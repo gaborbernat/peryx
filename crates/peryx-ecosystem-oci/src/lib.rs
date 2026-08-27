@@ -131,6 +131,7 @@ impl OciInstaller {
         ));
         context.register_service(driver.clone());
         context.register_protocol(ProtocolDriver::Absolute(driver.clone()), Arc::new(OciIndexer));
+        context.register_browse(ECOSYSTEM, driver.clone());
         context.register_idle_reclaimer(ECOSYSTEM, driver.clone());
         context.register_mirror(ECOSYSTEM, driver);
         context.register_lexicon(ECOSYSTEM, &OCI_LEXICON);

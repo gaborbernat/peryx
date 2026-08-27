@@ -883,13 +883,16 @@ secret_env = "PERYX_WEBHOOK_SECRET"
 Use one of `secret` or `secret_env`. Event names come from the selected owner. An empty `events` list subscribes to each
 event that implementation emits.
 
-Peryx stores pending deliveries in the metadata database and sends them outside the request path. Delivery does not
-follow redirects, so a `3xx` response counts as a failed attempt rather than reposting the signed payload to a location
-the target picks. Transient failures retry up to five attempts with capped backoff of 5, 15, 45, and 135 seconds: a
-`5xx` response, `408 Request Timeout`, `429 Too Many Requests`, a redirect, or a transport error. Any other `4xx`
-response cannot succeed on a repeat, so the delivery fails at once rather than spending its remaining attempts. The
-delivery log stores the payload, target name, attempt count, next retry time, response status, and last error. It does
-not store webhook secrets.
+Peryx stores pending deliveries in the metadata database and sends them outside the request path. Transport failures and
+HTTP `5xx` responses retry up to five attempts with capped backoff of 5, 15, 45, then 135 seconds; `408 Request Timeout`
+and `429 Too Many Requests` use the same retry path. Other `4xx` responses fail after one attempt.
+
+Redirects also fail after one attempt. Peryx neither follows nor retries a `3xx` response because sending the signed
+payload to a target-selected location could move it outside the configured origin. A `302` stores
+`webhook target returned redirect 302; redirects are not followed` as its last error.
+
+The delivery log stores the payload, target name, attempt count, next retry time, response status, and last error. It
+does not store webhook secrets.
 
 ## `[log]`
 

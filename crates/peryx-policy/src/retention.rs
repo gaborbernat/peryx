@@ -22,7 +22,7 @@ pub enum RetentionVisibility {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(tag = "selector", rename_all = "kebab-case")]
+#[serde(tag = "selector", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RetentionSelector {
     Age { older_than_seconds: u64 },
     Source { name: String },
@@ -86,7 +86,7 @@ pub struct RetentionCandidate {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetentionConfig {
     pub keep: Vec<RetentionSelector>,
     pub expire: Vec<RetentionSelector>,

@@ -4,23 +4,12 @@ use rstest::{fixture, rstest};
 
 use crate::meta::{
     AccountingClass, MetaStore, NewQuotaReservation, QuotaAllocation, QuotaError, QuotaLimit, QuotaLimits,
-    QuotaReservationState, QuotaResourceUsage, QuotaUsage, QuotaValue,
+    QuotaReservationRecord, QuotaReservationState, QuotaResourceUsage, QuotaUsage, QuotaValue,
 };
 
 use super::store;
 
 type ArtifactByteQuota = (tempfile::TempDir, MetaStore, QuotaLimits);
-
-enum QuotaTransition {
-    Reserved,
-    Committed,
-    Released,
-}
-
-enum ReservationResult {
-    Admitted,
-    Exceeded,
-}
 
 #[fixture]
 fn artifact_byte_quota() -> ArtifactByteQuota {
@@ -238,8 +227,7 @@ fn test_quota_reserve_commit_release_updates_counters() {
 #[test]
 fn test_quota_duplicate_commit_and_release_have_no_effect() {
     let (_dir, meta) = store();
-    let id = meta
-        .reserve_resource_quota(request("resource-a", "group-a", "sha256:first", 7), 7, false)
+    let id = reserve_resource(&meta, request("resource-a", "group-a", "sha256:first", 7), 7)
         .unwrap()
         .id;
 
@@ -312,8 +300,7 @@ fn test_quota_commit_is_atomic_with_driver_metadata() {
 #[test]
 fn test_quota_conditional_commit_releases_a_skipped_write() {
     let (_dir, meta) = store();
-    let id = meta
-        .reserve_resource_quota(request("resource-a", "group-a", "sha256:first", 7), 7, false)
+    let id = reserve_resource(&meta, request("resource-a", "group-a", "sha256:first", 7), 7)
         .unwrap()
         .id;
 
@@ -329,8 +316,7 @@ fn test_quota_conditional_commit_releases_a_skipped_write() {
 #[test]
 fn test_quota_conditional_commit_publishes_an_accepted_write() {
     let (_dir, meta) = store();
-    let id = meta
-        .reserve_resource_quota(request("resource-a", "group-a", "sha256:first", 7), 7, false)
+    let id = reserve_resource(&meta, request("resource-a", "group-a", "sha256:first", 7), 7)
         .unwrap()
         .id;
 
@@ -366,8 +352,7 @@ fn test_quota_conditional_commit_publishes_an_accepted_write() {
 #[test]
 fn test_quota_conditional_skip_rejects_a_committed_reservation() {
     let (_dir, meta) = store();
-    let id = meta
-        .reserve_resource_quota(request("resource-a", "group-a", "sha256:first", 7), 7, false)
+    let id = reserve_resource(&meta, request("resource-a", "group-a", "sha256:first", 7), 7)
         .unwrap()
         .id;
     meta.commit_quota_reservation(id).unwrap();
@@ -400,8 +385,7 @@ fn test_quota_conditional_skip_rejects_a_committed_reservation() {
 #[case::unavailable(false, true)]
 fn test_quota_conditional_commit_returns_its_journal(#[case] commit: bool, #[case] precommitted: bool) {
     let (_dir, meta) = store();
-    let id = meta
-        .reserve_resource_quota(request("resource-a", "group-a", "sha256:first", 7), 7, false)
+    let id = reserve_resource(&meta, request("resource-a", "group-a", "sha256:first", 7), 7)
         .unwrap()
         .id;
     if precommitted {
@@ -728,19 +712,45 @@ fn test_quota_enforcement_rejects_without_writes() {
 }
 
 #[test]
+fn test_quota_resource_reservation_enforces_repository_limits_without_writes() {
+    let (_dir, meta) = store();
+
+    let error = meta
+        .reserve_resource_quota(
+            request("resource-a", "group-a", "sha256:first", 7),
+            QuotaLimits {
+                max_resources: Some(0),
+                max_groups_per_resource: Some(0),
+                ..QuotaLimits::default()
+            },
+            Some(8),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        (
+            matches!(
+                error,
+                QuotaError::Exceeded { violations }
+                    if violations == [QuotaLimit::Resources, QuotaLimit::GroupsPerResource]
+            ),
+            meta.quota_usage("private").unwrap(),
+            meta.quota_resource_usage("private", "resource-a").unwrap(),
+        ),
+        (true, QuotaUsage::default(), QuotaResourceUsage::default())
+    );
+}
+
+#[test]
 fn test_quota_resource_artifact_bytes_reject_only_the_exhausted_resource() {
     let (_dir, meta) = store();
-    let first = meta
-        .reserve_resource_quota(request("resource-a", "group-a", "sha256:first", 7), 10, false)
-        .unwrap();
+    let first = reserve_resource(&meta, request("resource-a", "group-a", "sha256:first", 7), 10).unwrap();
     meta.commit_quota_reservation(first.id).unwrap();
     assert!(matches!(
-        meta.reserve_resource_quota(request("resource-a", "group-b", "sha256:second", 4), 10, false),
+        reserve_resource(&meta, request("resource-a", "group-b", "sha256:second", 4), 10),
         Err(QuotaError::ResourceExceeded { total: 11 })
     ));
-    let other = meta
-        .reserve_resource_quota(request("other", "group-a", "sha256:other", 4), 10, false)
-        .unwrap();
+    let other = reserve_resource(&meta, request("other", "group-a", "sha256:other", 4), 10).unwrap();
 
     assert_eq!(
         (
@@ -767,12 +777,10 @@ fn test_quota_resource_artifact_bytes_reject_only_the_exhausted_resource() {
 #[test]
 fn test_quota_resource_artifact_bytes_reject_after_the_limit_is_lowered() {
     let (_dir, meta) = store();
-    let reservation = meta
-        .reserve_resource_quota(request("resource-a", "group-a", "sha256:first", 7), 8, false)
-        .unwrap();
+    let reservation = reserve_resource(&meta, request("resource-a", "group-a", "sha256:first", 7), 8).unwrap();
     meta.commit_quota_reservation(reservation.id).unwrap();
 
-    let result = meta.reserve_resource_quota(request("resource-a", "group-b", "sha256:second", 1), 6, false);
+    let result = reserve_resource(&meta, request("resource-a", "group-b", "sha256:second", 1), 6);
 
     assert!(matches!(result, Err(QuotaError::ResourceExceeded { total: 8 })));
     assert_eq!(
@@ -796,7 +804,7 @@ fn test_quota_resource_artifact_bytes_require_a_resource_identity() {
     };
 
     assert_eq!(
-        meta.reserve_resource_quota(request, 10, false).unwrap_err().to_string(),
+        reserve_resource(&meta, request, 10).unwrap_err().to_string(),
         "resource must not be empty"
     );
 }
@@ -811,7 +819,7 @@ fn test_quota_parallel_resource_reservations_share_available_bytes() {
         let barrier = Arc::clone(&barrier);
         std::thread::spawn(move || {
             barrier.wait();
-            meta.reserve_resource_quota(request("resource-a", digest, digest, 7), 10, false)
+            reserve_resource(&meta, request("resource-a", digest, digest, 7), 10)
         })
     });
     barrier.wait();
@@ -894,68 +902,30 @@ fn test_quota_parallel_reservations_admit_only_capacity_that_fits() {
 }
 
 #[rstest]
-#[case::reserved_to_limit(
-    QuotaTransition::Reserved,
-    3,
-    ReservationResult::Admitted,
-    QuotaValue { committed: 0, reserved: 10 }
-)]
-#[case::reserved_over_limit(
-    QuotaTransition::Reserved,
-    4,
-    ReservationResult::Exceeded,
-    QuotaValue { committed: 0, reserved: 7 }
-)]
-#[case::committed_over_limit(
-    QuotaTransition::Committed,
-    4,
-    ReservationResult::Exceeded,
-    QuotaValue { committed: 7, reserved: 0 }
-)]
-#[case::released_capacity(
-    QuotaTransition::Released,
-    7,
-    ReservationResult::Admitted,
-    QuotaValue { committed: 0, reserved: 10 }
-)]
-fn test_quota_artifact_bytes_follow_reservation_transitions(
+#[case::under_limit(9, true)]
+#[case::at_limit(10, true)]
+#[case::over_limit(11, false)]
+fn test_quota_artifact_byte_limit_applies_to_each_reservation(
     artifact_byte_quota: ArtifactByteQuota,
-    #[case] transition: QuotaTransition,
-    #[case] second_size: u64,
-    #[case] expected_result: ReservationResult,
-    #[case] expected_usage: QuotaValue,
+    #[case] bytes: u64,
+    #[case] admitted: bool,
 ) {
     let (_dir, meta, limits) = artifact_byte_quota;
-    let first = meta
-        .reserve_quota(request("resource-a", "group-a", "sha256:first", 7), limits)
-        .unwrap();
-    match transition {
-        QuotaTransition::Reserved => {}
-        QuotaTransition::Committed => {
-            meta.commit_quota_reservation(first.id).unwrap();
-        }
-        QuotaTransition::Released => {
-            meta.reserve_quota(request("resource-a", "group-b", "sha256:second", 3), limits)
-                .unwrap();
-            meta.release_quota_reservation(first.id).unwrap();
-        }
-    }
+    let result = meta.reserve_quota(request("resource-a", "group-a", "sha256:first", bytes), limits);
 
-    let result = meta.reserve_quota(
-        request("resource-a", "group-c", "sha256:candidate", second_size),
-        limits,
+    assert_eq!(result.is_ok(), admitted);
+    assert!(
+        admitted
+            || matches!(result, Err(QuotaError::Exceeded { violations }) if violations == [QuotaLimit::ArtifactBytes])
     );
-    match expected_result {
-        ReservationResult::Admitted => assert_eq!(result.unwrap().state, QuotaReservationState::Reserved),
-        ReservationResult::Exceeded => assert!(
-            matches!(result, Err(QuotaError::Exceeded { violations }) if violations == [QuotaLimit::ArtifactBytes])
-        ),
-    }
-    assert_eq!(meta.quota_usage("private").unwrap().artifact_bytes, expected_usage);
+    assert_eq!(
+        meta.quota_usage("private").unwrap().artifact_bytes.reserved,
+        if admitted { bytes } else { 0 }
+    );
 }
 
 #[rstest]
-fn test_quota_parallel_reservations_admit_only_artifact_bytes_that_fit(artifact_byte_quota: ArtifactByteQuota) {
+fn test_quota_parallel_reservations_admit_each_artifact_within_the_limit(artifact_byte_quota: ArtifactByteQuota) {
     let (_dir, meta, limits) = artifact_byte_quota;
     let meta = Arc::new(meta);
     let barrier = Arc::new(Barrier::new(3));
@@ -979,7 +949,7 @@ fn test_quota_parallel_reservations_admit_only_artifact_bytes_that_fit(artifact_
                 .count(),
             meta.quota_usage("private").unwrap().artifact_bytes.reserved,
         ),
-        (1, 1, 7)
+        (2, 0, 14)
     );
 }
 
@@ -1343,4 +1313,12 @@ fn request<'a>(resource: &'a str, group: &'a str, digest: &'a str, bytes: u64) -
         class: AccountingClass::Hosted,
         created_at_unix: 10,
     }
+}
+
+fn reserve_resource(
+    meta: &MetaStore,
+    request: NewQuotaReservation<'_>,
+    max_resource_bytes: u64,
+) -> Result<QuotaReservationRecord, QuotaError> {
+    meta.reserve_resource_quota(request, QuotaLimits::default(), Some(max_resource_bytes))
 }

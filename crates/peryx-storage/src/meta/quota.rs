@@ -198,27 +198,20 @@ impl MetaStore {
         self.reserve_quota_inner(request, limits, None)
     }
 
-    /// Checks the resource limit and reserves logical bytes atomically.
+    /// Checks repository limits and an optional resource-byte limit atomically.
     ///
     /// # Errors
     /// Returns a validation, limit, overflow, decode, or store error without changing counters.
     pub fn reserve_resource_quota(
         &self,
         request: NewQuotaReservation<'_>,
-        max_resource_artifact_bytes: u64,
-        audit: bool,
+        limits: QuotaLimits,
+        max_resource_artifact_bytes: Option<u64>,
     ) -> Result<QuotaReservationRecord, QuotaError> {
         if request.resource.is_none() {
             return Err(QuotaError::Empty { field: "resource" });
         }
-        self.reserve_quota_inner(
-            request,
-            QuotaLimits {
-                audit,
-                ..QuotaLimits::default()
-            },
-            Some(max_resource_artifact_bytes),
-        )
+        self.reserve_quota_inner(request, limits, max_resource_artifact_bytes)
     }
 
     fn reserve_quota_inner(
@@ -599,14 +592,7 @@ fn limit_violations(
     resource_artifact_bytes_exceeded: bool,
 ) -> Vec<QuotaLimit> {
     let mut violations = Vec::new();
-    if limits.max_artifact_bytes.is_some_and(|limit| {
-        rows.usage
-            .artifact_bytes
-            .total()
-            .checked_add(bytes)
-            .is_none_or(|total| total > limit)
-    }) || resource_artifact_bytes_exceeded
-    {
+    if limits.max_artifact_bytes.is_some_and(|limit| bytes > limit) || resource_artifact_bytes_exceeded {
         violations.push(QuotaLimit::ArtifactBytes);
     }
     if adds.accounted_bytes

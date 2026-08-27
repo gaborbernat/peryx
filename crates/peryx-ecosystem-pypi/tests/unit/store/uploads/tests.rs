@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use peryx_storage::meta::{AccountingClass, NewQuotaReservation};
+use peryx_storage::meta::{AccountingClass, NewQuotaReservation, QuotaLimits};
 
 use super::{
     Guard, MetaError, MetaStore, MetadataSibling, PromotedRelease, ProvenanceSibling, PublishError, PublishedFile,
@@ -207,8 +207,8 @@ fn reservation(meta: &MetaStore) -> peryx_storage::meta::QuotaReservationRecord 
             class: AccountingClass::Hosted,
             created_at_unix: 123,
         },
-        8,
-        false,
+        QuotaLimits::default(),
+        Some(8),
     )
     .unwrap()
 }

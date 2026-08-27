@@ -3,12 +3,12 @@ use base64::engine::general_purpose::STANDARD;
 use blake2::Blake2bVar;
 use blake2::digest::{Update as _, VariableOutput as _};
 use peryx_storage::blob::{BlobStorage, Digest};
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{MetaStore, QuotaLimits};
 use serde_json::{Value, json};
 
 use super::support::{hex, staged_form, wheel_metadata};
 use crate::PackageName;
-use crate::quota::{Admission, PendingQuota, admit_upload, quota_reservation};
+use crate::quota::{Admission, PendingQuota, QuotaRejection, admit_upload, quota_reservation};
 use crate::store::PypiStore as _;
 use crate::upload::{StagedUpload, UploadStoreError, commit_publish, prepare, stage_publish, store_prepared_blocking};
 
@@ -40,7 +40,7 @@ fn blake2_256(bytes: &[u8]) -> String {
     hex(&digest)
 }
 
-fn pending_quota(meta: &MetaStore, wheel: &[u8], limit: u64) -> Result<PendingQuota, u64> {
+fn pending_quota(meta: &MetaStore, wheel: &[u8], limit: u64) -> Result<PendingQuota, QuotaRejection> {
     let project = PackageName::new("Flask");
     let digest = Digest::of(wheel);
     let request = quota_reservation(
@@ -51,9 +51,9 @@ fn pending_quota(meta: &MetaStore, wheel: &[u8], limit: u64) -> Result<PendingQu
         wheel.len() as u64,
         1000,
     );
-    match admit_upload(meta, request, limit, false).unwrap() {
+    match admit_upload(meta, request, QuotaLimits::default(), Some(limit)).unwrap() {
         Admission::Reserved(pending) => Ok(pending),
-        Admission::Rejected { total } => Err(total),
+        Admission::Rejected(rejection) => Err(rejection),
     }
 }
 
@@ -63,7 +63,10 @@ fn test_pending_quota_reports_the_projected_total() {
     let dir = tempfile::tempdir().unwrap();
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
 
-    assert_eq!(pending_quota(&meta, &wheel, 0).err(), Some(wheel.len() as u64));
+    assert!(matches!(
+        pending_quota(&meta, &wheel, 0),
+        Err(QuotaRejection::ProjectBytes { total }) if total == wheel.len() as u64
+    ));
 }
 
 #[test]
@@ -176,7 +179,9 @@ async fn test_store_prepared_quota_releases_after_blob_storage_fails() {
     let invalid_root = dir.path().join("not-a-directory");
     std::fs::write(&invalid_root, b"file").unwrap();
     let blobs = BlobStorage::filesystem(invalid_root);
-    let pending = pending_quota(&meta, &wheel, wheel.len() as u64).expect("the upload to reserve its exact capacity");
+    let pending = pending_quota(&meta, &wheel, wheel.len() as u64)
+        .ok()
+        .expect("the upload to reserve its exact capacity");
 
     // Staging failures must release pending quota reservations.
     let result = stage_publish(&blobs, prepared).await;
@@ -199,7 +204,9 @@ async fn test_store_prepared_quota_releases_when_the_existing_record_is_invalid(
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
     let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
     meta.put_upload("hosted", "flask", FILENAME, b"invalid-json").unwrap();
-    let pending = pending_quota(&meta, &wheel, wheel.len() as u64).expect("the upload to reserve its exact capacity");
+    let pending = pending_quota(&meta, &wheel, wheel.len() as u64)
+        .ok()
+        .expect("the upload to reserve its exact capacity");
 
     // Record failures after blob staging must roll back quota reservations.
     let staged = stage_publish(&blobs, prepared).await.unwrap();

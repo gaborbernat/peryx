@@ -1,10 +1,22 @@
 //! Quota status derives headroom from persisted counters and reports unlimited capacity as `null`.
 //! Counters use repository names; responses use caller-facing routes.
 
-use peryx_storage::meta::{QuotaUsage, QuotaValue};
+use peryx_core::Lexicon;
+use peryx_storage::meta::{QuotaLimit, QuotaUsage, QuotaValue};
 use serde::Serialize;
 
 use crate::Index;
+
+/// Return one quota dimension in the vocabulary of its owning ecosystem.
+#[must_use]
+pub fn quota_limit_label(lexicon: &Lexicon, limit: QuotaLimit) -> String {
+    match limit {
+        QuotaLimit::ArtifactBytes => format!("{} size", lexicon.artifact),
+        QuotaLimit::AccountedBytes => format!("{} bytes", lexicon.repository),
+        QuotaLimit::Resources => lexicon.resources.to_owned(),
+        QuotaLimit::GroupsPerResource => lexicon.groups.to_owned(),
+    }
+}
 
 /// One repository's configured limits alongside its committed and reserved counters.
 ///

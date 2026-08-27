@@ -6,6 +6,7 @@
 use axum::response::Response;
 use peryx_core::Role;
 use peryx_driver::ServingState;
+use peryx_driver::quota::quota_limit_label;
 use peryx_events::metrics::{MetricFamily, Observation};
 use peryx_index::Index;
 use peryx_policy::Policy;
@@ -152,12 +153,7 @@ fn record_quota_metric(state: &ServingState, index: &Index, repo: &str, family: 
 fn describe(violations: &[QuotaLimit]) -> String {
     violations
         .iter()
-        .map(|limit| match limit {
-            QuotaLimit::ArtifactBytes => format!("{} size", OCI_LEXICON.artifact),
-            QuotaLimit::AccountedBytes => format!("{} bytes", OCI_LEXICON.repository),
-            QuotaLimit::Resources => OCI_LEXICON.resources.to_owned(),
-            QuotaLimit::GroupsPerResource => OCI_LEXICON.groups.to_owned(),
-        })
+        .map(|limit| quota_limit_label(&OCI_LEXICON, *limit))
         .collect::<Vec<_>>()
         .join(", ")
 }

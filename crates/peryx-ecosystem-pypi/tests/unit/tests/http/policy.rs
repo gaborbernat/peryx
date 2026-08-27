@@ -285,6 +285,146 @@ async fn test_policy_quota_disabled_upload_does_not_create_accounting() {
     );
 }
 
+#[rstest]
+#[case::projects(Some(1), None, ("alpha", "1.0"), ("bravo", "1.0"), "projects", 0)]
+#[case::versions(None, Some(1), ("alpha", "1.0"), ("alpha", "2.0"), "versions", 1)]
+#[tokio::test]
+async fn test_policy_quota_rejects_count_limit(
+    #[case] max_projects: Option<u64>,
+    #[case] max_versions: Option<u64>,
+    #[case] first: (&str, &str),
+    #[case] rejected: (&str, &str),
+    #[case] label: &str,
+    #[case] rejected_project_groups: u64,
+) {
+    let quota_policy = policy(move |_neutral, pypi| {
+        pypi.max_projects = max_projects;
+        pypi.max_versions_per_project = max_versions;
+    });
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+
+    assert_eq!(
+        upload_project_version(&h.state, first.0, first.1).await.0,
+        StatusCode::OK
+    );
+    let (status, body) = upload_project_version(&h.state, rejected.0, rejected.1).await;
+
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (
+            status,
+            &denial["rule"],
+            &denial["reason"],
+            h.state.serving.meta.quota_usage("hosted").unwrap().resources.committed,
+            h.state
+                .serving
+                .meta
+                .quota_resource_usage("hosted", rejected.0)
+                .unwrap()
+                .groups
+                .committed,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            &serde_json::json!("index-quota"),
+            &serde_json::json!(format!("index quota exceeded: {label}")),
+            1,
+            rejected_project_groups,
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_rejects_index_bytes() {
+    let limit = fixture_wheel_for_project("alpha", "1.0").len() as u64 - 1;
+    let quota_policy = policy(move |neutral, _pypi| neutral.max_accounted_bytes = Some(limit));
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+
+    let (status, body) = upload_project_version(&h.state, "alpha", "1.0").await;
+
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (
+            status,
+            &denial["rule"],
+            &denial["reason"],
+            h.state.serving.meta.quota_usage("hosted").unwrap().accounted_bytes,
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            &serde_json::json!("index-quota"),
+            &serde_json::json!("index quota exceeded: index bytes"),
+            peryx_storage::meta::QuotaValue::default(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_policy_quota_applies_file_size_per_upload_with_count_limits() {
+    let first = fixture_wheel_for_project("alpha", "1.0");
+    let second = fixture_wheel_for_project("alpha", "2.0");
+    let limit = first.len().max(second.len()) as u64;
+    let quota_policy = policy(move |_neutral, pypi| {
+        pypi.max_file_size_bytes = Some(limit);
+        pypi.max_projects = Some(1);
+    });
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+
+    assert_eq!(upload_project_version(&h.state, "alpha", "1.0").await.0, StatusCode::OK);
+    assert_eq!(upload_project_version(&h.state, "alpha", "2.0").await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_policy_quota_enforces_project_bytes_and_count_together() {
+    let first = fixture_wheel_for_project("alpha", "1.0");
+    let resource_limit = first.len().max(fixture_wheel_for_project("bravo", "1.0").len()) as u64;
+    let quota_policy = policy(move |_neutral, pypi| {
+        pypi.max_project_size_bytes = Some(resource_limit);
+        pypi.max_projects = Some(1);
+    });
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+
+    assert_eq!(upload_project_version(&h.state, "alpha", "1.0").await.0, StatusCode::OK);
+    let (status, body) = upload_project_version(&h.state, "alpha", "2.0").await;
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (status, &denial["rule"]),
+        (StatusCode::FORBIDDEN, &serde_json::json!("max-project-size"))
+    );
+    let (status, body) = upload_project_version(&h.state, "bravo", "1.0").await;
+
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (status, &denial["rule"]),
+        (StatusCode::FORBIDDEN, &serde_json::json!("index-quota"))
+    );
+}
+
+#[rstest]
+#[case::projects(Some(0), None, committed_projects)]
+#[case::versions(None, Some(0), committed_versions)]
+#[tokio::test]
+async fn test_policy_quota_audit_counts_count_limit(
+    #[case] max_projects: Option<u64>,
+    #[case] max_versions: Option<u64>,
+    #[case] committed: fn(&MetaStore) -> u64,
+) {
+    let quota_policy = policy(move |neutral, pypi| {
+        neutral.quota_audit = true;
+        pypi.max_projects = max_projects;
+        pypi.max_versions_per_project = max_versions;
+    });
+    let h = harness_with_policies(true, true, Policy::default(), quota_policy, Policy::default()).await;
+
+    assert_eq!(
+        (
+            upload_project_version(&h.state, "alpha", "1.0").await.0,
+            committed(&h.state.serving.meta),
+        ),
+        (StatusCode::OK, 1)
+    );
+}
+
 #[tokio::test]
 async fn test_policy_quota_serializes_parallel_uploads_near_the_limit() {
     let first = fixture_wheel_for("1.0");
@@ -427,4 +567,25 @@ async fn test_policy_quota_records_admitted_and_rejected_metrics() {
         "quota metrics settled on an unexpected state: {:?}",
         counters.get("hosted")
     );
+}
+
+async fn upload_project_version(state: &Arc<AppState>, project: &str, version: &str) -> (StatusCode, String) {
+    let wheel = fixture_wheel_for_project(project, version);
+    let fields = [
+        (":action", "file_upload"),
+        ("name", project),
+        ("version", version),
+        ("filetype", "bdist_wheel"),
+    ];
+    let filename = format!("{project}-{version}-py3-none-any.whl");
+    let (content_type, body) = multipart_body(&fields, Some((&filename, &wheel)));
+    post_upload_response(state, "/root/pypi/", Some(&upload_auth()), &content_type, body).await
+}
+
+fn committed_projects(meta: &MetaStore) -> u64 {
+    meta.quota_usage("hosted").unwrap().resources.committed
+}
+
+fn committed_versions(meta: &MetaStore) -> u64 {
+    meta.quota_resource_usage("hosted", "alpha").unwrap().groups.committed
 }

@@ -474,6 +474,28 @@ async fn test_worker_discards_malformed_delivery_and_reaches_valid_work() {
 }
 
 #[tokio::test]
+async fn test_worker_reports_read_only_store_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("peryx.redb");
+    drop(MetaStore::open(&database).unwrap());
+    let host = Arc::new(TestHost {
+        webhooks: WebhookRuntime::new(vec![target_config("ci", "https://example.invalid/hook")]).unwrap(),
+        meta: MetaStore::open_existing_read_only(database).unwrap(),
+        now: 100,
+    });
+    let mut handle = kick(host).unwrap();
+
+    let failure = tokio::time::timeout(Duration::from_secs(1), handle.wait_for_failure())
+        .await
+        .expect("read-only webhook store did not stop its worker");
+
+    assert_eq!(
+        failure.to_string(),
+        "webhook delivery storage failed: I/O error: metadata store is read-only"
+    );
+}
+
+#[tokio::test]
 async fn test_wait_for_work_consumes_a_pending_notification() {
     let dir = tempfile::tempdir().unwrap();
     let host = TestHost {

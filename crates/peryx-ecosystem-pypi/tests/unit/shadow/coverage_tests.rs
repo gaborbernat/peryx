@@ -193,22 +193,45 @@ async fn shadow_candidates_report_validation_errors(#[case] uri: String, #[case]
 }
 
 #[tokio::test]
-async fn shadow_candidates_report_malformed_parameters() {
+async fn shadow_contract_reports_malformed_parameters() {
     let (_directory, state) = seeded_state("root/pypi", "root/pypi", IndexAcl::default());
     let authorization = local_reader(&state, "root/pypi").await;
 
-    let (status, _, body) = request(
-        &state,
-        "/+shadow/candidates?repository=root/pypi&project=acme-pkg&limit=abc",
-        Some(HeaderValue::from_str(&authorization).unwrap()),
-    )
-    .await;
+    for (uri, expected) in [
+        (
+            "/+shadow/candidates?project=acme-pkg",
+            "missing shadow query parameter `repository`",
+        ),
+        (
+            "/+shadow/candidates?repository=root/pypi",
+            "missing shadow query parameter `project`",
+        ),
+        (
+            "/+shadow/candidates?repository=root/pypi&resource=acme-pkg",
+            "unknown shadow query parameter `resource`; use `project`",
+        ),
+        (
+            "/+shadow/candidates?repository=root/pypi&project=acme-pkg&arbitrary=secret",
+            "unknown shadow query parameter",
+        ),
+        (
+            "/+shadow/candidates?repository=root/pypi&project=acme-pkg&limit=abc",
+            "shadow query parameter `limit` must be an unsigned integer",
+        ),
+        (
+            "/+shadow/candidates?repository=root/pypi&repository=root/pypi&project=acme-pkg",
+            "duplicate shadow query parameter",
+        ),
+    ] {
+        let (status, _, body) = request(&state, uri, Some(HeaderValue::from_str(&authorization).unwrap())).await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({"error": "invalid shadow query"})
-    );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": expected}),
+            "{uri}"
+        );
+    }
 }
 
 #[tokio::test]

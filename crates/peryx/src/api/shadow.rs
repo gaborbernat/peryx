@@ -19,14 +19,14 @@ fn shadow_example() -> serde_json::Value {
             {
                 "member": "hosted",
                 "source": "hosted",
-                "artifact": "artifact.bin",
+                "filename": "artifact.bin",
                 "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 "selected": true
             },
             {
                 "member": "example",
                 "source": "cached",
-                "artifact": "artifact.bin",
+                "filename": "artifact.bin",
                 "digest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
                 "selected": false,
                 "reason": "precedence",
@@ -49,13 +49,13 @@ fn shadow_parameters(mut operation: OperationBuilder) -> OperationBuilder {
             "repository",
             true,
             "The virtual repository route to inspect",
-            json!("root/artifacts"),
+            json!("root/pypi"),
         ),
         (
-            "resource",
+            "project",
             true,
-            "The resource to explain, normalized to the ecosystem's canonical form",
-            json!("example"),
+            "The project to explain, normalized per the Python package name rules",
+            json!("acme-pkg"),
         ),
         (
             "cursor",
@@ -107,7 +107,7 @@ fn shadow_candidates() -> OperationBuilder {
             .response(
                 "400",
                 api_json_response(
-                    "The limit, cursor, or resource is invalid, or a required parameter is missing",
+                    "A parameter is missing, unknown, duplicated, or invalid",
                     json!({"error": "limit must be between 1 and 100"}),
                 ),
             )

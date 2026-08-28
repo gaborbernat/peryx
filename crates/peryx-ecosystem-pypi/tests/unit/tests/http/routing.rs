@@ -113,6 +113,7 @@ async fn test_simple_url_without_trailing_slash_redirects(#[case] requested: &st
 #[case::empty("/pypi/simple//", StatusCode::NOT_FOUND)]
 #[case::nested("/pypi/simple/flask/bad/", StatusCode::NOT_FOUND)]
 #[case::invalid_name("/pypi/simple/-flask/", StatusCode::NOT_FOUND)]
+#[case::invalid_utf8("/pypi/simple/%FF/", StatusCode::BAD_REQUEST)]
 #[case::encoded_slash("/pypi/simple/flask%2Fbad/", StatusCode::BAD_REQUEST)]
 #[case::encoded_slash_without_trailing_slash("/pypi/simple/flask%2Fbad", StatusCode::BAD_REQUEST)]
 #[case::encoded_backslash("/pypi/simple/flask%5Cbad/", StatusCode::BAD_REQUEST)]

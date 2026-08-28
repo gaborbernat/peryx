@@ -56,6 +56,10 @@ pub const fn validate_upstream_serial(
 #[must_use]
 pub fn compose_serial_watermarks(stamps: impl IntoIterator<Item = Option<SerialStamp>>) -> Option<SerialStamp> {
     let mut stamps = stamps.into_iter();
+    compose_serial_watermark_iter(&mut stamps)
+}
+
+fn compose_serial_watermark_iter(stamps: &mut dyn Iterator<Item = Option<SerialStamp>>) -> Option<SerialStamp> {
     let mut composed = stamps.next()??;
     for stamp in stamps {
         let stamp = stamp?;

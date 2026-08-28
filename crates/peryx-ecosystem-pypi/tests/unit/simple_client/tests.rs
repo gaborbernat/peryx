@@ -13,7 +13,7 @@ fn body(sizes: Vec<usize>) -> impl Stream<Item = Result<Bytes, reqwest::Error>> 
 
 #[tokio::test]
 async fn test_read_capped_returns_a_body_within_the_limit() {
-    let read = read_capped(body(vec![8, 8]), 64).await.unwrap();
+    let read = read_capped(Box::pin(body(vec![8, 8])), 64).await.unwrap();
 
     assert_eq!(read.len(), 16);
 }
@@ -26,7 +26,7 @@ async fn test_read_capped_stops_at_the_first_chunk_past_the_limit() {
         counter.fetch_add(1, Ordering::SeqCst);
     });
 
-    let error = read_capped(stream, 8).await.unwrap_err();
+    let error = read_capped(Box::pin(stream), 8).await.unwrap_err();
 
     assert!(matches!(error, UpstreamError::ResponseTooLarge { limit: 8 }));
     assert_eq!(polled.load(Ordering::SeqCst), 1);

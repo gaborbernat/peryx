@@ -516,11 +516,7 @@ async fn test_stats_endpoint_drills_by_index_and_project() {
         crate::tests::http::get_bytes_with_headers(&h.state, "/+stats?repository=pypi&resource=flask", &credentials)
             .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        String::from_utf8_lossy(&bytes).contains("artifacts"),
-        "{}",
-        String::from_utf8_lossy(&bytes)
-    );
+    assert!(String::from_utf8(bytes).unwrap().contains("artifacts"));
 }
 #[tokio::test]
 async fn test_upstream_file_error_is_bad_gateway() {

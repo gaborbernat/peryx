@@ -1,6 +1,39 @@
 use super::support::*;
+use crate::PypiIndexer;
 use crate::tests::http::placement_harness;
 use peryx_ha::{ArtifactPlacement, ArtifactSource};
+use peryx_search::{IndexerCtx, SearchDocumentProvider as _, SearchError};
+
+#[test]
+fn test_search_indexer_reports_a_metadata_scan_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("peryx.redb");
+    drop(redb::Database::create(&database).unwrap());
+    let meta = MetaStore::open_existing(database).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    let indexes = [Index {
+        name: "pypi".to_owned(),
+        route: "pypi".to_owned(),
+        ecosystem: crate::ECOSYSTEM,
+        kind: IndexKind::Cached {
+            client: UpstreamClient::new("https://example.test/simple/").unwrap(),
+            offline: false,
+        },
+        policy: Policy::default(),
+        acl: peryx_identity::IndexAcl::default(),
+    }];
+
+    let error = PypiIndexer
+        .documents(&IndexerCtx {
+            indexes: &indexes,
+            meta: &meta,
+            blobs: &blobs,
+        })
+        .err()
+        .expect("metadata scan fails without its table");
+
+    assert!(matches!(error, SearchError::Meta(_)));
+}
 
 #[tokio::test]
 async fn test_search_indexes_uploaded_metadata_and_route_scope() {

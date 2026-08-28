@@ -11,6 +11,13 @@ fn store() -> (tempfile::TempDir, MetaStore) {
     (dir, meta)
 }
 
+fn uninitialized_store() -> (tempfile::TempDir, MetaStore) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    drop(redb::Database::create(&path).unwrap());
+    (directory, MetaStore::open_existing(path).unwrap())
+}
+
 fn record() -> CachedIndex {
     CachedIndex {
         etag: Some("\"abc\"".to_owned()),
@@ -343,13 +350,70 @@ fn test_scan_index_pages_reports_the_visitor_error_source() {
 #[test]
 fn test_scan_index_pages_rejects_a_malformed_record() {
     let (_dir, meta) = store();
-    meta.put_driver_value(&index_key("a"), b"not an index").unwrap();
+    meta.put_index("a", &record()).unwrap();
+    meta.put_driver_value(&index_key("m"), b"not an index").unwrap();
     meta.put_index("z", &record()).unwrap();
+    let mut visited = 0;
 
-    assert!(
-        meta.scan_index_pages(|_page| Ok::<(), std::convert::Infallible>(()))
-            .is_err()
-    );
+    let error = meta
+        .scan_index_pages(|_page| {
+            visited += 1;
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap_err();
+
+    assert_eq!(visited, 1);
+    assert!(matches!(error, peryx_storage::meta::MetaScanError::Store(_)));
+}
+
+#[test]
+fn test_list_index_pages_reports_a_missing_driver_table() {
+    let (_directory, meta) = uninitialized_store();
+
+    assert!(meta.list_index_pages().is_err());
+}
+
+#[test]
+fn test_scan_index_pages_propagates_store_errors_after_visiting_healthy_records() {
+    let (_valid_directory, valid) = store();
+    valid.put_index("a", &record()).unwrap();
+    let (_invalid_directory, invalid) = uninitialized_store();
+    let mut seen = 0;
+    let mut visit = |_page| {
+        seen += 1;
+        Ok::<(), std::convert::Infallible>(())
+    };
+    valid.scan_index_pages(&mut visit).unwrap();
+
+    let error = invalid.scan_index_pages(&mut visit).unwrap_err();
+
+    assert_eq!(seen, 1);
+    assert!(matches!(error, peryx_storage::meta::MetaScanError::Store(_)));
+}
+
+#[test]
+fn test_scan_index_records_propagates_store_errors_after_visiting_healthy_records() {
+    let (_valid_directory, valid) = store();
+    valid.put_index("a", &record()).unwrap();
+    let (_invalid_directory, invalid) = uninitialized_store();
+    let mut seen = 0;
+    let mut visit = |_key: &str, _value: &[u8]| {
+        seen += 1;
+        Ok::<(), std::convert::Infallible>(())
+    };
+    valid.scan_index_records(&mut visit).unwrap();
+
+    let error = invalid.scan_index_records(&mut visit).unwrap_err();
+
+    assert_eq!(seen, 1);
+    assert!(matches!(error, peryx_storage::meta::MetaScanError::Store(_)));
+}
+
+#[test]
+fn test_list_project_files_reports_a_missing_driver_table() {
+    let (_directory, meta) = uninitialized_store();
+
+    assert!(super::list_project_files(&meta, "pypi", "flask").is_err());
 }
 
 #[test]

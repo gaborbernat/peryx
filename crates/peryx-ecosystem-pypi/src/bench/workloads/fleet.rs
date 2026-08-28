@@ -137,10 +137,7 @@ fn fleet_install(index_url: &str, scratch: &Path, workers: usize, package: &str,
         .collect();
     let mut outcome = Ok(());
     for thread in threads {
-        let worker = thread
-            .join()
-            .map_err(|_| anyhow::anyhow!("fleet worker panicked"))
-            .and_then(|result| result);
+        let worker = thread.join().expect("fleet worker panicked");
         if outcome.is_ok() {
             outcome = worker;
         }

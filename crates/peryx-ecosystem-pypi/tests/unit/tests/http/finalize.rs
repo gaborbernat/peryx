@@ -158,6 +158,28 @@ async fn test_finalize_replays_the_first_result_without_a_second_write() {
 }
 
 #[tokio::test]
+async fn test_finalize_reports_a_read_only_store() {
+    let harness = authority_harness().await;
+    initialize_distributed_schema(&harness.state);
+    admit(&harness.state.serving.meta);
+    let harness = reopened_read_only_harness(harness);
+    let principal = Principal::Named {
+        subject: "uploader".to_owned(),
+    };
+    let operation = operation();
+    let digest = digest();
+
+    let result = finalize_admitted_upload(
+        &harness.state.serving,
+        INTENT_KEY,
+        &descriptor(&operation, &digest, &principal),
+    )
+    .await;
+
+    assert!(matches!(result, Err(FinalizeError::Store(_))));
+}
+
+#[tokio::test]
 async fn test_finalize_returns_not_staged_for_an_absent_intent() {
     let harness = harness_with(true, true).await;
     let principal = Principal::Named {

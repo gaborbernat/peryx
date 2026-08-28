@@ -575,18 +575,17 @@ fn build_indexes_with_providers(
         .route_prefixes()
         .map(|(ecosystem, prefix)| (prefix, ecosystem.to_string()))
         .collect::<Vec<_>>();
-    let reserved_prefixes = || {
-        path::CORE_ROUTE_PREFIXES
-            .iter()
-            .map(|prefix| (*prefix, "peryx core"))
-            .chain(peryx_web::ROUTE_PATHS.iter().map(|prefix| (*prefix, "peryx UI")))
-            .chain(plugin_prefixes.iter().map(|(prefix, owner)| (*prefix, owner.as_str())))
-    };
+    let reserved_prefixes = path::CORE_ROUTE_PREFIXES
+        .iter()
+        .map(|prefix| (*prefix, "peryx core"))
+        .chain(peryx_web::ROUTE_PATHS.iter().map(|prefix| (*prefix, "peryx UI")))
+        .chain(plugin_prefixes.iter().map(|(prefix, owner)| (*prefix, owner.as_str())))
+        .collect::<Vec<_>>();
     let mut positions = HashMap::with_capacity(configs.len());
     let mut routes = HashMap::with_capacity(configs.len());
     for (pos, index) in configs.iter().enumerate() {
         path::validate_path_segment("index name", &index.name)?;
-        match path::validate_route(&index.route, reserved_prefixes()) {
+        match path::validate_route(&index.route, &reserved_prefixes) {
             Ok(()) => {}
             Err(error @ path::PathSafetyError::ReservedRoute { .. }) => {
                 bail!("invalid index route {}: {error}", index.route);
@@ -929,22 +928,34 @@ fn build_upstream_routes(
                     Ok(named.with_artifact_mirror(mirror, routing.fallback))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            let normalize = |name: &str| {
-                plugins
-                    .drivers()
-                    .get_name(&index.ecosystem)
-                    .map_or_else(|| name.to_owned(), |driver| driver.normalize_name(name))
-            };
+            let names = plugins
+                .drivers()
+                .get_name(&index.ecosystem)
+                .map_or(UpstreamResourceNames::Identity, UpstreamResourceNames::Driver);
             let mut router = UpstreamRouter::new(upstreams)?.with_fallback(routing.fallback);
             for resource in &routing.protected {
-                router = router.protect(normalize(resource))?;
+                router = router.protect(names.normalize(resource))?;
             }
             for (resource, upstream) in &routing.pins {
-                router = router.pin(normalize(resource), upstream)?;
+                router = router.pin(names.normalize(resource), upstream)?;
             }
             Ok((index.name.clone(), router))
         })
         .collect()
+}
+
+enum UpstreamResourceNames<'a> {
+    Driver(&'a Arc<dyn peryx_driver::serving::NameDriver>),
+    Identity,
+}
+
+impl UpstreamResourceNames<'_> {
+    fn normalize(&self, resource: &str) -> String {
+        match self {
+            Self::Driver(driver) => driver.normalize_name(resource),
+            Self::Identity => resource.to_owned(),
+        }
+    }
 }
 
 fn build_upstream_client(

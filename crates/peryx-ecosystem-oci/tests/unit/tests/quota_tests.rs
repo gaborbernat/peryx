@@ -10,28 +10,22 @@ use super::{app_with, auth, bind_ownership, body_has_code, oci_digest, send, sen
 use crate::quota::{Admission, admit_push};
 use crate::quota_reservation;
 
-#[test]
-fn test_quota_reservation_preserves_oci_identity() {
-    for (case, tag) in [("tagged manifest", Some("stable")), ("blob", None)] {
-        assert_eq!(
-            (
-                case,
-                quota_reservation("images", "team/api", tag, "sha256:abc", 42, 100),
-            ),
-            (
-                case,
-                NewQuotaReservation {
-                    repository: "images",
-                    resource: Some("team/api"),
-                    group: tag,
-                    digest: "sha256:abc",
-                    bytes: 42,
-                    class: AccountingClass::Hosted,
-                    created_at_unix: 100,
-                },
-            )
-        );
-    }
+#[rstest]
+#[case::tagged_manifest(Some("stable"))]
+#[case::blob(None)]
+fn test_quota_reservation_preserves_oci_identity(#[case] tag: Option<&str>) {
+    assert_eq!(
+        quota_reservation("images", "team/api", tag, "sha256:abc", 42, 100),
+        NewQuotaReservation {
+            repository: "images",
+            resource: Some("team/api"),
+            group: tag,
+            digest: "sha256:abc",
+            bytes: 42,
+            class: AccountingClass::Hosted,
+            created_at_unix: 100,
+        }
+    );
 }
 
 const TOKEN: &str = "s3cret";
@@ -894,9 +888,7 @@ async fn test_quota_decisions_increment_the_admitted_and_rejected_counters() {
     assert!(
         counters
             .get("store")
-            .is_some_and(|store| want.iter().all(|(key, value)| store.ecosystem.get(key) == Some(value))),
-        "quota metrics settled on an unexpected state: {:?}",
-        counters.get("store")
+            .is_some_and(|store| want.iter().all(|(key, value)| store.ecosystem.get(key) == Some(value)))
     );
 }
 

@@ -80,7 +80,7 @@ async fn test_finish_process_combines_owner_failures() {
     let error = finish_process(
         Err(anyhow::anyhow!("server failed")),
         ProcessTasks::new(tokio_util::sync::CancellationToken::new()),
-        || async { Err(anyhow::anyhow!("availability failed")) },
+        Box::new(|| Box::pin(async { Err(anyhow::anyhow!("availability failed")) })),
     )
     .await
     .unwrap_err()
@@ -157,6 +157,7 @@ async fn test_manual_tls_entrypoints_stop_on_cancellation() {
     let directory = tempfile::tempdir().unwrap();
     let plugins = plugins();
     let mut config = local_config(&directory, &plugins);
+    assert!(prepare_availability_listener(&config).await.unwrap().is_none());
     let (cert, key) = certificate_files(&directory);
     config.tls = Some(TlsConfig::Manual {
         cert: cert.clone(),
@@ -342,12 +343,15 @@ fn test_banner_style_covers_terminal_capabilities() {
 #[tokio::test]
 async fn test_acme_helpers_cover_shutdown_events_and_join_failures() {
     let cancellation = cancelled();
-    drive_acme(futures_util::stream::pending::<Result<(), &str>>(), cancellation)
-        .await
-        .unwrap();
+    drive_acme(
+        futures_util::stream::iter(Vec::<Result<&str, &str>>::new()),
+        cancellation,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         drive_acme(
-            futures_util::stream::iter([Ok::<_, &str>("renewed"), Err("failed")]),
+            futures_util::stream::iter(vec![Ok::<_, &str>("renewed"), Err("failed")]),
             tokio_util::sync::CancellationToken::new()
         )
         .await
@@ -357,7 +361,7 @@ async fn test_acme_helpers_cover_shutdown_events_and_join_failures() {
     );
     assert_eq!(
         drive_acme(
-            futures_util::stream::empty::<Result<(), &str>>(),
+            futures_util::stream::iter(Vec::<Result<&str, &str>>::new()),
             tokio_util::sync::CancellationToken::new()
         )
         .await
@@ -394,7 +398,7 @@ async fn test_acme_supervision_reports_early_worker_failure() {
         acme_task,
         tokio_util::sync::CancellationToken::new(),
         tokio_util::sync::CancellationToken::new(),
-        move || server_stop.cancel(),
+        Box::new(move || server_stop.cancel()),
     )
     .await
     .unwrap_err();
@@ -416,7 +420,31 @@ async fn test_acme_supervision_stops_worker_after_server_completion() {
         acme_task,
         tokio_util::sync::CancellationToken::new(),
         acme_shutdown,
-        std::thread::yield_now,
+        Box::new(std::thread::yield_now),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_acme_supervision_stops_server_after_shutdown() {
+    let server_stop = tokio_util::sync::CancellationToken::new();
+    let server = server_stop.clone();
+    let acme_shutdown = tokio_util::sync::CancellationToken::new();
+    let worker_shutdown = acme_shutdown.clone();
+
+    supervise_acme(
+        Box::pin(async move {
+            server.cancelled_owned().await;
+            Ok(())
+        }),
+        tokio::spawn(async move {
+            worker_shutdown.cancelled_owned().await;
+            Ok(())
+        }),
+        cancelled(),
+        acme_shutdown,
+        Box::new(move || server_stop.cancel()),
     )
     .await
     .unwrap();

@@ -88,7 +88,7 @@ fn run_registered_job(
     run_node_job(
         config,
         plugins,
-        move |state| scheduled_job(state, &ScheduledJob::Plugin(configured)),
+        Box::new(move |state| scheduled_job(state, &ScheduledJob::Plugin(configured))),
         out,
     )
 }
@@ -131,7 +131,7 @@ fn run_search_rebuild(
     run_node_job(
         config,
         plugins,
-        move |_| Ok(Arc::new(SearchRebuildJob::new(chunk))),
+        Box::new(move |_| Ok(Arc::new(SearchRebuildJob::new(chunk)))),
         out,
     )
 }
@@ -150,22 +150,26 @@ fn run_authority_drain(
     run_node_job(
         config,
         plugins,
-        move |state| {
+        Box::new(move |state| {
             let drainer = state
                 .serving
                 .authority_drainer()
                 .cloned()
-                .ok_or_else(|| "distributed availability did not install authority draining".to_owned())?;
+                .ok_or_else(authority_drainer_error)?;
             Ok(Arc::new(AuthorityDrainJob::new(authority, drainer)))
-        },
+        }),
         out,
     )
+}
+
+fn authority_drainer_error() -> String {
+    "distributed availability did not install authority draining".to_owned()
 }
 
 fn run_node_job(
     config: &Config,
     plugins: &peryx_plugin_registry::PluginRegistry,
-    create: impl FnOnce(&AppState) -> Result<Arc<dyn NodeJob>, String>,
+    create: JobFactory<'_>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -185,6 +189,8 @@ fn run_node_job(
     writeln!(out, "quota_remaining\t{}", report.quota_remaining)?;
     Ok(())
 }
+
+type JobFactory<'a> = Box<dyn FnOnce(&AppState) -> Result<Arc<dyn NodeJob>, String> + 'a>;
 
 fn job_list(store: &MetaStore, out: &mut dyn Write) -> anyhow::Result<()> {
     serde_json::to_writer(&mut *out, &store.query_job_runs(&JobRunQuery::default())?)?;

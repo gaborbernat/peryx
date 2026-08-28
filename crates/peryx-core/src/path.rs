@@ -63,10 +63,7 @@ pub fn decode_path(path: &str) -> Result<Cow<'_, str>, PathSafetyError> {
 /// # Errors
 /// Returns [`PathSafetyError::InvalidRoute`] for empty, traversal, encoded, or control-containing
 /// routes, and [`PathSafetyError::ReservedRoute`] for supplied reserved prefixes.
-pub fn validate_route<'a>(
-    route: &str,
-    reserved: impl IntoIterator<Item = (&'a str, &'a str)>,
-) -> Result<(), PathSafetyError> {
+pub fn validate_route(route: &str, reserved: &[(&str, &str)]) -> Result<(), PathSafetyError> {
     if route.is_empty() || route.starts_with('/') || route.ends_with('/') || route.contains("//") {
         return Err(PathSafetyError::InvalidRoute(route.to_owned()));
     }
@@ -74,7 +71,8 @@ pub fn validate_route<'a>(
         .split_once('/')
         .map_or((route, None), |(first, rest)| (first, Some(rest)));
     if let Some((prefix, owner)) = reserved
-        .into_iter()
+        .iter()
+        .copied()
         .find(|(prefix, _)| prefix.trim_matches('/').split('/').next() == Some(first))
     {
         return Err(PathSafetyError::ReservedRoute {

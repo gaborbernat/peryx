@@ -361,10 +361,7 @@ async fn test_fetch_token_allows_basic_credentials_to_an_https_realm_on_another_
         .await;
 
     // Docker Hub authenticates through a separate HTTPS host.
-    assert!(
-        matches!(&result, Err(UpstreamError::Transport(message)) if !message.starts_with("insecure bearer realm")),
-        "expected the realm accepted and the fetch attempted, got {result:?}"
-    );
+    assert!(matches!(&result, Err(UpstreamError::Transport(message)) if !message.starts_with("insecure bearer realm")));
 }
 
 #[tokio::test]
@@ -893,16 +890,18 @@ async fn test_send_reelects_a_leader_after_a_failed_exchange() {
     drop(first.entered().await);
     let outcomes = pulls.await.unwrap();
 
-    let (mut succeeded, mut failed) = (0, 0);
-    for outcome in outcomes {
-        match outcome {
-            Ok(status) => {
-                assert_eq!(status, StatusCode::OK);
-                succeeded += 1;
-            }
-            Err(UpstreamError::Status(StatusCode::INTERNAL_SERVER_ERROR)) => failed += 1,
-            other => panic!("unexpected pull outcome: {other:?}"),
-        }
-    }
-    assert_eq!((succeeded, failed), (1, 1));
+    assert_eq!(
+        (
+            outcomes.len(),
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(StatusCode::OK)))
+                .count(),
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Err(UpstreamError::Status(StatusCode::INTERNAL_SERVER_ERROR))))
+                .count(),
+        ),
+        (2, 1, 1)
+    );
 }

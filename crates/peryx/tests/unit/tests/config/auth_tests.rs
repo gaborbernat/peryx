@@ -292,6 +292,17 @@ fn test_auth_table_is_rejected(#[case] text: &str, #[case] expected: &str) {
 }
 
 #[test]
+fn test_auth_table_rejects_unclaimed_plugin_fields() {
+    assert_eq!(
+        toml_config("[auth]\nunknown = true\n")
+            .validate()
+            .unwrap_err()
+            .to_string(),
+        "auth: unknown field `unknown`"
+    );
+}
+
+#[test]
 fn test_an_empty_secret_file_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("token");

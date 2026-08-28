@@ -110,6 +110,8 @@ fn server_login_reports_rejected_credentials() {
     tools.set_mode("auth-fail");
 
     assert!(servers::login_crane(&tools.environment(Some(("user".to_owned(), "token".to_owned())))).is_err());
+    tools.set_mode("success");
+    servers::login_crane(&tools.environment(Some(("user".to_owned(), "token".to_owned())))).unwrap();
     servers::login_crane(&tools.environment(None)).unwrap();
 }
 

@@ -54,7 +54,7 @@ fn test_paths_decode_member_separators() {
 
 #[test]
 fn test_route_validation_accepts_nested_unreserved_routes() {
-    assert_eq!(validate_route("root/alpha-1.0_~", []), Ok(()));
+    assert_eq!(validate_route("root/alpha-1.0_~", &[]), Ok(()));
 }
 
 #[rstest]
@@ -68,7 +68,7 @@ fn test_route_validation_accepts_nested_unreserved_routes() {
 #[case::encoded_segment("root/%61lpha")]
 fn test_route_validation_rejects_unsafe_routes(#[case] route: &str) {
     assert_eq!(
-        validate_route(route, []),
+        validate_route(route, &[]),
         Err(PathSafetyError::InvalidRoute(route.to_owned()))
     );
 }
@@ -79,8 +79,12 @@ fn test_route_validation_rejects_unsafe_routes(#[case] route: &str) {
 #[case::reserved_root_child("_/oidc")]
 fn test_route_validation_rejects_reserved_routes(#[case] route: &str) {
     let prefix = route.split('/').next().unwrap();
+    let reserved = CORE_ROUTE_PREFIXES
+        .iter()
+        .map(|prefix| (*prefix, "peryx core"))
+        .collect::<Vec<_>>();
     assert_eq!(
-        validate_route(route, CORE_ROUTE_PREFIXES.iter().map(|prefix| (*prefix, "peryx core"))),
+        validate_route(route, &reserved),
         Err(PathSafetyError::ReservedRoute {
             route: route.to_owned(),
             prefix: prefix.to_owned(),
@@ -92,7 +96,7 @@ fn test_route_validation_rejects_reserved_routes(#[case] route: &str) {
 #[test]
 fn test_route_validation_reports_a_supplied_absolute_prefix_owner() {
     assert_eq!(
-        validate_route("v2/simple", [("/v2/", "oci")]),
+        validate_route("v2/simple", &[("/v2/", "oci")]),
         Err(PathSafetyError::ReservedRoute {
             route: "v2/simple".to_owned(),
             prefix: "/v2/".to_owned(),

@@ -25,13 +25,16 @@ fn usage_reports_initial_failure() {
 fn usage_reports_terminal_sampling_failure() {
     let (sample_started, wait_for_sample) = sync_channel(0);
     let mut initial = true;
-    let usage = Usage::watch_with(Duration::ZERO, move || {
-        if std::mem::take(&mut initial) {
-            return Ok((1, 1));
-        }
-        sample_started.send(()).unwrap();
-        bail!("later sample failed");
-    })
+    let usage = Usage::watch_with(
+        Duration::ZERO,
+        Box::new(move || {
+            if std::mem::take(&mut initial) {
+                return Ok((1, 1));
+            }
+            sample_started.send(()).unwrap();
+            bail!("later sample failed");
+        }),
+    )
     .unwrap();
     wait_for_sample.recv().unwrap();
     assert_eq!(
@@ -43,9 +46,12 @@ fn usage_reports_terminal_sampling_failure() {
 #[test]
 fn usage_reports_sampler_thread_panic() {
     assert_eq!(
-        Usage::watch_with(Duration::ZERO, || -> anyhow::Result<(u64, u64)> {
-            panic!("sampler panic");
-        })
+        Usage::watch_with(
+            Duration::ZERO,
+            Box::new(|| -> anyhow::Result<(u64, u64)> {
+                panic!("sampler panic");
+            })
+        )
         .err()
         .unwrap()
         .to_string(),

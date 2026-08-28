@@ -392,18 +392,28 @@ impl Metrics {
         retention_days: Option<u32>,
         clock: Clock,
     ) -> Result<Self, MetricsError> {
-        Self::spawn(
-            Some(Arc::new(store)),
-            retention_days,
-            clock,
-            EVENT_QUEUE_CAPACITY,
-            FLUSH_INTERVAL,
-        )
+        Self::start_durable_inner(Arc::new(store), retention_days, clock)
+    }
+
+    fn start_durable_inner(
+        store: Arc<dyn MetricsStore>,
+        retention_days: Option<u32>,
+        clock: Clock,
+    ) -> Result<Self, MetricsError> {
+        Self::spawn(Some(store), retention_days, clock, EVENT_QUEUE_CAPACITY, FLUSH_INTERVAL)
     }
 
     #[must_use]
     pub fn start_durable_or_degraded(store: impl MetricsStore, retention_days: Option<u32>, clock: Clock) -> Self {
-        Self::start_durable(store, retention_days, clock.clone()).unwrap_or_else(|error| {
+        Self::start_durable_or_degraded_inner(Arc::new(store), retention_days, clock)
+    }
+
+    fn start_durable_or_degraded_inner(
+        store: Arc<dyn MetricsStore>,
+        retention_days: Option<u32>,
+        clock: Clock,
+    ) -> Self {
+        Self::start_durable_inner(store, retention_days, clock.clone()).unwrap_or_else(|error| {
             let (sender, receiver) = sync_channel(1);
             drop(receiver);
             Self {

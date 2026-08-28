@@ -571,6 +571,24 @@ fn process_silent_start_reports_the_deadlock_guard() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn process_ready_reports_an_external_reap() {
+    with_fixture(|fixture| {
+        fs::write(fixture.serve_mode(), "hang").expect("hold process before readiness");
+        let mut node = fixture
+            .harness()
+            .spawn_until_event("reaped", "", "fixture process started")
+            .expect("observe process start");
+        reap_process(node.pid());
+
+        assert!(matches!(
+            node.await_ready(),
+            Err(HarnessError::Io(error)) if error.raw_os_error() == Some(nix::libc::ECHILD)
+        ));
+    });
+}
+
 #[test]
 fn process_accepts_the_startup_signal_as_its_first_event() {
     with_fixture(|fixture| {
@@ -673,6 +691,15 @@ fn process_reports_status_body_and_executable_failures() {
 }
 
 #[test]
+fn process_reports_a_missing_path_executable() {
+    let error = ProcessHarness::new(format!("peryx-missing-{}", std::process::id()))
+        .spawn_with_config("missing", "")
+        .expect_err("a missing PATH executable must fail");
+
+    assert!(matches!(error, HarnessError::Io(error) if error.kind() == std::io::ErrorKind::NotFound));
+}
+
+#[test]
 fn process_bootstrap_and_claim_failures() {
     with_fixture(|fixture| {
         fs::write(fixture.bootstrap_mode(), "fail").expect("reject bootstrap");
@@ -767,12 +794,35 @@ fn toxiproxy_startup_reports_process_exit() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn toxiproxy_startup_reports_an_external_reap() {
+    with_fixture(|fixture| {
+        let (startup, receiver, _gate) = toxiproxy_start_at_gate(fixture, "silent-gate");
+        reap_process(fixture.toxiproxy_pid());
+
+        let error = receiver
+            .recv_timeout(TOXIPROXY_FAILURE_TIMEOUT)
+            .expect("receive bounded startup result")
+            .err()
+            .expect("an externally reaped process must fail startup");
+        startup.join().expect("join startup thread");
+
+        assert!(error.to_string().contains("read control process event"), "{error}");
+    });
+}
+
 #[test]
 fn toxiproxy_startup_waits_for_the_version_endpoint() {
     with_fixture(|fixture| {
         let (startup, receiver, mut release) = gated_toxiproxy_start(fixture);
         assert!(matches!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty)));
-        release.write_all(&[1]).expect("release control listener");
+        let mut published_port = [0; 2];
+        release.read_exact(&mut published_port).expect("read control port");
+        assert_ne!(u16::from_be_bytes(published_port), 0);
+        release
+            .shutdown(std::net::Shutdown::Write)
+            .expect("release control listener");
         let mut toxiproxy = receiver
             .recv_timeout(TOXIPROXY_FAILURE_TIMEOUT)
             .expect("receive bounded startup result")
@@ -907,7 +957,7 @@ fn toxiproxy_readiness_timeout_reaps_the_process() {
 #[test]
 fn toxiproxy_rejects_a_foreign_control_api() {
     with_fixture(|fixture| {
-        let (startup, receiver, mut child) = toxiproxy_start_at_gate(fixture, "gate-port");
+        let (startup, receiver, mut child) = toxiproxy_start_at_gate(fixture, "gate");
         let mut port = [0; 2];
         child.read_exact(&mut port).expect("read selected control port");
         let foreign = TcpListener::bind(("127.0.0.1", u16::from_be_bytes(port))).expect("bind foreign control API");
@@ -1264,6 +1314,13 @@ fn accept_within(listener: &TcpListener, timeout: Duration, event: &str) -> TcpS
         panic!("{event} not received within {timeout:?}");
     }
     connection
+}
+
+#[cfg(unix)]
+fn reap_process(pid: u32) {
+    let process = nix::unistd::Pid::from_raw(i32::try_from(pid).expect("pid fits an i32"));
+    nix::sys::signal::kill(process, nix::sys::signal::Signal::SIGKILL).expect("kill fixture process");
+    nix::sys::wait::waitpid(process, None).expect("reap fixture process outside its owner");
 }
 
 fn read_request(stream: &mut TcpStream) -> String {

@@ -1,4 +1,4 @@
-use peryx_upstream::{NamedUpstream, Reachability, UpstreamClient, UpstreamHealth};
+use crate::{NamedUpstream, Reachability, UpstreamClient, UpstreamHealth};
 use rstest::rstest;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};

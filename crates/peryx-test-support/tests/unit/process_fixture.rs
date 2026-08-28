@@ -315,10 +315,22 @@ fn fixture_toxiproxy_uses_protocol_readiness() {
         )
     });
     let mut release = accept_within(&gate, TOXIPROXY_FAILURE_TIMEOUT, "toxiproxy readiness event");
-    release.read_exact(&mut [0]).expect("identify readiness gate");
-    release.write_all(&[1]).expect("release readiness gate");
+    let mut published_port = [0; 2];
+    release.read_exact(&mut published_port).expect("read control port");
+    assert_eq!(u16::from_be_bytes(published_port), control_address.port());
+    release
+        .shutdown(std::net::Shutdown::Write)
+        .expect("release readiness gate");
     release.read_exact(&mut [0]).expect("observe control bind");
     assert!(request(control_address, "POST /proxies HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("500 test"));
+    fs::write(sibling(&executable, "toxi-state"), "proxy-malformed").expect("return a malformed proxy");
+    let body = r#"{"name":"malformed"}"#;
+    let response = request(
+        control_address,
+        &format!("POST /proxies HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}", body.len()),
+    );
+    assert!(response.starts_with("HTTP/1.1 200 test"));
+    assert_eq!(response.split_once("\r\n\r\n").expect("response body").1, "{");
     assert!(request(control_address, "GET /version HTTP/1.1\r\n\r\n").contains("200 test"));
     assert!(request(control_address, "POST /shutdown HTTP/1.1\r\nContent-Length: 0\r\n\r\n").contains("204 test"));
     assert_eq!(command.join().expect("join toxiproxy fixture"), Ok(()));
@@ -375,10 +387,7 @@ fn fixture_toxiproxy_publishes_its_bound_control_port() {
     let gate = TcpListener::bind("127.0.0.1:0").expect("bind readiness gate");
     fs::write(
         sibling(&executable, "toxi-mode"),
-        format!(
-            "gate-port:{}",
-            gate.local_addr().expect("readiness gate address").port()
-        ),
+        format!("gate:{}", gate.local_addr().expect("readiness gate address").port()),
     )
     .expect("set readiness gate");
     let control = TcpListener::bind("127.0.0.1:0").expect("bind control listener");

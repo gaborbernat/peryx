@@ -92,7 +92,7 @@ impl Toxiproxy {
         };
         let mut first_event_is_startup = false;
         Self::require_event(
-            wait_for_startup(&mut toxiproxy.server, &events, deadlock_guard, |event| {
+            wait_for_startup(&mut toxiproxy.server, &events, deadlock_guard, &mut |event| {
                 first_event_is_startup = event.contains("Starting Toxiproxy HTTP server");
                 true
             }),
@@ -101,7 +101,7 @@ impl Toxiproxy {
         )?;
         if !first_event_is_startup {
             Self::require_event(
-                wait_for_startup(&mut toxiproxy.server, &events, behavior_timeout, |line| {
+                wait_for_startup(&mut toxiproxy.server, &events, behavior_timeout, &mut |line| {
                     line.contains("Starting Toxiproxy HTTP server")
                 }),
                 behavior_timeout,
@@ -142,7 +142,7 @@ impl Toxiproxy {
                 deadline
                     .saturating_duration_since(Instant::now())
                     .min(Duration::from_millis(10)),
-                |_| false,
+                &mut |_| false,
             );
             if let Some(status) = toxiproxy.server.try_wait().expect("read toxiproxy child status") {
                 return Err(HarnessError::Toxiproxy(format!(

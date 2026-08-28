@@ -10,6 +10,8 @@ use peryx_driver::http_services::HttpDomainServices;
 use peryx_driver::state::{AppState, Index};
 use peryx_search::{SearchAccess, SearchError, SearchParams};
 
+use crate::response_security::ProtectedCachePolicy;
+
 pub(super) async fn index_search(
     state: Arc<AppState>,
     services: HttpDomainServices,
@@ -66,10 +68,14 @@ pub async fn search_response_offloaded(
 
 #[must_use]
 pub fn search_response(services: &HttpDomainServices, params: SearchParams, access: Option<&SearchAccess>) -> Response {
-    match services.search().search(params, access) {
+    let mut response = match services.search().search(params, access) {
         Ok(results) => axum::Json(results).into_response(),
         Err(err) => search_error_response(&err),
+    };
+    if access.is_some() {
+        ProtectedCachePolicy::NoStore.apply(response.headers_mut());
     }
+    response
 }
 
 #[must_use]

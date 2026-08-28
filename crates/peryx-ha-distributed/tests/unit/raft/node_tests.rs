@@ -7,12 +7,12 @@ use openraft::raft::InstallSnapshotRequest;
 use openraft::{ServerState, SnapshotMeta, Vote};
 use tempfile::TempDir;
 
-use crate::AuthorityKey;
-use crate::ownership::{AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, Rejection};
+use crate::ownership::{AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect};
 use crate::raft::log_store::RaftLogStoreAdapter;
 use crate::raft::network::{PeerRaftNetworkFactory, RaftRpc, RaftRpcRejection, raft_rpc_router};
 use crate::raft::persistence::RaftLogStore;
 use crate::raft::{OwnershipResponse, OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode, StartError, TypeConfig};
+use crate::{AuthorityEpoch, AuthorityKey};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -209,7 +209,7 @@ async fn test_forward_target_falls_back_for_a_non_forwarding_error() {
 }
 
 #[tokio::test]
-async fn test_a_reassignment_is_rejected_through_the_shared_state() {
+async fn test_a_reassignment_returns_its_claim_through_the_shared_state() {
     let dir = tempfile::tempdir().unwrap();
     let node = leader_node(&dir).await;
     let assign = OwnershipCommand::AssignHome {
@@ -222,7 +222,10 @@ async fn test_a_reassignment_is_rejected_through_the_shared_state() {
     let response = node.submit(assign).await.unwrap();
     assert_eq!(
         response,
-        OwnershipResponse::Applied(OwnershipEffect::Rejected(Rejection::AlreadyAssigned))
+        OwnershipResponse::Applied(OwnershipEffect::AlreadyAssigned {
+            home: DatacenterId("east".to_owned()),
+            epoch: AuthorityEpoch(1),
+        })
     );
 
     node.raft().ensure_linearizable().await.unwrap();

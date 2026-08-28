@@ -45,6 +45,7 @@ fn test_assign_home_mints_epoch_one_and_records_the_home() {
     assert_eq!(
         effect,
         OwnershipEffect::Assigned {
+            home: dc("east"),
             epoch: AuthorityEpoch(1)
         }
     );
@@ -77,7 +78,7 @@ fn test_an_unassigned_authority_has_no_assignment_audit() {
 }
 
 #[test]
-fn test_a_rejected_reassignment_keeps_the_first_assignment_audit() {
+fn test_a_reassignment_keeps_the_first_assignment_audit() {
     let mut state = OwnershipState::new();
     state.apply(&assign("proj", "east"), AppliedMeta { term: 2, index: 9 });
 
@@ -123,13 +124,19 @@ fn test_an_unassigned_authority_reads_as_the_zero_sentinel() {
 }
 
 #[test]
-fn test_assigning_an_already_homed_authority_is_rejected_and_leaves_it_unchanged() {
+fn test_assigning_an_already_homed_authority_returns_its_claim_and_leaves_it_unchanged() {
     let mut state = OwnershipState::new();
     state.apply(&assign("proj", "east"), META);
 
     let effect = state.apply(&assign("proj", "west"), META);
 
-    assert_eq!(effect, OwnershipEffect::Rejected(Rejection::AlreadyAssigned));
+    assert_eq!(
+        effect,
+        OwnershipEffect::AlreadyAssigned {
+            home: DatacenterId("east".to_owned()),
+            epoch: AuthorityEpoch(1),
+        }
+    );
     assert_eq!(state.epoch(&key("proj")), AuthorityEpoch(1));
     assert_eq!(state.home(&key("proj")), Some(&dc("east")));
 }
@@ -270,7 +277,10 @@ fn test_a_minted_epoch_admits_at_the_fence_and_fences_the_prior_one() {
     let first = AuthorityEpoch(1);
     assert_eq!(
         state.apply(&assign("proj", "east"), META),
-        OwnershipEffect::Assigned { epoch: first }
+        OwnershipEffect::Assigned {
+            home: dc("east"),
+            epoch: first,
+        }
     );
     fence.commit(&authority, first);
 

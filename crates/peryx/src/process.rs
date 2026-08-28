@@ -494,19 +494,19 @@ impl peryx_ha_distributed::PreparedAvailabilityListener for ProcessAvailabilityL
         match self.transport {
             AvailabilityListenerTransport::Http => {
                 let listener = tokio::net::TcpListener::from_std(self.listener)
-                    .map_err(|error| peryx_ha_distributed::AvailabilityListenerError::Setup(error.to_string()))?;
+                    .map_err(peryx_ha_distributed::AvailabilityListenerError::setup)?;
                 Ok(Box::pin(async move {
                     tracing::info!(%address, scheme = "http", "peryx availability listener");
                     axum::serve(listener, make_service)
                         .with_graceful_shutdown(shutdown.cancelled_owned())
                         .await
-                        .map_err(|error| peryx_ha_distributed::AvailabilityListenerError::Serve(error.to_string()))
+                        .map_err(peryx_ha_distributed::AvailabilityListenerError::serve)
                 }))
             }
             AvailabilityListenerTransport::Tls(tls) => {
                 let handle = axum_server::Handle::new();
                 let server = axum_server::from_tcp_rustls(self.listener, tls)
-                    .map_err(|error| peryx_ha_distributed::AvailabilityListenerError::Setup(error.to_string()))?
+                    .map_err(peryx_ha_distributed::AvailabilityListenerError::setup)?
                     .handle(handle.clone())
                     .serve(make_service);
                 Ok(Box::pin(async move {
@@ -519,7 +519,7 @@ impl peryx_ha_distributed::PreparedAvailabilityListener for ProcessAvailabilityL
                             server.await
                         }
                     }
-                    .map_err(|error| peryx_ha_distributed::AvailabilityListenerError::Serve(error.to_string()))
+                    .map_err(peryx_ha_distributed::AvailabilityListenerError::serve)
                 }))
             }
         }

@@ -2,14 +2,21 @@ use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::http::StatusCode;
+use axum::response::IntoResponse as _;
 use bytes::Bytes;
 use peryx_storage::blob::Digest;
 
-use crate::blob::{BlobRequest, BlobTransport, LoopbackBlobSource};
+use crate::blob::{BlobRequest, BlobTransport, CapacityLimited, LoopbackBlobSource};
 use crate::blob_fetch::{FetchOutcome, fetch_missing};
+use crate::blob_http::HttpBlobTransport;
 use crate::peer::{TransferLimits, TransportError};
+use crate::support::http_contract;
+
+const BLOB_ROUTE: &str = "/+replication/v1/blobs/sha256/{digest}";
 
 fn limits(max_bytes: u64) -> TransferLimits {
     TransferLimits {
@@ -41,6 +48,31 @@ async fn test_fetch_missing_reports_complete_when_every_blob_is_present() {
         report.fetched,
         vec![(alpha, b"alpha".to_vec()), (beta, b"beta".to_vec())]
     );
+}
+
+#[tokio::test]
+async fn test_fetch_missing_uses_the_capacity_limited_http_transport() {
+    let content = b"served over HTTP";
+    let digest = Digest::of(content);
+    let requested = digest.clone();
+    let report = http_contract::run(
+        http_contract::fixed_get(BLOB_ROUTE, || (StatusCode::OK, content.as_slice()).into_response()),
+        |base| async move {
+            fetch_missing(
+                &CapacityLimited::new(
+                    HttpBlobTransport::new(&base, "secret", limits(1024), Duration::from_secs(1)).unwrap(),
+                    nz(1),
+                ),
+                std::slice::from_ref(&requested),
+                nz(1),
+            )
+            .await
+        },
+    )
+    .await;
+
+    assert_eq!(report.outcome, FetchOutcome::Complete);
+    assert_eq!(report.fetched, vec![(digest, content.to_vec())]);
 }
 
 #[tokio::test]

@@ -11,8 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::support::{TestServer, http_contract};
 use crate::{
-    AvailabilityMetrics, BeaconError, BeaconSender, DEFAULT_BEACON_INTERVAL, HeartbeatError, LivenessTracker,
-    liveness_router,
+    AvailabilityMetrics, BeaconError, BeaconSender, DEFAULT_BEACON_INTERVAL, LivenessTracker, liveness_router,
 };
 
 const TOKEN: &str = "group-secret";
@@ -144,7 +143,7 @@ async fn test_beat_accepts_success_statuses() {
         let server = status_writer(status).await;
         let (_dir, beacon) = beacon(&server.url);
 
-        assert_eq!(beacon.beat(1).await.map_err(|error| error.to_string()), Ok(()));
+        beacon.beat(1).await.unwrap();
     }
 }
 
@@ -153,31 +152,30 @@ async fn test_beat_classifies_rejected_statuses() {
     for (status, expected) in [
         (
             StatusCode::UNAUTHORIZED,
-            ("authentication", Some(StatusCode::UNAUTHORIZED)),
+            "heartbeat authentication rejected with 401 Unauthorized",
         ),
-        (StatusCode::FORBIDDEN, ("authentication", Some(StatusCode::FORBIDDEN))),
-        (StatusCode::CONFLICT, ("stale_incarnation", None)),
+        (
+            StatusCode::FORBIDDEN,
+            "heartbeat authentication rejected with 403 Forbidden",
+        ),
+        (StatusCode::CONFLICT, "heartbeat incarnation or sequence is stale"),
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            ("server", Some(StatusCode::INTERNAL_SERVER_ERROR)),
+            "heartbeat server returned 500 Internal Server Error",
         ),
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            ("server", Some(StatusCode::SERVICE_UNAVAILABLE)),
+            "heartbeat server returned 503 Service Unavailable",
         ),
-        (StatusCode::BAD_REQUEST, ("rejected", Some(StatusCode::BAD_REQUEST))),
+        (
+            StatusCode::BAD_REQUEST,
+            "heartbeat request was rejected with 400 Bad Request",
+        ),
     ] {
         let server = status_writer(status).await;
         let (_dir, beacon) = beacon(&server.url);
 
-        let observed = match beacon.beat(1).await.unwrap_err() {
-            HeartbeatError::Authentication { status } => ("authentication", Some(status)),
-            HeartbeatError::StaleIncarnation => ("stale_incarnation", None),
-            HeartbeatError::Server { status } => ("server", Some(status)),
-            HeartbeatError::Rejected { status } => ("rejected", Some(status)),
-            HeartbeatError::Transport(_) => ("transport", None),
-        };
-        assert_eq!(observed, expected, "{status}");
+        assert_eq!(beacon.beat(1).await.unwrap_err().to_string(), expected, "{status}");
     }
 }
 
@@ -193,7 +191,14 @@ async fn test_beat_surfaces_and_counts_a_transport_failure() {
     let (_dir, beacon) = beacon(&upstream);
     let beacon = beacon.with_metrics(metrics.clone());
 
-    assert!(matches!(beacon.beat(1).await, Err(HeartbeatError::Transport(_))));
+    assert!(
+        beacon
+            .beat(1)
+            .await
+            .unwrap_err()
+            .to_string()
+            .starts_with("heartbeat transport failed:")
+    );
     close_connection.await.unwrap();
     assert!(heartbeat_metrics(&metrics).contains("peryx_availability_heartbeat_errors_total{class=\"transport\"} 1\n"));
 }

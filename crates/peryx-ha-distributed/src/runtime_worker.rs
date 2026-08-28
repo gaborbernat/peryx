@@ -15,7 +15,7 @@ use std::thread::{self, available_parallelism};
 
 use futures_util::FutureExt as _;
 use peryx_core::PrometheusSource;
-use tokio::runtime::{Builder, Handle};
+use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::sync::oneshot;
 
 use crate::lifecycle::Lifecycle;
@@ -169,10 +169,7 @@ impl RuntimeOwner {
         let handle = runtime.handle().clone();
         let thread = thread::Builder::new()
             .name("peryx-availability-owner".to_owned())
-            .spawn(move || {
-                let _ = requested.recv();
-                drop(runtime);
-            })?;
+            .spawn(move || run_runtime_owner(&requested, runtime))?;
         Ok((Self { shutdown, thread }, handle))
     }
 
@@ -180,6 +177,11 @@ impl RuntimeOwner {
         drop(self.shutdown);
         join_runtime_thread(self.thread)
     }
+}
+
+fn run_runtime_owner(requested: &mpsc::Receiver<()>, runtime: Runtime) {
+    let _ = requested.recv();
+    drop(runtime);
 }
 
 fn join_runtime_thread(thread: thread::JoinHandle<()>) -> std::io::Result<()> {

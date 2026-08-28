@@ -136,6 +136,23 @@ async fn test_sync_commits_metadata_journal_and_cursor_without_fetching_bytes() 
     assert!(blobs.head(&digest).await.unwrap().is_none());
 }
 
+#[test]
+fn test_apply_page_surfaces_a_read_only_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    drop(MetaStore::open(&path).unwrap());
+    let meta = MetaStore::open_existing_read_only(path).unwrap();
+
+    let result = replica(&meta).apply_page(page(
+        "primary-a",
+        0,
+        1,
+        vec![change(1, vec![put("alpha\0upload", b"record")], Vec::new())],
+    ));
+
+    assert!(matches!(result, Err(SyncError::Store(_))));
+}
+
 #[tokio::test]
 async fn test_sync_on_an_empty_page_commits_nothing() {
     let (_dir, meta) = stores();

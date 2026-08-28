@@ -171,18 +171,30 @@ pub type AvailabilityListenerFuture = Pin<Box<dyn Future<Output = Result<(), Ava
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum AvailabilityListenerError {
     #[error("availability listener setup failed: {0}")]
-    Setup(String),
+    Setup(#[source] Arc<std::io::Error>),
     #[error("availability listener failed: {0}")]
-    Serve(String),
+    Serve(#[source] Arc<std::io::Error>),
     #[error("availability listener stopped unexpectedly")]
     Stopped,
     #[error("availability listener task failed: {0}")]
     Task(String),
 }
 
+impl AvailabilityListenerError {
+    #[must_use]
+    pub fn setup(error: std::io::Error) -> Self {
+        Self::Setup(Arc::new(error))
+    }
+
+    #[must_use]
+    pub fn serve(error: std::io::Error) -> Self {
+        Self::Serve(Arc::new(error))
+    }
+}
+
 impl From<std::io::Error> for AvailabilityListenerError {
     fn from(error: std::io::Error) -> Self {
-        Self::Setup(error.to_string())
+        Self::setup(error)
     }
 }
 
@@ -466,7 +478,7 @@ impl ShutdownOwner {
         };
         thread.join().expect("shutdown owner catches task panics");
         self.completion_sender.send_replace(true);
-        match result.unwrap_or_else(|_| Err(std::io::Error::other("shutdown owner stopped without reporting"))) {
+        match result.expect("shutdown owner always reports") {
             Ok(()) => None,
             Err(error) => Some(ShutdownFailure {
                 stage: self.stage,
@@ -484,9 +496,7 @@ impl Drop for ShutdownOwner {
             drop(reap_process_resource_observed(
                 "availability shutdown",
                 move || {
-                    let result = result
-                        .blocking_recv()
-                        .unwrap_or_else(|_| Err(std::io::Error::other("shutdown owner stopped without reporting")));
+                    let result = result.blocking_recv().expect("shutdown owner always reports");
                     thread.join().expect("shutdown owner catches task panics");
                     result
                 },
@@ -518,17 +528,10 @@ impl<T: Send + 'static> OwnedResource<T> {
     }
 
     async fn wait_shutdown(&mut self, deadline: Duration) -> Option<ShutdownFailure> {
-        let mut owner = match std::mem::replace(self, Self::Complete) {
-            Self::Joining(owner) => owner,
-            Self::Absent => {
-                *self = Self::Absent;
-                return None;
-            }
-            Self::Complete => return None,
-            Self::Owned(owner) => {
-                *self = Self::Owned(owner);
-                return None;
-            }
+        let resource = std::mem::replace(self, Self::Complete);
+        let Self::Joining(mut owner) = resource else {
+            *self = resource;
+            return None;
         };
         let failure = owner.wait(deadline).await;
         if failure.as_ref().is_some_and(|failure| failure.completion.is_some()) {
@@ -615,13 +618,8 @@ impl Drop for ActiveDistributed {
 
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 
-fn reap_thread<T: Send + 'static>(name: &'static str, thread: std::thread::JoinHandle<T>) {
-    drop(reap_process_resource(name, move || {
-        thread
-            .join()
-            .map(|_| ())
-            .map_err(|payload| std::io::Error::other(format!("thread panicked: {}", panic_message(payload.as_ref()))))
-    }));
+fn reap_thread(name: &'static str, thread: std::thread::JoinHandle<Result<(), AvailabilityListenerError>>) {
+    drop(reap_process_resource(name, move || join_listener_thread(thread)));
 }
 
 #[async_trait::async_trait]
@@ -677,10 +675,10 @@ struct StartupCleanupError {
 }
 
 async fn fail_startup<T>(startup: anyhow::Error, mut active: ActiveDistributed) -> anyhow::Result<T> {
-    match active.shutdown_owned().await {
-        Ok(()) => Err(startup),
-        Err(cleanup) => Err(StartupCleanupError { startup, cleanup }.into()),
+    if let Err(cleanup) = active.shutdown_owned().await {
+        return Err(StartupCleanupError { startup, cleanup }.into());
     }
+    Err(startup)
 }
 
 pub fn prepare_runtime(

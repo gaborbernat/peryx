@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use peryx_driver::jobs::{JobLimits, JobReport, JobScheduler, LeaseScope, NodeJob, scheduled_job};
 use peryx_driver::state::AppState;
 use peryx_ha::{
-    AuthorityDrainer, AvailabilityTaskError, AvailabilityTaskReport, BlobReclaimer, CrossDcCopier, PlacementReconciler,
+    AuthorityDrainer, AvailabilityCapabilities, AvailabilityTaskError, AvailabilityTaskReport, BlobReclaimer,
+    CrossDcCopier, PlacementReconciler,
 };
 use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::{JobKind, MetaStore};
@@ -17,6 +18,7 @@ use super::{
     DcCopyJob, DcCopyParameters, PlacementReconcileJob, PlacementReconcileParameters, ReclamationJob,
     ReclamationParameters, compile_scheduled_job, is_scheduled_job_kind,
 };
+use crate::support::install_distributed_services_with_capabilities;
 
 fn app() -> (tempfile::TempDir, AppState) {
     let directory = tempfile::tempdir().unwrap();
@@ -27,6 +29,12 @@ fn app() -> (tempfile::TempDir, AppState) {
         Vec::new(),
         Arc::new(|| 41),
     );
+    (directory, state)
+}
+
+fn app_with_capabilities(capabilities: AvailabilityCapabilities) -> (tempfile::TempDir, AppState) {
+    let (directory, mut state) = app();
+    install_distributed_services_with_capabilities(&mut state, Vec::new(), capabilities);
     (directory, state)
 }
 
@@ -108,7 +116,7 @@ fn test_compile_scheduled_job_rejects_invalid_configuration(
 #[case::placement("placement_reconcile", "placement reconciliation is unavailable")]
 #[case::reclamation("reclamation", "reclamation is unavailable")]
 fn test_scheduled_job_rejects_missing_distributed_capability(#[case] kind: &str, #[case] expected: &str) {
-    let (_directory, app) = app();
+    let (_directory, app) = app_with_capabilities(AvailabilityCapabilities::default());
     let job = compile_scheduled_job(kind, &toml::Table::new()).unwrap().unwrap();
 
     assert_eq!(scheduled_job(&app, &job).err().unwrap(), expected);
@@ -212,6 +220,23 @@ impl JobCase {
             Self::Reclamation => ("reclamation", LeaseScope::ClusterSingleton("reclamation".to_owned())),
         }
     }
+
+    fn capabilities(self, task: Arc<Task>) -> AvailabilityCapabilities {
+        match self {
+            Self::DcCopy => AvailabilityCapabilities {
+                copier: Some(task),
+                ..Default::default()
+            },
+            Self::Placement => AvailabilityCapabilities {
+                placement: Some(task),
+                ..Default::default()
+            },
+            Self::Reclamation => AvailabilityCapabilities {
+                reclaimer: Some(task),
+                ..Default::default()
+            },
+        }
+    }
 }
 
 #[rstest]
@@ -220,14 +245,15 @@ impl JobCase {
 #[case::reclamation(JobCase::Reclamation)]
 #[tokio::test]
 async fn test_distributed_job_runs_its_bound_capability(#[case] case: JobCase) {
-    let (_directory, app) = app();
-    let scheduler = JobScheduler::new(app.serving, JobLimits::node_local());
     let task = Arc::new(Task::new(Ok(AvailabilityTaskReport {
         processed: 5,
         changed: 2,
     })));
-    let job = case.job(task.clone());
     let (kind, lease) = case.expected();
+    let (_directory, app) = app_with_capabilities(case.capabilities(task.clone()));
+    let registered = compile_scheduled_job(kind, &toml::Table::new()).unwrap().unwrap();
+    let job = scheduled_job(&app, &registered).unwrap();
+    let scheduler = JobScheduler::new(app.serving, JobLimits::node_local());
 
     assert_eq!((job.kind(), job.scope(), job.lease_scope()), (kind, "", lease));
     assert_eq!(

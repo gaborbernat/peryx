@@ -149,6 +149,42 @@ fn test_home_placement_recorder_validates_and_records_the_copy() {
 }
 
 #[test]
+fn test_home_placement_recorder_surfaces_storage_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    let store = MetaStore::open(&path).unwrap();
+    let recorder = DistributedHomePlacementRecorder::new(
+        store.clone(),
+        BackendId::new("filesystem").unwrap(),
+        DataCenterId::new("home").unwrap(),
+        std::sync::Arc::new(|| 100),
+    );
+    recorder.record(digest(7).sha256(), 2_048, 3).unwrap();
+    drop(recorder);
+    drop(store);
+    let database = redb::Database::open(&path).unwrap();
+    let transaction = database.begin_write().unwrap();
+    {
+        use redb::ReadableTable as _;
+        let mut table = transaction
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new("blob_placement"))
+            .unwrap();
+        let key = table.first().unwrap().unwrap().0.value().to_owned();
+        table.insert(key.as_str(), b"invalid".as_slice()).unwrap();
+    }
+    transaction.commit().unwrap();
+    drop(database);
+    let recorder = DistributedHomePlacementRecorder::new(
+        MetaStore::open_existing(path).unwrap(),
+        BackendId::new("filesystem").unwrap(),
+        DataCenterId::new("home").unwrap(),
+        std::sync::Arc::new(|| 200),
+    );
+
+    assert!(recorder.record(digest(7).sha256(), 2_048, 4).is_err());
+}
+
+#[test]
 fn test_record_local_placement_is_idempotent() {
     let (_directory, store) = store();
     let backend = BackendId::new("filesystem").unwrap();

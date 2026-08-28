@@ -6,15 +6,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::Request;
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 use axum::middleware::{Next, from_fn};
+use axum::response::IntoResponse as _;
 use bytes::Bytes;
 use peryx_ha::{ArtifactSource, BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId};
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::{DriverBlobReference, JournalEntry, MetaStore};
 
-use crate::blob::{BlobRequest, BlobTransport, LoopbackBlobSource};
+use crate::blob::{BlobRequest, BlobTransport, CapacityLimited, LoopbackBlobSource};
 use crate::blob_http::HttpBlobTransport;
 use crate::blob_plane::{
     BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_outstanding, pull_referenced,
@@ -25,6 +26,7 @@ use crate::support::TestServer;
 use crate::{advance_blob_frontier_with_evidence, pull_outstanding_with_evidence};
 
 const TOKEN: &str = "secret";
+const BLOB_ROUTE: &str = "/+replication/v1/blobs/sha256/{digest}";
 
 fn stores() -> (tempfile::TempDir, MetaStore, BlobStorage) {
     let dir = tempfile::tempdir().unwrap();
@@ -38,6 +40,13 @@ fn limits() -> TransferLimits {
         max_operations: NonZeroUsize::new(256).unwrap(),
         max_encoded_bytes: NonZeroU64::new(1 << 20).unwrap(),
     }
+}
+
+fn http_blob(base: &str) -> CapacityLimited<HttpBlobTransport> {
+    CapacityLimited::new(
+        HttpBlobTransport::new(base, TOKEN, limits(), Duration::from_secs(5)).unwrap(),
+        nz(2),
+    )
 }
 
 fn loopback(digest: &Digest, bytes: &'static [u8]) -> LoopbackBlobSource {
@@ -102,11 +111,24 @@ impl BlobTransport for Faulty {
 }
 
 #[tokio::test]
-async fn test_pull_referenced_fetches_absent_blobs_and_marks_them_local() {
+async fn test_pull_referenced_fetches_absent_blobs_over_http_and_marks_them_local() {
     let (_dir, meta, blobs) = stores();
     let bytes = b"artifact";
     let digest = Digest::of(bytes);
-    let source = loopback(&digest, bytes);
+    let remote_dir = tempfile::tempdir().unwrap();
+    let remote_blobs = BlobStorage::filesystem(remote_dir.path().join("blobs"));
+    remote_blobs.put_bytes(bytes).await.unwrap();
+    let server = TestServer::start(
+        crate::primary_router(
+            "remote",
+            TOKEN,
+            crate::support::distributed_meta(remote_dir.path().join("peryx.redb")),
+            remote_blobs,
+        )
+        .unwrap(),
+    )
+    .await;
+    let source = http_blob(&server.url);
 
     let report = pull_referenced(&source, &blobs, &meta, &[(digest.clone(), bytes.len() as u64)], nz(2))
         .await
@@ -410,9 +432,7 @@ async fn test_pull_outstanding_repairs_a_present_tail_blob_missing_its_placement
     seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
     seed_local(&blobs, &digest, bytes).await;
     assert!(meta.get_artifact_placement(digest.as_str()).unwrap().is_none());
-    let source = Faulty(TransportError::BlobNotFound {
-        digest: digest.as_str().to_owned(),
-    });
+    let source = http_blob("http://127.0.0.1:1");
     let delegates = HashMap::new();
     let sources = BlobSources {
         simple: &source,
@@ -582,8 +602,12 @@ async fn test_pull_outstanding_reports_a_peer_that_does_not_serve_the_blob() {
     let digest = Digest::of(bytes);
     seed_serial(&meta, 0, &[(digest.as_str(), bytes.len() as u64)]);
     seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
-    let simple = loopback(&digest, bytes);
-    let delegates = HashMap::from([("dc-b".to_owned(), empty_source())]);
+    let server = TestServer::start(crate::support::http_contract::fixed_get(BLOB_ROUTE, || {
+        (StatusCode::NOT_FOUND, [("x-peryx-blob-result", "not-found")]).into_response()
+    }))
+    .await;
+    let simple = http_blob(&server.url);
+    let delegates = HashMap::from([("dc-b".to_owned(), http_blob(&server.url))]);
     let sources = BlobSources {
         simple: &simple,
         delegates: &delegates,
@@ -653,9 +677,8 @@ async fn test_pull_outstanding_probes_once_without_downloading_the_deferred_blob
         }
     }));
     let server = TestServer::start(router).await;
-    let transport = HttpBlobTransport::new(&server.url, TOKEN, limits(), Duration::from_secs(5)).unwrap();
-    let simple = transport.clone();
-    let delegates = HashMap::from([("dc-b".to_owned(), transport)]);
+    let simple = http_blob(&server.url);
+    let delegates = HashMap::from([("dc-b".to_owned(), http_blob(&server.url))]);
     let sources = BlobSources {
         simple: &simple,
         delegates: &delegates,
@@ -706,8 +729,12 @@ async fn test_pull_outstanding_leaves_a_retryable_peer_probe_pending() {
     let digest = Digest::of(b"peer-held");
     seed_serial(&meta, 0, &[(digest.as_str(), 9)]);
     seed_verified_placement(&meta, &digest, "dc-b", 9);
-    let simple = Faulty(TransportError::AtCapacity);
-    let delegates = HashMap::from([("dc-b".to_owned(), Faulty(TransportError::AtCapacity))]);
+    let server = TestServer::start(crate::support::http_contract::fixed_get(BLOB_ROUTE, || {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }))
+    .await;
+    let simple = http_blob(&server.url);
+    let delegates = HashMap::from([("dc-b".to_owned(), http_blob(&server.url))]);
     let sources = BlobSources {
         simple: &simple,
         delegates: &delegates,
@@ -726,8 +753,12 @@ async fn test_pull_outstanding_rejects_peer_evidence_with_the_wrong_size() {
     let digest = Digest::of(b"peer-held");
     seed_serial(&meta, 0, &[(digest.as_str(), 9)]);
     seed_verified_placement(&meta, &digest, "dc-b", 9);
-    let simple = mislabeled(&digest, b"short");
-    let delegates = HashMap::from([("dc-b".to_owned(), mislabeled(&digest, b"short"))]);
+    let server = TestServer::start(crate::support::http_contract::fixed_get(BLOB_ROUTE, || {
+        (StatusCode::OK, [("content-length", "5")]).into_response()
+    }))
+    .await;
+    let simple = http_blob(&server.url);
+    let delegates = HashMap::from([("dc-b".to_owned(), http_blob(&server.url))]);
     let sources = BlobSources {
         simple: &simple,
         delegates: &delegates,

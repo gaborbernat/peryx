@@ -140,6 +140,14 @@ pub fn install_distributed_services(state: &mut AppState) {
 }
 
 pub fn install_distributed_services_with_members(state: &mut AppState, members: Vec<TopologyMember>) {
+    install_distributed_services_with_capabilities(state, members, peryx_ha::AvailabilityCapabilities::default());
+}
+
+pub fn install_distributed_services_with_capabilities(
+    state: &mut AppState,
+    members: Vec<TopologyMember>,
+    capabilities: peryx_ha::AvailabilityCapabilities,
+) {
     let topology = peryx_core::TopologyConfig {
         mode: TopologyMode::Ha,
         group: Some("test".to_owned()),
@@ -161,7 +169,7 @@ pub fn install_distributed_services_with_members(state: &mut AppState, members: 
             topology,
             blobs: peryx_ha::BlobServices::new(None, durability),
             analytics: Arc::new(DistributedAnalyticsCompleteness),
-            capabilities: peryx_ha::AvailabilityCapabilities::default(),
+            capabilities,
             authority_drainer: None,
             operations: None,
         })

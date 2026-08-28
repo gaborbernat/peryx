@@ -38,7 +38,7 @@ fn drain_pending(
     meta: &MetaStore,
     batch: NonZeroUsize,
     now: i64,
-    cancelled: impl Fn() -> bool,
+    cancelled: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<AvailabilityTaskReport, MetaError> {
     let mut report = AvailabilityTaskReport::default();
     loop {

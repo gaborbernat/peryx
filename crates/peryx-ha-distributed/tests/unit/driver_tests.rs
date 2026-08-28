@@ -1,7 +1,11 @@
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::routing::get;
+use axum::{Json, Router};
 
+use crate::HttpPeerTransport;
 use crate::backoff::{DEFAULT_RECONNECT_POLICY, RETRY_EXHAUSTED};
 use crate::channel::BoundedChannel;
 use crate::driver::{StepOutcome, advance_once};
@@ -10,6 +14,7 @@ use crate::peer::{
     TransportError,
 };
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
+use crate::support::TestServer;
 
 struct FixedFrame(BatchFrame);
 
@@ -159,6 +164,22 @@ async fn test_terminal_error_gives_up_with_its_reason() {
         StepOutcome::GaveUp {
             reason: "unauthenticated"
         }
+    );
+}
+
+#[tokio::test]
+async fn test_http_batch_with_a_serial_gap_gives_up() {
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        get(|| async { Json(frame(0, 2, &[2]).page().clone()) }),
+    ))
+    .await;
+    let transport =
+        HttpPeerTransport::new(&server.url, "secret", DEFAULT_TRANSFER_LIMITS, Duration::from_secs(1)).unwrap();
+
+    assert_eq!(
+        advance_once(&transport, &mut channel(5), &DEFAULT_RECONNECT_POLICY, 0, size(10), 1,).await,
+        StepOutcome::GaveUp { reason: "frontier_gap" }
     );
 }
 

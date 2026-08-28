@@ -109,6 +109,11 @@ fn test_missing_record_releases_the_active_attempt() {
     );
     controlled.release.wait();
     assert!(matches!(finishing.join().unwrap(), Err(JobAttemptError::Missing)));
+    assert_eq!(controlled.control.recover_interrupted(111).unwrap(), 1);
+    assert_eq!(
+        controlled.control.cancel(&controlled.id).unwrap(),
+        CancelJobRun::Finished
+    );
 }
 
 #[test]

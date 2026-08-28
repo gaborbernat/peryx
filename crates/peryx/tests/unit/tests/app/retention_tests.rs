@@ -113,7 +113,17 @@ fn test_retention_export_writes_identity_before_decisions() {
 fn test_retention_export_rejects_a_stale_cursor_before_output() {
     let dir = tempfile::tempdir().unwrap();
     let config = config_at(&dir);
+    let ecosystem = config
+        .indexes
+        .iter()
+        .find(|index| index.name == "main")
+        .unwrap()
+        .ecosystem
+        .as_str();
     let cursor = encode_cursor(
+        "main",
+        ecosystem,
+        Some(42),
         0,
         RetentionSummary {
             policy_version: 999,
@@ -123,6 +133,40 @@ fn test_retention_export_rejects_a_stale_cursor_before_output() {
     let mut output = Vec::new();
 
     let error = retention_with_plugins(&config, &plugins(), &export_command(Some(cursor)), &mut output).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "the plan cursor is stale: the repository changed since it was issued"
+    );
+    assert!(output.is_empty());
+}
+
+#[test]
+fn test_retention_rejects_a_cursor_from_another_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_at(&dir);
+    let ecosystem = config
+        .indexes
+        .iter()
+        .find(|index| index.name == "main")
+        .unwrap()
+        .ecosystem
+        .as_str();
+    let cursor = encode_cursor(
+        "other",
+        ecosystem,
+        Some(42),
+        0,
+        RetentionSummary {
+            policy_version: 0,
+            frontier: RetentionFrontier::default(),
+        },
+    );
+    let mut args = dry_run_args("main");
+    args.cursor = Some(cursor);
+    let mut output = Vec::new();
+
+    let error = retention_with_plugins(&config, &plugins(), &RetentionCommand::DryRun(args), &mut output).unwrap_err();
 
     assert_eq!(
         error.to_string(),

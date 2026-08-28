@@ -345,6 +345,7 @@ async fn retention_service_owns_store_access_gating_and_export() {
             &OneRetentionDriver,
             &RetentionQuery {
                 index: "source",
+                ecosystem: "example",
                 policy: &policy,
                 now: Some(42),
                 after: 0,
@@ -358,6 +359,7 @@ async fn retention_service_owns_store_access_gating_and_export() {
         Arc::new(OneRetentionDriver),
         RetentionExport {
             index: "source".to_owned(),
+            ecosystem: "example".to_owned(),
             policy,
             now: Some(42),
             after: 0,

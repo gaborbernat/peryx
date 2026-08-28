@@ -4,10 +4,10 @@
 //! in deterministic order. Pages retain at most `limit` decisions; exports retain one at a time. Each
 //! result carries its [identity](RetentionSummary) so resumed reads reject changed inputs.
 //!
-//! A [cursor](encode_cursor) folds the resume offset and that identity into one opaque token. Presenting
-//! it back both places the reader where it left off and, through [`plan`], rejects the resume when the
-//! repository has changed underneath it. The whole path only reads metadata, so an interrupted plan
-//! writes nothing.
+//! A [cursor](encode_cursor) folds the repository, ecosystem, evaluation instant, resume offset, and
+//! identity into one opaque token. Presenting it back both places the reader where it left off and,
+//! through [`plan`], rejects a changed repository. The whole path only reads metadata, so an interrupted
+//! plan writes nothing.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -90,6 +90,8 @@ impl Drop for RetentionPermit {
 pub struct RetentionQuery<'a> {
     /// The repository (index) name whose records the driver adapts into candidates.
     pub index: &'a str,
+    /// The ecosystem that owns the repository.
+    pub ecosystem: &'a str,
     /// The compiled policy the planner evaluates each candidate against.
     pub policy: &'a RetentionPolicy,
     /// The evaluation clock an age rule ages against, or `None` to date nothing.
@@ -190,7 +192,13 @@ pub fn plan(
         }),
         (Err(_), Some(Stop::Full)) => Ok(RetentionPage {
             summary,
-            next_cursor: Some(encode_cursor(query.after + emitted, summary)),
+            next_cursor: Some(encode_cursor(
+                query.index,
+                query.ecosystem,
+                query.now,
+                query.after + emitted,
+                summary,
+            )),
             emitted,
         }),
         (Err(reason), None) => Err(RetentionPlanError::Store(reason)),
@@ -230,6 +238,7 @@ struct ExportHeader {
 /// so a blocking export task can hold it past the handler that built it.
 pub struct RetentionExport {
     pub index: String,
+    pub ecosystem: String,
     pub policy: RetentionPolicy,
     pub now: Option<i64>,
     pub after: u64,
@@ -278,6 +287,7 @@ pub fn export_body(
         let _permit = permit;
         let query = RetentionQuery {
             index: &export.index,
+            ecosystem: &export.ecosystem,
             policy: &export.policy,
             now: export.now,
             after: export.after,
@@ -311,21 +321,45 @@ enum Stop {
 /// A resume offset paired with the plan identity it belongs to, decoded from a cursor.
 #[derive(Debug)]
 pub struct RetentionResume {
+    pub repository: String,
+    pub ecosystem: String,
+    pub evaluated_at: Option<i64>,
     pub after: u64,
     pub expect: RetentionSummary,
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Cursor {
+    version: u8,
+    repository: String,
+    ecosystem: String,
+    evaluated_at: Option<i64>,
     after: u64,
     summary: RetentionSummary,
 }
 
+const CURSOR_VERSION: u8 = 1;
+
 /// # Panics
 /// Never in practice: a cursor is a small fixed structure that always serializes.
 #[must_use]
-pub fn encode_cursor(after: u64, summary: RetentionSummary) -> String {
-    let bytes = serde_json::to_vec(&Cursor { after, summary }).expect("a plan cursor always serializes");
+pub fn encode_cursor(
+    repository: &str,
+    ecosystem: &str,
+    evaluated_at: Option<i64>,
+    after: u64,
+    summary: RetentionSummary,
+) -> String {
+    let bytes = serde_json::to_vec(&Cursor {
+        version: CURSOR_VERSION,
+        repository: repository.to_owned(),
+        ecosystem: ecosystem.to_owned(),
+        evaluated_at,
+        after,
+        summary,
+    })
+    .expect("a plan cursor always serializes");
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -336,7 +370,13 @@ pub fn decode_cursor(cursor: &str) -> Result<RetentionResume, String> {
         .decode(cursor)
         .map_err(|_| "invalid retention plan cursor".to_owned())?;
     let cursor: Cursor = serde_json::from_slice(&bytes).map_err(|_| "invalid retention plan cursor".to_owned())?;
+    if cursor.version != CURSOR_VERSION {
+        return Err("invalid retention plan cursor".to_owned());
+    }
     Ok(RetentionResume {
+        repository: cursor.repository,
+        ecosystem: cursor.ecosystem,
+        evaluated_at: cursor.evaluated_at,
         after: cursor.after,
         expect: cursor.summary,
     })

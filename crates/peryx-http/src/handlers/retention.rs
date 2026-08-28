@@ -21,7 +21,6 @@ use crate::response_security::ProtectedCachePolicy;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
-
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PlanRequest {
@@ -63,8 +62,9 @@ pub async fn retention_plan(
     let mut candidates = Vec::new();
     let query = RetentionQuery {
         index: &request.repository,
+        ecosystem: &request.ecosystem,
         policy: &request.policy,
-        now: Some((state.serving.clock)()),
+        now: request.evaluated_at,
         after,
         limit: Some(request.limit),
         expect: request.expect,
@@ -114,8 +114,9 @@ pub async fn retention_export(
     };
     let export = RetentionExport {
         index: request.repository,
+        ecosystem: request.ecosystem,
         policy: request.policy,
-        now: Some((state.serving.clock)()),
+        now: request.evaluated_at,
         after: request.after,
         summary,
     };
@@ -136,7 +137,9 @@ pub async fn retention_export(
 struct Prepared {
     driver: Arc<dyn RetentionDriver>,
     repository: String,
+    ecosystem: String,
     policy: RetentionPolicy,
+    evaluated_at: Option<i64>,
     after: u64,
     expect: Option<RetentionSummary>,
     limit: usize,
@@ -169,12 +172,15 @@ impl Prepared {
             .get_retention(&index.ecosystem)
             .ok_or_else(not_found)?
             .clone();
-        let (after, expect) = match &request.cursor {
+        let (after, expect, evaluated_at) = match &request.cursor {
             Some(cursor) => {
                 let resume = decode_cursor(cursor).map_err(|reason| problem(StatusCode::BAD_REQUEST, &reason))?;
-                (resume.after, Some(resume.expect))
+                if resume.repository != index.name || resume.ecosystem != index.ecosystem.as_str() {
+                    return Err(stale());
+                }
+                (resume.after, Some(resume.expect), resume.evaluated_at)
             }
-            None => (0, None),
+            None => (0, None, Some((state.serving.clock)())),
         };
         let policy = RetentionPolicy::compile(&RetentionConfig {
             keep: request.keep,
@@ -183,7 +189,9 @@ impl Prepared {
         Ok(Self {
             driver,
             repository: index.name.clone(),
+            ecosystem: index.ecosystem.as_str().to_owned(),
             policy,
+            evaluated_at,
             after,
             expect,
             limit,

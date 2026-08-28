@@ -306,7 +306,7 @@ impl UpstreamClient {
         let url = Url::parse(url)?;
         self.guard.check_url(&url)?;
         let response = self
-            .send_with_retry(|auth| {
+            .send_with_retry(&mut |auth| {
                 self.authenticate(
                     self.bulk(&url).get(url.clone()).header(ACCEPT_ENCODING, "identity"),
                     &url,
@@ -329,7 +329,7 @@ impl UpstreamClient {
         let mut retries = 0..MAX_RETRIES;
         loop {
             let response = self
-                .send_with_retry(|auth| {
+                .send_with_retry(&mut |auth| {
                     self.authenticate(
                         self.bulk(&url).get(url.clone()).header(ACCEPT_ENCODING, "identity"),
                         &url,
@@ -362,7 +362,7 @@ impl UpstreamClient {
         let mut retries = 0..MAX_RETRIES;
         loop {
             let response = self
-                .send_with_retry(|auth| {
+                .send_with_retry(&mut |auth| {
                     self.authenticate(
                         self.bulk(&url).get(url.clone()).header(ACCEPT_ENCODING, "identity"),
                         &url,
@@ -418,7 +418,7 @@ impl UpstreamClient {
         let url = Url::parse(url).map_err(UpstreamError::from)?;
         self.guard.check_url(&url).map_err(RangeError::from)?;
         let response = self
-            .send_with_retry(|auth| {
+            .send_with_retry(&mut |auth| {
                 self.authenticate(self.http(&url).head(url.clone()), &url, auth)
                     .header(ACCEPT_ENCODING, "identity")
             })
@@ -457,7 +457,7 @@ impl UpstreamClient {
         let url = Url::parse(url).map_err(UpstreamError::from)?;
         self.guard.check_url(&url).map_err(RangeError::from)?;
         let response = self
-            .send_with_retry(|auth| {
+            .send_with_retry(&mut |auth| {
                 self.authenticate(self.http(&url).get(url.clone()), &url, auth)
                     .header(ACCEPT_ENCODING, "identity")
                     .header(RANGE, format!("bytes={start}-{end}"))
@@ -581,7 +581,7 @@ impl UpstreamClient {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<reqwest::Response, UpstreamError> {
-        self.send_with_retry(|auth| {
+        self.send_with_retry(&mut |auth| {
             let mut request = self
                 .authenticate(self.http(&url).get(url.clone()), &url, auth)
                 .header(ACCEPT, accept);
@@ -597,7 +597,7 @@ impl UpstreamClient {
 
     async fn send_with_retry(
         &self,
-        mut request: impl FnMut(&Auth) -> reqwest::RequestBuilder,
+        request: &mut (dyn FnMut(&Auth) -> reqwest::RequestBuilder + Send),
     ) -> Result<reqwest::Response, UpstreamError> {
         let mut retries = 0..MAX_RETRIES;
         let mut credential = self.credentials.credential().await.map_err(UpstreamError::from)?;

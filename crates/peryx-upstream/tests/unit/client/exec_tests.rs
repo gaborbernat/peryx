@@ -29,6 +29,7 @@ struct Helper {
     _directory: TempDir,
     executable: PathBuf,
     executions: PathBuf,
+    pid: PathBuf,
     requests: PathBuf,
     start_event: AsyncFd<File>,
 }
@@ -54,13 +55,15 @@ impl Helper {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("credential-helper");
         let executions = directory.path().join("executions");
+        let pid = directory.path().join("pid");
         let requests = directory.path().join("requests");
         let started_path = directory.path().join("started");
         let start_event = fifo(&started_path);
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nset -u\nprintf x > {}\n{}",
+                "#!/bin/sh\nset -u\nprintf '%s' \"$$\" > {}\nprintf x > {}\n{}",
+                shell_quote(pid.display()),
                 shell_quote(started_path.display()),
                 body(&executions, &requests),
             ),
@@ -71,6 +74,7 @@ impl Helper {
             _directory: directory,
             executable,
             executions,
+            pid,
             requests,
             start_event,
         }
@@ -92,6 +96,15 @@ impl Helper {
 
     fn requests_fifo(&self) -> AsyncFd<File> {
         fifo(&self.requests)
+    }
+
+    fn pid(&self) -> rustix::process::Pid {
+        std::fs::read_to_string(&self.pid)
+            .unwrap()
+            .parse::<i32>()
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .unwrap()
     }
 
     async fn run_after_start<T>(&self, operation: impl Future<Output = T>) -> T {
@@ -534,6 +547,28 @@ async fn test_helper_spawn_failure_is_redacted() {
     let error = provider.credential().await.unwrap_err().to_string();
 
     assert_eq!(error, "credential helper failed to start");
+}
+
+#[tokio::test]
+async fn test_helper_reports_an_external_reap() {
+    let helper =
+        Helper::script(|_, requests| format!("/bin/cat >/dev/null\n/bin/cat {}\n", shell_quote(requests.display())));
+    let _process_guard = helper.process_signal();
+    let provider = helper
+        .config(CredentialFailure::Fail)
+        .provider("https://resources.example", CredentialScope::Read)
+        .unwrap();
+    let credential = tokio::spawn(async move { provider.credential().await });
+    helper.await_start().await;
+    let pid = helper.pid();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty())
+        .unwrap()
+        .expect("the helper is reaped outside its owner");
+
+    let error = credential.await.unwrap().unwrap_err();
+
+    assert_eq!(error.to_string(), "credential helper cleanup failed");
 }
 
 #[tokio::test]

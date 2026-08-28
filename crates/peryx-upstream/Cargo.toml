@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Guarded HTTP client and source router for peryx upstreams."
+autotests = false
 
 [dependencies]
 reqwest = { workspace = true, features = ["gzip", "http2", "rustls-no-provider", "stream"] }

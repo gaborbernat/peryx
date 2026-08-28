@@ -53,6 +53,19 @@ fn cargo_binary_uses_nextest_metadata() {
 }
 
 #[test]
+fn cargo_binary_falls_back_to_cargo_metadata() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    temp_env::with_var("NEXTEST_BIN_EXE_peryx_test_fixture", None::<&str>, || {
+        temp_env::with_var("CARGO_BIN_EXE_peryx-test-fixture", Some("cargo-fixture"), || {
+            assert_eq!(
+                peryx_test_support::cargo_binary("peryx-test-fixture"),
+                PathBuf::from("cargo-fixture")
+            );
+        });
+    });
+}
+
+#[test]
 fn peryx_binary_uses_the_current_cargo_profile() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 

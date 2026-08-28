@@ -32,6 +32,10 @@ const AVAILABILITY_LISTENER_FD_ENV: &str = "PERYX_INHERITED_AVAILABILITY_LISTENE
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 type DataPreparation<'a> = &'a dyn Fn(&MemberSpec, &std::path::Path);
 
+const fn accepted_observation<T>(value: Option<T>) -> T {
+    value.expect("accepted topology observation")
+}
+
 pub(crate) fn http_client(timeout: Duration) -> reqwest::blocking::Client {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     reqwest::blocking::Client::builder()
@@ -655,9 +659,24 @@ impl Cluster {
         within: Duration,
         mut observe: impl FnMut(&Self) -> (Option<T>, String),
     ) -> Result<T, HarnessError> {
-        let (value, last) = observe(self);
-        if let Some(value) = value {
-            return Ok(value);
+        let mut value = None;
+        self.await_topology_change(within, &mut || {
+            let (observed, last) = observe(self);
+            let accepted = observed.is_some();
+            value = observed;
+            (accepted, last)
+        })?;
+        Ok(accepted_observation(value))
+    }
+
+    fn await_topology_change(
+        &self,
+        within: Duration,
+        observe: &mut dyn FnMut() -> (bool, String),
+    ) -> Result<(), HarnessError> {
+        let (accepted, last) = observe();
+        if accepted {
+            return Ok(());
         }
         let Some(node) = self.nodes.iter().find(|node| process_alive(node.child.id())) else {
             return Err(HarnessError::SignalClosed {
@@ -665,7 +684,7 @@ impl Cluster {
                 last,
             });
         };
-        node.await_signal(within, last, || observe(self))
+        node.await_signal(within, last, observe)
     }
 }
 
@@ -788,10 +807,15 @@ impl Node {
             return self.ready_observation();
         }
         let mut first_event_is_startup = false;
-        match wait_for_startup(&mut self.child, &self.process_events, self.deadlock_guard, |line| {
-            first_event_is_startup = line.contains("peryx listening");
-            true
-        })? {
+        match wait_for_startup(
+            &mut self.child,
+            &self.process_events,
+            self.deadlock_guard,
+            &mut |line| {
+                first_event_is_startup = line.contains("peryx listening");
+                true
+            },
+        )? {
             StartupSignal::Matched => {}
             StartupSignal::Exited(status) => return Err(self.exited_early(status)),
             StartupSignal::TimedOut => {
@@ -799,7 +823,7 @@ impl Node {
             }
         }
         if !first_event_is_startup {
-            match wait_for_startup(&mut self.child, &self.process_events, self.ready_timeout, |line| {
+            match wait_for_startup(&mut self.child, &self.process_events, self.ready_timeout, &mut |line| {
                 line.contains("peryx listening")
             })? {
                 StartupSignal::Matched => {}
@@ -1005,16 +1029,34 @@ impl Node {
         within: Duration,
         mut observe: impl FnMut(&Self) -> (Option<T>, String),
     ) -> Result<T, HarnessError> {
-        let (value, last) = observe(self);
-        value.map_or_else(|| self.await_signal(within, last, || observe(self)), Ok)
+        let mut value = None;
+        self.await_topology_change(within, &mut || {
+            let (observed, last) = observe(self);
+            let accepted = observed.is_some();
+            value = observed;
+            (accepted, last)
+        })?;
+        Ok(accepted_observation(value))
     }
 
-    fn await_signal<T>(
+    fn await_topology_change(
+        &self,
+        within: Duration,
+        observe: &mut dyn FnMut() -> (bool, String),
+    ) -> Result<(), HarnessError> {
+        let (accepted, last) = observe();
+        if accepted {
+            return Ok(());
+        }
+        self.await_signal(within, last, observe)
+    }
+
+    fn await_signal(
         &self,
         within: Duration,
         mut last: String,
-        mut observe: impl FnMut() -> (Option<T>, String),
-    ) -> Result<T, HarnessError> {
+        observe: &mut dyn FnMut() -> (bool, String),
+    ) -> Result<(), HarnessError> {
         let response = http_client(within)
             .get(format!("http://127.0.0.1:{}/+availability/topology/stream", self.port))
             .send()
@@ -1042,10 +1084,10 @@ impl Node {
                     });
                 }
                 Ok(_) if line == "\n" || line == "\r\n" => {
-                    let (value, failure) = observe();
+                    let (accepted, failure) = observe();
                     last = failure;
-                    if let Some(value) = value {
-                        return Ok(value);
+                    if accepted {
+                        return Ok(());
                     }
                 }
                 Ok(_) => {}
@@ -1137,7 +1179,7 @@ impl Node {
             return Ok(());
         }
         let last = || format!("expected log event {expected:?}\n{}", self.log_tail());
-        match wait_for_line(&self.process_events, within, |line| line.contains(expected)) {
+        match wait_for_line(&self.process_events, within, &mut |line| line.contains(expected)) {
             ProcessSignal::Matched => Ok(()),
             _ if self.log().contains(expected) => Ok(()),
             ProcessSignal::Closed => Err(HarnessError::SignalClosed {
@@ -1483,7 +1525,7 @@ pub(crate) fn wait_for_startup(
     child: &mut Child,
     events: &Receiver<String>,
     timeout: Duration,
-    accept: impl FnMut(&str) -> bool,
+    accept: &mut dyn FnMut(&str) -> bool,
 ) -> std::io::Result<StartupSignal> {
     match wait_for_line(events, timeout, accept) {
         ProcessSignal::Matched => Ok(StartupSignal::Matched),
@@ -1495,7 +1537,7 @@ pub(crate) fn wait_for_startup(
 pub(crate) fn wait_for_line(
     events: &Receiver<String>,
     timeout: Duration,
-    mut accept: impl FnMut(&str) -> bool,
+    accept: &mut dyn FnMut(&str) -> bool,
 ) -> ProcessSignal {
     let deadline = Instant::now() + timeout;
     loop {

@@ -278,29 +278,20 @@ fn run_toxiproxy(executable: &Path, args: &[String], control_listener: Option<Tc
             TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port"))).expect("connect startup gate");
         gate.write_all(&[1]).expect("identify startup gate");
     }
-    let mut readiness_gate = mode
-        .strip_prefix("gate:")
-        .map(|port| (port, false))
-        .or_else(|| mode.strip_prefix("gate-port:").map(|port| (port, true)))
-        .map(|(port, publish_port)| {
-            emit_toxiproxy_startup();
-            let mut gate = TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port")))
-                .expect("connect readiness gate");
-            if publish_port {
-                gate.write_all(
-                    &argument(args, "-port")
-                        .parse::<u16>()
-                        .expect("control port")
-                        .to_be_bytes(),
-                )
-                .expect("publish control port");
-                gate.read_to_end(&mut Vec::new()).expect("wait for readiness cleanup");
-            } else {
-                gate.write_all(&[1]).expect("identify readiness gate");
-                gate.read_exact(&mut [0]).expect("wait for readiness release");
-            }
-            gate
-        });
+    let mut readiness_gate = mode.strip_prefix("gate:").map(|port| {
+        emit_toxiproxy_startup();
+        let mut gate =
+            TcpStream::connect(("127.0.0.1", port.parse::<u16>().expect("gate port"))).expect("connect readiness gate");
+        gate.write_all(
+            &argument(args, "-port")
+                .parse::<u16>()
+                .expect("control port")
+                .to_be_bytes(),
+        )
+        .expect("publish control port");
+        gate.read_to_end(&mut Vec::new()).expect("wait for readiness cleanup");
+        gate
+    });
     let listener = control_listener.unwrap_or_else(|| {
         TcpListener::bind((
             "127.0.0.1",

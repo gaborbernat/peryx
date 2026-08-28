@@ -25,8 +25,8 @@ fn node_timeout_reports_a_reaped_child_while_the_event_channel_is_open() {
     let mut child = Command::new("true").spawn().expect("start child");
     child.wait().expect("reap child");
     let (event_sender, process_events) = mpsc::channel();
-    let signal =
-        wait_for_startup(&mut child, &process_events, Duration::ZERO, |_| false).expect("classify startup timeout");
+    let signal = wait_for_startup(&mut child, &process_events, Duration::ZERO, &mut |_| false)
+        .expect("classify startup timeout");
     drop(event_sender);
     assert!(matches!(signal, StartupSignal::Exited(_)));
 }

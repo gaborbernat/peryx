@@ -204,10 +204,10 @@ impl ExecCredentialConfig {
             .take()
             .expect("credential helper stdout is piped");
         let input = request.to_vec();
-        let mut input_task = Some(tokio::spawn(async move {
+        let input_task = tokio::spawn(async move {
             stdin.write_all(&input).await?;
             stdin.shutdown().await
-        }));
+        });
         let mut output_task = Some(tokio::spawn(async move {
             let mut output = Vec::new();
             stdout
@@ -239,8 +239,13 @@ impl ExecCredentialConfig {
                     }
                 }
                 result = &mut wait, if status.is_none() => {
-                    status = Some(result.expect("owned child is waited once"));
-                    None
+                    result.map_or_else(
+                        |_| Some(CredentialError::new("credential helper wait failed")),
+                        |result| {
+                            status = Some(result);
+                            None
+                        },
+                    )
                 }
                 () = tokio::time::sleep_until(deadline) => {
                     Some(CredentialError::new("credential helper timed out"))
@@ -261,12 +266,12 @@ impl ExecCredentialConfig {
 
         match outcome {
             Ok((status, output)) => {
-                let result = finish(status, input_task.take().expect("input task is pending"), output).await;
+                let result = finish(status, input_task, output).await;
                 cleanup_result?;
                 result
             }
             Err(error) => {
-                cleanup(&mut input_task, &mut output_task).await;
+                cleanup(input_task, &mut output_task).await;
                 cleanup_result?;
                 Err(error)
             }
@@ -344,12 +349,10 @@ async fn finish(
 }
 
 async fn cleanup(
-    input_task: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    input_task: tokio::task::JoinHandle<std::io::Result<()>>,
     output_task: &mut Option<tokio::task::JoinHandle<Vec<u8>>>,
 ) {
-    if let Some(input_task) = input_task.take() {
-        input_task.abort();
-    }
+    input_task.abort();
     if let Some(output_task) = output_task.take() {
         output_task.abort();
         let _ = output_task.await;

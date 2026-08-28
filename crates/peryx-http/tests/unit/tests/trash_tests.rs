@@ -445,7 +445,7 @@ async fn test_trash_inspect_returns_not_found_for_an_absent_record() {
 
     let (status, headers, _) = get(
         &app,
-        "/+trash/record?ecosystem=alpha&repository=private&resource=artifact-a",
+        "/+trash/record?ecosystem=example&repository=private&resource=artifact-a",
         Some(("Alice", USER_PASSWORD)),
     )
     .await;

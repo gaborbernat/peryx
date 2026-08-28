@@ -17,6 +17,13 @@ fn store() -> (tempfile::TempDir, MetaStore) {
     (dir, meta)
 }
 
+fn uninitialized_store() -> (tempfile::TempDir, MetaStore) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    drop(redb::Database::create(&path).unwrap());
+    (directory, MetaStore::open_existing(path).unwrap())
+}
+
 fn published() -> PublishedFile<'static> {
     PublishedFile {
         index: "hosted",
@@ -111,8 +118,9 @@ fn test_publish_file_if_commits_quota_with_a_new_record() {
 #[test]
 fn test_publish_file_if_releases_quota_for_a_duplicate() {
     let (_dir, meta) = store();
-    meta.publish_file_if(true, &published(), |_existing| Ok::<_, MetaError>(Guard::Commit))
-        .unwrap();
+    let commit_if_missing =
+        |existing: Option<&[u8]>| Ok::<_, MetaError>(if existing.is_some() { Guard::Skip } else { Guard::Commit });
+    meta.publish_file_if(true, &published(), commit_if_missing).unwrap();
     let reservation = reservation(&meta);
 
     let wrote = meta
@@ -122,7 +130,7 @@ fn test_publish_file_if_releases_quota_for_a_duplicate() {
                 quota: Some(&reservation),
                 ..published()
             },
-            |_existing| Ok::<_, MetaError>(Guard::Skip),
+            commit_if_missing,
         )
         .unwrap();
 
@@ -408,6 +416,24 @@ fn test_scan_upload_records_visits_each_row() {
 }
 
 #[test]
+fn test_scan_upload_records_propagates_store_errors_after_visiting_healthy_records() {
+    let (_valid_directory, valid) = store();
+    valid.put_upload("hosted", "flask", "flask-1.0.whl", b"upload").unwrap();
+    let (_invalid_directory, invalid) = uninitialized_store();
+    let mut seen = 0;
+    let mut visit = |_key: &str, _value: &[u8]| {
+        seen += 1;
+        Ok::<(), std::convert::Infallible>(())
+    };
+    valid.scan_upload_records(&mut visit).unwrap();
+
+    let error = invalid.scan_upload_records(&mut visit).unwrap_err();
+
+    assert_eq!(seen, 1);
+    assert!(matches!(error, peryx_storage::meta::MetaScanError::Store(_)));
+}
+
+#[test]
 fn test_scan_upload_records_keeps_deleted_row_from_its_snapshot() {
     let (_dir, meta) = store();
     meta.put_upload("hosted", "flask", "a.whl", b"a").unwrap();
@@ -466,6 +492,33 @@ fn test_scan_override_records_visits_valid_and_skips_non_utf8() {
         seen,
         vec![("hosted/flask/flask-1.0.whl".to_owned(), "hidden".to_owned())]
     );
+}
+
+#[test]
+fn test_list_overrides_reports_a_missing_driver_table() {
+    let (_directory, meta) = uninitialized_store();
+
+    assert!(meta.list_overrides("hosted", "flask").is_err());
+}
+
+#[test]
+fn test_scan_override_records_propagates_store_errors_after_visiting_healthy_records() {
+    let (_valid_directory, valid) = store();
+    valid
+        .put_override(true, "hosted", "flask", "flask-1.0.whl", "hidden", 123)
+        .unwrap();
+    let (_invalid_directory, invalid) = uninitialized_store();
+    let mut seen = 0;
+    let mut visit = |_key: &str, _value: &str| {
+        seen += 1;
+        Ok::<(), std::convert::Infallible>(())
+    };
+    valid.scan_override_records(&mut visit).unwrap();
+
+    let error = invalid.scan_override_records(&mut visit).unwrap_err();
+
+    assert_eq!(seen, 1);
+    assert!(matches!(error, peryx_storage::meta::MetaScanError::Store(_)));
 }
 
 #[test]
@@ -572,6 +625,40 @@ fn test_mutate_uploads_journals_only_the_removed_record_and_keeps_the_rest() {
     assert_eq!(
         read_journal_entries(&meta, 0, 1).unwrap().entries[0].version.as_deref(),
         Some("1.0")
+    );
+}
+
+#[rstest::rstest]
+#[case::replace("1.0", Some(b"replaced".as_slice()), 1)]
+#[case::delete("2.0", None, 1)]
+#[case::keep("3.0", Some(b"3.0".as_slice()), 0)]
+fn test_mutate_uploads_applies_each_mutation(
+    #[case] version: &str,
+    #[case] expected: Option<&[u8]>,
+    #[case] expected_changes: usize,
+) {
+    let (_directory, meta) = store();
+    let filename = format!("flask-{version}.whl");
+    meta.put_upload("hosted", "flask", &filename, version.as_bytes())
+        .unwrap();
+    let mutate = |filename: &str, _record: &[u8]| {
+        Ok::<_, MetaError>(match filename {
+            "flask-1.0.whl" => UploadMutation::Replace(b"replaced".to_vec()),
+            "flask-2.0.whl" => UploadMutation::Delete,
+            _ => UploadMutation::Keep,
+        })
+    };
+
+    let changed = meta
+        .mutate_uploads(true, "hosted", "flask", "update", 123, mutate)
+        .unwrap();
+
+    assert_eq!(changed, expected_changes);
+    assert_eq!(
+        meta.get_driver_value(&upload_key("hosted", "flask", &filename))
+            .unwrap()
+            .as_deref(),
+        expected
     );
 }
 

@@ -1,6 +1,7 @@
 //! Maps `PyPI` records into neutral search documents.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 
 use crate::policy::PypiPolicy;
 use crate::store::CachedIndex;
@@ -8,7 +9,7 @@ use crate::store::PypiStore as _;
 use crate::{CoreMetadata, CoreMetadataDoc, File, Meta, ProjectDetail, ProjectStatus, parse_detail, parse_metadata};
 use peryx_policy::PolicyAction;
 use peryx_storage::blob::Digest;
-use peryx_storage::meta::ArtifactSource;
+use peryx_storage::meta::{ArtifactSource, MetaScanError};
 
 use crate::upload::Uploaded;
 use peryx_core::path::local_artifact_url;
@@ -58,29 +59,38 @@ impl SearchDocumentProvider for PypiIndexer {
 
 fn collect_projects(ctx: &IndexerCtx<'_>, index: &Index, projects: &mut BTreeSet<String>) -> Result<(), SearchError> {
     match &index.kind {
-        IndexKind::Cached { .. } => {
-            ctx.meta.scan_index_records(|key, _value| {
+        IndexKind::Cached { .. } => ctx
+            .meta
+            .scan_index_records(|key, _value| {
                 if let Some(project) = project_record_key(key, &index.name) {
                     projects.insert(project.to_owned());
                 }
-                Ok(())
-            })?;
-        }
-        IndexKind::Hosted { .. } => {
-            ctx.meta.scan_upload_records(|key, _value| {
+                Ok::<(), Infallible>(())
+            })
+            .map_err(infallible_scan_error),
+        IndexKind::Hosted { .. } => ctx
+            .meta
+            .scan_upload_records(|key, _value| {
                 if let Some((project, _filename)) = upload_key(key, &index.name) {
                     projects.insert(project.to_owned());
                 }
-                Ok(())
-            })?;
-        }
+                Ok::<(), Infallible>(())
+            })
+            .map_err(infallible_scan_error),
         IndexKind::Virtual { layers, .. } => {
             for &position in layers {
                 collect_projects(ctx, ctx.index_at(position), projects)?;
             }
+            Ok(())
         }
     }
-    Ok(())
+}
+
+fn infallible_scan_error(error: MetaScanError<Infallible>) -> SearchError {
+    match error {
+        MetaScanError::Store(error) => error.into(),
+        MetaScanError::Visit(never) => match never {},
+    }
 }
 
 pub(crate) fn package_document(

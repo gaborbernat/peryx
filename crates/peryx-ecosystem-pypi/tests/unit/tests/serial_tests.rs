@@ -85,6 +85,7 @@ fn test_compose_serial_watermarks_uses_the_shared_low_watermark() {
 
 #[rstest::rstest]
 #[case::empty(Vec::new())]
+#[case::first_missing(vec![None])]
 #[case::missing(vec![
     Some(SerialStamp { domain: "pypi.org".to_owned(), serial: 10 }),
     None,

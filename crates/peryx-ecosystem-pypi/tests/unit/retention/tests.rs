@@ -229,6 +229,24 @@ fn test_evaluate_retention_stops_the_scan_when_emit_returns_an_error() {
 }
 
 #[test]
+fn test_evaluate_retention_stops_before_scanning_the_next_project() {
+    let (_dir, meta) = store();
+    seed(&meta, "pypi", "aaa", "1.0", Yanked::No, None);
+    seed(&meta, "pypi", "demo", "1.0", Yanked::No, None);
+
+    let result = evaluate_retention(
+        &meta,
+        "pypi",
+        &expire_all_but_latest(1),
+        None,
+        RETENTION_PROJECT_BUDGET_BYTES,
+        reject_decision,
+    );
+
+    assert!(result.unwrap_err().contains("client hung up"));
+}
+
+#[test]
 fn test_evaluate_retention_rejects_a_project_over_the_memory_budget() {
     let (_dir, meta) = store();
     seed(&meta, "pypi", "demo", "2.0", Yanked::No, None);

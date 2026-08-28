@@ -11,6 +11,13 @@ fn store() -> (tempfile::TempDir, MetaStore) {
     (dir, meta)
 }
 
+fn uninitialized_store() -> (tempfile::TempDir, MetaStore) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    drop(redb::Database::create(&path).unwrap());
+    (directory, MetaStore::open_existing(path).unwrap())
+}
+
 fn generation(generation: u64, etag: Option<&str>, last_modified: Option<&str>) -> CatalogGeneration {
     CatalogGeneration {
         generation,
@@ -59,6 +66,13 @@ fn test_put_and_list_projects_are_sorted_and_deduplicated() {
         meta.get_project("root-pypi", "flask").unwrap().as_deref(),
         Some("Flask")
     );
+}
+
+#[test]
+fn test_list_projects_reports_a_missing_driver_table() {
+    let (_directory, meta) = uninitialized_store();
+
+    assert!(meta.list_projects("pypi").is_err());
 }
 
 #[test]

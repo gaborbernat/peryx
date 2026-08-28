@@ -237,6 +237,37 @@ pub fn restarted_state_with_ttl(harness: &Harness, ttl_secs: i64) -> Arc<AppStat
     }
 }
 
+pub fn reopened_read_only_harness(harness: Harness) -> Harness {
+    let Harness {
+        dir,
+        server,
+        state,
+        clock,
+    } = harness;
+    let blobs = state.serving.blobs.clone();
+    let ttl_secs = state.serving.ttl_secs;
+    let max_stale_secs = state.serving.max_stale_secs;
+    let indexes = state.serving.indexes.iter().map(clone_index).collect();
+    drop(state);
+
+    let ticks = clock.clone();
+    let mut state = AppState::with_clock(
+        MetaStore::open_existing_read_only(dir.path().join("peryx.redb")).unwrap(),
+        blobs,
+        ttl_secs,
+        indexes,
+        Arc::new(move || ticks.load(Ordering::Relaxed)),
+    );
+    Arc::get_mut(&mut state.serving).unwrap().max_stale_secs = max_stale_secs;
+    install_distributed_services(&mut state);
+    Harness {
+        dir,
+        server,
+        state: wire(state, true),
+        clock,
+    }
+}
+
 pub fn replica_state(harness: &Harness) -> Arc<AppState> {
     let clock = harness.clock.clone();
     let mut state = AppState::with_clock(

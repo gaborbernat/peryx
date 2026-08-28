@@ -555,17 +555,15 @@ async fn test_policy_quota_records_admitted_and_rejected_metrics() {
         StatusCode::FORBIDDEN
     );
 
-    let expected = BTreeMap::from([("quota_admitted", 1), ("quota_rejected", 1)]);
     h.state.serving.metrics.flush().unwrap();
     let counters = h.state.serving.metrics.index_totals();
-    assert!(
-        counters.get("hosted").is_some_and(|hosted| {
-            expected
-                .iter()
-                .all(|(key, value)| hosted.ecosystem.get(key) == Some(value))
-        }),
-        "quota metrics settled on an unexpected state: {:?}",
-        counters.get("hosted")
+    let hosted = counters.get("hosted").unwrap();
+    assert_eq!(
+        BTreeMap::from([
+            ("quota_admitted", hosted.ecosystem.get("quota_admitted").copied()),
+            ("quota_rejected", hosted.ecosystem.get("quota_rejected").copied()),
+        ]),
+        BTreeMap::from([("quota_admitted", Some(1)), ("quota_rejected", Some(1))])
     );
 }
 

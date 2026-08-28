@@ -64,7 +64,7 @@ impl SimpleHead {
     /// # Errors
     /// Returns [`UpstreamError::Http`] if the transfer fails.
     pub async fn bytes(self) -> Result<Bytes, UpstreamError> {
-        read_capped(self.response.bytes_stream(), MAX_SIMPLE_PAGE_BYTES).await
+        read_capped(Box::pin(self.response.bytes_stream()), MAX_SIMPLE_PAGE_BYTES).await
     }
 
     pub fn into_stream(self) -> impl Stream<Item = Result<Bytes, UpstreamError>> + Send + use<> {
@@ -144,7 +144,7 @@ impl SimpleClientExt for UpstreamRouter {
             let upstream = candidates.current();
             let result = SimpleClientExt::fetch_project(upstream.client(), project, None).await;
             record_health(upstream, &result);
-            if fallback_result(&result) && candidates.advance() {
+            if fallback_result(result.as_ref().map(SimpleStatus::status)) && candidates.advance() {
                 tracing::warn!(project, upstream = upstream.name(), "trying fallback");
                 continue;
             }
@@ -158,7 +158,7 @@ impl SimpleClientExt for UpstreamRouter {
             let upstream = candidates.current();
             let result = SimpleClientExt::fetch_index(upstream.client()).await;
             record_health(upstream, &result);
-            if fallback_result(&result) && candidates.advance() {
+            if fallback_result(result.as_ref().map(SimpleStatus::status)) && candidates.advance() {
                 tracing::warn!(upstream = upstream.name(), "upstream unavailable, trying fallback");
                 continue;
             }
@@ -185,7 +185,7 @@ impl SimpleClientExt for UpstreamRouter {
                 )
                 .await;
             record_health(upstream, &result);
-            if fallback_result(&result) && candidates.advance() {
+            if fallback_result(result.as_ref().map(SimpleStatus::status)) && candidates.advance() {
                 tracing::warn!(upstream = upstream.name(), "upstream unavailable, trying fallback");
                 continue;
             }
@@ -199,7 +199,7 @@ impl SimpleClientExt for UpstreamRouter {
             let upstream = candidates.current();
             let result = upstream.client().head_project(project, None).await;
             record_health(upstream, &result);
-            if fallback_result(&result) && candidates.advance() {
+            if fallback_result(result.as_ref().map(SimpleStatus::status)) && candidates.advance() {
                 tracing::warn!(project, upstream = upstream.name(), "trying fallback");
                 continue;
             }
@@ -257,9 +257,9 @@ fn record_health<T: SimpleStatus>(upstream: &NamedUpstream, result: &Result<T, U
     }
 }
 
-fn fallback_result<T: SimpleStatus>(result: &Result<T, UpstreamError>) -> bool {
+const fn fallback_result(result: Result<u16, &UpstreamError>) -> bool {
     match result {
-        Ok(response) => matches!(response.status(), 404 | 429 | 500..=599),
+        Ok(status) => matches!(status, 404 | 429 | 500..=599),
         Err(UpstreamError::Http(_)) => true,
         Err(
             UpstreamError::Credential(_)
@@ -304,13 +304,12 @@ const MAX_SIMPLE_PAGE_BYTES: usize = 256 * 1024 * 1024;
 /// Read a Simple-page body into memory under `limit`, counting the bytes as they stream so a chunked
 /// or missing-`Content-Length` response cannot force an unbounded body into memory: the read fails
 /// the instant a chunk would carry the running total past `limit`, before that chunk is buffered.
-async fn read_capped<S>(stream: S, limit: usize) -> Result<Bytes, UpstreamError>
-where
-    S: Stream<Item = Result<Bytes, reqwest::Error>>,
-{
+async fn read_capped(
+    mut stream: std::pin::Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+    limit: usize,
+) -> Result<Bytes, UpstreamError> {
     use futures_util::TryStreamExt as _;
 
-    let mut stream = std::pin::pin!(stream);
     let mut body = BytesMut::new();
     while let Some(chunk) = stream.try_next().await? {
         if chunk.len() > limit - body.len() {
@@ -326,7 +325,7 @@ async fn fetch_simple(client: &UpstreamClient, url: Url, etag: Option<&str>) -> 
     loop {
         let response = client.send_conditional(url.clone(), ACCEPT_SIMPLE, etag).await?;
         let head = simple_head(response)?;
-        match read_capped(head.response.bytes_stream(), MAX_SIMPLE_PAGE_BYTES).await {
+        match read_capped(Box::pin(head.response.bytes_stream()), MAX_SIMPLE_PAGE_BYTES).await {
             Ok(body) => {
                 return Ok(SimpleResponse {
                     status: head.status,

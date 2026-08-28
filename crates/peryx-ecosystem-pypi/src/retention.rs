@@ -55,6 +55,17 @@ pub fn evaluate_retention<F>(
 where
     F: FnMut(RetentionDecision) -> Result<(), String>,
 {
+    evaluate_retention_with(meta, index, policy, now, budget, &mut emit)
+}
+
+fn evaluate_retention_with(
+    meta: &MetaStore,
+    index: &str,
+    policy: &RetentionPolicy,
+    now: Option<i64>,
+    budget: usize,
+    emit: &mut dyn FnMut(RetentionDecision) -> Result<(), String>,
+) -> Result<RetentionSummary, String> {
     let mut current: Option<String> = None;
     let mut group: Vec<RetentionCandidate> = Vec::new();
     let mut used: usize = 0;
@@ -64,7 +75,7 @@ where
         };
         if current.as_deref() != Some(project) {
             if current.is_some() {
-                plan_group(&mut group, policy, now, &mut emit)?;
+                plan_group(&mut group, policy, now, emit)?;
             }
             current = Some(project.to_owned());
             used = 0;
@@ -83,7 +94,7 @@ where
     })
     .map_err(error_message)?;
     if current.is_some() {
-        plan_group(&mut group, policy, now, &mut emit).map_err(error_message)?;
+        plan_group(&mut group, policy, now, emit).map_err(error_message)?;
     }
     Ok(RetentionSummary {
         policy_version: policy.version(),
@@ -95,15 +106,12 @@ where
     })
 }
 
-fn plan_group<F>(
+fn plan_group(
     group: &mut Vec<RetentionCandidate>,
     policy: &RetentionPolicy,
     now: Option<i64>,
-    emit: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(RetentionDecision) -> Result<(), String>,
-{
+    emit: &mut dyn FnMut(RetentionDecision) -> Result<(), String>,
+) -> Result<(), String> {
     let mut group = std::mem::take(group);
     assign_ranks(&mut group);
     for decision in policy.plan_resource(now, group) {

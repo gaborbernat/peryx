@@ -36,6 +36,12 @@ fn zip_with_file(path: &str, bytes: &[u8], compression: zip::CompressionMethod) 
     buf
 }
 
+fn corrupt_first_zip_member(archive: &mut [u8]) {
+    let name_len = usize::from(u16::from_le_bytes([archive[26], archive[27]]));
+    let extra_len = usize::from(u16::from_le_bytes([archive[28], archive[29]]));
+    archive[30 + name_len + extra_len] ^= 0xff;
+}
+
 fn deflated_zip_with_forged_uncompressed_size(path: &str, bytes: &[u8], forged: u32) -> Vec<u8> {
     let mut buf = zip_with_file(path, bytes, zip::CompressionMethod::Deflated);
     let position = (0..buf.len())
@@ -237,6 +243,46 @@ fn test_extracts_metadata_documents_without_buffering_archives() {
     assert!(matches!(
         sdist_metadata_path("pkg-1.0.tar.gz", file.path()),
         Err(ArchiveError::Invalid(message)) if message == "invalid sdist: missing required pkg-1.0/pyproject.toml"
+    ));
+}
+
+#[test]
+fn test_wheel_metadata_path_reports_a_missing_archive() {
+    let directory = tempfile::tempdir().unwrap();
+
+    assert!(matches!(
+        wheel_metadata_path("pkg-1.0-py3-none-any.whl", &directory.path().join("missing.whl")),
+        Err(ArchiveError::Read(_))
+    ));
+}
+
+#[test]
+fn test_wheel_metadata_path_rejects_an_invalid_wheel_name() {
+    let archive = temp_archive(&zip_with_file(
+        "pkg-1.0.dist-info/METADATA",
+        b"Metadata-Version: 2.1\nName: pkg\n",
+        zip::CompressionMethod::Stored,
+    ));
+
+    assert!(matches!(
+        wheel_metadata_path("pkg.whl", archive.path()),
+        Err(ArchiveError::Invalid(_))
+    ));
+}
+
+#[test]
+fn test_wheel_metadata_path_reports_corrupt_metadata() {
+    let mut wheel = zip_with_file(
+        "pkg-1.0.dist-info/METADATA",
+        b"Metadata-Version: 2.1\nName: pkg\n",
+        zip::CompressionMethod::Deflated,
+    );
+    corrupt_first_zip_member(&mut wheel);
+    let archive = temp_archive(&wheel);
+
+    assert!(matches!(
+        wheel_metadata_path("pkg-1.0-py3-none-any.whl", archive.path()),
+        Err(ArchiveError::Read(_))
     ));
 }
 
@@ -815,9 +861,7 @@ fn test_read_zip_member_crc_mismatch_is_read_error() {
         b"print('x')\nprint('y')\n",
         zip::CompressionMethod::Deflated,
     );
-    let name_len = usize::from(u16::from_le_bytes([archive[26], archive[27]]));
-    let extra_len = usize::from(u16::from_le_bytes([archive[28], archive[29]]));
-    archive[30 + name_len + extra_len] ^= 0xff;
+    corrupt_first_zip_member(&mut archive);
 
     assert!(matches!(
         read_member_chunk(

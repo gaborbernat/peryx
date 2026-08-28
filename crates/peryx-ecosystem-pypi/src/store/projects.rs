@@ -274,27 +274,34 @@ pub fn scan_project_records<E>(
 /// # Errors
 /// Returns a store error if the read fails.
 pub fn list_projects(meta: &MetaStore, index: &str) -> Result<Vec<String>, MetaError> {
-    let prefix = format!("{PROJECTS_PREFIX}{index}/");
-    let mut local = BTreeMap::new();
-    meta.visit_driver_prefix(&prefix, |key, raw| {
-        if let Ok(display) = std::str::from_utf8(raw) {
-            local.insert(key[prefix.len()..].to_owned(), display.to_owned());
-        }
-    })?;
-    let mut names = Vec::new();
-    if let Some(active) = catalog_state(meta, index)?.active {
-        let catalog_prefix = catalog_generation_prefix(index, active.generation);
-        meta.visit_driver_prefix(&catalog_prefix, |key, raw| {
-            if let Some(display) = local.remove(&key[catalog_prefix.len()..]) {
-                names.push(display);
-            } else if let Ok(display) = std::str::from_utf8(raw) {
-                names.push(display.to_owned());
+    meta.read_driver_txn(|txn| {
+        let prefix = format!("{PROJECTS_PREFIX}{index}/");
+        let catalog_prefix = decode_catalog_state(txn.get(&catalog_key(index))?)?
+            .active
+            .map(|active| catalog_generation_prefix(index, active.generation));
+        let prefixes: &[&str] = match &catalog_prefix {
+            Some(catalog_prefix) => &[&prefix, catalog_prefix],
+            None => &[&prefix],
+        };
+        let mut local = BTreeMap::new();
+        let mut names = Vec::new();
+        for (group_prefix, entries) in prefixes.iter().zip(txn.prefixes(prefixes)?) {
+            for (key, raw) in entries {
+                if *group_prefix == prefix {
+                    if let Ok(display) = std::str::from_utf8(&raw) {
+                        local.insert(key[prefix.len()..].to_owned(), display.to_owned());
+                    }
+                } else if let Some(display) = local.remove(&key[group_prefix.len()..]) {
+                    names.push(display);
+                } else if let Ok(display) = std::str::from_utf8(&raw) {
+                    names.push(display.to_owned());
+                }
             }
-        })?;
-    }
-    names.extend(local.into_values());
-    names.sort();
-    Ok(names)
+        }
+        names.extend(local.into_values());
+        names.sort();
+        Ok(names)
+    })
 }
 
 /// # Errors

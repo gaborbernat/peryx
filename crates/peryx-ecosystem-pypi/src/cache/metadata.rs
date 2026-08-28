@@ -22,6 +22,8 @@ use super::{
     upstream_permit,
 };
 
+const _: () = assert!(crate::archive::MAX_WHEEL_METADATA_BYTES <= usize::MAX as u64);
+
 async fn fetch_from_source(
     state: &ServingState,
     source: &str,
@@ -250,9 +252,7 @@ async fn wheel_metadata_by_range(
         ZIP_COMPRESSION_STORED => Ok(RemoteMetadata::Found(compressed.to_vec())),
         ZIP_COMPRESSION_DEFLATED => {
             let mut decoder = flate2::read::DeflateDecoder::new(Cursor::new(compressed));
-            let mut metadata = Vec::with_capacity(
-                usize::try_from(entry.uncompressed_size).map_err(|err| RangeError::Invalid(err.to_string()))?,
-            );
+            let mut metadata = Vec::with_capacity(usize::try_from(entry.uncompressed_size).unwrap());
             if let Err(err) = decoder.read_to_end(&mut metadata) {
                 return Err(RangeError::Invalid(err.to_string()));
             }

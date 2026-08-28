@@ -81,19 +81,21 @@ fn test_parse_init_with_flags() {
 }
 
 #[rstest]
-#[case::debug("-v", 1, "debug")]
-#[case::trace("-vv", 2, "trace")]
-#[case::trace_saturates("-vvv", 3, "trace")]
-fn test_verbose_maps_to_level(#[case] flag: &str, #[case] verbose: u8, #[case] expected: &str) {
+#[case::default("", 0, None)]
+#[case::debug("-v", 1, Some("debug"))]
+#[case::trace("-vv", 2, Some("trace"))]
+#[case::trace_saturates("-vvv", 3, Some("trace"))]
+fn test_verbose_maps_to_level(#[case] flag: &str, #[case] verbose: u8, #[case] expected: Option<&str>) {
     let runtime = RuntimeArgs {
         verbose,
         ..RuntimeArgs::default()
     };
+    let args = ["peryx", "serve", flag];
     assert_eq!(
-        parse(&["peryx", "serve", flag]).command,
+        parse(&args[..if flag.is_empty() { 2 } else { 3 }]).command,
         Command::Serve(runtime.clone())
     );
-    assert_eq!(runtime.overlay().log.level.as_deref(), Some(expected));
+    assert_eq!(runtime.overlay().log.level.as_deref(), expected);
 }
 
 #[test]

@@ -201,7 +201,7 @@ fn test_openapi_parameters_declare_exactly_one_shape() {
                             .count()
                             != 1
                     })
-                    .map(move |parameter| format!("{method} {path}: {} {}", parameter["in"], parameter["name"]))
+                    .map(move |parameter| (method, path, &parameter["in"], &parameter["name"]))
             })
         })
         .collect::<Vec<_>>();

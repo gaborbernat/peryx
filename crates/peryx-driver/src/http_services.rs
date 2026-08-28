@@ -8,7 +8,7 @@ use peryx_pql::catalog::{Column, DomainAuth, DomainSchema, FieldClass, Indexabil
 use peryx_pql::{Ast, DataSource, FetchFilter, Page, PqlError, QueryScope, RepoScope, Row, Value, ValueType, execute};
 use peryx_search::{SearchAccess, SearchError, SearchParams, SearchResponse};
 use peryx_storage::blob::BlobStorage;
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{MetaError, MetaStore};
 
 use crate::retention::{
     RetentionExport, RetentionPage, RetentionPermit, RetentionPlanError, RetentionQuery, export_body, plan, summary,
@@ -150,7 +150,7 @@ pub trait StatusStorageService: Send + Sync {
     /// # Errors
     ///
     /// Returns the metadata error when the serial cannot be read.
-    fn current_serial(&self) -> Result<u64, String>;
+    fn current_serial(&self) -> Result<u64, MetaError>;
     async fn blobs_healthy(&self) -> bool;
     fn blob_status(&self) -> BlobStorageStatus;
 }
@@ -366,8 +366,8 @@ struct StorageStatusServices {
 
 #[async_trait]
 impl StatusStorageService for StorageStatusServices {
-    fn current_serial(&self) -> Result<u64, String> {
-        self.meta.current_serial().map_err(|error| error.to_string())
+    fn current_serial(&self) -> Result<u64, MetaError> {
+        self.meta.current_serial()
     }
 
     async fn blobs_healthy(&self) -> bool {

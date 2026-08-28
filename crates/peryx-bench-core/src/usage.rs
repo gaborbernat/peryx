@@ -8,6 +8,8 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
+type Sampler = Box<dyn FnMut() -> anyhow::Result<(u64, u64)> + Send>;
+
 /// Peak resident memory and CPU seconds of one server's process tree during a workload window.
 ///
 /// CPU integrates each process's usage between sample ticks, so work done by children that come
@@ -45,14 +47,17 @@ impl Usage {
         };
         let root = Pid::from_u32(pid);
         let mut system = System::new();
-        Self::watch_with(SAMPLE_INTERVAL, move || {
-            system.refresh_processes_specifics(
-                ProcessesToUpdate::All,
-                true,
-                ProcessRefreshKind::nothing().with_cpu().with_memory(),
-            );
-            process_tree_sample(&system, root)
-        })
+        Self::watch_with(
+            SAMPLE_INTERVAL,
+            Box::new(move || {
+                system.refresh_processes_specifics(
+                    ProcessesToUpdate::All,
+                    true,
+                    ProcessRefreshKind::nothing().with_cpu().with_memory(),
+                );
+                process_tree_sample(&system, root)
+            }),
+        )
     }
 
     /// # Errors
@@ -70,10 +75,7 @@ impl Usage {
         }))
     }
 
-    fn watch_with(
-        interval: Duration,
-        sampler: impl FnMut() -> anyhow::Result<(u64, u64)> + Send + 'static,
-    ) -> anyhow::Result<Self> {
+    fn watch_with(interval: Duration, sampler: Sampler) -> anyhow::Result<Self> {
         let peak_rss = Arc::new(AtomicU64::new(0));
         let cpu_millis = Arc::new(AtomicU64::new(0));
         let (stop, stopped) = channel();
@@ -109,7 +111,7 @@ fn join_sampler(handle: std::thread::JoinHandle<anyhow::Result<()>>) -> anyhow::
 }
 
 fn sample(
-    mut sampler: impl FnMut() -> anyhow::Result<(u64, u64)>,
+    mut sampler: Sampler,
     interval: Duration,
     peak_rss: &AtomicU64,
     cpu_millis: &AtomicU64,

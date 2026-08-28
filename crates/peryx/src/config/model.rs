@@ -349,11 +349,12 @@ impl Config {
             port: self.port,
             source,
         };
-        (self.host.as_str(), self.port)
+        let address = (self.host.as_str(), self.port)
             .to_socket_addrs()
             .map_err(&listen_error)?
-            .next()
-            .ok_or_else(|| listen_error(std::io::ErrorKind::AddrNotAvailable.into()))
+            .next();
+        let unavailable = listen_error(std::io::ErrorKind::AddrNotAvailable.into());
+        address.ok_or(unavailable)
     }
 
     /// # Errors

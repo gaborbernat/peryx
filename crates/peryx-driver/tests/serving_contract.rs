@@ -74,3 +74,23 @@ fn policy_capabilities_register_independently() {
         .unwrap();
     assert_eq!(output, b"dry-run");
 }
+
+#[test]
+fn policy_dry_run_returns_writer_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("read-only");
+    std::fs::write(&path, []).unwrap();
+    let mut output = std::fs::File::open(path).unwrap();
+
+    assert!(
+        PolicyCapabilities
+            .policy_dry_run(
+                &peryx_storage::meta::MetaStore::open(directory.path().join("peryx.redb")).unwrap(),
+                &[],
+                None,
+                None,
+                &mut output,
+            )
+            .is_err()
+    );
+}

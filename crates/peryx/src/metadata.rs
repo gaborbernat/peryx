@@ -80,12 +80,13 @@ impl Deref for OpenedMetadata {
 
 impl Probe {
     fn copy(source: &Path) -> anyhow::Result<Self> {
+        let current_directory = Path::new(".");
         let parent = source
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
+            .unwrap_or(current_directory);
         let mut probe = NamedTempFile::with_prefix_in(".peryx-metadata-probe-", parent)
-            .with_context(|| format!("create metadata schema probe beside {}", source.display()))?;
+            .context(format!("create metadata schema probe beside {}", source.display()))?;
         std::io::copy(
             &mut std::fs::File::open(source).context("open metadata store for schema inspection")?,
             probe.as_file_mut(),

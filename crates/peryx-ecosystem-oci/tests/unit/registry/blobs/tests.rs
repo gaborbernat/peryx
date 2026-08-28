@@ -56,7 +56,7 @@ async fn test_ingest_blob_reports_a_stream_error() {
     let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
     let storage = Digest::of(b"x");
     let stream = futures_util::stream::iter(vec![Err("boom".to_owned())]);
-    let err = ingest_blob(&blobs, &storage, stream).await.unwrap_err();
+    let err = ingest_blob(&blobs, &storage, Box::pin(stream)).await.unwrap_err();
     assert!(matches!(err, DownloadError::Stream(message) if message == "boom"));
 }
 
@@ -72,6 +72,6 @@ async fn test_ingest_blob_reports_a_cleanup_error() {
         std::fs::create_dir(&stage).unwrap();
         Err("boom".to_owned())
     });
-    let err = ingest_blob(&blobs, &storage, stream).await.unwrap_err();
+    let err = ingest_blob(&blobs, &storage, Box::pin(stream)).await.unwrap_err();
     assert!(matches!(err, DownloadError::Blob(_)));
 }

@@ -133,10 +133,11 @@ fn logging_layer(log: &LogConfig) -> anyhow::Result<(BoxedLayer, Option<WorkerGu
         LogSink::Stdout => fmt_layer(log.format, std::io::stdout),
         LogSink::File => {
             let path = log.file.as_ref().context("file sink without a path")?;
+            let current_directory = Path::new(".");
             let dir = path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
+                .unwrap_or(current_directory);
             let name = path.file_name().context("log file path has no file name")?;
             let (writer, worker) = tracing_appender::non_blocking(tracing_appender::rolling::daily(dir, name));
             guard = Some(worker);
@@ -343,56 +344,33 @@ async fn run_prepared_process(
     let public_server = match prepare_public_server(config, listen_address, router, shutdown.clone()).await {
         Ok(server) => server,
         Err(error) => {
-            return finish_process(Err(error), tasks, move || async move {
-                match prepared_availability {
-                    Some(prepared) => {
-                        let result = prepared.shutdown().await.map_err(anyhow::Error::from);
-                        log_shutdown_result("availability", &result);
-                        result
-                    }
-                    None => Ok(()),
-                }
-            })
+            return finish_process(
+                Err(error),
+                tasks,
+                Box::new(move || {
+                    Box::pin(async move {
+                        match prepared_availability {
+                            Some(prepared) => {
+                                let result = prepared.shutdown().await.map_err(anyhow::Error::from);
+                                log_shutdown_result("availability", &result);
+                                result
+                            }
+                            None => Ok(()),
+                        }
+                    })
+                }),
+            )
             .await;
         }
     };
     let mut availability = match prepared_availability.take() {
         Some(prepared) => match activate_prepared_availability(prepared) {
             Ok(active) => Some(active),
-            Err(error) => return finish_process(Err(error), tasks, || async { Ok(()) }).await,
+            Err(error) => return finish_process(Err(error), tasks, Box::new(|| Box::pin(async { Ok(()) }))).await,
         },
         None => None,
     };
-    if !state.serving.read_only {
-        tasks.webhooks = peryx_events::webhook::kick(state.serving.clone());
-    }
-    if !state.serving.read_only && config.jobs.mode == config::JobsMode::Local {
-        let scheduler = std::sync::Arc::new(peryx_driver::jobs::JobScheduler::new(
-            state.serving.clone(),
-            peryx_driver::jobs::JobLimits::node_local(),
-        ));
-        state.register_prometheus(scheduler.metrics());
-        let scheduler_task = tokio::spawn(peryx_driver::jobs::run_schedules(
-            state.clone(),
-            scheduler,
-            config.jobs.schedules.clone(),
-            tasks.cancellation.child_token(),
-        ));
-        tasks.scheduler = Some(scheduler_task);
-    }
-    for index in (!state.serving.read_only && !is_replica)
-        .then_some(&state.serving.indexes)
-        .into_iter()
-        .flatten()
-    {
-        if let peryx_driver::IndexKind::Cached { client, offline: false } = &index.kind {
-            let client = client.clone();
-            tasks.spawn_cache_warming(async move {
-                client.warm().await;
-                Ok(())
-            });
-        }
-    }
+    start_process_tasks(config, &state, is_replica, &mut tasks);
     let result = match (&mut availability, &mut tasks.webhooks) {
         (Some(availability), Some(webhooks)) => tokio::select! {
             result = public_server.serve() => result,
@@ -409,30 +387,71 @@ async fn run_prepared_process(
         },
         (None, None) => public_server.serve().await,
     };
-    finish_process(result, tasks, move || async move {
-        match availability {
-            Some(mut active) => {
-                let result = peryx_ha::ActiveAvailabilityHandle::shutdown(&mut active.handle)
-                    .await
-                    .map_err(anyhow::Error::from);
-                log_shutdown_result("availability", &result);
-                result
-            }
-            None => Ok(()),
-        }
-    })
+    finish_process(
+        result,
+        tasks,
+        Box::new(move || {
+            Box::pin(async move {
+                match availability {
+                    Some(mut active) => {
+                        let result = peryx_ha::ActiveAvailabilityHandle::shutdown(&mut active.handle)
+                            .await
+                            .map_err(anyhow::Error::from);
+                        log_shutdown_result("availability", &result);
+                        result
+                    }
+                    None => Ok(()),
+                }
+            })
+        }),
+    )
     .await
 }
 
-async fn finish_process<Shutdown, ShutdownFuture>(
+fn start_process_tasks(
+    config: &Config,
+    state: &Arc<peryx_driver::AppState>,
+    is_replica: bool,
+    tasks: &mut ProcessTasks,
+) {
+    if !state.serving.read_only {
+        tasks.webhooks = peryx_events::webhook::kick(state.serving.clone());
+    }
+    if !state.serving.read_only && config.jobs.mode == config::JobsMode::Local {
+        let scheduler = std::sync::Arc::new(peryx_driver::jobs::JobScheduler::new(
+            state.serving.clone(),
+            peryx_driver::jobs::JobLimits::node_local(),
+        ));
+        state.register_prometheus(scheduler.metrics());
+        tasks.scheduler = Some(tokio::spawn(peryx_driver::jobs::run_schedules(
+            state.clone(),
+            scheduler,
+            config.jobs.schedules.clone(),
+            tasks.cancellation.child_token(),
+        )));
+    }
+    for index in (!state.serving.read_only && !is_replica)
+        .then_some(&state.serving.indexes)
+        .into_iter()
+        .flatten()
+    {
+        if let peryx_driver::IndexKind::Cached { client, offline: false } = &index.kind {
+            let client = client.clone();
+            tasks.spawn_cache_warming(async move {
+                client.warm().await;
+                Ok(())
+            });
+        }
+    }
+}
+
+type ShutdownFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+
+async fn finish_process(
     process: anyhow::Result<()>,
     tasks: ProcessTasks,
-    shutdown_availability: Shutdown,
-) -> anyhow::Result<()>
-where
-    Shutdown: FnOnce() -> ShutdownFuture,
-    ShutdownFuture: Future<Output = anyhow::Result<()>>,
-{
+    shutdown_availability: Box<dyn FnOnce() -> ShutdownFuture + Send>,
+) -> anyhow::Result<()> {
     let tasks = tasks.shutdown().await;
     let availability = shutdown_availability().await;
     combined_results([
@@ -536,11 +555,9 @@ async fn prepare_availability_listener(
     let listener = availability_listener_or_bind(inherited, listener_config.bind)?;
     let transport = match &listener_config.tls {
         None => return prepared_plain_availability_listener(listener).map(Some),
-        Some(tls) => AvailabilityListenerTransport::Tls(
-            load_tls_config(&tls.cert, &tls.key)
-                .await
-                .with_context(|| format!("load TLS cert {} and key {}", tls.cert.display(), tls.key.display()))?,
-        ),
+        Some(tls) => AvailabilityListenerTransport::Tls(load_tls_config(&tls.cert, &tls.key).await.context(
+            format!("load TLS cert {} and key {}", tls.cert.display(), tls.key.display()),
+        )?),
     };
     prepared_availability_listener(listener, transport).map(Some)
 }
@@ -608,9 +625,11 @@ async fn prepare_public_server(
     let server = match config.tls.clone() {
         None => prepared_http(listener, make_service, indexes, shutdown)?,
         Some(config::TlsConfig::Manual { cert, key }) => {
-            let tls = load_tls_config(&cert, &key)
-                .await
-                .with_context(|| format!("load TLS cert {} and key {}", cert.display(), key.display()))?;
+            let tls = load_tls_config(&cert, &key).await.context(format!(
+                "load TLS cert {} and key {}",
+                cert.display(),
+                key.display()
+            ))?;
             prepared_tls(listener, tls, make_service, indexes, shutdown)?
         }
         Some(config::TlsConfig::Acme(acme)) => prepared_acme(listener, acme, make_service, indexes, shutdown)?,
@@ -831,7 +850,7 @@ fn prepared_acme(
             acme_task,
             shutdown,
             acme_shutdown,
-            move || handle.shutdown(),
+            Box::new(move || handle.shutdown()),
         )
         .await
     }))
@@ -842,7 +861,7 @@ async fn supervise_acme(
     mut acme_task: tokio::task::JoinHandle<anyhow::Result<()>>,
     shutdown: tokio_util::sync::CancellationToken,
     acme_shutdown: tokio_util::sync::CancellationToken,
-    stop_server: impl Fn(),
+    stop_server: Box<dyn Fn() + Send>,
 ) -> anyhow::Result<()> {
     let mut completed_acme = None;
     let server_result = tokio::select! {
@@ -1101,15 +1120,12 @@ fn self_update() -> anyhow::Result<()> {
         "no install receipt found; `self update` serves installer-based installs only \
          (reinstall with the install script, or update via the tool that installed peryx)",
     )?;
-    let result = updater.run_sync()?;
-    println!("{}", update_result_message(result.as_ref()));
+    let Some(result) = updater.run_sync()? else {
+        println!("{}", update_message(None));
+        return Ok(());
+    };
+    println!("{}", update_message(Some(&result.new_version_tag)));
     Ok(())
-}
-
-#[cfg(feature = "self-update")]
-fn update_result_message(result: Option<&axoupdater::UpdateResult>) -> String {
-    let version = result.map(|result| result.new_version_tag.as_str());
-    update_message(version)
 }
 
 #[cfg(feature = "self-update")]

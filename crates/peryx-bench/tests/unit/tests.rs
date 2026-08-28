@@ -6,6 +6,32 @@ use rstest::rstest;
 
 use super::*;
 
+#[test]
+fn runner_finish_preserves_success_and_runtime_errors() {
+    assert!(finish(Ok(()), &|_| unreachable!()).is_ok());
+    assert_eq!(
+        finish(Err(anyhow::anyhow!("benchmark failed")), &|_| unreachable!())
+            .unwrap_err()
+            .to_string(),
+        "benchmark failed"
+    );
+}
+
+#[test]
+fn runner_finish_delegates_argument_errors() {
+    let exited = std::cell::Cell::new(false);
+    finish(
+        Err(clap::Error::new(clap::error::ErrorKind::UnknownArgument).into()),
+        &|_| {
+            exited.set(true);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert!(exited.get());
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ExpectedCommand {
     HeadBuild,

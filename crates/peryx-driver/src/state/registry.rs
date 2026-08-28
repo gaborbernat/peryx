@@ -167,7 +167,7 @@ impl AppState {
         let Self {
             serving, http_routes, ..
         } = self;
-        let serving = Arc::get_mut(serving).ok_or_else(|| "serving state is already shared".to_owned())?;
+        let serving = Arc::get_mut(serving).ok_or_else(shared_state_error)?;
         Ok(crate::serving::AuthInstallContext::new(serving, http_routes))
     }
 
@@ -187,7 +187,7 @@ impl AppState {
             http_routes,
             ..
         } = self;
-        let serving = Arc::get_mut(serving).ok_or_else(|| "serving state is already shared".to_owned())?;
+        let serving = Arc::get_mut(serving).ok_or_else(shared_state_error)?;
         Ok(crate::serving::RuntimeInstallContext::new(
             crate::serving::RuntimeInstallDependencies {
                 serving,
@@ -225,7 +225,7 @@ impl AppState {
             http_routes,
             ..
         } = self;
-        let serving = Arc::get_mut(serving).ok_or_else(|| "serving state is already shared".to_owned())?;
+        let serving = Arc::get_mut(serving).ok_or_else(shared_state_error)?;
         Ok(crate::serving::DistributedInstallContext::new(
             crate::serving::RuntimeInstallContext::new(crate::serving::RuntimeInstallDependencies {
                 serving,
@@ -260,7 +260,7 @@ impl AppState {
         self.drivers.insert(protocol.driver_arc());
         self.protocols.insert(ecosystem, protocol);
         Arc::get_mut(&mut self.serving)
-            .ok_or_else(|| "serving state is already shared".to_owned())?
+            .ok_or_else(shared_state_error)?
             .search
             .add_indexer(indexer);
         Ok(())
@@ -337,7 +337,7 @@ impl AppState {
     /// an ecosystem's indexer mutates the search index, which lives behind the shared `Arc`; this is
     /// sound only while that `Arc` is still uniquely owned, which it is until the router wraps it.
     fn serving_mut(&mut self) -> Result<&mut ServingState, String> {
-        Arc::get_mut(&mut self.serving).ok_or_else(|| "serving state is already shared".to_owned())
+        Arc::get_mut(&mut self.serving).ok_or_else(shared_state_error)
     }
 
     /// # Errors
@@ -461,6 +461,10 @@ impl AppState {
         self.serving_mut()?.session_sealer = Some(Arc::new(sealer));
         Ok(())
     }
+}
+
+fn shared_state_error() -> String {
+    "serving state is already shared".to_owned()
 }
 
 #[cfg(test)]

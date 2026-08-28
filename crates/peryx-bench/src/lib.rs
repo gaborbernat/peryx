@@ -9,6 +9,29 @@ use peryx_bench_core::context::BenchmarkContext;
 use peryx_bench_core::suite::{BenchmarkRun, BenchmarkSuite};
 use peryx_bench_core::{machine, report};
 
+/// Runs one benchmark suite with process arguments and Clap's native error output.
+///
+/// # Errors
+/// Returns a benchmark or environment failure. Invalid arguments exit with Clap's status code.
+pub async fn run(suite: &'static dyn BenchmarkSuite) -> anyhow::Result<()> {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    finish(Runner::system().run_from(suite, arguments).await, &exit_clap)
+}
+
+fn finish(result: anyhow::Result<()>, exit: &dyn Fn(&clap::Error) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => match error.downcast::<clap::Error>() {
+            Ok(error) => exit(&error),
+            Err(error) => Err(error),
+        },
+    }
+}
+
+fn exit_clap(error: &clap::Error) -> anyhow::Result<()> {
+    error.exit()
+}
+
 #[derive(clap::Parser, Clone)]
 struct Arguments {
     #[arg(long, default_value_t = 3)]

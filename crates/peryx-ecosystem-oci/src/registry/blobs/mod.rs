@@ -426,7 +426,7 @@ pub async fn download_blob(
     response: reqwest::Response,
 ) -> Result<u64, DownloadError> {
     let stream = response.bytes_stream().map_err(|err| err.to_string());
-    ingest_blob(blobs, storage, stream).await
+    ingest_blob(blobs, storage, Box::pin(stream)).await
 }
 
 /// Drain a byte stream into a staged blob and commit it under `storage`. Takes the transfer error
@@ -434,10 +434,9 @@ pub async fn download_blob(
 async fn ingest_blob(
     blobs: &BlobStorage,
     storage: &Digest,
-    stream: impl Stream<Item = Result<bytes::Bytes, String>> + Send,
+    mut stream: std::pin::Pin<Box<dyn Stream<Item = Result<bytes::Bytes, String>> + Send>>,
 ) -> Result<u64, DownloadError> {
     let mut pending = blobs.begin().await?;
-    let mut stream = std::pin::pin!(stream);
     let mut bytes = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = match chunk {

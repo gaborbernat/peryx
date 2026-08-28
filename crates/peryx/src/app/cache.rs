@@ -120,11 +120,11 @@ fn list_driver_cache(
     names: Option<&dyn peryx_driver::serving::NameDriver>,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let resource_filter = context
-        .args
-        .resource
-        .as_deref()
-        .map(|resource| names.map_or_else(|| resource.to_owned(), |driver| driver.normalize_name(resource)));
+    let resource_filter = match (context.args.resource.as_deref(), names) {
+        (Some(resource), Some(driver)) => Some(driver.normalize_name(resource)),
+        (Some(resource), None) => Some(resource.to_owned()),
+        (None, _) => None,
+    };
     for page in driver
         .cache_pages(&context.stores.meta, context.index_names)
         .map_err(anyhow::Error::msg)?

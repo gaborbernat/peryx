@@ -114,6 +114,24 @@ fn test_cache_list_filters_index_pages() {
 }
 
 #[test]
+fn test_cache_list_preserves_resource_without_name_driver() {
+    let plugins = plugins_without_names();
+    let (_directory, meta, config) = store_and_config(&plugins);
+    drop(meta);
+    let mut output = Vec::new();
+
+    cache_with_plugins(
+        &config,
+        &plugins,
+        &CacheCommand::List(page_args(None, Some("Widget"), false, None, None)),
+        &mut output,
+    )
+    .unwrap();
+
+    assert!(listed_resources(&output).is_empty());
+}
+
+#[test]
 fn test_cache_list_filters_blobs() {
     let plugins = plugins();
     let (directory, meta, config) = store_and_config(&plugins);
@@ -406,15 +424,18 @@ fn write_invalid_blob_path(root: &std::path::Path) {
 }
 
 fn plugins() -> PluginRegistry {
-    registry(true)
+    registry(&PLUGIN)
 }
 
 fn plugins_without_cache() -> PluginRegistry {
-    registry(false)
+    registry(&PLUGIN_WITHOUT_CACHE)
 }
 
-fn registry(cache: bool) -> PluginRegistry {
-    let plugin = if cache { &PLUGIN } else { &PLUGIN_WITHOUT_CACHE };
+fn plugins_without_names() -> PluginRegistry {
+    registry(&PLUGIN_WITHOUT_NAMES)
+}
+
+fn registry(plugin: &'static CachePlugin) -> PluginRegistry {
     PluginRegistry::new(vec![PluginRegistration {
         registration: plugin,
         config: plugin,
@@ -433,8 +454,18 @@ fn registry(cache: bool) -> PluginRegistry {
     .unwrap()
 }
 
-static PLUGIN: CachePlugin = CachePlugin { cache: true };
-static PLUGIN_WITHOUT_CACHE: CachePlugin = CachePlugin { cache: false };
+static PLUGIN: CachePlugin = CachePlugin {
+    cache: true,
+    names: true,
+};
+static PLUGIN_WITHOUT_CACHE: CachePlugin = CachePlugin {
+    cache: false,
+    names: true,
+};
+static PLUGIN_WITHOUT_NAMES: CachePlugin = CachePlugin {
+    cache: true,
+    names: false,
+};
 static DEFAULT_INDEXES: [DefaultIndex; 1] = [DefaultIndex {
     name: "main",
     route: "main",
@@ -442,9 +473,10 @@ static DEFAULT_INDEXES: [DefaultIndex; 1] = [DefaultIndex {
     kind: DefaultIndexKind::Hosted,
 }];
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct CachePlugin {
     cache: bool,
+    names: bool,
 }
 
 impl EcosystemRegistration for CachePlugin {
@@ -461,13 +493,15 @@ impl EcosystemRegistration for CachePlugin {
     }
 
     fn driver(&self) -> ProtocolDriver {
-        ProtocolDriver::Absolute(Arc::new(*self))
+        ProtocolDriver::Absolute(Arc::new(self.clone()))
     }
 
     fn register_capabilities(&self, registrar: &mut dyn CapabilityRegistrar) {
-        registrar.register_name(CORE, Arc::new(*self));
+        if self.names {
+            registrar.register_name(CORE, Arc::new(self.clone()));
+        }
         if self.cache {
-            registrar.register_cache(CORE, Arc::new(*self));
+            registrar.register_cache(CORE, Arc::new(self.clone()));
         }
     }
 }

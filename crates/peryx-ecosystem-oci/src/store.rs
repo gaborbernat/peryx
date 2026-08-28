@@ -409,12 +409,13 @@ pub fn list_tags(meta: &MetaStore, index: &str, repo: &str) -> Result<Vec<String
 /// Returns a store error if the scan fails.
 pub fn list_tag_targets(meta: &MetaStore, index: &str, repo: &str) -> Result<Vec<(String, String)>, MetaError> {
     let prefix = tag_prefix(index, repo);
-    let mut targets = Vec::new();
-    meta.visit_driver_prefix(&prefix, |key, value| {
-        if let (Some(tag), Ok(digest)) = (key.strip_prefix(prefix.as_str()), std::str::from_utf8(value)) {
+    let entries = meta.read_driver_txn(|txn| txn.prefix(&prefix))?;
+    let mut targets = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        if let (Some(tag), Ok(digest)) = (key.strip_prefix(prefix.as_str()), std::str::from_utf8(&value)) {
             targets.push((tag.to_owned(), digest.to_owned()));
         }
-    })?;
+    }
     Ok(targets)
 }
 

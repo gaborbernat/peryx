@@ -12,13 +12,11 @@ fn test_documented_job_run_commands_parse() {
 
     let mut commands = 0;
     for path in paths {
-        let markdown = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-        for (line, command) in documented_job_runs(&markdown) {
+        let markdown = fs::read_to_string(&path).unwrap();
+        for (_, command) in documented_job_runs(&markdown) {
             commands += 1;
-            let argv = shlex::split(&command)
-                .unwrap_or_else(|| panic!("{}:{line}: invalid shell quoting: {command}", path.display()));
-            Cli::try_parse_from(&argv)
-                .unwrap_or_else(|error| panic!("{}:{line}: `{command}` does not parse: {error}", path.display()));
+            let argv = shlex::split(&command).unwrap();
+            Cli::try_parse_from(&argv).unwrap();
         }
     }
     assert_ne!(commands, 0, "no documented `peryx job run` commands found");
@@ -41,10 +39,8 @@ fn markdown_files(root: &Path) -> Vec<PathBuf> {
     let mut directories = vec![root.to_path_buf()];
     let mut paths = Vec::new();
     while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(&directory).unwrap_or_else(|error| panic!("{}: {error}", directory.display())) {
-            let path = entry
-                .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))
-                .path();
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
             if path.is_dir()
                 && !matches!(
                     path.file_name().and_then(|name| name.to_str()),

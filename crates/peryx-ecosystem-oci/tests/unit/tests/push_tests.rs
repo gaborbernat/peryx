@@ -12,8 +12,8 @@ use rstest::rstest;
 use tower::ServiceExt as _;
 
 use super::{
-    EpochAuthority, app_with_indexes, auth, bind_ownership, body_has_code, hosted, hosted_writable, oci_digest, proxy,
-    scoped_index, send, send_body, send_with, writable_index,
+    EpochAuthority, app_with_indexes, assert_registry_version, auth, bind_ownership, body_has_code, hosted,
+    hosted_writable, oci_digest, proxy, scoped_index, send, send_body, send_with, writable_index,
 };
 
 const TOKEN: &str = "s3cret";
@@ -35,6 +35,7 @@ async fn test_session_upload_then_pull() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
+    assert_registry_version(&headers);
     let location = headers[header::LOCATION].to_str().unwrap().to_owned();
     assert!(!headers["docker-upload-uuid"].is_empty());
 
@@ -60,8 +61,9 @@ async fn test_session_upload_then_pull() {
     assert_eq!(headers["docker-content-digest"], digest);
     assert_eq!(headers[header::LOCATION], format!("/v2/store/app/blobs/{digest}"));
 
-    let (status, _, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
+    let (status, headers, got) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}")).await;
     assert_eq!(status, StatusCode::OK);
+    assert_registry_version(&headers);
     assert_eq!(got, &blob[..]);
 }
 
@@ -637,6 +639,7 @@ async fn test_manifest_put_by_tag_then_pull_and_list() {
 
     let (status, headers, got) = send(&app, Method::GET, "/v2/store/app/manifests/v1").await;
     assert_eq!(status, StatusCode::OK);
+    assert_registry_version(&headers);
     assert_eq!(headers[header::CONTENT_TYPE], MANIFEST_TYPE);
     assert_eq!(got, &manifest[..]);
 
@@ -1218,6 +1221,7 @@ async fn test_push_requires_credentials() {
     let (_state, app) = hosted_writable(&dir, TOKEN);
     let (status, headers, _) = send_body(&app, Method::POST, "/v2/store/app/blobs/uploads/", &[], Vec::new()).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_registry_version(&headers);
     assert_eq!(headers[header::WWW_AUTHENTICATE], "Basic realm=\"peryx\"");
 }
 
@@ -1344,6 +1348,7 @@ async fn test_manifest_put_body_error_is_a_gateway_error() {
         .unwrap();
     let response = app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_registry_version(response.headers());
     let _ = response.into_body().collect().await;
 }
 

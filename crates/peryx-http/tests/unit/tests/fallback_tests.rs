@@ -26,6 +26,27 @@ fn unwired_state_with(indexes: Vec<peryx_driver::state::Index>) -> (tempfile::Te
     (dir, std::sync::Arc::new(AppState::new(meta, blobs, 60, indexes)))
 }
 
+fn state_with_search_storage_failure(
+    indexes: Vec<peryx_driver::state::Index>,
+) -> (tempfile::TempDir, std::sync::Arc<AppState>) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    drop(peryx_storage::meta::MetaStore::open(&path).unwrap());
+    let database = redb::Database::open(&path).unwrap();
+    let transaction = database.begin_write().unwrap();
+    transaction
+        .delete_table(redb::TableDefinition::<&str, u64>::new("serial"))
+        .unwrap();
+    transaction
+        .open_table(redb::TableDefinition::<&str, &[u8]>::new("serial"))
+        .unwrap();
+    transaction.commit().unwrap();
+    drop(database);
+    let meta = peryx_storage::meta::MetaStore::open_existing(path).unwrap();
+    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
+    (dir, std::sync::Arc::new(AppState::new(meta, blobs, 60, indexes)))
+}
+
 fn unwired_state_with_limits(rate_limit: RateLimitConfig) -> (tempfile::TempDir, std::sync::Arc<AppState>) {
     let dir = tempfile::tempdir().unwrap();
     let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
@@ -534,16 +555,68 @@ async fn test_root_search_rejects_an_invalid_filter() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+#[rstest]
+#[case::global("/+search?q=demo")]
+#[case::index("/private/+search?q=demo")]
 #[tokio::test]
-async fn test_private_index_search_uses_authorized_search() {
+async fn test_private_search_is_not_cached(#[case] uri: &str) {
     let mut index = test_index("private");
     index.acl.anonymous_read = false;
     let (_dir, state) = unwired_state_with(vec![index]);
     let response = crate::router(state)
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            response.status(),
+            response.headers()[axum::http::header::CACHE_CONTROL].to_str().unwrap(),
+        ),
+        (StatusCode::OK, "no-store")
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_visibility_search_is_not_cached() {
+    let mut private = test_index("private");
+    private.acl.anonymous_read = false;
+    let (_dir, state) = unwired_state_with(vec![test_index("public"), private]);
+    let response = crate::router(state)
         .oneshot(Request::builder().uri("/+search?q=demo").body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(response.headers()[axum::http::header::CACHE_CONTROL], "no-store");
+}
+
+#[tokio::test]
+async fn test_public_search_keeps_its_cache_policy() {
+    let (_dir, state) = unwired_state_with(vec![test_index("public"), test_index("mirror")]);
+    let response = crate::router(state)
+        .oneshot(Request::builder().uri("/+search?q=demo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert!(!response.headers().contains_key(axum::http::header::CACHE_CONTROL));
+}
+
+#[tokio::test]
+async fn test_private_search_error_is_not_cached() {
+    let mut index = test_index("private");
+    index.acl.anonymous_read = false;
+    let (_dir, state) = state_with_search_storage_failure(vec![index]);
+    let response = crate::router(state)
+        .oneshot(Request::builder().uri("/+search?q=demo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (
+            response.status(),
+            response.headers()[axum::http::header::CACHE_CONTROL].to_str().unwrap(),
+        ),
+        (StatusCode::INTERNAL_SERVER_ERROR, "no-store")
+    );
 }
 
 #[test]
@@ -554,22 +627,7 @@ fn test_search_internal_errors_are_server_errors() {
 
 #[test]
 fn test_search_response_maps_storage_failures() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("peryx.redb");
-    drop(peryx_storage::meta::MetaStore::open(&path).unwrap());
-    let database = redb::Database::open(&path).unwrap();
-    let transaction = database.begin_write().unwrap();
-    transaction
-        .delete_table(redb::TableDefinition::<&str, u64>::new("serial"))
-        .unwrap();
-    transaction
-        .open_table(redb::TableDefinition::<&str, &[u8]>::new("serial"))
-        .unwrap();
-    transaction.commit().unwrap();
-    drop(database);
-    let meta = peryx_storage::meta::MetaStore::open_existing(path).unwrap();
-    let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
-    let state = std::sync::Arc::new(AppState::new(meta, blobs, 60, Vec::new()));
+    let (_dir, state) = state_with_search_storage_failure(Vec::new());
     let services = HttpDomainServices::for_state(&state);
     let response = crate::handlers::search_response(&services, peryx_search::SearchParams::default(), None);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);

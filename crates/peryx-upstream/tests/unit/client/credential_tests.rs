@@ -271,25 +271,97 @@ async fn test_client_replays_only_once_after_a_401() {
 }
 
 #[tokio::test]
-async fn test_warm_records_a_credential_refresh_failure() {
+async fn test_warm_preserves_unknown_on_credential_refresh_failure() {
+    let server = MockServer::start().await;
+    let base = format!("{}/api/", server.uri());
+    let credentials = CredentialProvider::refreshing(
+        Auth::Bearer("old".to_owned()),
+        immediate_refresh(),
+        unavailable_credential,
+    );
     let client = UpstreamClient::with_credentials_and_tls_for_origin(
-        "https://example.invalid/api/",
-        CredentialProvider::refreshing(
-            Auth::Bearer("old".to_owned()),
-            CredentialRefresh {
-                interval: Duration::ZERO,
-                on_unauthorized: true,
-                failure: CredentialFailure::Fail,
-            },
-            || async { Err(CredentialError::new("source unavailable")) },
-        ),
+        &base,
+        credentials.clone(),
         &UpstreamTls::default(),
-        "https://example.invalid/api/",
+        &base,
         &[],
     )
     .unwrap();
 
     client.warm().await;
 
+    assert_eq!(
+        (
+            client.reachability(),
+            credentials.current().unwrap_err(),
+            server.received_requests().await.unwrap().len()
+        ),
+        (
+            crate::Reachability::Unknown,
+            CredentialError::new("source unavailable"),
+            0
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_warm_preserves_reachable_on_credential_refresh_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/api/"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let base = format!("{}/api/", server.uri());
+    let credentials = credential_then_failure();
+    let client =
+        UpstreamClient::with_credentials_and_tls_for_origin(&base, credentials, &UpstreamTls::default(), &base, &[])
+            .unwrap();
+    client.warm().await;
+
+    client.warm().await;
+
+    assert_eq!(
+        (client.reachability(), server.received_requests().await.unwrap().len()),
+        (crate::Reachability::Reachable, 1)
+    );
+}
+
+#[tokio::test]
+async fn test_warm_preserves_unreachable_on_credential_refresh_failure() {
+    let client = UpstreamClient::with_credentials_and_tls_for_origin(
+        "http://127.0.0.1:0/api/",
+        credential_then_failure(),
+        &UpstreamTls::default(),
+        "http://127.0.0.1:0/api/",
+        &[],
+    )
+    .unwrap();
+    client.warm().await;
+
+    client.warm().await;
+
     assert_eq!(client.reachability(), crate::Reachability::Unreachable);
+}
+
+fn credential_then_failure() -> CredentialProvider {
+    let loads = Arc::new(AtomicUsize::new(0));
+    CredentialProvider::refreshing(Auth::None, immediate_refresh(), move || {
+        let succeeds = loads.fetch_add(1, Ordering::Relaxed) == 0;
+        async move {
+            if succeeds {
+                Ok(Auth::None)
+            } else {
+                Err(CredentialError::new("source unavailable"))
+            }
+        }
+    })
+}
+
+const fn immediate_refresh() -> CredentialRefresh {
+    CredentialRefresh {
+        interval: Duration::ZERO,
+        on_unauthorized: true,
+        failure: CredentialFailure::Fail,
+    }
 }

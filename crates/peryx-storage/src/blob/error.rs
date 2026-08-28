@@ -39,11 +39,14 @@ pub struct BlobErrorContext {
 
 impl fmt::Display for BlobErrorContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{} blob backend {}", self.backend, self.operation)?;
-        if let Some(digest) = &self.digest {
-            write!(formatter, " for {digest}")?;
+        match &self.digest {
+            Some(digest) => write!(
+                formatter,
+                "{} blob backend {} for {digest}",
+                self.backend, self.operation
+            ),
+            None => write!(formatter, "{} blob backend {}", self.backend, self.operation),
         }
-        Ok(())
     }
 }
 
@@ -188,22 +191,28 @@ impl From<tokio::task::JoinError> for BlobError {
 
 impl fmt::Display for BlobError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(context) = &self.context {
-            write!(formatter, "{context}: ")?;
+        match &self.context {
+            Some(context) => write!(formatter, "{context}: {}", self.detail),
+            None => self.detail.fmt(formatter),
         }
-        match &self.detail {
-            BlobErrorDetail::Io(_) => formatter.write_str("I/O error"),
-            BlobErrorDetail::NotFound(digest) => write!(formatter, "blob {digest} not found"),
-            BlobErrorDetail::DigestMismatch { expected, actual } => {
+    }
+}
+
+impl fmt::Display for BlobErrorDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(_) => formatter.write_str("I/O error"),
+            Self::NotFound(digest) => write!(formatter, "blob {digest} not found"),
+            Self::DigestMismatch { expected, actual } => {
                 write!(formatter, "digest mismatch: expected {expected}, got {actual}")
             }
-            BlobErrorDetail::InvalidRange { start, end, bytes } => {
+            Self::InvalidRange { start, end, bytes } => {
                 write!(formatter, "range {start}..{end} exceeds {bytes} bytes")
             }
-            BlobErrorDetail::LimitExceeded { limit, actual } => {
+            Self::LimitExceeded { limit, actual } => {
                 write!(formatter, "blob size {actual} exceeds {limit} byte limit")
             }
-            BlobErrorDetail::Unsupported(capability) => write!(formatter, "{capability} is unsupported"),
+            Self::Unsupported(capability) => write!(formatter, "{capability} is unsupported"),
         }
     }
 }

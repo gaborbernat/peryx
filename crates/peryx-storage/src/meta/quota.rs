@@ -301,15 +301,7 @@ impl MetaStore {
             None,
             None,
             true,
-            |txn, value| {
-                (if commit(value) {
-                    commit_reservation(txn, id)?
-                } else {
-                    release(txn, id, ReleaseScope::Pending)?
-                })
-                .then_some(())
-                .ok_or_else(|| QuotaError::ReservationUnavailable { id }.into())
-            },
+            |txn, value| settle_reservation(txn, id, commit(value)).map_err(E::from),
             body,
         )
     }
@@ -448,6 +440,16 @@ impl MetaStore {
         let table = txn.open_table(QUOTA_RESERVATION)?;
         read_quota_reservation(&table, &id.to_string())
     }
+}
+
+fn settle_reservation(txn: &redb::WriteTransaction, id: Uuid, commit: bool) -> Result<(), QuotaError> {
+    (if commit {
+        commit_reservation(txn, id)?
+    } else {
+        release(txn, id, ReleaseScope::Pending)?
+    })
+    .then_some(())
+    .ok_or(QuotaError::ReservationUnavailable { id })
 }
 
 impl ReservationRows {

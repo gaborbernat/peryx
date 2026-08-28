@@ -159,6 +159,21 @@ impl MetaStore {
         Ok(())
     }
 
+    /// Runs dependent driver reads against one snapshot.
+    ///
+    /// # Errors
+    /// Returns a store error if the snapshot cannot be opened, or the callback's error.
+    pub fn read_driver_txn<T, E: From<MetaError>>(
+        &self,
+        body: impl FnOnce(&DriverReadTxn) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let txn = self.db.begin_read().map_err(MetaError::from)?;
+        let driver = DriverReadTxn {
+            table: txn.open_table(DRIVER_KV).map_err(MetaError::from)?,
+        };
+        body(&driver)
+    }
+
     /// Reads driver records and policy generation from one snapshot.
     ///
     /// # Errors
@@ -337,10 +352,7 @@ impl MetaStore {
         body: impl FnOnce(&mut DriverTxn) -> Result<(T, PendingJournal), E>,
     ) -> Result<super::DriverCommit<T>, E> {
         let mut txn = self.db.begin_write().map_err(MetaError::from)?;
-        if !durable {
-            txn.set_durability(redb::Durability::None)
-                .expect("no savepoints in this transaction");
-        }
+        set_durability(&mut txn, durable);
         check_replica_serial(&txn, expected_serial)?;
         let (value, journal) = {
             let mut driver = DriverTxn {
@@ -349,61 +361,13 @@ impl MetaStore {
                 blobs: std::collections::BTreeSet::new(),
             };
             let (value, journal) = body(&mut driver)?;
-            let journal = match journal {
-                PendingJournal::Payloads(payloads) => {
-                    let mut entries: Vec<_> = payloads
-                        .into_iter()
-                        .map(|payload| JournalEntry {
-                            payload,
-                            mutations: Vec::new(),
-                            blobs: Vec::new(),
-                        })
-                        .collect();
-                    if let Some(last) = entries.last_mut() {
-                        last.mutations = driver.mutations().map_err(E::from)?;
-                        last.blobs = driver.blobs.into_iter().collect();
-                    }
-                    entries
-                }
-                PendingJournal::Entries(entries) => entries,
-            };
+            let journal = finish_journal(journal, driver).map_err(E::from)?;
             (value, journal)
         };
-        if expected_serial.is_none()
-            && let Some(last) = journal.last()
-            && !last.blobs.is_empty()
-        {
-            let guards = txn.open_table(BLOB_RECLAIM_GUARD).map_err(MetaError::from)?;
-            for blob in &last.blobs {
-                if guards.get(blob.sha256.as_str()).map_err(MetaError::from)?.is_some() {
-                    return Err(MetaError::BlobReclaiming {
-                        digest: blob.sha256.clone(),
-                    }
-                    .into());
-                }
-            }
-        }
+        check_blob_reclaim_guard(&txn, expected_serial, &journal).map_err(E::from)?;
         let journal_commit = commit_journal(&txn, &journal)?;
         if let Some((repository, catalog)) = catalog_generation {
-            let mut generations = txn.open_table(POLICY_INPUT_GENERATION).map_err(MetaError::from)?;
-            let mut generation = generations
-                .get(repository)
-                .map_err(MetaError::from)?
-                .map(|value| serde_json::from_slice::<PolicyInputGeneration>(value.value()))
-                .transpose()
-                .map_err(MetaError::from)?
-                .unwrap_or_default();
-            generation.repository = txn
-                .open_table(SERIAL)
-                .map_err(MetaError::from)?
-                .get(SERIAL_KEY)
-                .map_err(MetaError::from)?
-                .map_or(0, |value| value.value());
-            generation.catalog = catalog;
-            let encoded = serde_json::to_vec(&generation).map_err(MetaError::from)?;
-            generations
-                .insert(repository, encoded.as_slice())
-                .map_err(MetaError::from)?;
+            update_policy_generation(&txn, repository, catalog).map_err(E::from)?;
         }
         finalize(&txn, &value)?;
         txn.commit().map_err(MetaError::from)?;
@@ -417,6 +381,73 @@ impl MetaStore {
 enum PendingJournal {
     Payloads(Vec<Vec<u8>>),
     Entries(Vec<JournalEntry>),
+}
+
+fn set_durability(txn: &mut redb::WriteTransaction, durable: bool) {
+    if !durable {
+        txn.set_durability(redb::Durability::None)
+            .expect("no savepoints in this transaction");
+    }
+}
+
+fn finish_journal(journal: PendingJournal, driver: DriverTxn<'_>) -> Result<Vec<JournalEntry>, MetaError> {
+    match journal {
+        PendingJournal::Payloads(payloads) => {
+            let mut entries: Vec<_> = payloads
+                .into_iter()
+                .map(|payload| JournalEntry {
+                    payload,
+                    mutations: Vec::new(),
+                    blobs: Vec::new(),
+                })
+                .collect();
+            if let Some(last) = entries.last_mut() {
+                last.mutations = driver.mutations()?;
+                last.blobs = driver.blobs.into_iter().collect();
+            }
+            Ok(entries)
+        }
+        PendingJournal::Entries(entries) => Ok(entries),
+    }
+}
+
+fn check_blob_reclaim_guard(
+    txn: &redb::WriteTransaction,
+    expected_serial: Option<u64>,
+    journal: &[JournalEntry],
+) -> Result<(), MetaError> {
+    let Some(last) = journal.last() else {
+        return Ok(());
+    };
+    if expected_serial.is_some() || last.blobs.is_empty() {
+        return Ok(());
+    }
+    let guards = txn.open_table(BLOB_RECLAIM_GUARD)?;
+    for blob in &last.blobs {
+        if guards.get(blob.sha256.as_str())?.is_some() {
+            return Err(MetaError::BlobReclaiming {
+                digest: blob.sha256.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn update_policy_generation(txn: &redb::WriteTransaction, repository: &str, catalog: u64) -> Result<(), MetaError> {
+    let mut generations = txn.open_table(POLICY_INPUT_GENERATION)?;
+    let mut generation = generations
+        .get(repository)?
+        .map(|value| serde_json::from_slice::<PolicyInputGeneration>(value.value()))
+        .transpose()?
+        .unwrap_or_default();
+    generation.repository = txn
+        .open_table(SERIAL)?
+        .get(SERIAL_KEY)?
+        .map_or(0, |value| value.value());
+    generation.catalog = catalog;
+    let encoded = serde_json::to_vec(&generation)?;
+    generations.insert(repository, encoded.as_slice())?;
+    Ok(())
 }
 
 fn check_replica_serial<E: From<MetaError>>(txn: &redb::WriteTransaction, expected: Option<u64>) -> Result<(), E> {
@@ -474,6 +505,50 @@ pub struct DriverTxn<'txn> {
     table: redb::Table<'txn, &'static str, &'static [u8]>,
     touched: std::collections::BTreeSet<String>,
     blobs: std::collections::BTreeSet<DriverBlobReference>,
+}
+
+/// Read-only access to opaque driver rows from one metadata snapshot.
+pub struct DriverReadTxn {
+    table: redb::ReadOnlyTable<&'static str, &'static [u8]>,
+}
+
+/// Owned driver rows in key order.
+pub type DriverEntries = Vec<(String, Vec<u8>)>;
+
+impl DriverReadTxn {
+    /// # Errors
+    /// Returns a store error if the snapshot read fails.
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>, MetaError> {
+        Ok(self.table.get(key)?.map(|value| value.value().to_vec()))
+    }
+
+    /// Returns one group of matching records per prefix, preserving prefix and key order.
+    ///
+    /// # Errors
+    /// Returns a store error if the snapshot scan fails.
+    pub fn prefixes(&self, prefixes: &[&str]) -> Result<Vec<DriverEntries>, MetaError> {
+        prefixes.iter().map(|prefix| self.collect_prefix(prefix)).collect()
+    }
+
+    /// Returns matching records in key order.
+    ///
+    /// # Errors
+    /// Returns a store error if the snapshot scan fails.
+    pub fn prefix(&self, prefix: &str) -> Result<DriverEntries, MetaError> {
+        self.collect_prefix(prefix)
+    }
+
+    fn collect_prefix(&self, prefix: &str) -> Result<DriverEntries, MetaError> {
+        let mut entries = Vec::new();
+        for entry in self.table.range(prefix..)? {
+            let (key, value) = entry?;
+            if !key.value().starts_with(prefix) {
+                break;
+            }
+            entries.push((key.value().to_owned(), value.value().to_vec()));
+        }
+        Ok(entries)
+    }
 }
 
 impl DriverTxn<'_> {

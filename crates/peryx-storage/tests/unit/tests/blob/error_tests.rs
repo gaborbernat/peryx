@@ -28,8 +28,65 @@ fn test_scan_store_error_reports_source() {
 }
 
 #[test]
-fn test_non_mismatch_error_returns_no_mismatch() {
+fn test_mismatch_returns_only_digest_pairs() {
+    let expected = Digest::of(b"expected");
+    let actual = Digest::of(b"actual");
+    assert_eq!(
+        BlobError::digest_mismatch(&expected, &actual).mismatch(),
+        Some((expected.as_str(), actual.as_str()))
+    );
     assert_eq!(BlobError::io(std::io::Error::other("disk")).mismatch(), None);
+}
+
+#[test]
+fn test_blob_error_formats_every_detail_with_optional_context() {
+    let expected = Digest::of(b"expected");
+    let actual = Digest::of(b"actual");
+    for (error, message) in [
+        (BlobError::io(std::io::Error::other("disk")), "I/O error".to_owned()),
+        (
+            BlobError::not_found(&expected),
+            format!("blob {} not found", expected.as_str()),
+        ),
+        (
+            BlobError::digest_mismatch(&expected, &actual),
+            format!(
+                "digest mismatch: expected {}, got {}",
+                expected.as_str(),
+                actual.as_str()
+            ),
+        ),
+        (
+            BlobError::invalid_range(3, 9, 7),
+            "range 3..9 exceeds 7 bytes".to_owned(),
+        ),
+        (
+            BlobError::limit_exceeded(6, 7),
+            "blob size 7 exceeds 6 byte limit".to_owned(),
+        ),
+        (
+            BlobError::unsupported("streaming"),
+            "streaming is unsupported".to_owned(),
+        ),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
+    assert_eq!(
+        BlobError::not_found(&expected)
+            .with_context("filesystem", BlobOperation::Open, Some(&expected))
+            .to_string(),
+        format!(
+            "filesystem blob backend open for {}: blob {} not found",
+            expected.as_str(),
+            expected.as_str()
+        )
+    );
+    assert_eq!(
+        BlobError::unsupported("streaming")
+            .with_context("s3", BlobOperation::Open, None)
+            .to_string(),
+        "s3 blob backend open: streaming is unsupported"
+    );
 }
 
 #[test]

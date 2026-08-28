@@ -123,20 +123,25 @@ impl BlobRead {
             ));
         }
         let result = match body {
-            BlobReadBody::File(mut file) => tokio::task::spawn_blocking(move || {
-                file.seek(std::io::SeekFrom::Start(range.start))?;
-                let mut bytes = Vec::new();
-                file.take(expected).read_to_end(&mut bytes)?;
-                if bytes.len() as u64 != expected {
-                    return Err(BlobError::io(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        format!("blob file declared {expected} bytes but yielded {}", bytes.len()),
-                    )));
-                }
-                Ok::<_, BlobError>(bytes)
-            })
-            .await
-            .map_err(|error| BlobError::from(error).with_context(backend, BlobOperation::Open, Some(&digest)))?,
+            BlobReadBody::File(mut file) => {
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || {
+                        file.seek(std::io::SeekFrom::Start(range.start))?;
+                        let mut bytes = Vec::new();
+                        file.take(expected).read_to_end(&mut bytes)?;
+                        if bytes.len() as u64 != expected {
+                            return Err(BlobError::io(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                format!("blob file declared {expected} bytes but yielded {}", bytes.len()),
+                            )));
+                        }
+                        Ok::<_, BlobError>(bytes)
+                    }),
+                    BlobOperation::Open,
+                    Some(&digest),
+                )
+                .await
+            }
             BlobReadBody::Stream(stream) => {
                 stream
                     .try_fold(Vec::new(), |mut bytes, chunk| async move {
@@ -343,15 +348,17 @@ impl FilesystemWrite {
         let pending = self.pending.take().expect("settled writer retains its stage");
         let queued = std::mem::take(&mut self.queued);
         let store = self.store.clone();
-        let staged = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let mut pending = pending;
-            queued.into_iter().try_for_each(|chunk| pending.write(&chunk))?;
-            pending.finish()
-        })
-        .await
-        .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Write, None))?;
-        let staged = filesystem_context(staged, BlobOperation::Write, None)?;
+        let staged = filesystem_worker(
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let mut pending = pending;
+                queued.into_iter().try_for_each(|chunk| pending.write(&chunk))?;
+                pending.finish()
+            }),
+            BlobOperation::Write,
+            None,
+        )
+        .await?;
         Ok(BlobStaged::filesystem(store, staged))
     }
 
@@ -359,13 +366,15 @@ impl FilesystemWrite {
         self.settle().await?;
         let permit = self.store.worker_permit().await;
         let pending = self.pending.take().expect("settled writer retains its stage");
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            pending.abort()
-        })
+        filesystem_worker(
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                pending.abort()
+            }),
+            BlobOperation::Write,
+            None,
+        )
         .await
-        .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Write, None))?
-        .map_err(|error| error.with_context("filesystem", BlobOperation::Write, None))
     }
 
     fn start_batch(&mut self, flush: bool, permit: tokio::sync::OwnedSemaphorePermit) {
@@ -387,10 +396,7 @@ impl FilesystemWrite {
         let Some(task) = self.task.take() else {
             return Ok(());
         };
-        let pending = task
-            .await
-            .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Write, None))?;
-        self.pending = Some(filesystem_context(pending, BlobOperation::Write, None)?);
+        self.pending = Some(filesystem_worker(task, BlobOperation::Write, None).await?);
         Ok(())
     }
 }
@@ -448,12 +454,15 @@ impl BlobStaged {
         match self.take_backend() {
             BlobStagedBackend::Filesystem { store, staged } => {
                 let permit = store.worker_permit().await;
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    Self::commit_backend(BlobStagedBackend::Filesystem { store, staged })
-                })
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        Self::commit_backend(BlobStagedBackend::Filesystem { store, staged })
+                    }),
+                    BlobOperation::Commit,
+                    None,
+                )
                 .await
-                .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Commit, None))?
             }
             BlobStagedBackend::S3(staged) => Box::pin(staged.commit()).await,
         }
@@ -501,12 +510,15 @@ impl BlobStaged {
         match self.take_backend() {
             BlobStagedBackend::Filesystem { store, staged } => {
                 let permit = store.worker_permit().await;
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    Self::abort_backend(BlobStagedBackend::Filesystem { store, staged })
-                })
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        Self::abort_backend(BlobStagedBackend::Filesystem { store, staged })
+                    }),
+                    BlobOperation::Write,
+                    None,
+                )
                 .await
-                .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Write, None))?
             }
             BlobStagedBackend::S3(staged) => staged.abort().await,
         }
@@ -600,15 +612,14 @@ impl BlobLease {
     }
 
     pub(crate) fn pinned(path: &Path, lease_dir: &Path) -> Result<Self, std::io::Error> {
-        Self::pinned_with(path, lease_dir, &|source, destination| {
-            std::fs::hard_link(source, destination)
-        })
+        Self::pinned_with(path, lease_dir, &hard_link, &temporary_lease)
     }
 
     fn pinned_with(
         path: &Path,
         lease_dir: &Path,
         hard_link: &dyn Fn(&Path, &Path) -> Result<(), std::io::Error>,
+        create_temporary: &dyn Fn(&Path) -> Result<tempfile::TempPath, std::io::Error>,
     ) -> Result<Self, std::io::Error> {
         std::fs::create_dir_all(lease_dir)?;
         let coordination = std::fs::OpenOptions::new()
@@ -619,10 +630,7 @@ impl BlobLease {
             .open(lease_dir.join(".cleanup.lock"))?;
         fs4::FileExt::lock_shared(&coordination)?;
         let mut source = std::fs::File::open(path)?;
-        let temporary = tempfile::Builder::new()
-            .prefix(".peryx-lease-")
-            .tempfile_in(lease_dir)?
-            .into_temp_path();
+        let temporary = create_temporary(lease_dir)?;
         std::fs::remove_file(&temporary)?;
         let lock = if hard_link(path, &temporary).is_ok() {
             source
@@ -652,6 +660,17 @@ impl BlobLease {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn temporary_lease(directory: &Path) -> Result<tempfile::TempPath, std::io::Error> {
+    tempfile::Builder::new()
+        .prefix(".peryx-lease-")
+        .tempfile_in(directory)
+        .map(tempfile::NamedTempFile::into_temp_path)
+}
+
+fn hard_link(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    std::fs::hard_link(source, destination)
 }
 
 impl Drop for BlobLease {
@@ -783,13 +802,15 @@ where
 {
     let permit = store.worker_permit().await;
     let error_digest = digest.clone();
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        action(store, digest)
-    })
+    filesystem_worker(
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            action(store, digest)
+        }),
+        operation,
+        Some(&error_digest),
+    )
     .await
-    .map_err(|error| BlobError::from(error).with_context("filesystem", operation, Some(&error_digest)))?
-    .map_err(|error| error.with_context("filesystem", operation, Some(&error_digest)))
 }
 
 async fn run_without_digest<T>(
@@ -801,13 +822,26 @@ where
     T: Send + 'static,
 {
     let permit = store.worker_permit().await;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        action(store)
-    })
+    filesystem_worker(
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            action(store)
+        }),
+        operation,
+        None,
+    )
     .await
-    .map_err(|error| BlobError::from(error).with_context("filesystem", operation, None))?
-    .map_err(|error| error.with_context("filesystem", operation, None))
+}
+
+pub(super) async fn filesystem_worker<T>(
+    worker: tokio::task::JoinHandle<Result<T, BlobError>>,
+    operation: BlobOperation,
+    digest: Option<&Digest>,
+) -> Result<T, BlobError> {
+    let result = worker
+        .await
+        .map_err(|error| BlobError::from(error).with_context("filesystem", operation, digest))?;
+    filesystem_context(result, operation, digest)
 }
 
 #[cfg(test)]

@@ -159,6 +159,24 @@ fn test_health_check_rejects_a_file_as_the_store_root() {
 
 #[cfg(unix)]
 #[test]
+fn test_health_check_ignores_a_missing_lease_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(dir.path().join("blobs"));
+    let lease_dir = dir.path().join("blobs/.leases");
+    std::fs::create_dir_all(&lease_dir).unwrap();
+    let missing = lease_dir.join(".peryx-lease-missing");
+    std::os::unix::fs::symlink(lease_dir.join("absent"), &missing).unwrap();
+    let stale = lease_dir.join(".peryx-lease-stale");
+    std::fs::write(&stale, b"stale").unwrap();
+
+    store.health_check().unwrap();
+
+    assert!(std::fs::symlink_metadata(missing).is_ok());
+    assert!(!stale.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn test_health_check_reports_an_unreadable_lease() {
     let dir = tempfile::tempdir().unwrap();
     let store = BlobStore::new(dir.path().join("blobs"));

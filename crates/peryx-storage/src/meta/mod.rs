@@ -45,7 +45,7 @@ pub use bootstrap::AdministratorBootstrapError;
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use external_identity::ExternalIdentityStoreError;
 pub use finalize::{FinalizeOutcome, FinalizedWrite};
-pub use index::DriverTxn;
+pub use index::{DriverEntries, DriverReadTxn, DriverTxn};
 pub use ingress_intent::{
     BackpressureState, IntentAdmission, IntentLimits, IntentPhase, IntentStageOutcome, IntentStageResult,
     IntentTransition, IntentUsage, StagedIntent,

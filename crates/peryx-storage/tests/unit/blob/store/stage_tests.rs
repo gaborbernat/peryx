@@ -5,6 +5,18 @@ use super::discard_stage_with;
 use super::remove_pending;
 use super::remove_pending_with;
 
+fn denied(_: &std::path::Path, _: &std::path::Path) -> Result<(), std::io::Error> {
+    Err(std::io::Error::from(ErrorKind::PermissionDenied))
+}
+
+fn close(path: tempfile::TempPath) -> Result<(), std::io::Error> {
+    path.close()
+}
+
+fn close_denied(_: tempfile::TempPath) -> Result<(), std::io::Error> {
+    Err(std::io::Error::from(ErrorKind::PermissionDenied))
+}
+
 #[test]
 fn test_remove_pending_treats_a_missing_stage_as_removed() {
     let dir = tempfile::tempdir().unwrap();
@@ -30,7 +42,13 @@ fn test_discard_stage_falls_back_when_rename_is_denied() {
     let (_file, path) = tempfile::NamedTempFile::new_in(&dir).unwrap().into_parts();
     let original = path.to_path_buf();
 
-    discard_stage_with(path, |_, _| Err(std::io::Error::from(ErrorKind::PermissionDenied))).unwrap();
+    discard_stage_with(path, denied, close).unwrap();
 
     assert!(!original.exists());
+
+    let (_file, path) = tempfile::NamedTempFile::new_in(&dir).unwrap().into_parts();
+    assert_eq!(
+        discard_stage_with(path, denied, close_denied).unwrap_err().kind(),
+        crate::blob::BlobErrorKind::Io
+    );
 }

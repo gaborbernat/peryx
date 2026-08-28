@@ -66,6 +66,11 @@ pub enum OwnershipCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnershipEffect {
     Assigned {
+        home: DatacenterId,
+        epoch: AuthorityEpoch,
+    },
+    AlreadyAssigned {
+        home: DatacenterId,
         epoch: AuthorityEpoch,
     },
     EpochAdvanced {
@@ -82,7 +87,6 @@ pub enum OwnershipEffect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rejection {
-    AlreadyAssigned,
     NotAssigned,
     SameHome,
 }
@@ -131,8 +135,11 @@ impl OwnershipState {
         cause: AssignmentCause,
         meta: AppliedMeta,
     ) -> OwnershipEffect {
-        if self.authorities.contains_key(&authority.0) {
-            return OwnershipEffect::Rejected(Rejection::AlreadyAssigned);
+        if let Some(record) = self.authorities.get(&authority.0) {
+            return OwnershipEffect::AlreadyAssigned {
+                home: record.home.clone(),
+                epoch: record.epoch,
+            };
         }
         let epoch = AuthorityEpoch(1);
         self.authorities.insert(
@@ -149,7 +156,10 @@ impl OwnershipState {
                 transfers: Vec::new(),
             },
         );
-        OwnershipEffect::Assigned { epoch }
+        OwnershipEffect::Assigned {
+            home: home.clone(),
+            epoch,
+        }
     }
 
     fn advance_epoch(&mut self, authority: &AuthorityKey) -> OwnershipEffect {

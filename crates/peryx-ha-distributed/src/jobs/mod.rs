@@ -146,11 +146,10 @@ impl ScheduledJobFactory for DcCopyFactory {
     }
 
     fn create(&self, app: &AppState) -> Result<Arc<dyn NodeJob>, String> {
-        app.serving
-            .cross_dc_copier()
-            .cloned()
-            .map(|copier| Arc::new(DcCopyJob::new(copier, self.0)) as Arc<dyn NodeJob>)
-            .ok_or_else(|| "cross-datacenter copy is unavailable".to_owned())
+        let Some(copier) = app.serving.cross_dc_copier().cloned() else {
+            return Err("cross-datacenter copy is unavailable".to_owned());
+        };
+        Ok(Arc::new(DcCopyJob::new(copier, self.0)))
     }
 }
 
@@ -166,11 +165,10 @@ impl ScheduledJobFactory for PlacementReconcileFactory {
     }
 
     fn create(&self, app: &AppState) -> Result<Arc<dyn NodeJob>, String> {
-        app.serving
-            .placement_reconciler()
-            .cloned()
-            .map(|reconciler| Arc::new(PlacementReconcileJob::new(reconciler, self.0)) as Arc<dyn NodeJob>)
-            .ok_or_else(|| "placement reconciliation is unavailable".to_owned())
+        let Some(reconciler) = app.serving.placement_reconciler().cloned() else {
+            return Err("placement reconciliation is unavailable".to_owned());
+        };
+        Ok(Arc::new(PlacementReconcileJob::new(reconciler, self.0)))
     }
 }
 
@@ -186,11 +184,10 @@ impl ScheduledJobFactory for ReclamationFactory {
     }
 
     fn create(&self, app: &AppState) -> Result<Arc<dyn NodeJob>, String> {
-        app.serving
-            .blob_reclaimer()
-            .cloned()
-            .map(|reclaimer| Arc::new(ReclamationJob::new(reclaimer, self.0)) as Arc<dyn NodeJob>)
-            .ok_or_else(|| "reclamation is unavailable".to_owned())
+        let Some(reclaimer) = app.serving.blob_reclaimer().cloned() else {
+            return Err("reclamation is unavailable".to_owned());
+        };
+        Ok(Arc::new(ReclamationJob::new(reclaimer, self.0)))
     }
 }
 

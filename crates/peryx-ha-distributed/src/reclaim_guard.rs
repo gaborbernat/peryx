@@ -63,23 +63,22 @@ pub fn purge_orphaned_blobs(
             .filter(|candidate| !live_digests.contains(candidate.digest.as_str()))
             .map(|candidate| candidate.digest.as_str())
             .collect::<Vec<_>>();
-        match meta.compare_and_arm_reclaim_guards(&digests, serial, now, guard)? {
-            ReclaimGuardArm::SerialChanged => {}
-            ReclaimGuardArm::Armed(armed) => break armed.into_iter().collect::<BTreeSet<_>>(),
-        }
+        let ReclaimGuardArm::Armed(armed) = meta.compare_and_arm_reclaim_guards(&digests, serial, now, guard)? else {
+            continue;
+        };
+        break armed.into_iter().collect::<BTreeSet<_>>();
     };
     let selected = candidates
         .into_iter()
         .filter(|candidate| armed.contains(candidate.digest.as_str()))
         .collect::<Vec<_>>();
     for candidate in &selected {
-        blobs
-            .blocking()
-            .delete(&candidate.digest)
-            .map_err(|error| OrphanPurgeError::Blob {
+        if let Err(error) = blobs.blocking().delete(&candidate.digest) {
+            return Err(OrphanPurgeError::Blob {
                 operation: "delete orphaned blob",
                 reason: error.to_string(),
-            })?;
+            });
+        }
         meta.compare_and_disarm_reclaim_guard(candidate.digest.as_str(), guard)?;
     }
     Ok(report(selected))

@@ -1,13 +1,20 @@
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::routing::get;
+use axum::{Json, Router};
 
+use crate::HttpPeerTransport;
 use crate::peer::{
     BatchFrame, BatchRequest, DEFAULT_TRANSFER_LIMITS, LoopbackPeer, LoopbackTransport, PeerFault, PeerTransport,
     TransferLimits, TransportError, drain_to_frontier,
 };
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
+use crate::support::TestServer;
 
 fn ops(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
@@ -344,6 +351,36 @@ async fn test_drain_rejects_a_moving_source() {
             expected: "primary-a".to_owned(),
             actual: "primary-b".to_owned()
         }
+    );
+}
+
+#[tokio::test]
+async fn test_http_drain_rejects_a_moving_source() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_calls = Arc::clone(&calls);
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        get(move || {
+            let call = handler_calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                Json(if call == 0 {
+                    page("primary-a", 0, 4, &[1, 2])
+                } else {
+                    page("primary-b", 2, 4, &[3, 4])
+                })
+            }
+        }),
+    ))
+    .await;
+    let transport =
+        HttpPeerTransport::new(&server.url, "secret", DEFAULT_TRANSFER_LIMITS, Duration::from_secs(1)).unwrap();
+
+    assert_eq!(
+        drain_to_frontier(&transport, 0, ops(2), ops(100)).await,
+        Err(TransportError::SourceChanged {
+            expected: "primary-a".to_owned(),
+            actual: "primary-b".to_owned(),
+        })
     );
 }
 

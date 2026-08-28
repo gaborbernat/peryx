@@ -37,10 +37,10 @@ fn transfer(authority: &str, new_home: &str) -> OwnershipCommand {
 
 fn minted(effect: &OwnershipEffect) -> Option<AuthorityEpoch> {
     match effect {
-        OwnershipEffect::Assigned { epoch }
+        OwnershipEffect::Assigned { epoch, .. }
         | OwnershipEffect::EpochAdvanced { epoch }
         | OwnershipEffect::Transferred { epoch, .. } => Some(*epoch),
-        OwnershipEffect::Rejected(_) => None,
+        OwnershipEffect::AlreadyAssigned { .. } | OwnershipEffect::Rejected(_) => None,
     }
 }
 

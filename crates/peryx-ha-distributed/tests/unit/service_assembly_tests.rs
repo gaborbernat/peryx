@@ -695,6 +695,41 @@ fn assembly_rejects_invalid_datacenters() {
 }
 
 #[test]
+fn worker_assembly_rejects_an_invalid_local_datacenter() {
+    let dir = tempfile::tempdir().unwrap();
+    let context = service_context(&dir);
+    let mut config = runtime_config(
+        &dir,
+        DistributedMode::Dc,
+        RuntimeRole::Primary {
+            source: "local".to_owned(),
+            token: "token".to_owned(),
+        },
+    );
+    config.membership.as_mut().unwrap().members[0].datacenter.clear();
+
+    assert!(
+        assemble_workers(
+            &config,
+            DistributedWorkerContext {
+                filesystem: context.blobs.filesystem_store().cloned(),
+                backend: context.blobs.backend_id(),
+                meta: context.meta,
+                blobs: context.blobs,
+                clock: context.clock,
+                authority: None,
+                references: Arc::new(EmptyReferences),
+                frontiers: Arc::new(EmptyFrontiers),
+            },
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("local datacenter identity")
+    );
+}
+
+#[test]
 fn assembly_builds_multi_datacenter_services() {
     let (_dir, store, backend) = storage();
     let topology = topology(vec![
@@ -863,9 +898,11 @@ impl PreparedAvailabilityListener for SignalListener {
     ) -> Result<AvailabilityListenerFuture, AvailabilityListenerError> {
         Ok(match self.0 {
             ListenerBehavior::Complete => Box::pin(async { Ok(()) }),
-            ListenerBehavior::Fail => {
-                Box::pin(async { Err(AvailabilityListenerError::Serve("listener failure".to_owned())) })
-            }
+            ListenerBehavior::Fail => Box::pin(async {
+                Err(AvailabilityListenerError::serve(std::io::Error::other(
+                    "listener failure",
+                )))
+            }),
             ListenerBehavior::Panic => Box::pin(async { panic!("listener panic") }),
             ListenerBehavior::PanicString => {
                 Box::pin(async { std::panic::panic_any("listener string panic".to_owned()) })
@@ -1089,14 +1126,20 @@ async fn listener_setup_panic_is_reported() {
 }
 
 #[test]
-fn listener_io_errors_are_setup_errors() {
+fn listener_io_errors_keep_their_failure_stage() {
     assert!(matches!(
         AvailabilityListenerError::from(std::io::Error::other("runtime failure")),
-        AvailabilityListenerError::Setup(message) if message == "runtime failure"
+        AvailabilityListenerError::Setup(error)
+            if error.kind() == std::io::ErrorKind::Other && error.to_string() == "runtime failure"
     ));
     assert!(matches!(
         listener_thread_error(std::io::Error::other("thread failure")),
         AvailabilityListenerError::Task(message) if message == "thread failure"
+    ));
+    assert!(matches!(
+        AvailabilityListenerError::serve(std::io::Error::other("serve failure")),
+        AvailabilityListenerError::Serve(error)
+            if error.kind() == std::io::ErrorKind::Other && error.to_string() == "serve failure"
     ));
 }
 

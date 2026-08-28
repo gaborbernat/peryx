@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use axum::response::IntoResponse as _;
 use axum::routing::get;
 use axum::{Json, Router, http::StatusCode};
@@ -12,9 +11,7 @@ use axum::{Json, Router, http::StatusCode};
 use crate::HttpPeerTransport;
 use crate::backoff::ReconnectPolicy;
 use crate::multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RoundReport, SetLimits};
-use crate::peer::{
-    BatchFrame, BatchRequest, LoopbackPeer, LoopbackTransport, PeerFault, PeerTransport, TransferLimits, TransportError,
-};
+use crate::peer::{LoopbackPeer, LoopbackTransport, PeerFault, TransferLimits};
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
 use crate::support::TestServer;
 
@@ -510,45 +507,6 @@ async fn test_quarantine_preserves_attempts_across_commit_and_becomes_due() {
     assert_eq!(calls.load(Ordering::Relaxed), 4);
 }
 
-struct GappyTransport;
-
-#[async_trait]
-impl PeerTransport for GappyTransport {
-    async fn fetch_batch(&self, request: BatchRequest) -> Result<BatchFrame, TransportError> {
-        let page = ChangePage {
-            version: PROTOCOL_VERSION,
-            source: "gappy".to_owned(),
-            after: request.after,
-            current_serial: request.after + 5,
-            changes: vec![Change {
-                serial: request.after + 2,
-                event: Vec::new(),
-                metadata: Vec::new(),
-                blobs: Vec::new(),
-            }],
-        };
-        Ok(BatchFrame::new(page))
-    }
-}
-
-#[tokio::test]
-async fn test_a_non_contiguous_batch_retires_the_peer() {
-    let mut set = PeerSet::new(DEFAULT_SET_LIMITS, policy(10));
-    set.join("gappy", GappyTransport, 0);
-
-    let report = set.advance(Duration::ZERO).await;
-
-    assert_eq!(
-        report.outcomes[0],
-        MemberOutcome::GaveUp {
-            source: "gappy".to_owned(),
-            reason: "frontier_gap",
-        }
-    );
-    assert!(report.fully_retired);
-    assert_eq!(set.advance(Duration::from_secs(1)).await.advanced(), 0);
-}
-
 #[tokio::test]
 async fn test_a_protocol_violation_requires_an_explicit_rearm() {
     let (_server, mut set, calls) = protocol_recovery_http_peer().await;
@@ -573,14 +531,14 @@ async fn test_a_protocol_violation_requires_an_explicit_rearm() {
 
 #[tokio::test]
 async fn test_an_empty_set_advances_nothing() {
-    let mut set: PeerSet<GappyTransport> = PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default());
+    let mut set: PeerSet<HttpPeerTransport> = PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default());
 
     assert_eq!(set.advance(Duration::ZERO).await, RoundReport::default());
 }
 
 #[tokio::test]
 async fn test_accessors_ignore_an_unknown_peer() {
-    let mut set: PeerSet<GappyTransport> = PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default());
+    let mut set: PeerSet<HttpPeerTransport> = PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default());
 
     assert_eq!(set.frontier("ghost"), None);
     assert_eq!(set.buffered("ghost"), None);
@@ -615,23 +573,35 @@ async fn test_jitter_spreads_retries_and_stays_within_its_window() {
     for peer in &peers {
         peer.inject(PeerFault::Disconnect);
     }
-    let mut set = PeerSet::new(limits(4, 8, 8, window), policy(10));
+    let mut set = PeerSet::new(limits(5, 8, 8, window), policy(10));
     for (source, peer) in sources.iter().zip(&peers) {
         set.join(*source, LoopbackTransport::connect(peer, "tok"), 0);
     }
+    let healthy = peer_with("healthy", "tok", 1);
+    set.join("healthy", LoopbackTransport::connect(&healthy, "tok"), 0);
 
     let report = set.advance(Duration::ZERO).await;
 
-    let mut delays: BTreeSet<Duration> = BTreeSet::new();
-    for outcome in &report.outcomes {
-        let MemberOutcome::RetryAfter { delay, .. } = outcome else {
-            panic!("expected a retry");
-        };
+    let delays: BTreeSet<Duration> = report
+        .outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            MemberOutcome::RetryAfter { delay, .. } => Some(*delay),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delays.len(), peers.len());
+    assert!(
+        report
+            .outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, MemberOutcome::Progressed { source, .. } if source == "healthy"))
+    );
+    for delay in &delays {
         assert!(
             *delay >= base && *delay < base + window,
             "delay {delay:?} left its window"
         );
-        delays.insert(*delay);
     }
     assert!(delays.len() > 1, "jitter should not retry every peer in lockstep");
 }

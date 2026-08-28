@@ -153,21 +153,25 @@ impl RaftRpcClient {
             )
             .await
             .map_err(map_client_error)?;
-        match classify_status(response.status()) {
-            ReplicationStatus::Success => {}
-            ReplicationStatus::Unauthenticated => return Err(RaftRpcError::Unauthenticated),
-            ReplicationStatus::NotFound | ReplicationStatus::ServerError(_) | ReplicationStatus::BadStatus(_) => {
-                return Err(RaftRpcError::RemoteError {
-                    status: response.status().as_u16(),
-                });
-            }
-        }
+        require_rpc_success(response.status())?;
         let body = self
             .http
             .read_bounded(response, self.max_response_bytes, false)
             .await
             .map_err(map_client_error)?;
         serde_json::from_slice(&body).map_err(|_| RaftRpcError::Malformed)
+    }
+}
+
+const fn require_rpc_success(status: StatusCode) -> Result<(), RaftRpcError> {
+    match classify_status(status) {
+        ReplicationStatus::Success => Ok(()),
+        ReplicationStatus::Unauthenticated => Err(RaftRpcError::Unauthenticated),
+        ReplicationStatus::NotFound | ReplicationStatus::ServerError(_) | ReplicationStatus::BadStatus(_) => {
+            Err(RaftRpcError::RemoteError {
+                status: status.as_u16(),
+            })
+        }
     }
 }
 

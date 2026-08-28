@@ -126,9 +126,13 @@ async fn test_pull_ranged_rejects_a_blob_that_fails_verification() {
 
     let result = pull_ranged(&[&source], &wrong, &[range(0, 10)], 10, &wrong).await;
 
-    let Err(PullError::Reassembly(ReassemblyError::DigestMismatch { .. })) = result else {
-        panic!("expected a digest-mismatch reassembly error, got {result:?}");
-    };
+    assert_eq!(
+        result,
+        Err(PullError::Reassembly(ReassemblyError::DigestMismatch {
+            expected: wrong.as_str().to_owned(),
+            received: Digest::of(b"0123456789").as_str().to_owned(),
+        }))
+    );
 }
 
 #[tokio::test]
@@ -181,9 +185,13 @@ async fn test_pull_ranged_rejects_when_every_source_serves_wrong_content() {
 
     let result = pull_ranged(&[&garbage(), &garbage()], &expected, &[range(0, 10)], 10, &expected).await;
 
-    let Err(PullError::Reassembly(ReassemblyError::DigestMismatch { .. })) = result else {
-        panic!("expected a digest-mismatch reassembly error, got {result:?}");
-    };
+    assert_eq!(
+        result,
+        Err(PullError::Reassembly(ReassemblyError::DigestMismatch {
+            expected: expected.as_str().to_owned(),
+            received: Digest::of(&[0xFF; 10]).as_str().to_owned(),
+        }))
+    );
 }
 
 #[tokio::test]

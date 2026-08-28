@@ -687,10 +687,9 @@ impl peryx_ha_distributed::PreparedAvailabilityListener for FailingAvailabilityL
         _: axum::Router,
         _: tokio_util::sync::CancellationToken,
     ) -> Result<peryx_ha_distributed::AvailabilityListenerFuture, peryx_ha_distributed::AvailabilityListenerError> {
-        Err(peryx_ha_distributed::AvailabilityListenerError::Setup(format!(
-            "injected failure at {}",
-            self.address()
-        )))
+        Err(peryx_ha_distributed::AvailabilityListenerError::setup(
+            std::io::Error::other(format!("injected failure at {}", self.address())),
+        ))
     }
 }
 

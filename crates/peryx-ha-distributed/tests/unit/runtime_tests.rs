@@ -70,11 +70,8 @@ impl crate::PreparedAvailabilityListener for ConsensusOrderListener {
         _router: Router,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<crate::AvailabilityListenerFuture, crate::AvailabilityListenerError> {
-        self.listener
-            .set_nonblocking(true)
-            .map_err(|error| crate::AvailabilityListenerError::Setup(error.to_string()))?;
-        let listener = tokio::net::TcpListener::from_std(self.listener)
-            .map_err(|error| crate::AvailabilityListenerError::Setup(error.to_string()))?;
+        self.listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(self.listener).unwrap();
         let stopped = ConsensusOrderSignal {
             listener: Some(listener),
             log_path: self.log_path,
@@ -98,7 +95,9 @@ impl crate::PreparedAvailabilityListener for FailingListener {
         _router: Router,
         _shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<crate::AvailabilityListenerFuture, crate::AvailabilityListenerError> {
-        Err(crate::AvailabilityListenerError::Setup("injected failure".to_owned()))
+        Err(crate::AvailabilityListenerError::setup(std::io::Error::other(
+            "injected failure",
+        )))
     }
 }
 
@@ -155,11 +154,8 @@ impl crate::PreparedAvailabilityListener for ControlledListener {
             stopped,
             panic,
         } = *self;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| crate::AvailabilityListenerError::Setup(error.to_string()))?;
-        let listener = tokio::net::TcpListener::from_std(listener)
-            .map_err(|error| crate::AvailabilityListenerError::Setup(error.to_string()))?;
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
         let stopped = DropSignal {
             listener: Some(listener),
             stopped: Some(stopped),
@@ -191,11 +187,8 @@ impl crate::PreparedAvailabilityListener for TestListener {
         router: Router,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<crate::AvailabilityListenerFuture, crate::AvailabilityListenerError> {
-        self.0
-            .set_nonblocking(true)
-            .map_err(|error| crate::AvailabilityListenerError::Setup(error.to_string()))?;
-        let listener = tokio::net::TcpListener::from_std(self.0)
-            .map_err(|error| crate::AvailabilityListenerError::Setup(error.to_string()))?;
+        self.0.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(self.0).unwrap();
         Ok(Box::pin(async move {
             axum::serve(
                 listener,
@@ -203,7 +196,8 @@ impl crate::PreparedAvailabilityListener for TestListener {
             )
             .with_graceful_shutdown(shutdown.cancelled_owned())
             .await
-            .map_err(|error| crate::AvailabilityListenerError::Serve(error.to_string()))
+            .unwrap();
+            Ok(())
         }))
     }
 }
@@ -1187,10 +1181,10 @@ async fn prepared_listener_stays_inactive_until_activation_and_drop_cancels_it()
 
     assert_ownership_unavailable(&state).await;
     assert!(!dir.path().join(LOG_STORE_SUBPATH).exists());
-    assert!(matches!(
+    assert_eq!(
         listener_entered.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-    ));
+    );
     let active = prepared.activate().unwrap();
     listener_entered.await.unwrap();
     assert!(state.serving.ownership_authority().is_some());

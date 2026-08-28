@@ -66,6 +66,7 @@ async fn test_apply_folds_normal_commands_through_one_state_in_order() {
         responses,
         vec![
             OwnershipResponse::Applied(OwnershipEffect::Assigned {
+                home: DatacenterId("east".to_owned()),
                 epoch: AuthorityEpoch(1)
             }),
             OwnershipResponse::Applied(OwnershipEffect::EpochAdvanced {

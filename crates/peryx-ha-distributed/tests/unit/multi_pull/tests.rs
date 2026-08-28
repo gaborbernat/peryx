@@ -1,32 +1,18 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
-use async_trait::async_trait;
+use axum::routing::get;
+use axum::{Json, Router};
 
 use super::pull_round;
+use crate::HttpPeerTransport;
 use crate::backoff::ReconnectPolicy;
 use crate::multi_peer::{DEFAULT_SET_LIMITS, PeerSet, SetLimits};
-use crate::peer::{
-    BatchFrame, BatchRequest, LoopbackPeer, LoopbackTransport, PeerFault, PeerTransport, TransferLimits, TransportError,
-};
-use crate::protocol::{ChangePage, PROTOCOL_VERSION};
+use crate::peer::{LoopbackPeer, LoopbackTransport, PeerFault, TransferLimits};
+use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
+use crate::support::TestServer;
 
 const SOURCE: &str = "writer";
-
-struct UnsupportedVersion;
-
-#[async_trait]
-impl PeerTransport for UnsupportedVersion {
-    async fn fetch_batch(&self, request: BatchRequest) -> Result<BatchFrame, TransportError> {
-        Ok(BatchFrame::new(ChangePage {
-            version: PROTOCOL_VERSION + 1,
-            source: SOURCE.to_owned(),
-            after: request.after,
-            current_serial: request.after + 1,
-            changes: Vec::new(),
-        }))
-    }
-}
 
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
@@ -56,6 +42,30 @@ fn peer(count: u64) -> LoopbackPeer {
         peer.append(format!("event-{index}").into_bytes());
     }
     peer
+}
+
+async fn http_peer() -> (TestServer, HttpPeerTransport) {
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        get(|| async {
+            Json(ChangePage {
+                version: PROTOCOL_VERSION,
+                source: SOURCE.to_owned(),
+                after: 0,
+                current_serial: 1,
+                changes: vec![Change {
+                    serial: 1,
+                    event: b"event".to_vec(),
+                    metadata: Vec::new(),
+                    blobs: Vec::new(),
+                }],
+            })
+        }),
+    ))
+    .await;
+    let transport =
+        HttpPeerTransport::new(&server.url, "secret", TransferLimits::default(), Duration::from_secs(1)).unwrap();
+    (server, transport)
 }
 
 #[derive(Default)]
@@ -143,11 +153,11 @@ async fn test_a_lone_peer_converges_to_its_head() {
 
 #[tokio::test]
 async fn test_two_peers_at_one_head_apply_each_change_once() {
-    let first = peer(3);
-    let second = peer(3);
+    let (_first_server, first) = http_peer().await;
+    let (_second_server, second) = http_peer().await;
     let mut set = PeerSet::new(DEFAULT_SET_LIMITS, policy());
-    set.join("a", LoopbackTransport::connect(&first, "tok"), 0);
-    set.join("b", LoopbackTransport::connect(&second, "tok"), 0);
+    set.join("a", first, 0);
+    set.join("b", second, 0);
     let mut applier = Applier::default();
 
     let round = pull_round(&mut set, Duration::ZERO, 0, None, |page| {
@@ -156,9 +166,9 @@ async fn test_two_peers_at_one_head_apply_each_change_once() {
     .await
     .unwrap();
 
-    assert_eq!((round.serial, round.applied), (3, 3));
-    assert_eq!(applier.applied, vec![1, 2, 3]);
-    assert_eq!((set.frontier("a"), set.frontier("b")), (Some(3), Some(3)));
+    assert_eq!((round.serial, round.applied), (1, 1));
+    assert_eq!(applier.applied, vec![1]);
+    assert_eq!((set.frontier("a"), set.frontier("b")), (Some(1), Some(1)));
 }
 
 #[tokio::test]
@@ -268,11 +278,11 @@ async fn test_an_apply_failure_releases_the_drained_peers() {
 
 #[tokio::test]
 async fn test_an_apply_failure_stops_the_fold_before_the_next_drained_peer() {
-    let first = peer(3);
-    let second = peer(3);
+    let (_first_server, first) = http_peer().await;
+    let (_second_server, second) = http_peer().await;
     let mut set = PeerSet::new(DEFAULT_SET_LIMITS, policy());
-    set.join("a", LoopbackTransport::connect(&first, "tok"), 0);
-    set.join("b", LoopbackTransport::connect(&second, "tok"), 0);
+    set.join("a", first, 0);
+    set.join("b", second, 0);
 
     let error = pull_round(&mut set, Duration::ZERO, 0, None, |_page| Err::<u64, _>(TestFailure))
         .await
@@ -285,8 +295,25 @@ async fn test_an_apply_failure_stops_the_fold_before_the_next_drained_peer() {
 
 #[tokio::test]
 async fn test_a_peer_on_an_unsupported_version_is_reported_not_applied() {
+    let server = TestServer::start(Router::new().route(
+        "/+replication/v1/changes",
+        get(|| async {
+            Json(ChangePage {
+                version: PROTOCOL_VERSION + 1,
+                source: SOURCE.to_owned(),
+                after: 0,
+                current_serial: 1,
+                changes: Vec::new(),
+            })
+        }),
+    ))
+    .await;
     let mut set = PeerSet::new(DEFAULT_SET_LIMITS, policy());
-    set.join("a", UnsupportedVersion, 0);
+    set.join(
+        "a",
+        HttpPeerTransport::new(&server.url, "secret", TransferLimits::default(), Duration::from_secs(1)).unwrap(),
+        0,
+    );
     let round = pull_round(&mut set, Duration::ZERO, 0, None, apply_page).await.unwrap();
 
     assert_eq!(round.incompatible, Some(PROTOCOL_VERSION + 1));

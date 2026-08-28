@@ -423,8 +423,49 @@ fn test_replica_services_start_selected_loops() {
 
         let (lifecycle, _) = crate::lifecycle::Lifecycle::new();
         lifecycle.activate();
-        let runtime = runtime.start_replica_services_with_lifecycle(replica, analytics, beacon, lifecycle);
+        let runtime = runtime
+            .start_replica_services_with_lifecycle(replica, analytics, beacon, lifecycle)
+            .unwrap();
         assert_eq!(shared.in_flight.load(Ordering::Relaxed), expected_workers);
         drop(runtime);
+    }
+}
+
+#[test]
+fn test_replica_services_report_the_saturated_worker() {
+    for (slots, include_analytics, include_beacon, expected) in [
+        (0, false, false, "reserve the replica worker slot"),
+        (1, true, false, "reserve the analytics worker slot"),
+        (2, true, true, "reserve the beacon worker slot"),
+    ] {
+        let runtime = AvailabilityRuntime::start(Arc::new(WorkerShared::new(1, slots))).unwrap();
+        let (_dir, meta, replica) = replica();
+        let analytics = include_analytics
+            .then(|| AnalyticsPuller::new("http://127.0.0.1:1/", "token", meta.analytics(), Duration::from_secs(1)))
+            .transpose()
+            .unwrap();
+        let beacon = include_beacon
+            .then(|| {
+                BeaconSender::new(
+                    "http://127.0.0.1:1/",
+                    "token",
+                    "replica",
+                    1,
+                    meta,
+                    Duration::from_secs(1),
+                )
+            })
+            .transpose()
+            .unwrap();
+        let (lifecycle, _) = crate::lifecycle::Lifecycle::new();
+
+        assert_eq!(
+            runtime
+                .start_replica_services_with_lifecycle(replica, analytics, beacon, lifecycle)
+                .err()
+                .unwrap()
+                .to_string(),
+            expected
+        );
     }
 }

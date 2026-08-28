@@ -328,18 +328,6 @@ impl OwnershipGroup {
     pub const fn new(node: RaftNode, home: DatacenterId) -> Self {
         Self { node, home }
     }
-
-    async fn committed_home(&self, authority: &AuthorityKey) -> Result<HomeClaim, OwnershipError> {
-        self.node
-            .state_machine()
-            .home_claim(authority)
-            .await
-            .map(|(home, epoch)| HomeClaim {
-                home: home.0,
-                epoch: epoch.0,
-            })
-            .ok_or_else(|| OwnershipError::Unavailable("committed home is missing after assignment".to_owned()))
-    }
 }
 
 #[async_trait::async_trait]
@@ -429,7 +417,12 @@ impl OwnershipAuthority for OwnershipGroup {
                     },
                     error => OwnershipError::Unavailable(error.to_string()),
                 })?;
-            return self.committed_home(&authority).await;
+            if let Some((home, epoch)) = self.node.state_machine().home_claim(&authority).await {
+                return Ok(HomeClaim {
+                    home: home.0,
+                    epoch: epoch.0,
+                });
+            }
         }
         let command = OwnershipCommand::AssignHome {
             authority: authority.clone(),
@@ -437,13 +430,12 @@ impl OwnershipAuthority for OwnershipGroup {
             cause: AssignmentCause::FirstPublish,
         };
         match self.node.submit(command).await {
-            Ok(OwnershipResponse::Applied(OwnershipEffect::Assigned { epoch })) => Ok(HomeClaim {
-                home: self.home.0.clone(),
+            Ok(OwnershipResponse::Applied(
+                OwnershipEffect::Assigned { home, epoch } | OwnershipEffect::AlreadyAssigned { home, epoch },
+            )) => Ok(HomeClaim {
+                home: home.0,
                 epoch: epoch.0,
             }),
-            Ok(OwnershipResponse::Applied(OwnershipEffect::Rejected(Rejection::AlreadyAssigned))) => {
-                self.committed_home(&authority).await
-            }
             Ok(response) => Err(OwnershipError::Unavailable(format!(
                 "ownership assignment returned {response:?}"
             ))),
@@ -623,8 +615,7 @@ pub fn map_write_error(error: &RaftError<u64, ClientWriteError<u64, PeryxNode>>)
 const fn rejection_reason(rejection: Rejection) -> &'static str {
     match rejection {
         Rejection::SameHome => "the authority already homes at that datacenter",
-        // Transfer and epoch commands cannot produce `AlreadyAssigned`; the fallback is `NotAssigned`.
-        _ => "the authority is not assigned a home to move or fence",
+        Rejection::NotAssigned => "the authority is not assigned a home to move or fence",
     }
 }
 

@@ -33,6 +33,7 @@ enum StoreFault {
 
 struct TrashStub {
     error: bool,
+    ecosystem: Ecosystem,
 }
 
 impl TrashDriver for TrashStub {
@@ -43,10 +44,10 @@ impl TrashDriver for TrashStub {
         Ok(index_names
             .iter()
             .map(|repository| TrashRecord {
-                ecosystem: Ecosystem::new("example"),
+                ecosystem: self.ecosystem.clone(),
                 repository: repository.as_str().into(),
                 resource: "artifact-a".into(),
-                artifact: Some("artifact-a-1.0.bin".into()),
+                artifact: Some(format!("{repository}-1.0.bin").into()),
                 digest: Some("sha256:abc".to_owned()),
                 reason: Some("replaced".to_owned()),
                 actor: Some("Alice".to_owned()),
@@ -59,7 +60,7 @@ impl TrashDriver for TrashStub {
 
 impl EcosystemDriver for TrashStub {
     fn ecosystem(&self) -> Ecosystem {
-        Ecosystem::new("example")
+        self.ecosystem.clone()
     }
 }
 
@@ -80,6 +81,25 @@ async fn app_with_error_driver() -> (tempfile::TempDir, axum::Router) {
 }
 
 async fn build_app(fault: StoreFault, driver_error: Option<bool>) -> (tempfile::TempDir, axum::Router) {
+    build_app_with_indexes(fault, driver_error, vec![private_index(), read_only_index()], &[]).await
+}
+
+async fn app_with_route_name_collision() -> (tempfile::TempDir, axum::Router) {
+    build_app_with_indexes(
+        StoreFault::None,
+        Some(false),
+        collision_indexes(),
+        &[Ecosystem::new("other")],
+    )
+    .await
+}
+
+async fn build_app_with_indexes(
+    fault: StoreFault,
+    driver_error: Option<bool>,
+    indexes: Vec<Index>,
+    extra_trash_ecosystems: &[Ecosystem],
+) -> (tempfile::TempDir, axum::Router) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");
     let meta = MetaStore::open(&path).unwrap();
@@ -119,19 +139,37 @@ async fn build_app(fault: StoreFault, driver_error: Option<bool>) -> (tempfile::
     }
     let meta = MetaStore::open_existing(path).unwrap();
     let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
-    let mut state = AppState::new(meta.clone(), blobs, 60, vec![private_index(), read_only_index()]);
+    let mut state = AppState::new(meta.clone(), blobs, 60, indexes);
     Arc::get_mut(&mut state.serving).unwrap().users =
         UserService::with_password_settings(meta, PasswordPolicy::new(8, 1, 1).unwrap(), 2);
     match driver_error {
         Some(error) => {
             state.register_capabilities(|registrar| {
-                registrar.register_trash(Ecosystem::new("example"), Arc::new(TrashStub { error }));
+                registrar.register_trash(
+                    Ecosystem::new("example"),
+                    Arc::new(TrashStub {
+                        error,
+                        ecosystem: Ecosystem::new("example"),
+                    }),
+                );
+                for ecosystem in extra_trash_ecosystems {
+                    registrar.register_trash(
+                        ecosystem.clone(),
+                        Arc::new(TrashStub {
+                            error,
+                            ecosystem: ecosystem.clone(),
+                        }),
+                    );
+                }
                 registrar.register_index_credentials(
                     Ecosystem::new("example"),
                     Arc::new(super::support::ExampleCredentials),
                 );
             });
-            state.register_driver(Arc::new(TrashStub { error }));
+            state.register_driver(Arc::new(TrashStub {
+                error,
+                ecosystem: Ecosystem::new("example"),
+            }));
         }
         None => super::support::register_example_driver(&mut state),
     }
@@ -177,6 +215,16 @@ fn read_only_index() -> Index {
     index.route = "read-only".to_owned();
     index.acl.tokens.clear();
     index
+}
+
+fn collision_indexes() -> Vec<Index> {
+    let mut authorized = private_index();
+    authorized.route = "team".to_owned();
+    let mut hidden = read_only_index();
+    hidden.name = "team".to_owned();
+    hidden.route = "other".to_owned();
+    hidden.ecosystem = Ecosystem::new("other");
+    vec![authorized, hidden]
 }
 
 async fn get(
@@ -228,12 +276,59 @@ async fn test_trash_list_and_record_render_driver_records() {
 
     let (status, _, record) = get(
         &app,
-        "/+trash/record?ecosystem=example&repository=private&resource=artifact-a&artifact=artifact-a-1.0.bin&digest=sha256%3Aabc",
+        "/+trash/record?ecosystem=example&repository=private&resource=artifact-a&artifact=private-1.0.bin&digest=sha256%3Aabc",
         Some(("Alice", USER_PASSWORD)),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(record["record"]["artifact"], "artifact-a-1.0.bin");
+    assert_eq!(record["record"]["artifact"], "private-1.0.bin");
+}
+
+#[rstest]
+#[case::local_reader(("Rita", USER_PASSWORD))]
+#[case::repository_token(("external", ADMIN_SECRET))]
+#[tokio::test]
+async fn test_trash_inspect_rejects_a_record_from_a_name_colliding_repository(#[case] credential: (&str, &str)) {
+    let (_dir, app) = app_with_route_name_collision().await;
+
+    let (status, _, _) = get(
+        &app,
+        "/+trash/record?ecosystem=other&repository=team&resource=artifact-a&artifact=team-1.0.bin&digest=sha256%3Aabc",
+        Some(credential),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[rstest]
+#[case::local_reader(("Rita", USER_PASSWORD))]
+#[case::repository_token(("external", ADMIN_SECRET))]
+#[tokio::test]
+async fn test_trash_inspect_resolves_the_authorized_route(#[case] credential: (&str, &str)) {
+    let (_dir, app) = app_with_route_name_collision().await;
+
+    let (status, _, document) = get(
+        &app,
+        "/+trash/record?ecosystem=example&repository=team&resource=artifact-a&artifact=private-1.0.bin&digest=sha256%3Aabc",
+        Some(credential),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            status,
+            document["record"]["ecosystem"].as_str(),
+            document["record"]["repository"].as_str(),
+            document["record"]["artifact"].as_str(),
+        ),
+        (
+            StatusCode::OK,
+            Some("example"),
+            Some("private"),
+            Some("private-1.0.bin"),
+        )
+    );
 }
 
 #[tokio::test]
@@ -350,7 +445,7 @@ async fn test_trash_inspect_returns_not_found_for_an_absent_record() {
 
     let (status, headers, _) = get(
         &app,
-        "/+trash/record?ecosystem=alpha&repository=private&resource=artifact-a",
+        "/+trash/record?ecosystem=example&repository=private&resource=artifact-a",
         Some(("Alice", USER_PASSWORD)),
     )
     .await;

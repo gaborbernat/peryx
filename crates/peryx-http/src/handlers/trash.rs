@@ -8,7 +8,7 @@ use axum::response::{IntoResponse as _, Response};
 use peryx_core::{Ecosystem, TrashState};
 use peryx_driver::authz::{Decision, DenyReason, ScopedDecision};
 use peryx_driver::http_services::{HttpDomainServices, TrashService};
-use peryx_driver::state::AppState;
+use peryx_driver::state::{AppState, Index};
 use peryx_driver::trash::{TrashItem, TrashPage, TrashQuery, TrashQueryError, TrashRef};
 use peryx_identity::{Action, Resource, Scope, UserId, parse_basic};
 
@@ -73,7 +73,7 @@ async fn list_trash_response(state: &AppState, trash: &dyn TrashService, headers
         Err(rejection) => return rejection.response(),
     };
     let query = TrashQuery {
-        repository: authorization.repository,
+        repository: authorization.repository.map(|repository| repository.name),
         ecosystem,
         state: state_filter,
         deadline_before_unix: params.deadline_before,
@@ -102,13 +102,16 @@ async fn inspect_trash_response(
     let Ok(ecosystem) = params.ecosystem.parse::<Ecosystem>() else {
         return invalid_query();
     };
-    let authorization = match authorize(state, headers, Some(&params.repository), &identity) {
+    let authorization = match authorize_repository(state, headers, &params.repository, &identity) {
         Ok(authorization) => authorization,
         Err(rejection) => return rejection.response(),
     };
+    if ecosystem != authorization.repository.ecosystem {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let reference = TrashRef {
-        ecosystem,
-        repository: params.repository.into(),
+        ecosystem: authorization.repository.ecosystem,
+        repository: authorization.repository.name.into(),
         resource: params.resource.into(),
         artifact: params.artifact.map(Into::into),
         digest: params.digest,
@@ -135,9 +138,41 @@ enum TrashIdentity {
 
 #[derive(Debug)]
 struct TrashAuthorization {
-    repository: Option<String>,
+    repository: Option<AuthorizedRepository>,
     actor: ActorDetail,
     response: ResponseAuthorization,
+}
+
+#[derive(Debug)]
+struct RepositoryAuthorization {
+    repository: AuthorizedRepository,
+    actor: ActorDetail,
+    response: ResponseAuthorization,
+}
+
+impl From<RepositoryAuthorization> for TrashAuthorization {
+    fn from(authorization: RepositoryAuthorization) -> Self {
+        Self {
+            repository: Some(authorization.repository),
+            actor: authorization.actor,
+            response: authorization.response,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AuthorizedRepository {
+    name: String,
+    ecosystem: Ecosystem,
+}
+
+impl From<&Index> for AuthorizedRepository {
+    fn from(index: &Index) -> Self {
+        Self {
+            name: index.name.clone(),
+            ecosystem: index.ecosystem.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -193,33 +228,47 @@ fn authorize(
     route: Option<&str>,
     identity: &TrashIdentity,
 ) -> Result<TrashAuthorization, TrashRejection> {
+    let Some(route) = route else {
+        return authorize_global(state, identity);
+    };
+    authorize_repository(state, headers, route, identity).map(Into::into)
+}
+
+fn authorize_repository(
+    state: &AppState,
+    headers: &HeaderMap,
+    route: &str,
+    identity: &TrashIdentity,
+) -> Result<RepositoryAuthorization, TrashRejection> {
     match identity {
-        TrashIdentity::Local(actor) => authorize_local(state, actor, route),
-        TrashIdentity::EcosystemCredential => authorize_ecosystem(state, headers, route),
+        TrashIdentity::Local(actor) => authorize_local_repository(state, actor, route),
+        TrashIdentity::EcosystemCredential => authorize_ecosystem_repository(state, headers, route),
     }
 }
 
-/// An administrator inspects any repository and sees actor details wherever they read; a repository
-/// reader inspects one repository they can read, with actor details redacted. Actor visibility follows
-/// the caller's role, so scoping an administrator to one repository does not redact it.
-fn authorize_local(
+fn authorize_global(state: &AppState, identity: &TrashIdentity) -> Result<TrashAuthorization, TrashRejection> {
+    let TrashIdentity::Local(actor) = identity else {
+        return Err(TrashRejection::Unauthorized);
+    };
+    let authorization =
+        state
+            .serving
+            .authorization
+            .authorize_scoped(actor, Scope::AdministrationRead, &Resource::Operator);
+    require_permission(authorization)?;
+    Ok(TrashAuthorization {
+        repository: None,
+        actor: ActorDetail::Full,
+        response: ResponseAuthorization::Scoped(authorization),
+    })
+}
+
+/// Actor visibility follows the server role, independent of the repository grant that allowed the request.
+fn authorize_local_repository(
     state: &AppState,
     actor: &UserId,
-    route: Option<&str>,
-) -> Result<TrashAuthorization, TrashRejection> {
-    let Some(route) = route else {
-        let authorization =
-            state
-                .serving
-                .authorization
-                .authorize_scoped(actor, Scope::AdministrationRead, &Resource::Operator);
-        require_permission(authorization)?;
-        return Ok(TrashAuthorization {
-            repository: None,
-            actor: ActorDetail::Full,
-            response: ResponseAuthorization::Scoped(authorization),
-        });
-    };
+    route: &str,
+) -> Result<RepositoryAuthorization, TrashRejection> {
     let index = super::index_by_route(state, route).ok_or(TrashRejection::NotFound)?;
     let authorization = state.serving.authorization.authorize_scoped(
         actor,
@@ -231,8 +280,8 @@ fn authorize_local(
         .serving
         .authorization
         .authorize_scoped(actor, Scope::AdministrationRead, &Resource::Operator);
-    Ok(TrashAuthorization {
-        repository: Some(index.name.clone()),
+    Ok(RepositoryAuthorization {
+        repository: index.into(),
         actor: if operator.decision().is_allowed() {
             ActorDetail::Full
         } else {
@@ -242,15 +291,14 @@ fn authorize_local(
     })
 }
 
-fn authorize_ecosystem(
+fn authorize_ecosystem_repository(
     state: &AppState,
     headers: &HeaderMap,
-    route: Option<&str>,
-) -> Result<TrashAuthorization, TrashRejection> {
-    let route = route.ok_or(TrashRejection::Unauthorized)?;
+    route: &str,
+) -> Result<RepositoryAuthorization, TrashRejection> {
     let index = super::authorize_ecosystem_credential(state, headers, route, Action::Write)?;
-    Ok(TrashAuthorization {
-        repository: Some(index.name.clone()),
+    Ok(RepositoryAuthorization {
+        repository: index.into(),
         actor: ActorDetail::Redacted,
         response: ResponseAuthorization::Repository,
     })

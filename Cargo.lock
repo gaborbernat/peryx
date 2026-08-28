@@ -5139,6 +5139,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml",
  "tower",
  "url",

@@ -474,7 +474,10 @@ fn transient_upstream_failure(err: &CacheError) -> bool {
         CacheError::Upstream(peryx_upstream::UpstreamError::Http(err)) => err.status().is_none_or(|status| {
             status.is_server_error() || matches!(status, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS)
         }),
-        CacheError::Unavailable | CacheError::OfflineMissing(_) | CacheError::RateLimited { .. } => true,
+        CacheError::Unavailable
+        | CacheError::OfflineMissing(_)
+        | CacheError::RateLimited { .. }
+        | CacheError::UpstreamRateLimited { .. } => true,
         _ => false,
     }
 }

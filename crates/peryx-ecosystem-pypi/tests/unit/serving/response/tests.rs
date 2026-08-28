@@ -14,6 +14,24 @@ async fn test_index_response_names_store_failures() {
     );
 }
 
+#[tokio::test]
+async fn test_cache_error_response_preserves_upstream_retry_after() {
+    let response = cache_error_response(
+        &CacheError::UpstreamRateLimited {
+            retry_after: Some("Wed, 21 Oct 2037 07:28:00 GMT".to_owned()),
+        },
+        CacheContext::project("root/pypi", "demo"),
+    );
+
+    assert_eq!(
+        (
+            response.status(),
+            response.headers()[header::RETRY_AFTER].to_str().unwrap(),
+        ),
+        (StatusCode::TOO_MANY_REQUESTS, "Wed, 21 Oct 2037 07:28:00 GMT")
+    );
+}
+
 #[test]
 fn test_provenance_response_tags_the_integrity_media_type_and_maps_errors() {
     let served = provenance_response(

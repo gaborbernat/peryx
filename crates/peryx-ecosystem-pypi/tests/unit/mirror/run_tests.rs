@@ -130,6 +130,7 @@ fn detail_parsers_accept_json_and_html_and_reject_invalid_cache() {
         body: json.clone().into(),
         etag: None,
         last_modified: None,
+        retry_after: None,
         last_serial: None,
         max_age: None,
     };

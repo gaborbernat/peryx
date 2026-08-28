@@ -319,6 +319,7 @@ async fn buffer_html_page(
         content_type,
         etag,
         last_modified,
+        retry_after: None,
         last_serial,
         max_age,
         body,

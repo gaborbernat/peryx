@@ -56,6 +56,22 @@ async fn test_fetch_project_revalidate_304() {
     assert_eq!(response.status, 304);
 }
 
+#[tokio::test]
+async fn test_fetch_project_preserves_retry_after_above_the_wait_budget() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/flask/"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = simple_client(&server);
+
+    let response = client.fetch_project("flask", None).await.unwrap();
+
+    assert_eq!((response.status, response.retry_after.as_deref()), (429, Some("120")));
+}
+
 #[rstest]
 #[case::not_found(404)]
 #[case::rate_limited(429)]

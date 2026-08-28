@@ -9,23 +9,25 @@ use super::redact_url;
 pub const MAX_RETRIES: u32 = 2;
 const RETRY_BASE_MILLIS: u64 = 100;
 const RETRY_CAP_MILLIS: u64 = 2_000;
-const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
+pub(super) const RETRY_WAIT_BUDGET: Duration = Duration::from_secs(30);
 
 pub(super) fn should_retry_status(status: StatusCode) -> bool {
     status.is_server_error() || matches!(status, StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS)
 }
 
-/// Parses either RFC 9110 `Retry-After` form and caps the delay at 30 seconds.
+/// Parses either RFC 9110 `Retry-After` form.
 #[must_use]
 pub fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    retry_after_at(headers, SystemTime::now())
+}
+
+pub(crate) fn retry_after_at(headers: &HeaderMap, received_at: SystemTime) -> Option<Duration> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
-    let delay = value.parse::<u64>().map(Duration::from_secs).ok().or_else(|| {
-        httpdate::parse_http_date(value)
-            .ok()?
-            .duration_since(SystemTime::now())
-            .ok()
-    })?;
-    Some(delay.min(RETRY_AFTER_CAP))
+    value
+        .parse::<u64>()
+        .map(Duration::from_secs)
+        .ok()
+        .or_else(|| httpdate::parse_http_date(value).ok()?.duration_since(received_at).ok())
 }
 
 #[must_use]
@@ -50,15 +52,14 @@ pub(super) async fn sleep_before_retry_str(url: &str, attempt: u32, err: &reqwes
     tokio::time::sleep(delay).await;
 }
 
-pub(super) async fn sleep_before_retry_status(url: &Url, attempt: u32, status: StatusCode, headers: &HeaderMap) {
-    let delay = retry_after(headers).unwrap_or_else(|| retry_delay(attempt));
+pub(super) async fn sleep_before_retry_status(url: &Url, status: StatusCode, delay: Duration) {
     let url = redact_url(url.as_str());
     let delay_ms = delay.as_millis();
     tracing::debug!(url, %status, delay_ms, "upstream returned retryable status");
     tokio::time::sleep(delay).await;
 }
 
-fn retry_delay(attempt: u32) -> Duration {
+pub(super) fn retry_delay(attempt: u32) -> Duration {
     let multiplier = 2_u64.pow(attempt.min(20));
     let cap = RETRY_CAP_MILLIS.min(RETRY_BASE_MILLIS.saturating_mul(multiplier));
     let floor = cap.div_euclid(2);

@@ -173,7 +173,9 @@ async fn virtual_detail(
             Ok(Some(detail)) => details.push((pos, detail)),
             Ok(None) => {}
             Err(err @ CacheError::OfflineMissing(_)) => offline_missing = Some(err),
-            Err(err @ CacheError::RateLimited { .. }) => rate_limited = Some(err),
+            Err(err @ (CacheError::RateLimited { .. } | CacheError::UpstreamRateLimited { .. })) => {
+                rate_limited = Some(err);
+            }
             Err(err @ CacheError::VirtualIndexCycle(_)) => return Err(err),
             Err(err) => {
                 tracing::warn!(layer = %state.index_at(pos).name, error = ?err, "virtual-index layer unavailable, skipping");

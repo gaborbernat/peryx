@@ -8,7 +8,9 @@ use futures_util::Stream;
 use peryx_upstream::retry::{MAX_RETRIES, should_retry_error, sleep_before_retry};
 use peryx_upstream::{NamedUpstream, UpstreamClient, UpstreamError, UpstreamRouter};
 use reqwest::StatusCode;
-use reqwest::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, LAST_MODIFIED};
+use reqwest::header::{
+    CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, HeaderName, LAST_MODIFIED, RETRY_AFTER,
+};
 use url::Url;
 
 /// The `Accept` header peryx sends upstream: PEP 691 JSON first, then PEP 503 HTML.
@@ -34,6 +36,7 @@ pub struct SimpleResponse {
     pub content_type: Option<String>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+    pub retry_after: Option<String>,
     pub last_serial: Option<u64>,
     /// The freshness lifetime upstream granted via `Cache-Control`; `None` when absent and zero when
     /// the response is stale or requires immediate revalidation.
@@ -52,6 +55,7 @@ pub struct SimpleHead {
     pub content_type: Option<String>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
+    pub retry_after: Option<String>,
     pub content_length: Option<u64>,
     pub last_serial: Option<u64>,
     /// The freshness lifetime upstream granted via `Cache-Control`; `None` when absent and zero when
@@ -334,6 +338,7 @@ async fn fetch_simple(client: &UpstreamClient, url: Url, etag: Option<&str>) -> 
                     content_type: head.content_type,
                     etag: head.etag,
                     last_modified: head.last_modified,
+                    retry_after: head.retry_after,
                     last_serial: head.last_serial,
                     max_age: head.max_age,
                     body,
@@ -365,6 +370,7 @@ fn simple_head(response: reqwest::Response) -> Result<SimpleHead, UpstreamError>
         content_type,
         etag: header_str(headers, &ETAG),
         last_modified: header_str(headers, &LAST_MODIFIED),
+        retry_after: header_str(headers, &RETRY_AFTER),
         content_length: header_str(headers, &CONTENT_LENGTH).and_then(|value| value.parse().ok()),
         last_serial: header_str(headers, &HeaderName::from_static("x-pypi-last-serial"))
             .and_then(|value| value.parse().ok()),

@@ -12,8 +12,8 @@ use tower::ServiceExt as _;
 use peryx_identity::{Action, Glob, Grant, Principal, TokenScope};
 
 use super::{
-    auth, body_has_code, current_unix_time, hosted_writable, oci_digest, realm_app, realm_app_with_clock_and_limits,
-    scoped_index, send, send_body, send_with, token_from, writable_index,
+    assert_registry_version, auth, body_has_code, current_unix_time, hosted_writable, oci_digest, realm_app,
+    realm_app_with_clock_and_limits, scoped_index, send, send_body, send_with, token_from, writable_index,
 };
 
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -635,6 +635,7 @@ async fn test_token_endpoint_responses_prevent_caching(
         .map(|value| vec![("authorization", value)])
         .unwrap_or_default();
     let (status, headers, _) = send_with(&app, Method::GET, &format!("/v2/token?{query}"), &request_headers).await;
+    assert_registry_version(&headers);
     assert_eq!(
         (
             status,

@@ -54,8 +54,10 @@ pub fn rate_limit_principal(state: &ServingState, headers: &HeaderMap) -> peryx_
 }
 /// The header a registry returns the canonical content digest in.
 const DOCKER_CONTENT_DIGEST: HeaderName = HeaderName::from_static("docker-content-digest");
+const DOCKER_DISTRIBUTION_API_VERSION: HeaderName = HeaderName::from_static("docker-distribution-api-version");
 /// The header carrying an upload session's id.
 const DOCKER_UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-upload-uuid");
+const REGISTRY_V2: HeaderValue = HeaderValue::from_static("registry/2.0");
 const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
 const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
 /// The media type served for blob bytes.
@@ -307,10 +309,16 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> AbsoluteProtocolDriver fo
             request.headers_mut().remove(&X_FORWARDED_PROTO);
         }
         let path = request.uri().path();
-        if matches!(request.method(), &Method::GET | &Method::HEAD) && (path == "/v2/" || path == "/v2") {
-            return auth::negotiate_version(&state, request.headers());
-        }
-        self.serve_request(state, request).boxed().await
+        let mut response =
+            if matches!(request.method(), &Method::GET | &Method::HEAD) && (path == "/v2/" || path == "/v2") {
+                auth::negotiate_version(&state, request.headers())
+            } else {
+                self.serve_request(state, request).boxed().await
+            };
+        response
+            .headers_mut()
+            .insert(DOCKER_DISTRIBUTION_API_VERSION, REGISTRY_V2);
+        response
     }
 }
 
@@ -887,16 +895,6 @@ fn request_id(headers: &HeaderMap) -> Option<String> {
         .get("x-request-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
-}
-fn version_ok() -> Response {
-    (
-        [(
-            HeaderName::from_static("docker-distribution-api-version"),
-            HeaderValue::from_static("registry/2.0"),
-        )],
-        StatusCode::OK,
-    )
-        .into_response()
 }
 /// The per-blob lock concurrent misses share so a single upstream fetch serves them all, the same
 /// single-flight coalescing every cached fetch shares. Keyed in its own namespace on the blob digest.

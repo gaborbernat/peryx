@@ -33,7 +33,7 @@ pub(super) fn negotiate_version(state: &ServingState, headers: &HeaderMap) -> Re
     {
         return challenge(signer.audience(), headers, None, None);
     }
-    super::version_ok()
+    StatusCode::OK.into_response()
 }
 
 pub(super) fn rate_limit_principal(state: &ServingState, headers: &HeaderMap) -> Principal {

@@ -2,7 +2,7 @@ use std::io::Write as _;
 
 use axum::http::{Method, StatusCode};
 
-use super::{auth, hosted_writable, oci_digest, proxy, send, send_body};
+use super::{assert_registry_version, auth, hosted_writable, oci_digest, proxy, send, send_body};
 
 const TOKEN: &str = "s3cret";
 
@@ -58,6 +58,7 @@ async fn test_contents_lists_a_gzip_layer_members() {
 
     let (status, headers, body) = send(&app, Method::GET, &format!("/v2/store/app/blobs/{digest}/contents")).await;
     assert_eq!(status, StatusCode::OK);
+    assert_registry_version(&headers);
     assert!(headers["content-type"].to_str().unwrap().contains("json"));
     let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let members = doc["members"].as_array().unwrap();
@@ -253,13 +254,14 @@ async fn test_contents_offset_past_the_member_is_range_not_satisfiable() {
     let (_state, app) = hosted_writable(&dir, TOKEN);
     let digest = upload(&app, &gzip_layer()).await;
 
-    let (status, _, _) = send(
+    let (status, headers, _) = send(
         &app,
         Method::GET,
         &format!("/v2/store/app/blobs/{digest}/contents?member=app%2Fconfig.toml&offset=9999"),
     )
     .await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_registry_version(&headers);
 }
 
 #[tokio::test]
@@ -283,6 +285,7 @@ async fn test_contents_of_a_missing_upstream_layer_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = proxy(&dir, "http://127.0.0.1:1/", false);
     let digest = oci_digest(b"whatever");
-    let (status, _, _) = send(&app, Method::GET, &format!("/v2/hub/app/blobs/{digest}/contents")).await;
+    let (status, headers, _) = send(&app, Method::GET, &format!("/v2/hub/app/blobs/{digest}/contents")).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_registry_version(&headers);
 }

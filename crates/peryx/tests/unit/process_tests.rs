@@ -190,6 +190,27 @@ async fn test_manual_tls_entrypoints_stop_on_cancellation() {
         .unwrap();
 }
 
+#[test]
+fn test_server_reports_public_tls_file_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let plugins = plugins();
+    let mut config = local_config(&directory, &plugins);
+    let cert = directory.path().join("missing-cert.pem");
+    let key = directory.path().join("missing-key.pem");
+    config.tls = Some(TlsConfig::Manual {
+        cert: cert.clone(),
+        key: key.clone(),
+    });
+    let active = crate::server::activate_plugins(&config, &plugins).unwrap();
+
+    let error = run_server_until_with_active_plugins(&config, &active, cancelled()).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!("load TLS cert {} and key {}", cert.display(), key.display())
+    );
+}
+
 #[tokio::test]
 async fn test_acme_entrypoint_stops_on_cancellation() {
     let directory = tempfile::tempdir().unwrap();

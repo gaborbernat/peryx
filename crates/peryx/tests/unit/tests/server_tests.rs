@@ -189,6 +189,56 @@ fn test_build_indexes_preserves_names_without_a_name_capability() {
 }
 
 #[test]
+fn test_build_state_preserves_upstream_names_without_a_name_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = plugins_without_retention();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Config::with_plugins(&plugins)
+    }
+    .apply_with_plugins(
+        crate::config::from_toml(
+            dir.path().join("peryx.toml"),
+            r#"
+[[index]]
+ecosystem = "plain"
+name = "cache"
+protected = ["Mixed.Name"]
+
+[[index.upstream]]
+name = "primary"
+url = "https://primary.example/"
+
+[[index.upstream]]
+name = "secondary"
+url = "https://secondary.example/"
+"#,
+        )
+        .unwrap(),
+        &plugins,
+    )
+    .unwrap();
+
+    let state = build_state_with_plugins(&config, &plugins).unwrap();
+    let route = &state.serving.upstream_routes["cache"];
+
+    assert_eq!(
+        route
+            .candidates("Mixed.Name")
+            .map(peryx_upstream::NamedUpstream::name)
+            .collect::<Vec<_>>(),
+        ["primary"]
+    );
+    assert_eq!(
+        route
+            .candidates("mixed.name")
+            .map(peryx_upstream::NamedUpstream::name)
+            .collect::<Vec<_>>(),
+        ["primary", "secondary"]
+    );
+}
+
+#[test]
 fn test_build_indexes_rejects_policy_without_a_policy_capability() {
     let dir = tempfile::tempdir().unwrap();
     let plugins = plugins_without_retention();

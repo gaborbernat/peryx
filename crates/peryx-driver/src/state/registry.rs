@@ -337,7 +337,7 @@ impl AppState {
     /// an ecosystem's indexer mutates the search index, which lives behind the shared `Arc`; this is
     /// sound only while that `Arc` is still uniquely owned, which it is until the router wraps it.
     fn serving_mut(&mut self) -> Result<&mut ServingState, String> {
-        Arc::get_mut(&mut self.serving).ok_or_else(|| "serving state is already shared".to_owned())
+        Arc::get_mut(&mut self.serving).ok_or_else(shared_state_error)
     }
 
     /// # Errors

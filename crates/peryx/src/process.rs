@@ -130,7 +130,7 @@ fn logging_layer(log: &LogConfig) -> anyhow::Result<(BoxedLayer, Option<WorkerGu
     let filter = logging::env_filter(&log.level).context("invalid log level")?;
     let mut guard = None;
     let layer: BoxedLayer = match log.sink {
-        LogSink::Stdout => Ok(fmt_layer(log.format, std::io::stdout)),
+        LogSink::Stdout => fmt_layer(log.format, std::io::stdout),
         LogSink::File => {
             let path = log.file.as_ref().context("file sink without a path")?;
             let current_directory = Path::new(".");
@@ -141,11 +141,11 @@ fn logging_layer(log: &LogConfig) -> anyhow::Result<(BoxedLayer, Option<WorkerGu
             let name = path.file_name().context("log file path has no file name")?;
             let (writer, worker) = tracing_appender::non_blocking(tracing_appender::rolling::daily(dir, name));
             guard = Some(worker);
-            Ok(fmt_layer(log.format, writer))
+            fmt_layer(log.format, writer)
         }
-        LogSink::Journald => journald_layer(log.format),
-        LogSink::Syslog => syslog_layer(log.format),
-    }?;
+        LogSink::Journald => journald_layer(log.format)?,
+        LogSink::Syslog => syslog_layer(log.format)?,
+    };
     Ok((layer.with_filter(filter).boxed(), guard))
 }
 

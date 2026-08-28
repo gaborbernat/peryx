@@ -19,6 +19,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "self-update")]
+use wiremock::matchers::{method, path};
+#[cfg(feature = "self-update")]
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
 #[cfg(unix)]
 const PUBLIC_LISTENER_FD_ENV: &str = "PERYX_INHERITED_PUBLIC_LISTENER_FD";
 
@@ -120,6 +125,32 @@ fn inherited_descriptor_errors_are_specific() {
 }
 
 #[cfg(unix)]
+#[test]
+fn availability_listener_reports_tls_file_failure() {
+    let data = tempfile::tempdir().expect("create data directory");
+    let config = data.path().join("peryx.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "{SHUTDOWN_CONFIG}\n[availability.listener]\nbind = \"127.0.0.1:0\"\n\
+             [availability.listener.tls]\ncert = \"missing-cert.pem\"\nkey = \"missing-key.pem\"\n"
+        ),
+    )
+    .expect("write fixture config");
+    let output = serve_command(data.path(), "127.0.0.1:0".parse().expect("fixed address"))
+        .arg("--config")
+        .arg(config)
+        .output()
+        .expect("run fixture");
+
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(error.contains("load TLS cert"), "{error}");
+    assert!(error.contains("missing-cert.pem"), "{error}");
+    assert!(error.contains("missing-key.pem"), "{error}");
+}
+
+#[cfg(unix)]
 #[rstest::rstest]
 #[case::sigterm(nix::sys::signal::Signal::SIGTERM)]
 #[case::sigint(nix::sys::signal::Signal::SIGINT)]
@@ -162,10 +193,78 @@ fn a_second_shutdown_signal_uses_the_default_disposition() {
 }
 
 #[cfg(feature = "self-update")]
-#[test]
-fn self_update_uses_an_install_receipt() {
+#[tokio::test(flavor = "multi_thread")]
+async fn self_update_installs_release_from_matching_receipt() {
+    let releases = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/tox-dev/peryx/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tag_name": "1.2.3",
+            "name": "1.2.3",
+            "url": releases.uri(),
+            "assets": [{
+                "url": format!("{}/installer", releases.uri()),
+                "browser_download_url": format!("{}/installer", releases.uri()),
+                "name": "peryx-installer.sh"
+            }],
+            "prerelease": false
+        })))
+        .mount(&releases)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/installer"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("#!/bin/sh\nexit 0\n"))
+        .mount(&releases)
+        .await;
     let dir = tempfile::tempdir().expect("create receipt directory");
-    let config_dir = dir.path().join("peryx");
+    let binary = peryx_test_support::cargo_binary("peryx-process-fixture")
+        .canonicalize()
+        .expect("canonicalize fixture binary");
+    write_install_receipt(
+        dir.path(),
+        binary.parent().expect("fixture binary has an install directory"),
+    );
+
+    let output = self_update_command(dir.path())
+        .env("PERYX_INSTALLER_GHE_BASE_URL", releases.uri())
+        .output()
+        .expect("run self-update fixture");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "updated to 1.2.3");
+}
+
+#[cfg(feature = "self-update")]
+#[test]
+fn self_update_ignores_a_receipt_for_another_install() {
+    let dir = tempfile::tempdir().expect("create receipt directory");
+    write_install_receipt(dir.path(), &dir.path().join("unrelated-install"));
+
+    let output = self_update_command(dir.path())
+        .output()
+        .expect("run self-update fixture");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "peryx is already up to date"
+    );
+}
+
+#[cfg(feature = "self-update")]
+#[test]
+fn self_update_requires_an_install_receipt() {
+    let missing = tempfile::tempdir().expect("create empty config directory");
+    let output = self_update_command(missing.path())
+        .output()
+        .expect("run self-update fixture");
+    assert!(!output.status.success());
+    let error = stderr(&output);
+    assert!(error.contains("no install receipt found"), "{error}");
+}
+
+#[cfg(feature = "self-update")]
+fn write_install_receipt(config_home: &Path, install_prefix: &Path) {
+    let config_dir = config_home.join("peryx");
     std::fs::create_dir(&config_dir).expect("create config directory");
     std::fs::write(
         config_dir.join("peryx-receipt.json"),
@@ -178,17 +277,10 @@ fn self_update_uses_an_install_receipt() {
                 "provider": {{"source": "cargo-dist", "version": "0.23.0"}},
                 "modify_path": false
             }}"#,
-            dir.path().join("unrelated-install").display().to_string()
+            install_prefix.display().to_string()
         ),
     )
     .expect("write install receipt");
-
-    assert!(self_update_output(dir.path()).status.success());
-    let missing = tempfile::tempdir().expect("create empty config directory");
-    let output = self_update_output(missing.path());
-    assert!(!output.status.success());
-    let error = stderr(&output);
-    assert!(error.contains("no install receipt found"), "{error}");
 }
 
 #[cfg(unix)]
@@ -374,11 +466,10 @@ fn has_shutdown_result(logs: &str, resource: &str) -> bool {
 }
 
 #[cfg(feature = "self-update")]
-fn self_update_output(config_home: &Path) -> Output {
-    fixture_command("self-update")
-        .env("XDG_CONFIG_HOME", config_home)
-        .output()
-        .expect("run self-update fixture")
+fn self_update_command(config_home: &Path) -> Command {
+    let mut command = fixture_command("self-update");
+    command.env("XDG_CONFIG_HOME", config_home);
+    command
 }
 
 fn fixture_command(command: impl AsRef<OsStr>) -> Command {

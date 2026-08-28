@@ -155,15 +155,11 @@ fn run_authority_drain(
                 .serving
                 .authority_drainer()
                 .cloned()
-                .ok_or_else(authority_drainer_error)?;
+                .expect("distributed availability installs authority draining");
             Ok(Arc::new(AuthorityDrainJob::new(authority, drainer)))
         }),
         out,
     )
-}
-
-fn authority_drainer_error() -> String {
-    "distributed availability did not install authority draining".to_owned()
 }
 
 fn run_node_job(

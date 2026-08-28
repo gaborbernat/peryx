@@ -1,15 +1,16 @@
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use http_body_util::BodyExt as _;
 use peryx_core::Ecosystem;
 use peryx_driver::authz::AuthorizationService;
-use peryx_driver::retention::encode_cursor;
 use peryx_driver::serving::RetentionDriver;
-use peryx_driver::state::{AppState, Index, IndexKind, ServingState};
+use peryx_driver::state::{AppState, Clock, Index, IndexKind, ServingState};
 use peryx_driver::users::UserService;
 use peryx_identity::{GrantScope, IndexAcl, PasswordPolicy, Role};
 use peryx_policy::{
@@ -21,6 +22,8 @@ use tower::ServiceExt as _;
 
 const ADMIN_PASSWORD: &str = "administrator password";
 const OPERATOR_PASSWORD: &str = "operator password";
+
+type PlanCalls = Arc<Mutex<Vec<(String, Option<i64>)>>>;
 
 /// A driver whose plan is fixed test data: `unsupported` returns no plan at all, `fail` raises a store
 /// error mid-scan, and otherwise it emits `decisions` in order.
@@ -49,6 +52,29 @@ impl RetentionDriver for StubDriver {
             policy_version: policy.version(),
             frontier: RetentionFrontier::default(),
         })
+    }
+}
+
+struct TimestampDriver {
+    calls: PlanCalls,
+}
+
+impl RetentionDriver for TimestampDriver {
+    fn plan_retention(
+        &self,
+        meta: &MetaStore,
+        index: &str,
+        policy: &peryx_policy::RetentionPolicy,
+        now: Option<i64>,
+        emit: &mut dyn FnMut(RetentionDecision) -> Result<(), String>,
+    ) -> Result<RetentionSummary, String> {
+        self.calls.lock().unwrap().push((index.to_owned(), now));
+        StubDriver {
+            decisions: ["a", "b", "c"].into_iter().map(decision).collect(),
+            unsupported: false,
+            fail: None,
+        }
+        .plan_retention(meta, index, policy, now, emit)
     }
 }
 
@@ -120,6 +146,15 @@ impl Fixture {
     }
 
     async fn with_fault(driver: StubDriver, fault: StoreFault) -> Self {
+        let driver = (!driver.unsupported).then(|| Arc::new(driver) as Arc<dyn RetentionDriver>);
+        Self::build(driver, fault, None).await
+    }
+
+    async fn with_driver(driver: Arc<dyn RetentionDriver>, clock: Clock) -> Self {
+        Self::build(Some(driver), StoreFault::None, Some(clock)).await
+    }
+
+    async fn build(driver: Option<Arc<dyn RetentionDriver>>, fault: StoreFault, clock: Option<Clock>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("peryx.redb");
         let meta = MetaStore::open(&path).unwrap();
@@ -145,14 +180,18 @@ impl Fixture {
             60,
             vec![
                 hosted_index("hosted", Ecosystem::new("example")),
+                hosted_index("hosted-two", Ecosystem::new("example")),
                 hosted_index("beta-repo", Ecosystem::new("other")),
             ],
         );
-        Arc::get_mut(&mut state.serving).unwrap().users =
-            UserService::with_password_settings(meta, PasswordPolicy::new(8, 1, 1).unwrap(), 2);
-        if !driver.unsupported {
+        let serving = Arc::get_mut(&mut state.serving).unwrap();
+        serving.users = UserService::with_password_settings(meta, PasswordPolicy::new(8, 1, 1).unwrap(), 2);
+        if let Some(clock) = clock {
+            serving.clock = clock;
+        }
+        if let Some(driver) = driver {
             state.register_capabilities(|registrar| {
-                registrar.register_retention(Ecosystem::new("example"), Arc::new(driver));
+                registrar.register_retention(Ecosystem::new("example"), driver);
             });
         }
         let serving = state.serving.clone();
@@ -200,6 +239,15 @@ impl Fixture {
             serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
         )
     }
+}
+
+async fn timestamp_fixture() -> (Fixture, Arc<AtomicI64>, PlanCalls) {
+    let now = Arc::new(AtomicI64::new(100));
+    let clock_now = now.clone();
+    let clock: Clock = Arc::new(move || clock_now.load(Ordering::Relaxed));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let fixture = Fixture::with_driver(Arc::new(TimestampDriver { calls: calls.clone() }), clock).await;
+    (fixture, now, calls)
 }
 
 fn plan_body(repository: &str) -> serde_json::Value {
@@ -264,22 +312,110 @@ async fn test_plan_pages_then_resumes_from_the_cursor() {
 }
 
 #[tokio::test]
-async fn test_plan_rejects_a_stale_cursor() {
+async fn test_plan_reuses_the_cursor_evaluation_time() {
+    let (fixture, now, calls) = timestamp_fixture().await;
+    let mut body = plan_body("hosted");
+    body["limit"] = serde_json::json!(1);
+    let (status, first) = fixture.plan(body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["candidates"][0]["artifact"], "a");
+
+    now.store(200, Ordering::Relaxed);
+    body["cursor"] = first["next_cursor"].clone();
+    let (status, second) = fixture.plan(body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["candidates"][0]["artifact"], "b");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![("hosted".to_owned(), Some(100)), ("hosted".to_owned(), Some(100))]
+    );
+}
+
+#[tokio::test]
+async fn test_plan_rejects_a_cursor_from_another_repository_before_scanning() {
+    let (fixture, _, calls) = timestamp_fixture().await;
+    let mut body = plan_body("hosted");
+    body["limit"] = serde_json::json!(1);
+    let (status, first) = fixture.plan(body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut replay = plan_body("hosted-two");
+    replay["cursor"] = first["next_cursor"].clone();
+    let (status, response) = fixture.plan(replay).await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        response,
+        serde_json::json!({"error": "the plan cursor is stale: the repository changed"})
+    );
+    assert_eq!(*calls.lock().unwrap(), vec![("hosted".to_owned(), Some(100))]);
+}
+
+#[tokio::test]
+async fn test_plan_rejects_a_tampered_cursor() {
+    let fixture = Fixture::new(StubDriver {
+        decisions: vec![decision("a"), decision("b")],
+        unsupported: false,
+        fail: None,
+    })
+    .await;
+    let mut body = plan_body("hosted");
+    body["limit"] = serde_json::json!(1);
+    let (status, first) = fixture.plan(body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut cursor = URL_SAFE_NO_PAD.decode(first["next_cursor"].as_str().unwrap()).unwrap();
+    *cursor.last_mut().unwrap() = 0xff;
+    body["cursor"] = serde_json::json!(URL_SAFE_NO_PAD.encode(cursor));
+
+    let (status, response) = fixture.plan(body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response, serde_json::json!({"error": "invalid retention plan cursor"}));
+}
+
+#[tokio::test]
+async fn test_plan_rejects_an_unbound_cursor() {
     let fixture = Fixture::new(StubDriver {
         decisions: vec![decision("a")],
         unsupported: false,
         fail: None,
     })
     .await;
-    let stale = encode_cursor(
-        0,
-        RetentionSummary {
-            policy_version: 999,
-            frontier: RetentionFrontier::default(),
-        },
-    );
     let mut body = plan_body("hosted");
-    body["cursor"] = serde_json::json!(stale);
+    body["cursor"] = serde_json::json!(
+        URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "after": 0,
+                "summary": RetentionSummary {
+                    policy_version: 999,
+                    frontier: RetentionFrontier::default(),
+                },
+            }))
+            .unwrap(),
+        )
+    );
+
+    let (status, response) = fixture.plan(body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response, serde_json::json!({"error": "invalid retention plan cursor"}));
+}
+
+#[tokio::test]
+async fn test_plan_rejects_a_stale_cursor() {
+    let fixture = Fixture::new(StubDriver {
+        decisions: vec![decision("a"), decision("b")],
+        unsupported: false,
+        fail: None,
+    })
+    .await;
+    let mut body = plan_body("hosted");
+    body["limit"] = serde_json::json!(1);
+    let (status, first) = fixture.plan(body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    fixture.serving.meta.advance_policy_generation("hosted").unwrap();
+    body["cursor"] = first["next_cursor"].clone();
 
     let (status, _) = fixture.plan(body).await;
 
@@ -526,20 +662,17 @@ async fn test_export_streams_json_lines_with_the_identity_first() {
 #[tokio::test]
 async fn test_export_rejects_a_stale_cursor_before_streaming() {
     let fixture = Fixture::new(StubDriver {
-        decisions: vec![decision("a")],
+        decisions: vec![decision("a"), decision("b")],
         unsupported: false,
         fail: None,
     })
     .await;
-    let stale = encode_cursor(
-        0,
-        RetentionSummary {
-            policy_version: 999,
-            frontier: RetentionFrontier::default(),
-        },
-    );
     let mut body = plan_body("hosted");
-    body["cursor"] = serde_json::json!(stale);
+    body["limit"] = serde_json::json!(1);
+    let (status, first) = fixture.plan(body.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    fixture.serving.meta.advance_policy_generation("hosted").unwrap();
+    body["cursor"] = first["next_cursor"].clone();
 
     let response = fixture
         .post(
@@ -551,6 +684,29 @@ async fn test_export_rejects_a_stale_cursor_before_streaming() {
         .await;
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn test_export_rejects_a_cursor_from_another_repository_before_streaming() {
+    let (fixture, _, calls) = timestamp_fixture().await;
+    let mut body = plan_body("hosted");
+    body["limit"] = serde_json::json!(1);
+    let (status, first) = fixture.plan(body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut replay = plan_body("hosted-two");
+    replay["cursor"] = first["next_cursor"].clone();
+    let response = fixture
+        .post(
+            "/+retention/export",
+            Some(("Alice", ADMIN_PASSWORD)),
+            Body::from(serde_json::to_vec(&replay).unwrap()),
+            true,
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(*calls.lock().unwrap(), vec![("hosted".to_owned(), Some(100))]);
 }
 
 #[tokio::test]

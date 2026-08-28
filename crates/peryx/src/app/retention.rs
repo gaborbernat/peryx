@@ -48,17 +48,18 @@ fn dry_run(
     args: &RetentionDryRunArgs,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let driver = resolve_driver(config, drivers, &args.index)?;
+    let (driver, ecosystem) = resolve_driver(config, drivers, &args.index)?;
     let policy = load_rules(args.rules.as_deref())?;
-    let (after, expect) = resume(args.cursor.as_deref())?;
+    let (after, expect, evaluated_at) = resume(args.cursor.as_deref(), &args.index, &ecosystem)?;
     writeln!(
         out,
         "action\tresource\tgroup\tartifact\tdigest\tclass\tvisibility\tbytes\trule"
     )?;
     let query = RetentionQuery {
         index: &args.index,
+        ecosystem: &ecosystem,
         policy: &policy,
-        now: Some(now()),
+        now: evaluated_at,
         after,
         limit: args.limit,
         expect,
@@ -81,9 +82,9 @@ fn export(
     args: &RetentionExportArgs,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let driver = resolve_driver(config, drivers, &args.index)?;
+    let (driver, ecosystem) = resolve_driver(config, drivers, &args.index)?;
     let policy = load_rules(args.rules.as_deref())?;
-    let (after, expect) = resume(args.cursor.as_deref())?;
+    let (after, expect, evaluated_at) = resume(args.cursor.as_deref(), &args.index, &ecosystem)?;
     let summary = summary(&stores.meta, &args.index, &policy).map_err(anyhow::Error::msg)?;
     // Refuse a resume the repository has outgrown before writing a header the reader would trust.
     if expect.is_some_and(|expected| expected != summary) {
@@ -96,8 +97,9 @@ fn export(
     )?;
     let query = RetentionQuery {
         index: &args.index,
+        ecosystem: &ecosystem,
         policy: &policy,
-        now: Some(now()),
+        now: evaluated_at,
         after,
         limit: None,
         expect: None,
@@ -109,7 +111,11 @@ fn export(
     Ok(())
 }
 
-fn resolve_driver(config: &Config, drivers: &DriverSet, index: &str) -> anyhow::Result<Arc<dyn RetentionDriver>> {
+fn resolve_driver(
+    config: &Config,
+    drivers: &DriverSet,
+    index: &str,
+) -> anyhow::Result<(Arc<dyn RetentionDriver>, String)> {
     let ecosystem = config
         .indexes
         .iter()
@@ -117,10 +123,11 @@ fn resolve_driver(config: &Config, drivers: &DriverSet, index: &str) -> anyhow::
         .context(format!("unknown index {index:?}"))?
         .ecosystem
         .clone();
-    drivers
+    let driver = drivers
         .get_retention(&ecosystem)
         .cloned()
-        .context("the ecosystem does not support retention planning")
+        .context("the ecosystem does not support retention planning")?;
+    Ok((driver, ecosystem.as_str().to_owned()))
 }
 
 fn load_rules(path: Option<&Path>) -> anyhow::Result<RetentionPolicy> {
@@ -134,13 +141,20 @@ fn load_rules(path: Option<&Path>) -> anyhow::Result<RetentionPolicy> {
     Ok(RetentionPolicy::compile(&config))
 }
 
-fn resume(cursor: Option<&str>) -> anyhow::Result<(u64, Option<RetentionSummary>)> {
+fn resume(
+    cursor: Option<&str>,
+    repository: &str,
+    ecosystem: &str,
+) -> anyhow::Result<(u64, Option<RetentionSummary>, Option<i64>)> {
     match cursor {
         Some(cursor) => {
             let resume = decode_cursor(cursor).map_err(|err| anyhow::anyhow!("{err}"))?;
-            Ok((resume.after, Some(resume.expect)))
+            if resume.repository != repository || resume.ecosystem != ecosystem {
+                anyhow::bail!("the plan cursor is stale: the repository changed since it was issued");
+            }
+            Ok((resume.after, Some(resume.expect), resume.evaluated_at))
         }
-        None => Ok((0, None)),
+        None => Ok((0, None, Some(now()))),
     }
 }
 

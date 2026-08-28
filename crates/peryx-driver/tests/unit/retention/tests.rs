@@ -84,6 +84,7 @@ fn collect(
     let mut seen = Vec::new();
     let query = RetentionQuery {
         index: "alpha",
+        ecosystem: "example",
         policy,
         now: None,
         after,
@@ -188,6 +189,7 @@ fn test_plan_reports_interruption_when_the_sink_stops() {
     };
     let query = RetentionQuery {
         index: "alpha",
+        ecosystem: "example",
         policy: &empty_policy(),
         now: None,
         after: 0,
@@ -235,6 +237,27 @@ fn test_decode_cursor_rejects_base64_that_is_not_a_cursor() {
 }
 
 #[test]
+fn test_decode_cursor_rejects_an_unknown_version() {
+    use base64::Engine as _;
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "version": 2,
+            "repository": "alpha",
+            "ecosystem": "example",
+            "evaluated_at": 42,
+            "after": 4,
+            "summary": {
+                "policy_version": 7,
+                "frontier": {"repository": 1, "catalog": 2, "policy": 3},
+            },
+        }))
+        .unwrap(),
+    );
+
+    assert_eq!(decode_cursor(&token).unwrap_err(), "invalid retention plan cursor");
+}
+
+#[test]
 fn test_encode_cursor_round_trips_offset_and_identity() {
     let summary = peryx_policy::RetentionSummary {
         policy_version: 7,
@@ -245,8 +268,11 @@ fn test_encode_cursor_round_trips_offset_and_identity() {
         },
     };
 
-    let resume = decode_cursor(&encode_cursor(4, summary)).unwrap();
+    let resume = decode_cursor(&encode_cursor("alpha", "example", Some(42), 4, summary)).unwrap();
 
+    assert_eq!(resume.repository, "alpha");
+    assert_eq!(resume.ecosystem, "example");
+    assert_eq!(resume.evaluated_at, Some(42));
     assert_eq!(resume.after, 4);
     assert_eq!(resume.expect, summary);
 }
@@ -277,6 +303,7 @@ fn export_lines(
     let summary = super::summary(meta, "alpha", &policy).unwrap();
     let query = RetentionQuery {
         index: "alpha",
+        ecosystem: "example",
         policy: &policy,
         now: None,
         after,
@@ -391,6 +418,7 @@ async fn test_export_body_streams_the_whole_plan() {
     let permit = gates.try_enter("alpha").unwrap();
     let export = super::RetentionExport {
         index: "alpha".to_owned(),
+        ecosystem: "example".to_owned(),
         policy,
         now: None,
         after: 0,
@@ -420,6 +448,7 @@ async fn test_export_body_poisons_the_stream_on_a_store_failure() {
     let permit = gates.try_enter("alpha").unwrap();
     let export = super::RetentionExport {
         index: "alpha".to_owned(),
+        ecosystem: "example".to_owned(),
         policy,
         now: None,
         after: 0,

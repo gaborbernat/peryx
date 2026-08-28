@@ -80,6 +80,12 @@ enum PrefetchMode {
     MetadataOnly,
 }
 
+impl PrefetchMode {
+    const fn requires_metadata_only(self) -> bool {
+        matches!(self, Self::MetadataOnly)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PrefetchConfig {
     mode: PrefetchMode,
@@ -96,8 +102,9 @@ struct PrefetchConfig {
 
 impl PrefetchConfig {
     fn from_table(table: &toml::Table) -> Result<Self, String> {
+        let mode = mode(table.get("mode").and_then(toml::Value::as_str).unwrap_or("selected"))?;
         Ok(Self {
-            mode: mode(table.get("mode").and_then(toml::Value::as_str).unwrap_or("selected"))?,
+            mode,
             packages: table_strings(table, "packages")?,
             requirements: table_strings(table, "requirements")?
                 .into_iter()
@@ -109,7 +116,7 @@ impl PrefetchConfig {
             abi_tags: table_strings(table, "abi_tags")?,
             platform_tags: table_strings(table, "platform_tags")?,
             max_file_size_bytes: table_u64(table, "max_file_size_bytes")?,
-            metadata_only: table_bool(table, "metadata_only", false)?,
+            metadata_only: mode.requires_metadata_only() || table_bool(table, "metadata_only", false)?,
         })
     }
 }

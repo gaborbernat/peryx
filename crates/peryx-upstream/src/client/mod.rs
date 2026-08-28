@@ -266,7 +266,6 @@ impl UpstreamClient {
     /// A failed warm-up does not fail future requests.
     pub async fn warm(&self) {
         let Ok(credentials) = self.credentials.credential().await else {
-            self.reachability.store(REACHABILITY_UNREACHABLE, Ordering::Relaxed);
             return;
         };
         self.reachability.store(

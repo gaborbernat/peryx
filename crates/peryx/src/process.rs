@@ -1120,18 +1120,12 @@ fn self_update() -> anyhow::Result<()> {
         "no install receipt found; `self update` serves installer-based installs only \
          (reinstall with the install script, or update via the tool that installed peryx)",
     )?;
-    let result = updater.run_sync()?;
-    println!("{}", update_result_message(result.as_ref()));
-    Ok(())
-}
-
-#[cfg(feature = "self-update")]
-fn update_result_message(result: Option<&axoupdater::UpdateResult>) -> String {
-    let version = match result {
-        Some(result) => Some(result.new_version_tag.as_str()),
-        None => None,
+    let Some(result) = updater.run_sync()? else {
+        println!("{}", update_message(None));
+        return Ok(());
     };
-    update_message(version)
+    println!("{}", update_message(Some(&result.new_version_tag)));
+    Ok(())
 }
 
 #[cfg(feature = "self-update")]

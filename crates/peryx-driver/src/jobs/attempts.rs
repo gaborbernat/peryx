@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use peryx_storage::meta::{
     FinishJobRun, JobOutcome, JobRunRecord, JobRunStoreError, JobState, MetaError, MetaStore, NewJobRun,
@@ -30,13 +30,17 @@ pub enum JobAttemptError {
 
 /// Durable attempt state shared by the scheduler and the management boundary.
 pub struct JobAttemptControl {
-    store: MetaStore,
+    store: Arc<dyn JobAttemptStore>,
     active: Mutex<HashMap<String, CancellationToken>>,
 }
 
 impl JobAttemptControl {
     #[must_use]
     pub fn new(store: MetaStore) -> Self {
+        Self::with_store(Arc::new(store))
+    }
+
+    fn with_store(store: Arc<dyn JobAttemptStore>) -> Self {
         Self {
             store,
             active: Mutex::new(HashMap::new()),
@@ -52,20 +56,12 @@ impl JobAttemptControl {
     }
 
     pub(super) fn finish(&self, id: &str, outcome: JobOutcome<'_>) -> Result<JobRunRecord, JobAttemptError> {
-        let mut active = self.lock();
-        let result = match self.store.finish_job_run(id, outcome)? {
-            FinishJobRun::Finished(record) => {
-                active.remove(id);
-                Ok(record)
-            }
-            FinishJobRun::AlreadyFinished(_) => {
-                active.remove(id);
-                Err(JobAttemptError::AlreadyFinished)
-            }
+        drop(self.lock().remove(id));
+        match self.store.finish_job_run(id, outcome)? {
+            FinishJobRun::Finished(record) => Ok(record),
+            FinishJobRun::AlreadyFinished(_) => Err(JobAttemptError::AlreadyFinished),
             FinishJobRun::Missing => Err(JobAttemptError::Missing),
-        };
-        drop(active);
-        result
+        }
     }
 
     /// # Errors
@@ -92,6 +88,31 @@ impl JobAttemptControl {
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, CancellationToken>> {
         self.active.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+trait JobAttemptStore: Send + Sync {
+    fn start_job_run(&self, run: NewJobRun<'_>) -> Result<String, JobRunStoreError>;
+    fn finish_job_run(&self, id: &str, outcome: JobOutcome<'_>) -> Result<FinishJobRun, MetaError>;
+    fn get_job_run(&self, id: &str) -> Result<Option<JobRunRecord>, MetaError>;
+    fn recover_interrupted_job_runs(&self, recovered_at_unix: i64) -> Result<usize, MetaError>;
+}
+
+impl JobAttemptStore for MetaStore {
+    fn start_job_run(&self, run: NewJobRun<'_>) -> Result<String, JobRunStoreError> {
+        Self::start_job_run(self, run)
+    }
+
+    fn finish_job_run(&self, id: &str, outcome: JobOutcome<'_>) -> Result<FinishJobRun, MetaError> {
+        Self::finish_job_run(self, id, outcome)
+    }
+
+    fn get_job_run(&self, id: &str) -> Result<Option<JobRunRecord>, MetaError> {
+        Self::get_job_run(self, id)
+    }
+
+    fn recover_interrupted_job_runs(&self, recovered_at_unix: i64) -> Result<usize, MetaError> {
+        Self::recover_interrupted_job_runs(self, recovered_at_unix)
     }
 }
 

@@ -2082,19 +2082,13 @@ async fn test_child_dispatch_rejects_unknown_scenarios() {
     let server = MockServer::start().await;
     let output = child(&server.uri(), dir.path(), "unknown", ROOT_ACCESS_KEY, ROOT_SECRET_KEY).await;
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unknown S3 scenario: unknown"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown S3 scenario: unknown"));
 }
 
 #[cfg(feature = "container-tests")]
 #[tokio::test]
 async fn test_wait_for_signal_reports_eof() {
-    let (reader, writer) = tokio::io::duplex(1);
-    drop(writer);
-    let error = wait_for_signal(reader, STREAM_OPENED).await.unwrap_err();
+    let error = wait_for_signal(&b""[..], STREAM_OPENED).await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     assert_eq!(error.to_string(), "child exited before signaling PERYX_STREAM_OPENED");
 }
@@ -2391,14 +2385,21 @@ async fn test_s3_public_surface_in_fixture() {
         .await
         .unwrap()
         .unwrap();
-        assert!(
-            output.status.success(),
-            "{} failed\nstdout:\n{}\nstderr:\n{}",
-            scenario.name(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success());
     }
+}
+
+#[tokio::test]
+async fn test_filesystem_surface_in_fixture() {
+    assert!(
+        Command::new(s3_fixture())
+            .arg("filesystem")
+            .output()
+            .await
+            .unwrap()
+            .status
+            .success()
+    );
 }
 
 #[tokio::test]

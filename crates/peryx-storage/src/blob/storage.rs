@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
+use super::backend::filesystem_worker;
 use super::s3::S3Backend;
 use super::{
     BlobBackend, BlobCapabilities, BlobEntry, BlobError, BlobLease, BlobMetadata, BlobOperation, BlobRead,
@@ -31,16 +32,6 @@ fn filesystem_context<T>(
         Ok(value) => Ok(value),
         Err(error) => Err(error.with_context("filesystem", operation, digest)),
     }
-}
-
-async fn filesystem_worker<T>(
-    worker: tokio::task::JoinHandle<Result<T, BlobError>>,
-    operation: BlobOperation,
-    digest: Option<&Digest>,
-) -> Result<T, BlobError> {
-    worker
-        .await
-        .map_err(|error| BlobError::from(error).with_context("filesystem", operation, digest))?
 }
 
 impl BlobStorage {
@@ -152,17 +143,20 @@ impl BlobStorage {
         match &self.backend {
             Backend::Filesystem(store) => {
                 let store = store.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut present = HashSet::with_capacity(digests.len());
-                    for digest in digests {
-                        if filesystem_context(store.head(&digest), BlobOperation::Head, Some(&digest))?.is_some() {
-                            present.insert(digest);
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || {
+                        let mut present = HashSet::with_capacity(digests.len());
+                        for digest in digests {
+                            if filesystem_context(store.head(&digest), BlobOperation::Head, Some(&digest))?.is_some() {
+                                present.insert(digest);
+                            }
                         }
-                    }
-                    Ok::<_, BlobError>(present)
-                })
+                        Ok::<_, BlobError>(present)
+                    }),
+                    BlobOperation::Head,
+                    None,
+                )
                 .await
-                .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Head, None))?
             }
             Backend::S3(backend) => {
                 Box::pin(async {
@@ -224,15 +218,18 @@ impl BlobStorage {
                 let store = store.clone();
                 let session = session.to_owned();
                 let chunk = chunk.to_vec();
-                tokio::task::spawn_blocking(move || {
-                    filesystem_context(
-                        store.stage_upload_chunk(&session, offset, &chunk),
-                        BlobOperation::Write,
-                        None,
-                    )
-                })
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || {
+                        filesystem_context(
+                            store.stage_upload_chunk(&session, offset, &chunk),
+                            BlobOperation::Write,
+                            None,
+                        )
+                    }),
+                    BlobOperation::Write,
+                    None,
+                )
                 .await
-                .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Write, None))?
             }
             Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Write)),
         }
@@ -248,11 +245,14 @@ impl BlobStorage {
             Backend::Filesystem(store) => {
                 let store = store.clone();
                 let session = session.to_owned();
-                tokio::task::spawn_blocking(move || {
-                    filesystem_context(store.staged_upload_len(&session), BlobOperation::Head, None)
-                })
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || {
+                        filesystem_context(store.staged_upload_len(&session), BlobOperation::Head, None)
+                    }),
+                    BlobOperation::Head,
+                    None,
+                )
                 .await
-                .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Head, None))?
             }
             Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Head)),
         }
@@ -298,11 +298,14 @@ impl BlobStorage {
             Backend::Filesystem(store) => {
                 let store = store.clone();
                 let session = session.to_owned();
-                tokio::task::spawn_blocking(move || {
-                    filesystem_context(store.discard_upload(&session), BlobOperation::Delete, None)
-                })
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || {
+                        filesystem_context(store.discard_upload(&session), BlobOperation::Delete, None)
+                    }),
+                    BlobOperation::Delete,
+                    None,
+                )
                 .await
-                .map_err(|error| BlobError::from(error).with_context("filesystem", BlobOperation::Delete, None))?
             }
             Backend::S3(_) => Err(unsupported_blocking(BlobOperation::Delete)),
         }

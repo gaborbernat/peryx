@@ -78,16 +78,21 @@ fn absent_or_io(err: std::io::Error, digest: &Digest) -> BlobError {
 /// Renaming first frees the stage name on Windows, where open handles leave an unlinked file in a
 /// delete-pending state that rejects new readers with `PermissionDenied`.
 fn discard_stage(path: tempfile::TempPath) -> Result<(), BlobError> {
-    discard_stage_with(path, |from, to| std::fs::rename(from, to))
+    discard_stage_with(path, rename_stage, tempfile::TempPath::close)
+}
+
+fn rename_stage(from: &Path, to: &Path) -> Result<(), std::io::Error> {
+    std::fs::rename(from, to)
 }
 
 fn discard_stage_with(
     path: tempfile::TempPath,
-    rename: impl FnOnce(&Path, &Path) -> Result<(), std::io::Error>,
+    rename: fn(&Path, &Path) -> Result<(), std::io::Error>,
+    close: fn(tempfile::TempPath) -> Result<(), std::io::Error>,
 ) -> Result<(), BlobError> {
     let scratch = scratch_path(&path);
     if rename(&path, &scratch).is_err() {
-        return path.close().map_err(BlobError::from);
+        return close(path).map_err(BlobError::from);
     }
     remove_pending(&scratch)
 }
@@ -231,10 +236,8 @@ impl BlobStore {
             if !entry.file_name().to_string_lossy().starts_with(".peryx-lease-") {
                 continue;
             }
-            let file = match std::fs::File::open(entry.path()) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
+            let Some(file) = open_lease(&entry.path())? else {
+                continue;
             };
             if lease_lock_available(fs4::FileExt::try_lock(&file))? {
                 fs4::FileExt::unlock(&file)?;
@@ -474,6 +477,14 @@ impl BlobStore {
             return None;
         }
         Some(digest)
+    }
+}
+
+fn open_lease(path: &Path) -> Result<Option<std::fs::File>, BlobError> {
+    match std::fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 

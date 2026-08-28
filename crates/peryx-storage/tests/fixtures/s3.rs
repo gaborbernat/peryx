@@ -28,6 +28,7 @@ async fn main() -> Result<(), String> {
     let mut arguments = std::env::args_os().skip(1);
     match argument(&mut arguments, "command")?.as_str() {
         "unit" => run_unit(arguments.collect()).await,
+        "filesystem" => run_filesystem().await,
         "integration" => {
             run_integration(
                 argument(&mut arguments, "scenario")?,
@@ -38,6 +39,23 @@ async fn main() -> Result<(), String> {
         }
         command => Err(format!("unknown S3 fixture command: {command}")),
     }
+}
+
+async fn run_filesystem() -> Result<(), String> {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = BlobStorage::filesystem(dir.path());
+    storage.health().await.unwrap();
+    let digest = storage.put_bytes(b"package").await.unwrap();
+    storage.head(&digest).await.unwrap();
+    storage.open(&digest, None).await.unwrap();
+    storage.present(vec![digest.clone()]).await.unwrap();
+    storage.verify(&digest).await.unwrap();
+    storage.materialize(&digest).await.unwrap();
+    storage.delete(&digest).await.unwrap();
+    let mut write = storage.begin().await.unwrap();
+    write.write_chunk(Bytes::from_static(b"package")).await.unwrap();
+    write.commit(&digest).await.unwrap();
+    Ok(())
 }
 
 fn argument(arguments: &mut impl Iterator<Item = OsString>, name: &str) -> Result<String, String> {
@@ -326,19 +344,22 @@ fn run_blocking(storage: &BlobStorage, digest: &Digest, scenario: UnitBlockingSc
             let filesystem = BlobStorage::filesystem(dir.path());
             filesystem.blocking().put_bytes(b"package").unwrap();
             let mut visits = 0;
-            let error = {
+            {
                 let mut visit = |_: peryx_storage::blob::BlobEntry| {
                     visits += 1;
-                    Ok::<_, std::convert::Infallible>(())
+                    (visits == 1).then_some(()).ok_or("stop")
                 };
                 filesystem.blocking().visit(&mut visit).unwrap();
-                match storage.blocking().visit(&mut visit).unwrap_err() {
-                    BlobScanError::Store(error) => error,
-                    BlobScanError::Visit(never) => match never {},
-                }
-            };
-            assert_eq!(visits, 1);
-            assert_eq!(error.kind(), BlobErrorKind::Unsupported);
+                assert!(matches!(
+                    filesystem.blocking().visit(&mut visit),
+                    Err(BlobScanError::Visit("stop"))
+                ));
+                assert!(matches!(
+                    storage.blocking().visit(&mut visit),
+                    Err(BlobScanError::Store(error)) if error.kind() == BlobErrorKind::Unsupported
+                ));
+            }
+            assert_eq!(visits, 2);
         }
     }
 }

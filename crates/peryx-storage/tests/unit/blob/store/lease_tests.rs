@@ -2,7 +2,19 @@ use std::io::ErrorKind;
 
 use rstest::rstest;
 
-use super::lease_lock_available;
+use super::{lease_lock_available, open_lease};
+
+#[test]
+fn test_open_lease_distinguishes_missing_and_invalid_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(open_lease(&dir.path().join("missing")).unwrap().is_none());
+    let parent = dir.path().join("file");
+    std::fs::write(&parent, []).unwrap();
+    assert_eq!(
+        open_lease(&parent.join("child")).unwrap_err().kind(),
+        crate::blob::BlobErrorKind::Io
+    );
+}
 
 #[rstest]
 #[case::available(Ok(()), Ok(true))]

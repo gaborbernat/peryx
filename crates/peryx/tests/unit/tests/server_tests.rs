@@ -1127,7 +1127,11 @@ fn test_check_config_uses_compiled_plugins() {
 #[case::startup(start_config)]
 #[case::check_config(check_config)]
 fn test_configuration_boundaries_reject_ui_routes(#[case] validate: fn(&Config) -> anyhow::Result<()>) {
-    let mut config = neutral_config();
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config {
+        data_dir: dir.path().to_path_buf(),
+        ..neutral_config()
+    };
     config.indexes[0].route = "login".to_owned();
 
     assert_eq!(

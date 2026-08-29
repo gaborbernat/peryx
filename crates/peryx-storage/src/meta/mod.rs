@@ -145,6 +145,7 @@ const DRIVER_KV: TableDefinition<&str, &[u8]> = TableDefinition::new("driver_kv"
 const ANALYTICS: TableDefinition<&str, &[u8]> = TableDefinition::new("analytics");
 const USER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user");
 const USER_NAME: TableDefinition<&str, &str> = TableDefinition::new("server_user_name");
+const USER_NAME_SCHEMA: TableDefinition<&str, &str> = TableDefinition::new("server_user_name_schema");
 const USER_EVENT: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_event");
 const USER_VERIFIER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_verifier");
 const ROLE_GRANT: TableDefinition<&str, &[u8]> = TableDefinition::new("role_grant");
@@ -282,6 +283,7 @@ impl MetaStore {
             txn.open_table(ANALYTICS)?;
             txn.open_table(USER)?;
             txn.open_table(USER_NAME)?;
+            txn.open_table(USER_NAME_SCHEMA)?;
             txn.open_table(USER_EVENT)?;
             txn.open_table(USER_VERIFIER)?;
             txn.open_table(ROLE_GRANT)?;
@@ -297,6 +299,7 @@ impl MetaStore {
             txn.open_table(SCOPED_TOKEN_REACH)?;
             txn.open_table(SCOPED_TOKEN_VERIFIER)?;
         }
+        user::migrate_names(&txn)?;
         external_identity::backfill_role_grants(&txn)?;
         revocation::backfill_digest_revocation_state(&txn)?;
         txn.commit()?;
@@ -313,6 +316,25 @@ impl MetaStore {
         let txn = self.db.begin_write()?;
         txn.commit()?;
         Ok(())
+    }
+
+    /// Rebuilds user records and their name index after Unicode canonicalization data changes.
+    ///
+    /// # Errors
+    /// Returns a collision before writing when two stored users acquire the same canonical name, or
+    /// a store error when records cannot be read, rewritten, or committed.
+    pub fn migrate_user_names(&self) -> Result<(), MetaError> {
+        let txn = self.db.begin_write()?;
+        user::migrate_names(&txn)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Returns a store error when the recorded Unicode canonicalization version cannot be read.
+    pub fn user_names_require_migration(&self) -> Result<bool, MetaError> {
+        let txn = self.db.begin_read()?;
+        user::names_require_migration(&txn)
     }
 
     /// Opens an existing database without creating files or tables.

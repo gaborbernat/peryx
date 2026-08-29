@@ -1,9 +1,14 @@
+use std::collections::BTreeMap;
+
 use peryx_identity::{
-    PasswordVerifier, ServerUser, UserId, UserLifecycleChange, UserLifecycleEvent, UserName, UserNameError, UserState,
+    PasswordVerifier, ServerUser, USER_NAME_CANONICAL_VERSION, UserId, UserLifecycleChange, UserLifecycleEvent,
+    UserName, UserNameError, UserState,
 };
 use redb::{ReadableTable as _, WriteTransaction};
 
-use super::{MetaError, MetaStore, USER, USER_EVENT, USER_NAME, USER_VERIFIER};
+use super::{MetaError, MetaStore, USER, USER_EVENT, USER_NAME, USER_NAME_SCHEMA, USER_VERIFIER};
+
+const USER_NAME_SCHEMA_KEY: &str = "canonical";
 
 /// A verifier and the serialized row identity required for conditional replacement.
 pub struct StoredPasswordVerifier {
@@ -303,6 +308,71 @@ impl MetaStore {
         }
         Ok(events)
     }
+}
+
+pub(super) fn migrate_names(txn: &WriteTransaction) -> Result<(), MetaError> {
+    {
+        let schema = txn.open_table(USER_NAME_SCHEMA)?;
+        if schema
+            .get(USER_NAME_SCHEMA_KEY)?
+            .is_some_and(|version| version.value() == USER_NAME_CANONICAL_VERSION)
+        {
+            return Ok(());
+        }
+    }
+
+    let mut users = txn.open_table(USER)?;
+    let stored = users
+        .iter()?
+        .map(|entry| {
+            let (key, value) = entry?;
+            Ok((key.value().to_owned(), value.value().to_vec()))
+        })
+        .collect::<Result<Vec<_>, redb::StorageError>>()?;
+    let mut names = BTreeMap::<String, Vec<String>>::new();
+    let mut rewritten = Vec::with_capacity(stored.len());
+    for (key, value) in stored {
+        let mut user: ServerUser = serde_json::from_slice(&value)?;
+        user.name = UserName::new(user.name.display()).map_err(|source| MetaError::UserNameMigration {
+            id: user.id.as_str().to_owned(),
+            source,
+        })?;
+        names
+            .entry(user.name.canonical().to_owned())
+            .or_default()
+            .push(user.id.as_str().to_owned());
+        rewritten.push((key, serde_json::to_vec(&user)?, user));
+    }
+    if let Some((canonical_name, user_ids)) = names.into_iter().find(|(_, user_ids)| user_ids.len() > 1) {
+        return Err(MetaError::UserNameCollision {
+            canonical_name,
+            user_ids,
+        });
+    }
+
+    for (key, value, _) in &rewritten {
+        users.insert(key.as_str(), value.as_slice())?;
+    }
+    drop(users);
+    let mut names = txn.open_table(USER_NAME)?;
+    names.retain(|_, _| false)?;
+    for (_, _, user) in &rewritten {
+        names.insert(user.name.canonical(), user.id.as_str())?;
+    }
+    txn.open_table(USER_NAME_SCHEMA)?
+        .insert(USER_NAME_SCHEMA_KEY, USER_NAME_CANONICAL_VERSION)?;
+    Ok(())
+}
+
+pub(super) fn names_require_migration(txn: &redb::ReadTransaction) -> Result<bool, MetaError> {
+    let schema = match txn.open_table(USER_NAME_SCHEMA) {
+        Ok(schema) => schema,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(schema
+        .get(USER_NAME_SCHEMA_KEY)?
+        .is_none_or(|version| version.value() != USER_NAME_CANONICAL_VERSION))
 }
 
 pub(super) fn read_user(txn: &WriteTransaction, id: &UserId) -> Result<Option<ServerUser>, MetaError> {

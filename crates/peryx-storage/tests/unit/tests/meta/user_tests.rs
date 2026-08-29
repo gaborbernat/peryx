@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 
 use peryx_identity::{PasswordCheck, PasswordPolicy, ServerUser, UserId, UserLifecycleChange, UserName, UserState};
-use redb::TableDefinition;
+use redb::{ReadableDatabase as _, ReadableTable as _, TableDefinition};
 use rstest::rstest;
 
 use super::store;
@@ -12,6 +12,7 @@ const RAW_DRIVER: TableDefinition<&str, &[u8]> = TableDefinition::new("driver_kv
 const RAW_USER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user");
 const RAW_USER_NAME: TableDefinition<&str, &str> = TableDefinition::new("server_user_name");
 const RAW_USER_VERIFIER: TableDefinition<&str, &[u8]> = TableDefinition::new("server_user_verifier");
+const RAW_USER_NAME_SCHEMA: TableDefinition<&str, &str> = TableDefinition::new("server_user_name_schema");
 
 fn raw_store(setup: impl FnOnce(&redb::WriteTransaction)) -> (tempfile::TempDir, MetaStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -394,6 +395,102 @@ fn test_user_tables_migrate_an_older_store_without_touching_driver_records() {
 }
 
 #[test]
+fn test_user_name_migration_rebuilds_records_and_lookup_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older.redb");
+    older_store_with_users(&path, &[("usr_street", "Straße", "straße")], None);
+
+    let store = MetaStore::open(&path).unwrap();
+    let user = store.get_user_by_name("STRASSE").unwrap().unwrap();
+
+    assert_eq!(
+        (user.id.as_str(), user.name.display(), user.name.canonical()),
+        ("usr_street", "Straße", "strasse")
+    );
+    drop(store);
+    assert_eq!(
+        MetaStore::open(&path)
+            .unwrap()
+            .get_user_by_name("Straße")
+            .unwrap()
+            .unwrap()
+            .name
+            .canonical(),
+        "strasse"
+    );
+}
+
+#[test]
+fn test_user_name_migration_reports_collisions_before_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older.redb");
+    older_store_with_users(
+        &path,
+        &[("usr_sharp", "Straße", "straße"), ("usr_ascii", "STRASSE", "strasse")],
+        Some("prior-unicode-data"),
+    );
+
+    assert!(matches!(
+        MetaStore::open(&path),
+        Err(MetaError::UserNameCollision { canonical_name, user_ids })
+            if canonical_name == "strasse" && user_ids == ["usr_ascii", "usr_sharp"]
+    ));
+    let database = redb::Database::open(&path).unwrap();
+    let txn = database.begin_read().unwrap();
+    let names = txn
+        .open_table(RAW_USER_NAME)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (name, id) = entry.unwrap();
+            (name.value().to_owned(), id.value().to_owned())
+        })
+        .collect::<Vec<_>>();
+    let users = txn
+        .open_table(RAW_USER)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .map(|entry| {
+            let (id, value) = entry.unwrap();
+            (
+                id.value().to_owned(),
+                serde_json::from_slice::<serde_json::Value>(value.value()).unwrap()["name"]["canonical"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        (names, users),
+        (
+            vec![
+                ("strasse".to_owned(), "usr_ascii".to_owned()),
+                ("straße".to_owned(), "usr_sharp".to_owned()),
+            ],
+            vec![
+                ("usr_ascii".to_owned(), "strasse".to_owned()),
+                ("usr_sharp".to_owned(), "straße".to_owned()),
+            ],
+        )
+    );
+}
+
+#[test]
+fn test_user_name_migration_rejects_an_invalid_stored_display_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older.redb");
+    older_store_with_users(&path, &[("usr_empty", " ", " ")], None);
+
+    assert!(matches!(
+        MetaStore::open(path),
+        Err(MetaError::UserNameMigration { id, source: peryx_identity::UserNameError::Empty }) if id == "usr_empty"
+    ));
+}
+
+#[test]
 fn test_user_reads_treat_missing_old_tables_as_empty() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("older.redb");
@@ -426,4 +523,41 @@ fn test_failed_user_table_migration_leaves_prior_data_readable() {
         prior.get_user(&peryx_identity::UserId::random()),
         Err(MetaError::Table(_))
     ));
+}
+
+fn older_store_with_users(path: &Path, users: &[(&str, &str, &str)], version: Option<&str>) {
+    let database = redb::Database::create(path).unwrap();
+    let txn = database.begin_write().unwrap();
+    {
+        let mut records = txn.open_table(RAW_USER).unwrap();
+        let mut names = txn.open_table(RAW_USER_NAME).unwrap();
+        for &(id, display, canonical) in users {
+            let value = serde_json::to_vec(&serde_json::json!({
+                "id": id,
+                "name": { "display": display, "canonical": canonical },
+                "state": "active",
+                "revision": 1,
+            }))
+            .unwrap();
+            records.insert(id, value.as_slice()).unwrap();
+            names.insert(canonical, id).unwrap();
+        }
+    }
+    if let Some(version) = version {
+        txn.open_table(RAW_USER_NAME_SCHEMA)
+            .unwrap()
+            .insert("canonical", version)
+            .unwrap();
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn test_user_name_migration_check_rejects_an_incompatible_schema_table() {
+    let (_dir, store) = raw_store(|txn| {
+        txn.open_table(TableDefinition::<&str, u64>::new("server_user_name_schema"))
+            .unwrap();
+    });
+
+    assert!(matches!(store.user_names_require_migration(), Err(MetaError::Table(_))));
 }

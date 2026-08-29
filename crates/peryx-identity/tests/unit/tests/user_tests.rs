@@ -1,4 +1,5 @@
 use crate::{UserId, UserName, UserNameError};
+use rstest::rstest;
 
 #[test]
 fn test_user_id_is_opaque_and_random() {
@@ -16,13 +17,26 @@ fn test_user_id_rehydrates_a_stored_value_verbatim() {
     assert_eq!(UserId::from_stored("usr_stored").as_str(), "usr_stored");
 }
 
-#[test]
-fn test_user_name_preserves_display_and_canonicalizes_lookup() {
-    let name = UserName::new("  E\u{301}LODIE  ").unwrap();
+#[rstest]
+#[case::normalization("E\u{301}LODIE", "Élodie", "élodie")]
+#[case::sharp_s("Straße", "STRASSE", "strasse")]
+#[case::sigma("ΟΣ", "οσ", "οσ")]
+#[case::ypogegrammeni("ῃ", "ηι", "ηι")]
+fn test_user_name_preserves_display_and_canonicalizes_lookup(
+    #[case] display: &str,
+    #[case] equivalent: &str,
+    #[case] canonical: &str,
+) {
+    let name = UserName::new(format!("  {display}  ").as_str()).unwrap();
 
-    assert_eq!(name.display(), "E\u{301}LODIE");
-    assert_eq!(name.canonical(), "élodie");
-    assert_eq!(name.canonical(), UserName::new("Élodie").unwrap().canonical());
+    assert_eq!(
+        (
+            name.display(),
+            name.canonical(),
+            UserName::new(equivalent).unwrap().canonical()
+        ),
+        (display, canonical, canonical)
+    );
 }
 
 #[test]

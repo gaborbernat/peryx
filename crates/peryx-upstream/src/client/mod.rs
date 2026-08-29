@@ -11,7 +11,7 @@ mod response;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
@@ -24,7 +24,8 @@ use self::guard::OutboundGuard;
 use self::range::RangeSuppressions;
 use self::response::header_str;
 use self::retry::{
-    MAX_RETRIES, should_retry_error, should_retry_status, sleep_before_retry_status, sleep_before_retry_str,
+    MAX_RETRIES, RETRY_WAIT_BUDGET, retry_after_at, retry_delay, should_retry_error, should_retry_status,
+    sleep_before_retry_status, sleep_before_retry_str,
 };
 
 pub use self::credential::{
@@ -598,10 +599,20 @@ impl UpstreamClient {
                     refreshed = true;
                 }
                 Ok(response) => {
-                    if let (true, Some(attempt)) = (should_retry_status(response.status()), retries.next()) {
+                    if should_retry_status(response.status()) {
+                        let server_delay = retry_after_at(response.headers(), SystemTime::now());
+                        if server_delay.is_some_and(|delay| delay > RETRY_WAIT_BUDGET) {
+                            self.reachability.store(REACHABILITY_REACHABLE, Ordering::Relaxed);
+                            return Ok(response);
+                        }
+                        let Some(attempt) = retries.next() else {
+                            self.reachability.store(REACHABILITY_REACHABLE, Ordering::Relaxed);
+                            return Ok(response);
+                        };
                         let url = response.url().clone();
                         let status = response.status();
-                        sleep_before_retry_status(&url, attempt, status, response.headers()).await;
+                        sleep_before_retry_status(&url, status, server_delay.unwrap_or_else(|| retry_delay(attempt)))
+                            .await;
                         continue;
                     }
                     self.reachability.store(REACHABILITY_REACHABLE, Ordering::Relaxed);

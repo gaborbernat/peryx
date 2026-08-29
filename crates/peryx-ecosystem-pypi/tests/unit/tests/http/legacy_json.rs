@@ -228,6 +228,31 @@ async fn test_legacy_json_unsupported_upstream_content_type_is_bad_gateway() {
     assert!(body.contains("upstream returned an invalid response"), "{body}");
 }
 #[tokio::test]
+async fn test_legacy_json_forwards_upstream_retry_after() {
+    let h = harness().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/flask/"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    let (status, headers, body) = get(&h.state, "/pypi/flask/json", None).await;
+
+    assert_eq!(
+        (
+            status,
+            headers.get(header::RETRY_AFTER).and_then(|value| value.to_str().ok()),
+            body.as_str(),
+        ),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Some("120"),
+            "project detail on index \"pypi\" for project \"flask\": upstream rate limit exceeded",
+        )
+    );
+}
+#[tokio::test]
 async fn test_legacy_json_unavailable_upstream_is_bad_gateway() {
     let dir = tempfile::tempdir().unwrap();
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();

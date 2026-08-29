@@ -11,13 +11,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::guarded_client;
 use crate::client::UpstreamClient;
-use crate::client::retry::{MAX_RETRIES, retry_after};
+use crate::client::retry::{MAX_RETRIES, retry_after, retry_after_at};
 
 #[rstest]
 #[case::seconds(Some(b"5".as_slice()), Some(Duration::from_secs(5)))]
 #[case::zero(Some(b"0".as_slice()), Some(Duration::from_secs(0)))]
 #[case::at_cap(Some(b"30".as_slice()), Some(Duration::from_secs(30)))]
-#[case::over_cap(Some(b"120".as_slice()), Some(Duration::from_secs(30)))]
+#[case::over_budget(Some(b"120".as_slice()), Some(Duration::from_mins(2)))]
 #[case::padded(Some(b" 5 ".as_slice()), Some(Duration::from_secs(5)))]
 #[case::malformed(Some(b"soon".as_slice()), None)]
 #[case::non_ascii(Some(b"\xff".as_slice()), None)]
@@ -32,15 +32,16 @@ fn test_retry_after_reads_the_header(#[case] value: Option<&[u8]>, #[case] expec
 }
 
 #[test]
-fn test_retry_after_caps_a_future_http_date() {
+fn test_retry_after_reads_a_future_http_date_from_receipt_time() {
     let future = SystemTime::UNIX_EPOCH + Duration::from_secs(4_000_000_000);
+    let received_at = future - Duration::from_mins(2);
     let mut headers = HeaderMap::new();
     headers.insert(
         RETRY_AFTER,
         HeaderValue::from_str(&httpdate::fmt_http_date(future)).unwrap(),
     );
 
-    assert_eq!(retry_after(&headers), Some(Duration::from_secs(30)));
+    assert_eq!(retry_after_at(&headers, received_at), Some(Duration::from_mins(2)));
 }
 
 #[test]
@@ -52,7 +53,33 @@ fn test_retry_after_ignores_a_past_http_date() {
         HeaderValue::from_str(&httpdate::fmt_http_date(past)).unwrap(),
     );
 
-    assert_eq!(retry_after(&headers), None);
+    assert_eq!(retry_after_at(&headers, SystemTime::now()), None);
+}
+
+#[tokio::test]
+async fn test_retry_after_above_budget_returns_the_original_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+
+    let response = client
+        .send_conditional(
+            url::Url::parse(&format!("{}/simple/", server.uri())).unwrap(),
+            "application/json",
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (response.status(), response.headers()[RETRY_AFTER].to_str().unwrap()),
+        (reqwest::StatusCode::TOO_MANY_REQUESTS, "120")
+    );
 }
 
 #[tokio::test]

@@ -47,28 +47,7 @@ pub(super) async fn fetch_and_store(
     };
     match response {
         Ok(response) if response.status == 200 => {
-            let record = CachedIndex {
-                etag: response.etag.clone(),
-                last_serial: response.last_serial,
-                fetched_at_unix: now,
-                content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
-                fresh_secs: response.max_age,
-                body: canonical_raw(project, &response)?,
-            };
-            if let Some(previous) = &cached {
-                let changed = previous.body != record.body;
-                if changed {
-                    tracing::info!(%key, "upstream page changed");
-                }
-                let event = Observation::Refresh {
-                    repository: route,
-                    resource: event_project,
-                    changed,
-                };
-                state.metrics.record(event);
-            }
-            persist_page_from(state, key, name, project, &record, response.source.as_deref())?;
-            Ok(Some(record))
+            cache_project_response(state, key, name, project, now, cached.as_ref(), &response).map(Some)
         }
         Ok(response) if response.status == 304 => {
             let mut record = cached.ok_or(CacheError::Unavailable)?;
@@ -93,6 +72,20 @@ pub(super) async fn fetch_and_store(
                 state.remember_negative(project_negative_key(key), NEGATIVE_TTL_SECS);
                 None
             }),
+        Ok(response)
+            if response.status == 429
+                && cached
+                    .as_ref()
+                    .is_none_or(|record| !super::servable_stale(state, record)) =>
+        {
+            state.metrics.record(Observation::UpstreamError {
+                repository: route,
+                resource: event_project,
+            });
+            Err(CacheError::UpstreamRateLimited {
+                retry_after: response.retry_after,
+            })
+        }
         // Past `max_stale_secs` a stale page stops being an answer, so drop it and let the upstream
         // failure surface rather than papering over an outage with data of unbounded age.
         Ok(response) => cached
@@ -134,6 +127,38 @@ pub(super) async fn fetch_and_store(
                 },
             ),
     }
+}
+
+fn cache_project_response(
+    state: &ServingState,
+    key: &str,
+    name: &str,
+    project: &str,
+    now: i64,
+    previous: Option<&CachedIndex>,
+    response: &SimpleResponse,
+) -> Result<CachedIndex, CacheError> {
+    let record = CachedIndex {
+        etag: response.etag.clone(),
+        last_serial: response.last_serial,
+        fetched_at_unix: now,
+        content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
+        fresh_secs: response.max_age,
+        body: canonical_raw(project, response)?,
+    };
+    if let Some(previous) = previous {
+        let changed = previous.body != record.body;
+        if changed {
+            tracing::info!(%key, "upstream page changed");
+        }
+        state.metrics.record(Observation::Refresh {
+            repository: mirror_route(state, name),
+            resource: project.to_owned(),
+            changed,
+        });
+    }
+    persist_page_from(state, key, name, project, &record, response.source.as_deref())?;
+    Ok(record)
 }
 
 fn mirror_policy<'a>(state: &'a ServingState, name: &str) -> &'a peryx_policy::Policy {

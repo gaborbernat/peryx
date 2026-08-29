@@ -262,6 +262,16 @@ pub(super) fn cache_error_response(err: &CacheError, context: CacheContext<'_>) 
         );
         return response;
     }
+    if let CacheError::UpstreamRateLimited { retry_after } = err {
+        let mut response = (cache_error_status(err, &context), cache_error_message(err, context)).into_response();
+        if let Some(retry_after) = retry_after {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from_str(retry_after).expect("the upstream retry-after header was valid"),
+            );
+        }
+        return response;
+    }
     (cache_error_status(err, &context), cache_error_message(err, context)).into_response()
 }
 
@@ -336,7 +346,7 @@ fn cache_error_status(err: &CacheError, context: &CacheContext<'_>) -> StatusCod
         CacheError::OfflineMissing(_) => StatusCode::SERVICE_UNAVAILABLE,
         CacheError::FileExists(_) | CacheError::AuthoritySuperseded => StatusCode::CONFLICT,
         CacheError::NotVolatile | CacheError::Policy(_) => StatusCode::FORBIDDEN,
-        CacheError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+        CacheError::RateLimited { .. } | CacheError::UpstreamRateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         CacheError::Parse(_) if matches!(context.operation, "upload storage" | "file removal" | "promotion") => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

@@ -106,6 +106,8 @@ pub enum CacheError {
     Stream(String),
     #[error("rate limit exceeded; retry after {retry_after} seconds")]
     RateLimited { retry_after: u64 },
+    #[error("upstream rate limit exceeded")]
+    UpstreamRateLimited { retry_after: Option<String> },
     #[error("virtual index composition cycle: {0}")]
     VirtualIndexCycle(String),
     #[error(transparent)]
@@ -177,6 +179,7 @@ impl CacheError {
             }
             Self::Stream(err) => format!("file stream failed: {err}"),
             Self::RateLimited { retry_after } => format!("rate limit exceeded; retry after {retry_after} seconds"),
+            Self::UpstreamRateLimited { .. } => "upstream rate limit exceeded".to_owned(),
             Self::VirtualIndexCycle(cycle) => format!("virtual index composition cycle: {cycle}"),
             Self::Policy(err) => crate::serving::response::pypi_reason(&err.reason),
             Self::Quota(err) => format!("quota accounting error: {err}"),

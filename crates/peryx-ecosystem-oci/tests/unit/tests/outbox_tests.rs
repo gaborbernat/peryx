@@ -59,6 +59,7 @@ fn test_publish_manifest_records_the_reference_it_named(#[case] reference: Refer
             reference: &reference,
             reservation: None,
             journal: true,
+            webhook: None,
         },
     )
     .unwrap();
@@ -88,6 +89,7 @@ fn test_none_mode_publish_records_no_outbox_entry() {
             reference: &Reference::Digest("sha256:abc".to_owned()),
             reservation: None,
             journal: false,
+            webhook: None,
         },
     )
     .unwrap();
@@ -122,7 +124,7 @@ fn test_trash_tag_records_a_trash_tag_operation() {
     store::record_manifest(&meta, "store", "app", "sha256:abc", &manifest()).unwrap();
     store::put_tag(&meta, "store", "app", "latest", "sha256:abc").unwrap();
 
-    store::trash_tag(&meta, "store", "app", "latest", &info(), true).unwrap();
+    store::trash_tag(&meta, "store", "app", "latest", &info(), true, |_| None).unwrap();
 
     assert_eq!(
         only_op(&meta),
@@ -142,7 +144,7 @@ fn test_trash_manifest_records_the_captured_tags() {
     store::put_tag(&meta, "store", "app", "1.0", "sha256:abc").unwrap();
     store::put_tag(&meta, "store", "app", "latest", "sha256:abc").unwrap();
 
-    store::trash_manifest(&meta, "store", "app", "sha256:abc", &info(), true).unwrap();
+    store::trash_manifest(&meta, "store", "app", "sha256:abc", &info(), true, None).unwrap();
 
     assert_eq!(
         only_op(&meta),
@@ -160,9 +162,9 @@ fn test_restore_tag_records_a_restore_operation() {
     let (_dir, meta) = store();
     store::record_manifest(&meta, "store", "app", "sha256:abc", &manifest()).unwrap();
     store::put_tag(&meta, "store", "app", "latest", "sha256:abc").unwrap();
-    store::trash_tag(&meta, "store", "app", "latest", &info(), false).unwrap();
+    store::trash_tag(&meta, "store", "app", "latest", &info(), false, |_| None).unwrap();
 
-    store::restore_tag(&meta, "store", "app", "latest", true).unwrap();
+    store::restore_tag(&meta, "store", "app", "latest", true, |_| None).unwrap();
 
     assert_eq!(
         only_op(&meta),
@@ -181,9 +183,9 @@ fn test_restore_manifest_records_the_relit_tags() {
     store::record_manifest(&meta, "store", "app", "sha256:abc", &manifest()).unwrap();
     store::put_tag(&meta, "store", "app", "1.0", "sha256:abc").unwrap();
     store::put_tag(&meta, "store", "app", "latest", "sha256:abc").unwrap();
-    store::trash_manifest(&meta, "store", "app", "sha256:abc", &info(), false).unwrap();
+    store::trash_manifest(&meta, "store", "app", "sha256:abc", &info(), false, None).unwrap();
 
-    store::restore_manifest(&meta, "store", "app", "sha256:abc", true).unwrap();
+    store::restore_manifest(&meta, "store", "app", "sha256:abc", true, None).unwrap();
 
     assert_eq!(
         only_op(&meta),
@@ -200,7 +202,7 @@ fn test_restore_manifest_records_the_relit_tags() {
 fn test_no_op_deletion_records_no_outbox_entry() {
     let (_dir, meta) = store();
 
-    let digest = store::trash_tag(&meta, "store", "app", "absent", &info(), true).unwrap();
+    let digest = store::trash_tag(&meta, "store", "app", "absent", &info(), true, |_| None).unwrap();
 
     assert!(digest.is_none(), "no tag was present to trash");
     assert_eq!(meta.current_serial().unwrap(), 0, "a no-op records nothing");

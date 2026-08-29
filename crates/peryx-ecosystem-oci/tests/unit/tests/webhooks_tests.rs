@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
+use http_body_util::BodyExt as _;
 use peryx_driver::AppState;
 use peryx_events::webhook::{WebhookRuntime, WebhookTargetConfig};
 use peryx_http::router;
@@ -16,8 +17,11 @@ use super::{auth, oci_digest};
 const TOKEN: &str = "s3cret";
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
-fn hosted_with_webhook(dir: &tempfile::TempDir, events: &[&str]) -> (Arc<AppState>, axum::Router) {
-    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+fn hosted_with_meta_and_webhook(
+    dir: &tempfile::TempDir,
+    meta: MetaStore,
+    events: &[&str],
+) -> (Arc<AppState>, axum::Router) {
     let blobs = BlobStore::new(dir.path().join("blobs"));
     let webhooks = WebhookRuntime::new(vec![WebhookTargetConfig {
         index: "store".to_owned(),
@@ -48,13 +52,17 @@ fn hosted_with_webhook(dir: &tempfile::TempDir, events: &[&str]) -> (Arc<AppStat
     (state.clone(), router(state))
 }
 
-async fn send_body(
+fn hosted_with_webhook(dir: &tempfile::TempDir, events: &[&str]) -> (Arc<AppState>, axum::Router) {
+    hosted_with_meta_and_webhook(dir, MetaStore::open(dir.path().join("peryx.redb")).unwrap(), events)
+}
+
+async fn send_response(
     app: &axum::Router,
     method: Method,
     uri: &str,
     headers: &[(&str, &str)],
     body: Vec<u8>,
-) -> StatusCode {
+) -> axum::response::Response {
     let mut builder = Request::builder().method(method).uri(uri);
     for (name, value) in headers {
         builder = builder.header(*name, *value);
@@ -63,19 +71,26 @@ async fn send_body(
         .oneshot(builder.body(Body::from(body)).unwrap())
         .await
         .unwrap()
-        .status()
+}
+
+async fn send_body(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> StatusCode {
+    send_response(app, method, uri, headers, body).await.status()
 }
 
 /// Delivery records remain available after an attempt.
 fn enqueued_delivery(state: &AppState) -> WebhookDeliveryRecord {
-    state
-        .serving
-        .meta
-        .list_webhook_deliveries()
-        .unwrap()
-        .into_iter()
-        .next()
-        .expect("the push enqueued a webhook delivery")
+    while let Some(id) = state.serving.meta.next_webhook_event_id().unwrap() {
+        state.serving.meta.fan_out_webhook_event(&id).unwrap();
+    }
+    let mut deliveries = state.serving.meta.list_webhook_deliveries().unwrap();
+    assert_eq!(deliveries.len(), 1);
+    deliveries.pop().unwrap()
 }
 
 async fn push_manifest(app: &axum::Router, blob: &[u8], manifest: &[u8], reference: &str) {
@@ -123,6 +138,19 @@ async fn test_manifest_push_fires_manifest_push_webhook() {
 }
 
 #[tokio::test]
+async fn test_manifest_push_by_digest_fires_manifest_push_webhook() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_with_webhook(&dir, &["manifest-push"]);
+    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}"#;
+    let digest = oci_digest(manifest);
+    push_manifest(&app, b"layer-bytes", manifest, &digest).await;
+
+    let payload: serde_json::Value = serde_json::from_str(&enqueued_delivery(&state).payload).unwrap();
+    assert_eq!(payload["data"]["digest"], digest);
+    assert_eq!(payload["data"]["reference"], serde_json::Value::Null);
+}
+
+#[tokio::test]
 async fn test_manifest_delete_fires_a_delete_webhook() {
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = hosted_with_webhook(&dir, &["manifest-delete"]);
@@ -145,6 +173,30 @@ async fn test_manifest_delete_fires_a_delete_webhook() {
     assert_eq!(payload["schema"], "oci.v1");
     assert_eq!(payload["data"]["repository"], "app");
     assert_eq!(payload["data"]["reference"], "2.0");
+}
+
+#[tokio::test]
+async fn test_manifest_delete_by_digest_fires_a_delete_webhook() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_with_webhook(&dir, &["manifest-delete"]);
+    let manifest = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(manifest);
+    push_manifest(&app, b"layer", manifest, "2.0").await;
+
+    let status = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/store/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let payload: serde_json::Value = serde_json::from_str(&enqueued_delivery(&state).payload).unwrap();
+    assert_eq!(payload["event"], "manifest-delete");
+    assert_eq!(payload["data"]["digest"], digest);
+    assert_eq!(payload["data"]["reference"], serde_json::Value::Null);
 }
 
 #[tokio::test]
@@ -178,6 +230,71 @@ async fn test_manifest_restore_fires_a_restore_webhook() {
     assert_eq!(payload["data"]["repository"], "app");
     assert_eq!(payload["data"]["reference"], "2.0");
     assert!(payload["data"]["digest"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_manifest_restore_by_digest_fires_a_restore_webhook() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = hosted_with_webhook(&dir, &["manifest-restore"]);
+    let manifest = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(manifest);
+    push_manifest(&app, b"layer", manifest, "2.0").await;
+    send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/store/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+
+    let status = send_body(
+        &app,
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{digest}/restore"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let payload: serde_json::Value = serde_json::from_str(&enqueued_delivery(&state).payload).unwrap();
+    assert_eq!(payload["event"], "manifest-restore");
+    assert_eq!(payload["data"]["digest"], digest);
+    assert_eq!(payload["data"]["reference"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn test_manifest_restore_by_digest_reports_a_store_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("read-only.redb");
+    drop(MetaStore::open(&path).unwrap());
+    let (_state, app) = hosted_with_meta_and_webhook(
+        &dir,
+        MetaStore::open_existing_read_only(path).unwrap(),
+        &["manifest-restore"],
+    );
+    let digest = format!("sha256:{}", "a".repeat(64));
+
+    let response = send_response(
+        &app,
+        Method::PUT,
+        &format!("/v2/store/app/manifests/{digest}/restore"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["errors"][0]["code"], "UNKNOWN");
+    assert!(
+        payload["errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("metadata store error:")
+    );
 }
 
 #[tokio::test]

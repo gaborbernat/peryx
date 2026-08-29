@@ -4,7 +4,7 @@ use redb::ReadableTable as _;
 use serde::{Deserialize, Serialize};
 
 use super::error::MetaError;
-use super::{MetaStore, SERIAL, WEBHOOK_DELIVERY, WEBHOOK_DUE, WEBHOOK_SERIAL_KEY};
+use super::{MetaStore, SERIAL, WEBHOOK_DELIVERY, WEBHOOK_DUE, WEBHOOK_EVENT, WEBHOOK_SERIAL_KEY};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +36,15 @@ pub struct NewWebhookDelivery<'a> {
     pub target: &'a str,
     pub event: &'a str,
     pub payload: &'a str,
+    pub created_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookEventIntent {
+    pub index: String,
+    pub targets: Vec<String>,
+    pub event: String,
+    pub payload: String,
     pub created_at_unix: i64,
 }
 
@@ -82,6 +91,71 @@ impl MetaStore {
         }
         txn.commit()?;
         Ok(id)
+    }
+
+    pub(super) fn enqueue_webhook_events(
+        txn: &redb::WriteTransaction,
+        events: &[WebhookEventIntent],
+    ) -> Result<(), MetaError> {
+        for event in events {
+            insert_webhook_event(txn, event)?;
+        }
+        Ok(())
+    }
+
+    /// Materializes an event's target deliveries without changing identities already committed by an
+    /// earlier attempt.
+    ///
+    /// # Errors
+    /// Returns a store error if a queue write fails or a stored event cannot be decoded.
+    pub fn fan_out_webhook_event(&self, id: &str) -> Result<bool, MetaError> {
+        let Some(event) = self.webhook_event(id)? else {
+            return Ok(false);
+        };
+        for delivery in &event.deliveries {
+            self.enqueue_webhook_event_delivery(delivery)?;
+        }
+        let txn = self.db.begin_write()?;
+        txn.open_table(WEBHOOK_EVENT)?.remove(id)?;
+        txn.commit()?;
+        Ok(true)
+    }
+
+    /// Returns the oldest event whose target fan-out has not completed.
+    ///
+    /// # Errors
+    /// Returns a store error if the event table cannot be read.
+    pub fn next_webhook_event_id(&self) -> Result<Option<String>, MetaError> {
+        let txn = self.db.begin_read()?;
+        let events = txn.open_table(WEBHOOK_EVENT)?;
+        Ok(events.first()?.map(|(id, _)| id.value().to_owned()))
+    }
+
+    fn webhook_event(&self, id: &str) -> Result<Option<WebhookEventRecord>, MetaError> {
+        let txn = self.db.begin_read()?;
+        let events = txn.open_table(WEBHOOK_EVENT)?;
+        Ok(events
+            .get(id)?
+            .map(|value| serde_json::from_slice(value.value()))
+            .transpose()?)
+    }
+
+    fn enqueue_webhook_event_delivery(&self, delivery: &WebhookDeliveryRecord) -> Result<(), MetaError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut deliveries = txn.open_table(WEBHOOK_DELIVERY)?;
+            if deliveries.get(delivery.id.as_str())?.is_some() {
+                return Ok(());
+            }
+            let bytes = serde_json::to_vec(delivery)?;
+            deliveries.insert(delivery.id.as_str(), bytes.as_slice())?;
+            txn.open_table(WEBHOOK_DUE)?.insert(
+                due_key(delivery.created_at_unix, &delivery.id).as_str(),
+                delivery.id.as_str(),
+            )?;
+        }
+        txn.commit()?;
+        Ok(())
     }
 
     /// Returns due deliveries in due-time order, at most one per `(index, target)`, excluding active
@@ -252,6 +326,54 @@ impl MetaStore {
     }
 }
 
+fn insert_webhook_event(txn: &redb::WriteTransaction, event: &WebhookEventIntent) -> Result<String, MetaError> {
+    if event.targets.is_empty() {
+        return Err(MetaError::DriverPrecondition(
+            "webhook event requires at least one target".to_owned(),
+        ));
+    }
+    let first_delivery = {
+        let mut serials = txn.open_table(SERIAL)?;
+        let first_delivery = serials.get(WEBHOOK_SERIAL_KEY)?.map_or(0, |value| value.value()) + 1;
+        serials.insert(
+            WEBHOOK_SERIAL_KEY,
+            first_delivery + u64::try_from(event.targets.len()).expect("target count fits u64") - 1,
+        )?;
+        first_delivery
+    };
+    let id = format!("we_{first_delivery:016x}");
+    let deliveries = event
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(offset, target)| WebhookDeliveryRecord {
+            id: format!(
+                "wd_{:016x}",
+                first_delivery + u64::try_from(offset).expect("target count fits u64")
+            ),
+            index: event.index.clone(),
+            target: target.clone(),
+            event: event.event.clone(),
+            payload: event.payload.clone(),
+            status: WebhookDeliveryStatus::Pending,
+            attempts: 0,
+            created_at_unix: event.created_at_unix,
+            updated_at_unix: event.created_at_unix,
+            next_attempt_at_unix: Some(event.created_at_unix),
+            response_status: None,
+            last_error: None,
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&WebhookEventRecord { deliveries })?;
+    txn.open_table(WEBHOOK_EVENT)?.insert(id.as_str(), bytes.as_slice())?;
+    Ok(id)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WebhookEventRecord {
+    deliveries: Vec<WebhookDeliveryRecord>,
+}
+
 #[derive(Default, PartialEq, Eq)]
 struct WebhookQueueCleanup {
     malformed_due_keys: usize,
@@ -283,3 +405,7 @@ fn due_key_time(key: &str) -> Option<i64> {
     let raw = key.split_once('/')?.0.parse::<u64>().ok()?;
     Some(i64::from_be_bytes((raw ^ (1_u64 << 63)).to_be_bytes()))
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/meta/webhook_fault_tests.rs"]
+mod fault_tests;

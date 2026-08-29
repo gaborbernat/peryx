@@ -1,12 +1,15 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
 use peryx_storage::meta::{AccountingClass, NewQuotaReservation, QuotaLimits};
+use rstest::rstest;
 
 use super::{
-    Guard, MetaError, MetaStore, MetadataSibling, PromotedRelease, ProvenanceSibling, PublishError, PublishedFile,
-    UploadMutation, map_publish_error, override_key, upload_key,
+    Guard, MetaError, MetaStore, MetadataSibling, OverrideMutation, PromotedRelease, ProvenanceSibling, PublishError,
+    PublishedFile, UploadMutation, UploadMutationPlan, map_publish_error, mutate_uploads_and_overrides, override_key,
+    upload_key,
 };
 use crate::store::{PypiStore as _, read_journal_entries};
 use crate::upload::UploadStoreError;
@@ -819,4 +822,49 @@ fn test_delete_override_of_a_missing_file_journals_nothing() {
 
     assert!(!existed);
     assert_eq!(meta.current_serial().unwrap(), 0, "a no-op reversal records no serial");
+}
+
+#[rstest]
+#[case::unchanged(Some("hidden"), OverrideMutation::Put("hidden"), 0)]
+#[case::missing(None, OverrideMutation::Delete, 0)]
+#[case::changed(None, OverrideMutation::Put("hidden"), 1)]
+fn test_combined_mutation_reports_override_changes(
+    #[case] stored: Option<&str>,
+    #[case] mutation: OverrideMutation<'_>,
+    #[case] expected: usize,
+) {
+    let (_dir, meta) = store();
+    let filename = "flask-1.0.whl";
+    meta.put_driver_value(&upload_key("hosted", "flask", filename), b"record")
+        .unwrap();
+    if let Some(stored) = stored {
+        meta.put_driver_value(&override_key("hosted", "flask", filename), stored.as_bytes())
+            .unwrap();
+    }
+    let webhook_calls = Cell::new(0);
+
+    let changed = mutate_uploads_and_overrides(
+        &meta,
+        UploadMutationPlan {
+            outbox: true,
+            index: "hosted",
+            normalized: "flask",
+            action: "mutate",
+            submitted_at_unix: 123,
+            override_filenames: &[filename.to_owned()],
+            override_mutation: mutation,
+        },
+        || Ok::<_, MetaError>(()),
+        |_filename, _record| Ok::<_, MetaError>(None),
+        |_| {
+            webhook_calls.set(webhook_calls.get() + 1);
+            None
+        },
+    )
+    .unwrap();
+
+    assert_eq!(changed, expected);
+    assert_eq!(webhook_calls.get(), usize::from(expected > 0));
+    assert_eq!(meta.current_serial().unwrap(), expected as u64);
+    assert_eq!(meta.next_webhook_event_id().unwrap(), None);
 }

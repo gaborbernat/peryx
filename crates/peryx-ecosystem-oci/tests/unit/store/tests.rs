@@ -248,7 +248,7 @@ fn test_trash_records_lists_a_trashed_tag_with_provenance_and_retention() {
     let (_dir, meta) = store();
     record_manifest(&meta, "hub", "library/nginx", "sha256:a", &image("{}")).unwrap();
     put_tag(&meta, "hub", "library/nginx", "latest", "sha256:a").unwrap();
-    trash_tag(&meta, "hub", "library/nginx", "latest", &info(), false).unwrap();
+    trash_tag(&meta, "hub", "library/nginx", "latest", &info(), false, |_| None).unwrap();
 
     let records = trash_records(&meta, "hub").unwrap();
 
@@ -272,7 +272,7 @@ fn test_trash_records_lists_a_trashed_tag_with_provenance_and_retention() {
 fn test_trash_records_reports_an_untagged_digest_deletion_once() {
     let (_dir, meta) = store();
     record_manifest(&meta, "hub", "library/nginx", "sha256:a", &image("{}")).unwrap();
-    trash_manifest(&meta, "hub", "library/nginx", "sha256:a", &info(), false).unwrap();
+    trash_manifest(&meta, "hub", "library/nginx", "sha256:a", &info(), false, None).unwrap();
 
     let records = trash_records(&meta, "hub").unwrap();
 
@@ -287,7 +287,7 @@ fn test_trash_records_does_not_double_count_a_tagged_manifest_deletion() {
     record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
     put_tag(&meta, "hub", "app", "1.0", "sha256:a").unwrap();
     put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
-    trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false).unwrap();
+    trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false, None).unwrap();
 
     let mut artifacts: Vec<Option<String>> = trash_records(&meta, "hub")
         .unwrap()
@@ -307,7 +307,7 @@ fn test_trash_records_does_not_double_count_a_tagged_manifest_deletion() {
 fn test_trash_records_marks_purged_content_as_not_retained() {
     let (_dir, meta) = store();
     put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
-    trash_tag(&meta, "hub", "app", "latest", &info(), false).unwrap();
+    trash_tag(&meta, "hub", "app", "latest", &info(), false, |_| None).unwrap();
 
     let records = trash_records(&meta, "hub").unwrap();
 
@@ -320,7 +320,7 @@ fn test_trash_records_scope_to_one_index_and_skip_corrupt_rows() {
     let (_dir, meta) = store();
     record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
     put_tag(&meta, "hub", "app", "latest", "sha256:a").unwrap();
-    trash_tag(&meta, "hub", "app", "latest", &info(), false).unwrap();
+    trash_tag(&meta, "hub", "app", "latest", &info(), false, |_| None).unwrap();
     meta.put_driver_value(&tag_trash_key("hub", "app", "corrupt"), b"not json")
         .unwrap();
 
@@ -339,7 +339,7 @@ fn test_trash_records_scope_to_one_index_and_skip_corrupt_rows() {
 fn test_restore_tag_reports_a_missing_tag() {
     let (_dir, meta) = store();
     assert_eq!(
-        restore_tag(&meta, "hub", "app", "absent", false).unwrap(),
+        restore_tag(&meta, "hub", "app", "absent", false, |_| None).unwrap(),
         RestoreTagOutcome::Missing
     );
 }
@@ -349,10 +349,10 @@ fn test_restore_tag_without_a_manifest_record_restores_the_tag() {
     let (_dir, meta) = store();
     record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
     put_tag(&meta, "hub", "app", "v1", "sha256:a").unwrap();
-    trash_tag(&meta, "hub", "app", "v1", &info(), false).unwrap();
+    trash_tag(&meta, "hub", "app", "v1", &info(), false, |_| None).unwrap();
 
     assert_eq!(
-        restore_tag(&meta, "hub", "app", "v1", false).unwrap(),
+        restore_tag(&meta, "hub", "app", "v1", false, |_| None).unwrap(),
         RestoreTagOutcome::Restored {
             digest: "sha256:a".to_owned()
         }
@@ -366,10 +366,10 @@ fn test_restore_tag_keeps_shared_manifest_trash_until_the_last_tag() {
     record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
     put_tag(&meta, "hub", "app", "v1", "sha256:a").unwrap();
     put_tag(&meta, "hub", "app", "v2", "sha256:a").unwrap();
-    trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false).unwrap();
+    trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false, None).unwrap();
 
     assert_eq!(
-        restore_tag(&meta, "hub", "app", "v1", false).unwrap(),
+        restore_tag(&meta, "hub", "app", "v1", false, |_| None).unwrap(),
         RestoreTagOutcome::Restored {
             digest: "sha256:a".to_owned()
         }
@@ -379,7 +379,7 @@ fn test_restore_tag_keeps_shared_manifest_trash_until_the_last_tag() {
     assert_eq!(list_trashed_tags(&meta, "hub", "app").unwrap(), vec!["v2"]);
 
     assert_eq!(
-        restore_tag(&meta, "hub", "app", "v2", false).unwrap(),
+        restore_tag(&meta, "hub", "app", "v2", false, |_| None).unwrap(),
         RestoreTagOutcome::Restored {
             digest: "sha256:a".to_owned()
         }
@@ -393,10 +393,10 @@ fn test_restore_tag_leaves_an_independent_untagged_deletion() {
     let (_dir, meta) = store();
     record_manifest(&meta, "hub", "app", "sha256:a", &image("{}")).unwrap();
     put_tag(&meta, "hub", "app", "v1", "sha256:a").unwrap();
-    trash_tag(&meta, "hub", "app", "v1", &info(), false).unwrap();
-    trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false).unwrap();
+    trash_tag(&meta, "hub", "app", "v1", &info(), false, |_| None).unwrap();
+    trash_manifest(&meta, "hub", "app", "sha256:a", &info(), false, None).unwrap();
 
-    restore_tag(&meta, "hub", "app", "v1", false).unwrap();
+    restore_tag(&meta, "hub", "app", "v1", false, |_| None).unwrap();
 
     assert_eq!(get_tag(&meta, "hub", "app", "v1").unwrap(), Some("sha256:a".to_owned()));
     assert!(

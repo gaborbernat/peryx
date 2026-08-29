@@ -1,5 +1,6 @@
 use peryx_driver::ServingState;
 use peryx_events::webhook::{WebhookEnvelope, WebhookEvent};
+use peryx_storage::meta::WebhookEventIntent;
 use serde::Serialize;
 
 pub const DELETE: &str = "delete";
@@ -25,8 +26,8 @@ pub struct PypiWebhook<'a> {
     pub request_id: Option<&'a str>,
 }
 
-pub fn emit(state: &ServingState, webhook: PypiWebhook<'_>) {
-    peryx_events::webhook::emit(
+pub fn prepare(state: &ServingState, webhook: PypiWebhook<'_>) -> Option<WebhookEventIntent> {
+    peryx_events::webhook::prepare(
         state,
         &WebhookEvent {
             created_at_unix: webhook.created_at_unix,
@@ -37,7 +38,7 @@ pub fn emit(state: &ServingState, webhook: PypiWebhook<'_>) {
                 serde_json::to_value(PypiPayload::from(&webhook)).expect("PyPI webhook payload is serializable"),
             ),
         },
-    );
+    )
 }
 
 #[derive(Serialize)]

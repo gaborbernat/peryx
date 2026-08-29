@@ -282,20 +282,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             Err(response) => return Ok(response),
         };
         let membership = store::blob_membership_key(&index.name, &repo, digest);
-        let mutation = commit_epoch(state, &repo, fence, |lease| {
-            lease.guard()?;
-            self.blob_memberships.write().remove(&membership);
-            crate::quota::release_blob_membership(&state.meta, &index.name, &repo, digest)
-        })
-        .await?;
-        let deleted = match mutation {
-            EpochCommit::Committed(deleted) => deleted,
-            EpochCommit::Fenced => return Ok(authority_moved()),
-        };
-        if !deleted {
-            return Ok(error_response(ErrorCode::BlobUnknown, "blob unknown"));
-        }
-        emit_webhook(
+        let webhook = prepare_webhook(
             state,
             &Requester {
                 headers,
@@ -307,6 +294,20 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             None,
             Some(digest),
         );
+        let mutation = commit_epoch(state, &repo, fence, |lease| {
+            lease.guard()?;
+            self.blob_memberships.write().remove(&membership);
+            crate::quota::release_blob_membership(&state.meta, &index.name, &repo, digest, webhook)
+        })
+        .await?;
+        let deleted = match mutation {
+            EpochCommit::Committed(deleted) => deleted,
+            EpochCommit::Fenced => return Ok(authority_moved()),
+        };
+        if !deleted {
+            return Ok(error_response(ErrorCode::BlobUnknown, "blob unknown"));
+        }
+        peryx_events::webhook::notify(state.as_ref());
         Ok(accepted())
     }
 

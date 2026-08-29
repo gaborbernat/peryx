@@ -5,10 +5,18 @@ use std::sync::Mutex;
 use rstest::rstest;
 
 use super::store;
-use crate::meta::{MetaStore, NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryStatus};
+use crate::meta::{MetaStore, NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryStatus, WebhookEventIntent};
 
 fn none() -> HashSet<(String, String)> {
     HashSet::new()
+}
+
+fn enqueue_event(store: &MetaStore, event: WebhookEventIntent) -> Result<String, crate::meta::MetaError> {
+    store.commit_driver_txn(|txn| {
+        txn.enqueue_webhook_event(event);
+        Ok::<_, crate::meta::MetaError>(((), Vec::new()))
+    })?;
+    Ok(store.next_webhook_event_id()?.unwrap())
 }
 
 #[test]
@@ -47,6 +55,63 @@ fn test_webhook_delivery_queue_orders_due_records() {
             .map(|delivery| delivery.id)
             .collect::<HashSet<_>>(),
         HashSet::from([earlier, later])
+    );
+}
+
+#[test]
+fn test_webhook_event_fan_out_uses_stable_delivery_identities() {
+    let (_dir, store) = store();
+    let targets = vec!["audit".to_owned(), "deploy".to_owned()];
+    let event_id = enqueue_event(
+        &store,
+        WebhookEventIntent {
+            index: "hosted".to_owned(),
+            targets,
+            event: "upload".to_owned(),
+            payload: r#"{"event":"upload"}"#.to_owned(),
+            created_at_unix: 10,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        store.next_webhook_event_id().unwrap().as_deref(),
+        Some(event_id.as_str())
+    );
+    assert!(store.fan_out_webhook_event(&event_id).unwrap());
+    assert!(!store.fan_out_webhook_event(&event_id).unwrap());
+    assert_eq!(store.next_webhook_event_id().unwrap(), None);
+    let deliveries = store.list_webhook_deliveries().unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert_ne!(deliveries[0].id, deliveries[1].id);
+    assert_eq!(
+        deliveries
+            .iter()
+            .map(|delivery| delivery.target.as_str())
+            .collect::<HashSet<_>>(),
+        HashSet::from(["audit", "deploy"])
+    );
+}
+
+#[test]
+fn test_webhook_event_rejects_an_empty_target_snapshot() {
+    let (_dir, store) = store();
+
+    let error = enqueue_event(
+        &store,
+        WebhookEventIntent {
+            index: "hosted".to_owned(),
+            targets: Vec::new(),
+            event: "upload".to_owned(),
+            payload: "{}".to_owned(),
+            created_at_unix: 10,
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "driver precondition failed: webhook event requires at least one target"
     );
 }
 

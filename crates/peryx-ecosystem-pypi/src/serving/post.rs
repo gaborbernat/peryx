@@ -288,7 +288,24 @@ async fn admit_and_store(
             return block.response;
         }
     };
-    let stored = match cache::store_upload(state, &hosted.name, project, prepared, quota, fence).await {
+    let upload_webhook = webhook::prepare(
+        state,
+        PypiWebhook {
+            event: webhook::UPLOAD,
+            created_at_unix: audit.created_at_unix,
+            index: audit.index,
+            route: audit.route,
+            hosted_index: audit.hosted,
+            project: audit.project,
+            version: Some(audit.version),
+            filename: Some(audit.filename),
+            digest: Some(audit.digest),
+            count: 1,
+            actor: audit.actor.as_deref(),
+            request_id: audit.request_id.as_deref(),
+        },
+    );
+    let stored = match cache::store_upload(state, &hosted.name, project, prepared, quota, fence, upload_webhook).await {
         Ok(stored) => stored,
         // A store fault stays a 5xx and leaves the operation pending, so a retry re-drives it.
         Err(err) => return upload_store_error_response(audit, err),
@@ -536,23 +553,7 @@ fn emit_store_side_effects(state: &Arc<ServingState>, audit: &UploadAudit<'_>, s
             repository: audit.route.to_owned(),
             resource: audit.project.to_owned(),
         });
-        webhook::emit(
-            state,
-            PypiWebhook {
-                event: webhook::UPLOAD,
-                created_at_unix: audit.created_at_unix,
-                index: audit.index,
-                route: audit.route,
-                hosted_index: audit.hosted,
-                project: audit.project,
-                version: Some(audit.version),
-                filename: Some(audit.filename),
-                digest: Some(audit.digest),
-                count: 1,
-                actor: audit.actor.as_deref(),
-                request_id: audit.request_id.as_deref(),
-            },
-        );
+        peryx_events::webhook::notify(state.as_ref());
     }
     security_upload_event(
         audit.headers,

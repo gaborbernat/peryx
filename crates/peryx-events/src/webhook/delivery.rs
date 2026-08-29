@@ -6,7 +6,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use futures_util::StreamExt as _;
 use futures_util::stream::FuturesUnordered;
 use peryx_storage::meta::{
-    MetaError, NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus,
+    MetaError, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus, WebhookEventIntent,
 };
 
 use super::event::WebhookEvent;
@@ -28,26 +28,24 @@ enum RetryAfter {
 
 /// # Panics
 /// Panics if JSON serialization fails.
-pub fn emit<H: WebhookHost>(host: &H, event: &WebhookEvent) {
+pub fn prepare<H: WebhookHost>(host: &H, event: &WebhookEvent) -> Option<WebhookEventIntent> {
     if host.webhooks().is_empty() {
-        return;
+        return None;
     }
     let targets = host.webhooks().target_names(&event.index, event.envelope.event);
     if targets.is_empty() {
-        return;
+        return None;
     }
-    let payload = serde_json::to_string(&event.envelope.data).expect("webhook payload is valid JSON");
-    let event_name = event.envelope.event;
-    for target in targets {
-        let result = host.meta().enqueue_webhook_delivery(NewWebhookDelivery {
-            index: &event.index,
-            target: &target,
-            event: event_name,
-            payload: &payload,
-            created_at_unix: event.created_at_unix,
-        });
-        log_enqueue_error(result.as_ref().err(), event, &target);
-    }
+    Some(WebhookEventIntent {
+        index: event.index.clone(),
+        targets,
+        event: event.envelope.event.to_owned(),
+        payload: serde_json::to_string(&event.envelope.data).expect("webhook payload is valid JSON"),
+        created_at_unix: event.created_at_unix,
+    })
+}
+
+pub fn notify<H: WebhookHost>(host: &H) {
     host.webhooks().notify.notify_one();
 }
 
@@ -138,8 +136,16 @@ async fn delivery_loop<H: WebhookHost>(
 }
 
 async fn delivery_cycle<H: WebhookHost>(host: &Arc<H>) -> Result<(), MetaError> {
+    recover_webhook_events(host.as_ref())?;
     deliver_due(host).await?;
     wait_for_work(host.as_ref()).await
+}
+
+fn recover_webhook_events<H: WebhookHost>(host: &H) -> Result<(), MetaError> {
+    while let Some(id) = host.meta().next_webhook_event_id()? {
+        host.meta().fan_out_webhook_event(&id)?;
+    }
+    Ok(())
 }
 
 async fn wait_for_work<H: WebhookHost>(host: &H) -> Result<(), MetaError> {
@@ -379,20 +385,6 @@ fn log_delivery_failure(record: Option<&WebhookDeliveryRecord>) {
             next_attempt_at_unix = ?record.next_attempt_at_unix,
             status = ?record.status,
             "webhook delivery failed"
-        );
-    }
-}
-
-fn log_enqueue_error(err: Option<&MetaError>, event: &WebhookEvent, target: &str) {
-    if let Some(err) = err {
-        tracing::error!(
-            target: "peryx::webhook",
-            error = ?err,
-            index = %event.index,
-            target = %target,
-            schema = event.envelope.schema,
-            event = event.envelope.event,
-            "webhook delivery could not be queued"
         );
     }
 }

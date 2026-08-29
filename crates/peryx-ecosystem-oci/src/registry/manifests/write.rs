@@ -66,6 +66,19 @@ pub(in crate::registry) async fn put_manifest(
         PushReservation::Rejected(response) => return Ok(response),
         PushReservation::Admitted(reservation) => reservation,
     };
+    let version = reference_tag(reference).map(str::to_owned);
+    let webhook = prepare_webhook(
+        state,
+        &Requester {
+            headers,
+            identity: &identity,
+        },
+        crate::webhook::MANIFEST_PUSH,
+        index,
+        &repo,
+        version.as_deref(),
+        Some(&canonical),
+    );
     let mutation = commit_manifest(
         state,
         fence,
@@ -78,6 +91,7 @@ pub(in crate::registry) async fn put_manifest(
             reference,
             reservation: &reservation,
             journal,
+            webhook,
         },
     )
     .await?;
@@ -93,19 +107,7 @@ pub(in crate::registry) async fn put_manifest(
         repository: index.route.clone(),
         resource: repo.clone(),
     });
-    let version = reference_tag(reference).map(str::to_owned);
-    emit_webhook(
-        state,
-        &Requester {
-            headers,
-            identity: &identity,
-        },
-        crate::webhook::MANIFEST_PUSH,
-        index,
-        &repo,
-        version.as_deref(),
-        Some(canonical.as_str()),
-    );
+    peryx_events::webhook::notify(state.as_ref());
     Ok(manifest_created(&location, &canonical, subject.as_deref()))
 }
 
@@ -139,6 +141,7 @@ struct ManifestWrite<'a> {
     reference: &'a Reference,
     reservation: &'a Option<peryx_storage::meta::QuotaReservationRecord>,
     journal: crate::outbox::Outbox,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 }
 
 async fn commit_manifest(
@@ -161,6 +164,7 @@ async fn commit_manifest(
                 reference: write.reference,
                 reservation: write.reservation.clone(),
                 journal: write.journal,
+                webhook: write.webhook,
             },
         )?;
         lease.guard()?;
@@ -268,44 +272,51 @@ pub(in crate::registry) async fn delete_manifest(
         actor: peryx_events::security::actor(&identity),
         reason: query_params(query).remove("reason"),
     };
+    let requester = Requester {
+        headers,
+        identity: &identity,
+    };
     let mutation = commit_epoch(state, &repo, fence, |lease| {
         lease.guard()?;
         Ok(match reference {
             Reference::Tag(tag) => {
-                let digest = store::trash_tag(&state.meta, &index.name, &repo, tag, &info, journal)?;
-                (digest.is_some(), digest.is_some(), Some(tag.clone()), digest)
+                let digest = store::trash_tag(&state.meta, &index.name, &repo, tag, &info, journal, |digest| {
+                    prepare_webhook(
+                        state,
+                        &requester,
+                        crate::webhook::MANIFEST_DELETE,
+                        index,
+                        &repo,
+                        Some(tag),
+                        Some(digest),
+                    )
+                })?;
+                (digest.is_some(), digest.is_some())
             }
             Reference::Digest(digest) => {
-                let removed = store::trash_manifest(&state.meta, &index.name, &repo, digest, &info, journal)?;
-                (
-                    removed.is_some(),
-                    removed.is_some_and(|tags| tags > 0),
+                let webhook = prepare_webhook(
+                    state,
+                    &requester,
+                    crate::webhook::MANIFEST_DELETE,
+                    index,
+                    &repo,
                     None,
-                    Some(digest.clone()),
-                )
+                    Some(digest),
+                );
+                let removed = store::trash_manifest(&state.meta, &index.name, &repo, digest, &info, journal, webhook)?;
+                (removed.is_some(), removed.is_some_and(|tags| tags > 0))
             }
         })
     })
     .await?;
-    let EpochCommit::Committed((removed, search_changed, version, digest)) = mutation else {
+    let EpochCommit::Committed((removed, search_changed)) = mutation else {
         return Ok(authority_moved());
     };
     if search_changed {
         state.invalidate_search_resource(&repo);
     }
     Ok(if removed {
-        emit_webhook(
-            state,
-            &Requester {
-                headers,
-                identity: &identity,
-            },
-            crate::webhook::MANIFEST_DELETE,
-            index,
-            &repo,
-            version.as_deref(),
-            digest.as_deref(),
-        );
+        peryx_events::webhook::notify(state.as_ref());
         accepted()
     } else {
         error_response(ErrorCode::ManifestUnknown, "manifest unknown")
@@ -327,25 +338,55 @@ pub(in crate::registry) async fn restore_manifest(
     // Restoring re-exposes a trashed manifest or tag, so it is fenced like a publish: a stale home
     // cannot bring back a reference the surviving home has moved past.
     let fence = repository_epoch(state, &repo).await;
+    let requester = Requester {
+        headers,
+        identity: &identity,
+    };
     let mutation = commit_epoch(state, &repo, fence, |lease| {
         lease.guard()?;
         Ok(match reference {
-            Reference::Tag(tag) => match store::restore_tag(&state.meta, &index.name, &repo, tag, journal)? {
+            Reference::Tag(tag) => match store::restore_tag(&state.meta, &index.name, &repo, tag, journal, |digest| {
+                prepare_webhook(
+                    state,
+                    &requester,
+                    crate::webhook::MANIFEST_RESTORE,
+                    index,
+                    &repo,
+                    Some(tag),
+                    Some(digest),
+                )
+            })? {
                 store::RestoreTagOutcome::Missing => None,
-                store::RestoreTagOutcome::Restored { digest } => Some((Some(tag.clone()), digest, 1, Vec::new())),
+                store::RestoreTagOutcome::Restored { digest } => Some((digest, 1, Vec::new())),
             },
             Reference::Digest(digest) => {
-                match store::restore_manifest(&state.meta, &index.name, &repo, digest, journal)? {
+                let outcome = store::restore_manifest(
+                    &state.meta,
+                    &index.name,
+                    &repo,
+                    digest,
+                    journal,
+                    prepare_webhook(
+                        state,
+                        &requester,
+                        crate::webhook::MANIFEST_RESTORE,
+                        index,
+                        &repo,
+                        None,
+                        Some(digest),
+                    ),
+                )?;
+                match outcome {
                     store::RestoreManifestOutcome::Missing => None,
                     store::RestoreManifestOutcome::Restored { restored, conflicts } => {
-                        Some((None, digest.clone(), restored.len(), conflicts))
+                        Some((digest.clone(), restored.len(), conflicts))
                     }
                 }
             }
         })
     })
     .await?;
-    let (version, digest, restored, conflicts) = match mutation {
+    let (digest, restored, conflicts) = match mutation {
         EpochCommit::Committed(Some(restored)) => restored,
         EpochCommit::Committed(None) => {
             return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
@@ -355,18 +396,7 @@ pub(in crate::registry) async fn restore_manifest(
     if restored > 0 {
         state.invalidate_search_resource(&repo);
     }
-    emit_webhook(
-        state,
-        &Requester {
-            headers,
-            identity: &identity,
-        },
-        crate::webhook::MANIFEST_RESTORE,
-        index,
-        &repo,
-        version.as_deref(),
-        Some(digest.as_str()),
-    );
+    peryx_events::webhook::notify(state.as_ref());
     let mut builder = Response::builder()
         .status(StatusCode::ACCEPTED)
         .header(DOCKER_CONTENT_DIGEST, digest)

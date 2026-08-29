@@ -28,7 +28,9 @@ pub use fetch::{
     sync_project_files,
 };
 pub use metadata::{metadata_bytes, registered_file_size};
-pub(crate) use mutate::store_upload;
+pub(crate) use mutate::{
+    RemovalContext, remove_files_with_webhook, restore_files_with_webhook, set_yanked_with_webhook, store_upload,
+};
 pub use mutate::{
     TrashContext, download_status, project_status, promote_release, remove_files, restore_files, set_yanked,
 };

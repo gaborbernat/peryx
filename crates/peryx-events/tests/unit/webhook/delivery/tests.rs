@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicI64, AtomicUsize};
 
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{MetaStore, NewWebhookDelivery, WebhookEventIntent};
 use rstest::rstest;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -140,7 +140,6 @@ fn test_delivery_logs_report_results_and_storage_errors() {
         log_delivery_failure(Some(&delivery));
         log_delivery_success(None, 200);
         log_delivery_failure(None);
-        log_enqueue_error(Some(&error), &event(), "ci");
         log_update_error(Some(&error));
     });
 
@@ -148,7 +147,6 @@ fn test_delivery_logs_report_results_and_storage_errors() {
     for message in [
         "webhook delivery succeeded",
         "webhook delivery failed",
-        "webhook delivery could not be queued",
         "webhook result update failed",
     ] {
         assert_eq!(output.matches(message).count(), 1, "unexpected log count: {message}");
@@ -175,7 +173,7 @@ fn event() -> WebhookEvent {
 }
 
 #[test]
-fn test_emit_skips_disabled_webhooks() {
+fn test_prepare_skips_disabled_webhooks() {
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::disabled(),
@@ -183,13 +181,13 @@ fn test_emit_skips_disabled_webhooks() {
         now: AtomicI64::new(1),
     });
 
-    emit(host.as_ref(), &event());
+    assert_eq!(prepare(host.as_ref(), &event()), None);
 
     assert_eq!(host.meta().next_webhook_delivery_at().unwrap(), None);
 }
 
 #[test]
-fn test_emit_skips_targets_not_subscribed_to_the_event() {
+fn test_prepare_skips_targets_not_subscribed_to_the_event() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = target_config("ci", "https://example.invalid/hook");
     config.events = vec!["resource-delete".to_owned()];
@@ -199,13 +197,13 @@ fn test_emit_skips_targets_not_subscribed_to_the_event() {
         now: AtomicI64::new(1),
     });
 
-    emit(host.as_ref(), &event());
+    assert_eq!(prepare(host.as_ref(), &event()), None);
 
     assert_eq!(host.meta().next_webhook_delivery_at().unwrap(), None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_emit_enqueues_and_delivers_the_signed_payload() {
+async fn test_committed_event_is_delivered_with_the_signed_payload() {
     let mut healthy = observed_status_server(200);
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(TestHost {
@@ -215,10 +213,10 @@ async fn test_emit_enqueues_and_delivers_the_signed_payload() {
     });
 
     let handle = kick(Arc::clone(&host)).unwrap();
-    emit(host.as_ref(), &event());
-    let id = host.meta().list_webhook_deliveries().unwrap()[0].id.clone();
+    commit_event(host.as_ref(), &event());
     healthy.requests.recv().await.unwrap();
-    emit(host.as_ref(), &event());
+    let id = host.meta().list_webhook_deliveries().unwrap()[0].id.clone();
+    commit_event(host.as_ref(), &event());
     healthy.requests.recv().await.unwrap();
 
     let delivered = host.meta().get_webhook_delivery(&id).unwrap().unwrap();
@@ -246,6 +244,67 @@ async fn test_emit_enqueues_and_delivers_the_signed_payload() {
         serde_json::json!({"key": "value"})
     );
     handle.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_worker_recovers_an_event_intent_after_store_reopen() {
+    let mut audit = observed_status_server(200);
+    let mut deploy = observed_status_server(200);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    let meta = MetaStore::open(&path).unwrap();
+    let targets = vec!["audit".to_owned(), "deploy".to_owned()];
+    meta.commit_driver_txn(|txn| {
+        txn.enqueue_webhook_event(WebhookEventIntent {
+            index: "hosted".to_owned(),
+            targets,
+            event: "resource-write".to_owned(),
+            payload: r#"{"key":"value"}"#.to_owned(),
+            created_at_unix: 100,
+        });
+        Ok::<_, peryx_storage::meta::MetaError>(((), Vec::new()))
+    })
+    .unwrap();
+    assert!(meta.next_webhook_event_id().unwrap().is_some());
+    assert_eq!(audit.requests.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(deploy.requests.try_recv(), Err(TryRecvError::Empty));
+    drop(meta);
+    let host = Arc::new(TestHost {
+        webhooks: WebhookRuntime::new(vec![
+            target_config("audit", &audit.url),
+            target_config("deploy", &deploy.url),
+        ])
+        .unwrap(),
+        meta: MetaStore::open_existing(path).unwrap(),
+        now: AtomicI64::new(100),
+    });
+
+    let handle = kick(Arc::clone(&host)).unwrap();
+    audit.requests.recv().await.unwrap();
+    deploy.requests.recv().await.unwrap();
+    let deliveries = host.meta().list_webhook_deliveries().unwrap();
+
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(
+        deliveries
+            .iter()
+            .map(|delivery| delivery.target.as_str())
+            .collect::<std::collections::HashSet<_>>(),
+        std::collections::HashSet::from(["audit", "deploy"])
+    );
+    assert_eq!(host.meta().next_webhook_event_id().unwrap(), None);
+    handle.shutdown().await.unwrap();
+}
+
+fn commit_event(host: &TestHost, event: &WebhookEvent) {
+    let intent = prepare(host, event).unwrap();
+    host.meta()
+        .commit_driver_txn(|txn| {
+            txn.enqueue_webhook_event(intent);
+            Ok::<_, peryx_storage::meta::MetaError>(((), Vec::new()))
+        })
+        .unwrap();
+    notify(host);
 }
 
 fn enqueue(meta: &MetaStore, target: &str, created_at_unix: i64) -> String {

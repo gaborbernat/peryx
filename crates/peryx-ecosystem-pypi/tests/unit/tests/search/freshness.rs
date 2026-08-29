@@ -162,4 +162,15 @@ async fn test_search_rebuilds_after_yank_and_hide_overrides() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"], 0);
+
+    assert_eq!(
+        cache::restore_files(&h.state.serving, "hosted", "flask", None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        search_total(&h.state, "/root/pypi/+search?q=flask&page_size=25").await,
+        1
+    );
 }

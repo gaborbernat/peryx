@@ -63,10 +63,7 @@ impl tracing::field::Visit for DeliveryVisitor {
 impl Harness {
     fn new(url: String, events: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
-        let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
         let clock = Arc::new(AtomicI64::new(1000));
-        let ticks = clock.clone();
         let webhooks = WebhookRuntime::new(vec![WebhookTargetConfig {
             index: "hosted".to_owned(),
             name: "ci".to_owned(),
@@ -79,23 +76,7 @@ impl Harness {
         let (delivery_updates, delivery_receiver) = mpsc::unbounded_channel();
         let delivery_observer =
             tracing::subscriber::set_default(tracing_subscriber::registry().with(DeliveryLayer(delivery_updates)));
-        let mut state = AppState::with_clock_and_webhooks(
-            meta,
-            blobs,
-            60,
-            vec![Index {
-                name: "hosted".to_owned(),
-                route: "hosted".to_owned(),
-                ecosystem: crate::ECOSYSTEM,
-                kind: IndexKind::Hosted { volatile: true },
-                policy: Policy::default(),
-                acl: crate::tests::writer_acl("s3cret".to_owned()),
-            }],
-            Arc::new(move || ticks.load(Ordering::Relaxed)),
-            webhooks,
-        );
-        super::http::install_distributed_services(&mut state);
-        let state = super::wired_distributed(state);
+        let state = webhook_state(&dir, &clock, webhooks);
         let webhook = webhook::kick(state.serving.clone()).expect("configured webhook worker");
         Self {
             _dir: dir,
@@ -106,6 +87,27 @@ impl Harness {
             delivery_updates: AsyncMutex::new(delivery_receiver),
         }
     }
+}
+
+fn webhook_state(dir: &tempfile::TempDir, clock: &Arc<AtomicI64>, webhooks: WebhookRuntime) -> Arc<AppState> {
+    let ticks = Arc::clone(clock);
+    let mut state = AppState::with_clock_and_webhooks(
+        MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
+        BlobStorage::filesystem(dir.path().join("blobs")),
+        60,
+        vec![Index {
+            name: "hosted".to_owned(),
+            route: "hosted".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Hosted { volatile: true },
+            policy: Policy::default(),
+            acl: crate::tests::writer_acl("s3cret".to_owned()),
+        }],
+        Arc::new(move || ticks.load(Ordering::Relaxed)),
+        webhooks,
+    );
+    super::http::install_distributed_services(&mut state);
+    super::wired_distributed(state)
 }
 
 struct ResponseSequence {
@@ -214,6 +216,47 @@ async fn test_upload_webhook_is_signed_and_skips_duplicate_upload() {
     assert_eq!(upload_peryxpkg(&h.state, "/hosted/", &wheel).await, StatusCode::OK);
     assert_eq!(h.state.serving.meta.list_webhook_deliveries().unwrap().len(), 1);
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_upload_event_recovers_every_target_after_store_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let webhooks = WebhookRuntime::new(
+        [("audit", 1), ("deploy", 2)]
+            .map(|(name, port)| WebhookTargetConfig {
+                index: "hosted".to_owned(),
+                name: name.to_owned(),
+                url: format!("http://127.0.0.1:{port}/hook"),
+                secret: SECRET.to_owned(),
+                events: vec!["upload".to_owned()],
+                allowed_events: crate::registration().registration.webhook_events(),
+            })
+            .to_vec(),
+    )
+    .unwrap();
+    let state = webhook_state(&dir, &Arc::new(AtomicI64::new(1000)), webhooks);
+
+    assert_eq!(
+        upload_peryxpkg(&state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    assert!(state.serving.meta.list_webhook_deliveries().unwrap().is_empty());
+    let event_id = state.serving.meta.next_webhook_event_id().unwrap().unwrap();
+    drop(state);
+
+    let meta = MetaStore::open_existing(dir.path().join("peryx.redb")).unwrap();
+    assert!(meta.fan_out_webhook_event(&event_id).unwrap());
+    assert_eq!(meta.next_webhook_event_id().unwrap(), None);
+    let deliveries = meta.list_webhook_deliveries().unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert_ne!(deliveries[0].id, deliveries[1].id);
+    assert_eq!(
+        deliveries
+            .iter()
+            .map(|delivery| delivery.target.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["audit", "deploy"])
+    );
 }
 
 #[tokio::test]

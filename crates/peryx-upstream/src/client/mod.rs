@@ -3,6 +3,7 @@ mod error;
 mod exec;
 mod guard;
 mod netrc;
+mod range;
 pub mod retry;
 mod tls;
 
@@ -15,12 +16,12 @@ use std::time::Duration;
 use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use reqwest::header::{
-    ACCEPT, ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, HeaderName, IF_MODIFIED_SINCE, IF_NONE_MATCH,
-    RANGE,
+    ACCEPT, ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, IF_MODIFIED_SINCE, IF_NONE_MATCH, RANGE,
 };
 use url::Url;
 
 use self::guard::OutboundGuard;
+use self::range::RangeSuppressions;
 use self::response::header_str;
 use self::retry::{
     MAX_RETRIES, should_retry_error, should_retry_status, sleep_before_retry_status, sleep_before_retry_str,
@@ -39,6 +40,8 @@ pub use self::tls::{UpstreamTls, UpstreamTlsError};
 const USER_AGENT: &str = concat!("peryx/", env!("CARGO_PKG_VERSION"));
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const RANGE_SUPPRESSION_CAPACITY: usize = 1_024;
+pub(crate) const RANGE_SUPPRESSION_TTL: Duration = Duration::from_mins(5);
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub enum Auth {
@@ -111,13 +114,10 @@ pub struct UpstreamClient {
     base: Url,
     credentials: CredentialProvider,
     guard: OutboundGuard,
-    range_support: Arc<AtomicU8>,
+    range_suppressions: Arc<RangeSuppressions>,
     reachability: Arc<AtomicU8>,
 }
 
-const RANGE_UNKNOWN: u8 = 0;
-const RANGE_SUPPORTED: u8 = 1;
-const RANGE_UNSUPPORTED: u8 = 2;
 const REACHABILITY_UNKNOWN: u8 = 0;
 const REACHABILITY_REACHABLE: u8 = 1;
 const REACHABILITY_UNREACHABLE: u8 = 2;
@@ -232,7 +232,7 @@ impl UpstreamClient {
             base,
             credentials,
             guard,
-            range_support: Arc::new(AtomicU8::new(RANGE_UNKNOWN)),
+            range_suppressions: Arc::new(RangeSuppressions::default()),
             reachability: Arc::new(AtomicU8::new(REACHABILITY_UNKNOWN)),
         })
     }
@@ -399,23 +399,17 @@ impl UpstreamClient {
         }
     }
 
-    #[must_use]
-    pub fn may_support_ranges(&self) -> bool {
-        self.range_support.load(Ordering::Relaxed) != RANGE_UNSUPPORTED
-    }
-
-    pub fn disable_ranges(&self) {
-        self.range_support.store(RANGE_UNSUPPORTED, Ordering::Relaxed);
-    }
-
-    /// Requires byte-range support and a content length.
+    /// Reads the representation length without relying on advisory `Accept-Ranges` metadata.
     ///
     /// # Errors
-    /// Returns [`RangeError::Unsupported`] when upstream omits range support or length metadata,
-    /// and [`RangeError::Upstream`] on other request failures.
+    /// Returns [`RangeError::Unsupported`] when the resource recently ignored a range or cannot
+    /// provide length metadata, and [`RangeError::Upstream`] on other request failures.
     pub async fn head_file_for_range(&self, url: &str) -> Result<FileHead, RangeError> {
         let url = Url::parse(url).map_err(UpstreamError::from)?;
         self.guard.check_url(&url).map_err(RangeError::from)?;
+        if self.range_suppressions.contains(&url) {
+            return Err(RangeError::Unsupported);
+        }
         let response = self
             .send_with_retry(&mut |auth| {
                 self.authenticate(self.http(&url).head(url.clone()), &url, auth)
@@ -423,26 +417,26 @@ impl UpstreamClient {
             })
             .await
             .map_err(RangeError::from)?;
-        if head_status_disables_ranges(response.status()) {
-            self.disable_ranges();
+        if response.status().is_success() {
+            return match header_str(response.headers(), &CONTENT_LENGTH).and_then(|value| value.parse().ok()) {
+                Some(len) => Ok(FileHead { len }),
+                None => self.probe_file_for_range(&url).await,
+            };
+        }
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::METHOD_NOT_ALLOWED | reqwest::StatusCode::NOT_IMPLEMENTED
+        ) {
+            return self.probe_file_for_range(&url).await;
+        }
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND
+        ) {
             return Err(RangeError::Unsupported);
         }
-        let response = response.error_for_status().map_err(UpstreamError::from)?;
-        let headers = response.headers();
-        if !headers
-            .get(HeaderName::from_static("accept-ranges"))
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.split(',').any(|part| part.trim().eq_ignore_ascii_case("bytes")))
-        {
-            self.disable_ranges();
-            return Err(RangeError::Unsupported);
-        }
-        let Some(len) = header_str(headers, &CONTENT_LENGTH).and_then(|value| value.parse().ok()) else {
-            self.disable_ranges();
-            return Err(RangeError::Unsupported);
-        };
-        self.range_support.store(RANGE_SUPPORTED, Ordering::Relaxed);
-        Ok(FileHead { len })
+        response.error_for_status().map_err(UpstreamError::from)?;
+        Err(RangeError::Invalid("HEAD returned a non-success response".to_owned()))
     }
 
     /// Fetches the inclusive byte range `start..=end` within `memory_limit`.
@@ -455,59 +449,45 @@ impl UpstreamClient {
         let (range_len, expected_len) = range_lengths(start, end, memory_limit)?;
         let url = Url::parse(url).map_err(UpstreamError::from)?;
         self.guard.check_url(&url).map_err(RangeError::from)?;
+        let response = self.request_range(&url, start, end).await?;
+        validate_content_range(response.headers(), start, end)?;
+        read_range_body(response, range_len, expected_len).await
+    }
+
+    async fn probe_file_for_range(&self, url: &Url) -> Result<FileHead, RangeError> {
+        let response = self.request_range(url, 0, 0).await?;
+        let len = validate_content_range(response.headers(), 0, 0)?
+            .ok_or_else(|| RangeError::Invalid("range probe returned an unknown representation length".to_owned()))?;
+        read_range_body(response, 1, 1).await?;
+        Ok(FileHead { len })
+    }
+
+    async fn request_range(&self, url: &Url, start: u64, end: u64) -> Result<reqwest::Response, RangeError> {
+        if self.range_suppressions.contains(url) {
+            return Err(RangeError::Unsupported);
+        }
         let response = self
             .send_with_retry(&mut |auth| {
-                self.authenticate(self.http(&url).get(url.clone()), &url, auth)
+                self.authenticate(self.http(url).get(url.clone()), url, auth)
                     .header(ACCEPT_ENCODING, "identity")
                     .header(RANGE, format!("bytes={start}-{end}"))
             })
             .await
             .map_err(RangeError::from)?;
         match response.status() {
-            reqwest::StatusCode::PARTIAL_CONTENT => {}
-            reqwest::StatusCode::OK | reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
-                self.disable_ranges();
-                return Err(RangeError::Unsupported);
+            reqwest::StatusCode::PARTIAL_CONTENT => Ok(response),
+            reqwest::StatusCode::OK => {
+                self.range_suppressions.insert(url.clone());
+                Err(RangeError::Unsupported)
             }
+            reqwest::StatusCode::RANGE_NOT_SATISFIABLE => Err(RangeError::Unsupported),
             _ => {
                 response.error_for_status().map_err(UpstreamError::from)?;
-                return Err(RangeError::Invalid(
+                Err(RangeError::Invalid(
                     "range request returned a non-206 success".to_owned(),
-                ));
+                ))
             }
         }
-        if let Err(err) = validate_content_range(response.headers(), start, end) {
-            self.disable_ranges();
-            return Err(err);
-        }
-        if let Some(content_length) = response.content_length()
-            && content_length != range_len
-        {
-            self.disable_ranges();
-            return Err(RangeError::Invalid(format!(
-                "expected {expected_len} bytes, received Content-Length {content_length}"
-            )));
-        }
-        let mut response = response;
-        let mut bytes = BytesMut::with_capacity(expected_len);
-        while let Some(chunk) = response.chunk().await.map_err(UpstreamError::from)? {
-            if chunk.len() > expected_len - bytes.len() {
-                self.disable_ranges();
-                return Err(RangeError::Invalid(format!(
-                    "response body exceeds the expected {expected_len} bytes"
-                )));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        if bytes.len() != expected_len {
-            self.disable_ranges();
-            return Err(RangeError::Invalid(format!(
-                "expected {expected_len} bytes, received {}",
-                bytes.len()
-            )));
-        }
-        self.range_support.store(RANGE_SUPPORTED, Ordering::Relaxed);
-        Ok(bytes.freeze())
     }
 
     /// Removes user info, query, and fragment for display.
@@ -714,17 +694,6 @@ pub fn redact_url(value: &str) -> String {
     url.to_string()
 }
 
-const fn head_status_disables_ranges(status: reqwest::StatusCode) -> bool {
-    matches!(
-        status,
-        reqwest::StatusCode::BAD_REQUEST
-            | reqwest::StatusCode::FORBIDDEN
-            | reqwest::StatusCode::NOT_FOUND
-            | reqwest::StatusCode::METHOD_NOT_ALLOWED
-            | reqwest::StatusCode::NOT_IMPLEMENTED
-    )
-}
-
 pub(crate) fn range_lengths(start: u64, end: u64, memory_limit: usize) -> Result<(u64, usize), RangeError> {
     if end < start {
         return Err(RangeError::Invalid(format!("start {start} is after end {end}")));
@@ -741,7 +710,7 @@ pub(crate) fn range_lengths(start: u64, end: u64, memory_limit: usize) -> Result
     Ok((range_len, expected_len))
 }
 
-fn validate_content_range(headers: &HeaderMap, start: u64, end: u64) -> Result<(), RangeError> {
+fn validate_content_range(headers: &HeaderMap, start: u64, end: u64) -> Result<Option<u64>, RangeError> {
     let value = headers
         .get(CONTENT_RANGE)
         .and_then(|value| value.to_str().ok())
@@ -761,10 +730,49 @@ fn validate_content_range(headers: &HeaderMap, start: u64, end: u64) -> Result<(
         )));
     }
     // RFC 9110 permits "*" or a decimal greater than last-byte-pos for complete-length.
-    if total != "*" && total.parse::<u64>().ok().is_none_or(|total| total <= end) {
+    let total = if total == "*" {
+        None
+    } else {
+        Some(total.parse::<u64>().map_err(|_| {
+            RangeError::Invalid(format!(
+                "invalid Content-Range total for bytes {start}-{end}, got {value:?}"
+            ))
+        })?)
+    };
+    if total.is_some_and(|total| total <= end) {
         return Err(RangeError::Invalid(format!(
             "invalid Content-Range total for bytes {start}-{end}, got {value:?}"
         )));
     }
-    Ok(())
+    Ok(total)
+}
+
+async fn read_range_body(
+    mut response: reqwest::Response,
+    range_len: u64,
+    expected_len: usize,
+) -> Result<Bytes, RangeError> {
+    if let Some(content_length) = response.content_length()
+        && content_length != range_len
+    {
+        return Err(RangeError::Invalid(format!(
+            "expected {expected_len} bytes, received Content-Length {content_length}"
+        )));
+    }
+    let mut bytes = BytesMut::with_capacity(expected_len);
+    while let Some(chunk) = response.chunk().await.map_err(UpstreamError::from)? {
+        if chunk.len() > expected_len - bytes.len() {
+            return Err(RangeError::Invalid(format!(
+                "response body exceeds the expected {expected_len} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.len() != expected_len {
+        return Err(RangeError::Invalid(format!(
+            "expected {expected_len} bytes, received {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes.freeze())
 }

@@ -499,11 +499,11 @@ async fn test_metadata_backfill_downloads_when_range_is_unusable() {
         let h = harness().await;
         let ranged = (case.build_ranged)(metadata, &wheel);
 
-        assert_metadata_range_fallback(&h, case.label, ranged, wheel.clone(), metadata).await;
+        assert_metadata_range_fallback_preserves_other_resources(&h, case.label, ranged, wheel.clone(), metadata).await;
     }
 }
 #[tokio::test]
-async fn test_metadata_backfill_skips_ranges_after_disable() {
+async fn test_metadata_backfill_scopes_ignored_ranges_to_one_artifact() {
     let h = harness().await;
     let first = fixture_wheel_with_metadata(b"Metadata-Version: 2.1\nName: peryxpkg\nVersion: 1.0\n");
     let first_digest = Digest::of(&first);
@@ -544,9 +544,16 @@ async fn test_metadata_backfill_skips_ranges_after_disable() {
             "pypi",
         )
         .unwrap();
+    Mock::given(method("HEAD"))
+        .and(path(format!("/files/{second_filename}")))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-length", second.len()))
+        .expect(1)
+        .mount(&h.server)
+        .await;
     Mock::given(method("GET"))
         .and(path(format!("/files/{second_filename}")))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(second))
+        .and(header_regex("range", "^bytes=[0-9]+-[0-9]+$"))
+        .respond_with(range_response(second))
         .mount(&h.server)
         .await;
 

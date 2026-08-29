@@ -10,13 +10,6 @@ pub enum RangeError {
     Invalid(String),
 }
 
-impl RangeError {
-    #[must_use]
-    pub const fn disables_ranges(&self) -> bool {
-        matches!(self, Self::Unsupported | Self::Invalid(_))
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
     #[error("upstream credential refresh failed: {0}")]

@@ -131,6 +131,10 @@ pub const fn within_stale_bound(now: i64, max_stale_secs: i64, fetched_at: i64, 
     max_stale_secs == 0 || now.saturating_sub(fetched_at) < freshness_secs.saturating_add(max_stale_secs)
 }
 
+const NEGATIVE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+// Moka does not expose allocation size, so this covers its Arc, table slot, and entry metadata.
+const NEGATIVE_CACHE_ENTRY_OVERHEAD_BYTES: usize = 128;
+
 pub struct ServingCache {
     pub inflight: Inflight,
     pub hot: moka::sync::Cache<String, (bytes::Bytes, i64, Option<u64>)>,
@@ -151,7 +155,11 @@ impl ServingCache {
                 })
                 .time_to_live(std::time::Duration::from_secs(ttl_secs.max(1).unsigned_abs()))
                 .build(),
-            negative: moka::sync::Cache::builder().max_capacity(65_536).build(),
+            negative: moka::sync::Cache::builder()
+                .max_capacity(NEGATIVE_CACHE_BYTES)
+                .weigher(|key: &String, _: &i64| negative_weight(key))
+                .support_invalidation_closures()
+                .build(),
             resource_epochs: Mutex::new(BTreeMap::new()),
         }
     }
@@ -209,7 +217,24 @@ impl ServingCache {
     }
 
     pub fn remember_negative(&self, key: String, expires_at: i64) {
+        self.remember_negative_at(key, expires_at, system_now());
+    }
+
+    pub fn remember_negative_at(&self, key: String, expires_at: i64, now: i64) {
+        if u64::from(negative_weight(&key)) > NEGATIVE_CACHE_BYTES {
+            self.maintain_negative(now);
+            return;
+        }
         self.negative.insert(key, expires_at);
+        self.maintain_negative(now);
+    }
+
+    fn maintain_negative(&self, now: i64) {
+        // Moka's internal clock cannot share the serving owner's injected epoch clock.
+        self.negative
+            .invalidate_entries_if(move |_, expires_at| *expires_at <= now)
+            .expect("negative invalidation is enabled");
+        self.negative.run_pending_tasks();
     }
 
     /// # Panics
@@ -222,6 +247,20 @@ impl ServingCache {
             .entry(resource.to_owned())
             .or_default() += 1;
     }
+}
+
+fn negative_weight(key: &String) -> u32 {
+    let bytes = std::mem::size_of::<String>()
+        .saturating_add(key.capacity())
+        .saturating_add(std::mem::size_of::<i64>())
+        .saturating_add(NEGATIVE_CACHE_ENTRY_OVERHEAD_BYTES);
+    u32::try_from(bytes).unwrap_or(u32::MAX)
+}
+
+fn system_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

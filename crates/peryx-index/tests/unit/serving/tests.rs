@@ -136,11 +136,70 @@ fn test_negative_cache_retires_expired_entries() {
     let cache = ServingCache::new(1024, 60);
     assert!(!cache.negative_fresh("missing", 0));
 
-    cache.remember_negative("missing".to_owned(), 10);
+    cache.remember_negative_at("missing".to_owned(), 10, 0);
 
     assert!(cache.negative_fresh("missing", 9));
     assert!(!cache.negative_fresh("missing", 10));
     assert!(!cache.negative_fresh("missing", 9));
+}
+
+#[test]
+fn test_negative_cache_replacement_uses_the_new_deadline() {
+    let cache = ServingCache::new(1024, 60);
+    cache.remember_negative_at("missing".to_owned(), 10, 0);
+
+    cache.remember_negative_at("missing".to_owned(), 20, 5);
+
+    assert!(cache.negative_fresh("missing", 19));
+    assert!(!cache.negative_fresh("missing", 20));
+}
+
+#[test]
+fn test_negative_cache_default_clock_rejects_a_past_deadline() {
+    let cache = ServingCache::new(1024, 60);
+
+    cache.remember_negative("missing".to_owned(), 0);
+
+    assert!(!cache.negative_fresh("missing", 0));
+}
+
+#[test]
+fn test_negative_cache_maintenance_reclaims_expired_entries() {
+    let cache = ServingCache::new(1024, 60);
+
+    for key in ["first", "second"] {
+        cache.remember_negative_at(key.to_owned(), 10, 0);
+    }
+    cache.remember_negative_at("fresh".to_owned(), 20, 10);
+
+    assert_eq!(cache.negative.entry_count(), 1);
+    assert!(cache.negative_fresh("fresh", 10));
+}
+
+#[test]
+fn test_negative_cache_rejects_an_entry_over_its_byte_budget() {
+    let cache = ServingCache::new(1024, 60);
+    let mut key = String::with_capacity(usize::try_from(cache.negative.policy().max_capacity().unwrap()).unwrap());
+    key.push('x');
+
+    cache.remember_negative_at(key, 10, 0);
+
+    cache.negative.run_pending_tasks();
+    assert_eq!(cache.negative.entry_count(), 0);
+}
+
+#[test]
+fn test_negative_cache_churn_stays_within_its_byte_budget() {
+    let cache = ServingCache::new(1024, 60);
+    let capacity = cache.negative.policy().max_capacity().unwrap();
+    let name = "x".repeat(usize::try_from(capacity / 16).unwrap());
+
+    for key in 0..64 {
+        cache.remember_negative_at(format!("{key}-{name}"), i64::MAX, 0);
+    }
+
+    cache.negative.run_pending_tasks();
+    assert!(cache.negative.weighted_size() <= capacity);
 }
 
 #[rstest]

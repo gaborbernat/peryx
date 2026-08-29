@@ -41,15 +41,17 @@ fn test_negative_accessors_expire_against_injected_clock() {
 }
 
 #[test]
-fn test_resource_invalidation_advances_only_its_representation_key() {
+fn test_resource_invalidation_advances_only_its_route_and_representation_key() {
     let (_dir, state) = state();
     let resource = state.representation_key("resources", "resource", "page");
     let other = state.representation_key("resources", "other", "page");
+    let independent = state.representation_key("independent", "resource", "page");
 
-    state.invalidate_resource("resource");
+    state.invalidate_resource("resources", "resource");
 
     assert_ne!(state.representation_key("resources", "resource", "page"), resource);
     assert_eq!(state.representation_key("resources", "other", "page"), other);
+    assert_eq!(state.representation_key("independent", "resource", "page"), independent);
 }
 
 #[test]
@@ -57,7 +59,7 @@ fn test_representation_only_invalidation_advances_representation_key() {
     let (_dir, state) = state();
     let key = state.representation_key("resources", "resource", "page");
 
-    state.invalidate_representations("resource");
+    state.invalidate_representations("resources", "resource");
 
     assert_ne!(state.representation_key("resources", "resource", "page"), key);
 }

@@ -210,7 +210,18 @@ fn test_state() -> (tempfile::TempDir, Arc<ServingState>) {
     let dir = tempfile::tempdir().unwrap();
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
     let blobs = BlobStore::new(dir.path().join("blobs"));
-    let mut state = peryx_driver::AppState::new(meta, blobs, 60, Vec::new());
+    let indexes = vec![peryx_index::Index {
+        name: "pypi".to_owned(),
+        route: "pypi".to_owned(),
+        ecosystem: crate::ECOSYSTEM,
+        kind: peryx_index::IndexKind::Cached {
+            client: UpstreamClient::new("https://pypi.org/simple/").unwrap(),
+            offline: false,
+        },
+        policy: peryx_policy::Policy::default(),
+        acl: peryx_identity::IndexAcl::default(),
+    }];
+    let mut state = peryx_driver::AppState::new(meta, blobs, 60, indexes);
     peryx_plugin_registry::PluginRegistry::new(vec![crate::registration()])
         .unwrap()
         .activate([crate::ECOSYSTEM])

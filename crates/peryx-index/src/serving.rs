@@ -136,7 +136,7 @@ pub struct ServingCache {
     pub hot: moka::sync::Cache<String, (bytes::Bytes, i64, Option<u64>)>,
     pub negative: moka::sync::Cache<String, i64>,
     /// A `BTreeMap` keeps benchmark instruction counts deterministic.
-    pub resource_epochs: Mutex<BTreeMap<String, u64>>,
+    pub resource_epochs: Mutex<BTreeMap<String, BTreeMap<String, u64>>>,
 }
 
 impl ServingCache {
@@ -190,7 +190,8 @@ impl ServingCache {
             .resource_epochs
             .lock()
             .expect("hot epoch lock")
-            .get(resource)
+            .get(route)
+            .and_then(|epochs| epochs.get(resource))
             .copied()
             .unwrap_or(0);
         format!("{route}\u{0}{resource}\u{0}{representation}\u{0}{epoch}")
@@ -214,11 +215,13 @@ impl ServingCache {
 
     /// # Panics
     /// Panics if the epoch map's mutex was poisoned.
-    pub fn invalidate_resource(&self, resource: &str) {
+    pub fn invalidate_resource(&self, route: &str, resource: &str) {
         *self
             .resource_epochs
             .lock()
             .expect("hot epoch lock")
+            .entry(route.to_owned())
+            .or_default()
             .entry(resource.to_owned())
             .or_default() += 1;
     }

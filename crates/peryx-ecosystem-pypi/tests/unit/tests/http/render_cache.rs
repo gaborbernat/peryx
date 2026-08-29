@@ -80,51 +80,68 @@ async fn test_a_mutation_retires_the_cached_html_render() {
             },
         )
         .unwrap();
-    h.state.serving.invalidate_resource("flask");
+    crate::cache::invalidate_project(&h.state.serving, "pypi", "flask");
 
     let (_, _, after) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
     assert!(after.contains(Digest::of(b"wheel-v2").as_str()), "{after}");
 }
 #[tokio::test]
-async fn test_a_mutation_spares_other_projects_cached_renders() {
+async fn test_a_mutation_retires_dependent_route_cached_renders() {
     let h = harness().await;
     let page = bytes::Bytes::from_static(b"render");
-    h.state.serving.cache.store_hot(
-        h.state
-            .serving
-            .representation_key("pypi", "flask", crate::cache::SIMPLE_HTML),
-        page.clone(),
-        2000,
-    );
-    h.state.serving.cache.store_hot(
-        h.state
-            .serving
-            .representation_key("pypi", "django", crate::cache::SIMPLE_HTML),
-        page.clone(),
-        2000,
-    );
+    for route in ["pypi", "root/pypi"] {
+        h.state.serving.cache.store_hot(
+            h.state
+                .serving
+                .representation_key(route, "flask", crate::cache::SIMPLE_HTML),
+            page.clone(),
+            2000,
+        );
+    }
     h.state.serving.cache.hot.run_pending_tasks();
 
-    h.state.serving.invalidate_resource("flask");
+    crate::cache::invalidate_project(&h.state.serving, "pypi", "flask");
 
-    assert!(
-        h.state
-            .serving
-            .hot_fresh(
+    for route in ["pypi", "root/pypi"] {
+        assert!(
+            h.state
+                .serving
+                .hot_fresh(
+                    &h.state
+                        .serving
+                        .representation_key(route, "flask", crate::cache::SIMPLE_HTML)
+                )
+                .is_none()
+        );
+    }
+}
+#[tokio::test]
+async fn test_a_mutation_spares_independent_cached_renders() {
+    let h = harness().await;
+    let page = bytes::Bytes::from_static(b"render");
+    for (route, project) in [("hosted", "flask"), ("pypi", "django")] {
+        h.state.serving.cache.store_hot(
+            h.state
+                .serving
+                .representation_key(route, project, crate::cache::SIMPLE_HTML),
+            page.clone(),
+            2000,
+        );
+    }
+    h.state.serving.cache.hot.run_pending_tasks();
+
+    crate::cache::invalidate_project(&h.state.serving, "pypi", "flask");
+
+    for (route, project) in [("hosted", "flask"), ("pypi", "django")] {
+        assert_eq!(
+            h.state.serving.hot_fresh(
                 &h.state
                     .serving
-                    .representation_key("pypi", "flask", crate::cache::SIMPLE_HTML)
-            )
-            .is_none()
-    );
-    assert_eq!(
-        h.state.serving.hot_fresh(
-            &h.state
-                .serving
-                .representation_key("pypi", "django", crate::cache::SIMPLE_HTML)
-        ),
-        Some(page)
-    );
+                    .representation_key(route, project, crate::cache::SIMPLE_HTML)
+            ),
+            Some(page.clone())
+        );
+    }
 }
 #[tokio::test]
 async fn test_a_policy_filtered_page_still_serves_json() {

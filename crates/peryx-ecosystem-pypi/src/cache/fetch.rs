@@ -89,7 +89,7 @@ pub(super) async fn fetch_and_store(
             .retire_cached_project(key, name, project)
             .map_err(CacheError::from)
             .map(|()| {
-                state.invalidate_resource(project);
+                super::invalidate_project(state, name, project);
                 state.remember_negative(project_negative_key(key), NEGATIVE_TTL_SECS);
                 None
             }),
@@ -325,7 +325,7 @@ pub(super) fn persist_page_from(
             attestations: &attestations,
         })
         .map_err(CacheError::from)?;
-    state.invalidate_resource(project);
+    super::invalidate_project(state, name, project);
     Ok(())
 }
 

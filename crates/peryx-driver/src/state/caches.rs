@@ -29,14 +29,14 @@ impl ServingState {
         self.cache.remember_negative(key, (self.clock)() + ttl_secs);
     }
 
-    pub fn invalidate_resource(&self, resource: &str) {
-        self.cache.invalidate_resource(resource);
+    pub fn invalidate_resource(&self, route: &str, resource: &str) {
+        self.cache.invalidate_resource(route, resource);
         self.search.invalidate_resource(resource);
     }
 
     /// Retire one resource's representations without touching the search epoch.
-    pub fn invalidate_representations(&self, resource: &str) {
-        self.cache.invalidate_resource(resource);
+    pub fn invalidate_representations(&self, route: &str, resource: &str) {
+        self.cache.invalidate_resource(route, resource);
     }
 
     pub fn bump_search_epoch(&self) {

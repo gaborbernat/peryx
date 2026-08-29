@@ -531,7 +531,6 @@ impl PypiServing {
                 }
             }
         }
-        let mut hot_retired = std::collections::BTreeSet::new();
         let mut block = None;
         for (position, normalized) in views {
             let index = &ctx.indexes[position];
@@ -541,9 +540,7 @@ impl PypiServing {
                     view: SEARCH_VIEW.to_owned(),
                 });
             }
-            if hot_retired.insert(normalized) {
-                state.invalidate_representations(normalized);
-            }
+            state.invalidate_representations(&index.route, normalized);
         }
         block.map_or(Ok(()), Err)
     }
@@ -580,7 +577,7 @@ impl ReplicatedApplyDriver for PypiServing {
 /// `base` itself and every virtual index that reaches it, because a virtual page merges the member it
 /// layers, so the member's change shows through the virtual index's own document. An unknown index name
 /// resolves to nothing.
-fn serving_positions(indexes: &[Index], base: &str) -> Vec<usize> {
+pub(crate) fn serving_positions(indexes: &[Index], base: &str) -> Vec<usize> {
     let Some(base_position) = indexes.iter().position(|index| index.name == base) else {
         return Vec::new();
     };

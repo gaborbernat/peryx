@@ -43,6 +43,26 @@ pub(crate) fn install_runtime_services(context: &mut RuntimeInstallContext<'_>) 
 
 const NEGATIVE_TTL_SECS: i64 = 30;
 
+pub(crate) fn invalidate_project(state: &ServingState, index: &str, project: &str) {
+    let positions = crate::serving::serving_positions(&state.indexes, index);
+    let (base, dependents) = positions
+        .split_first()
+        .expect("cache mutations name a configured index");
+    state.invalidate_resource(&state.indexes[*base].route, project);
+    for position in dependents {
+        state.invalidate_representations(&state.indexes[*position].route, project);
+    }
+}
+
+fn invalidate_project_route(state: &ServingState, route: &str, project: &str) {
+    let index = state
+        .indexes
+        .iter()
+        .find(|index| index.route == route)
+        .expect("served routes belong to configured indexes");
+    invalidate_project(state, &index.name, project);
+}
+
 /// An error while producing a cached response.
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {

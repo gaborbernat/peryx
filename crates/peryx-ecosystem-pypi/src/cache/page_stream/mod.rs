@@ -81,7 +81,7 @@ fn persist_streamed(
             attestations: &attestations,
         })
         .map_err(CacheError::from)?;
-    state.invalidate_resource(project);
+    super::invalidate_project(state, name, project);
     Ok(())
 }
 
@@ -245,7 +245,7 @@ fn retire_missing_project(
     let retired = state.meta.retire_cached_project(key, index, project);
     release_flight(state, key, guard);
     retired.map_err(CacheError::from).map(|()| {
-        state.invalidate_resource(project);
+        super::invalidate_project(state, index, project);
         state.remember_negative(project_negative_key(key), NEGATIVE_TTL_SECS);
         missing_upstream_outcome(context)
     })

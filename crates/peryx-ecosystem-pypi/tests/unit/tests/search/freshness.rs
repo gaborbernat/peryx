@@ -41,7 +41,7 @@ async fn test_scoped_refresh_retires_only_the_mutated_project() {
         .meta
         .delete_upload(true, "hosted", "beta", "beta-1.0-py3-none-any.whl", 0)
         .unwrap();
-    h.state.serving.invalidate_resource("beta");
+    h.state.serving.invalidate_resource("hosted", "beta");
 
     assert_eq!(
         search_total(&h.state, "/hosted/+search?q=alpha&page_size=25").await,
@@ -61,7 +61,7 @@ async fn test_scoped_refresh_re_derives_the_named_project() {
     put_uploaded_package(&h.state.serving, "Alpha", "alpha", "alpha summary");
     assert_eq!(search_total(&h.state, "/hosted/+search?q=alpha&page_size=25").await, 1);
 
-    h.state.serving.invalidate_resource("alpha");
+    h.state.serving.invalidate_resource("hosted", "alpha");
 
     assert_eq!(search_total(&h.state, "/hosted/+search?q=alpha&page_size=25").await, 1);
 }

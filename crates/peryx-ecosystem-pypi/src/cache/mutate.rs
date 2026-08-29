@@ -70,7 +70,7 @@ pub async fn store_upload(
     }
     state.record_operation_trace(peryx_driver::state::OperationKind::Publish, fence);
     if published.stored {
-        state.invalidate_resource(project);
+        super::invalidate_project(state, name, project);
     }
     Ok(StoredUpload {
         stored: published.stored,
@@ -138,7 +138,7 @@ pub async fn promote_release(
         .meta
         .promote_files_checked(crate::replication_enabled(state), &release, promote_conflict)?;
     if promoted > 0 {
-        state.invalidate_resource(normalized);
+        super::invalidate_project(state, target, normalized);
     }
     Ok(promoted)
 }
@@ -209,7 +209,7 @@ pub async fn set_yanked(
         }
     }
     if changed > 0 {
-        state.invalidate_resource(normalized);
+        super::invalidate_project(state, hosted, normalized);
     }
     Ok(changed)
 }
@@ -272,7 +272,7 @@ pub async fn remove_files(
         affected += 1;
     }
     if affected > 0 {
-        state.invalidate_resource(normalized);
+        super::invalidate_project(state, hosted, normalized);
     }
     Ok(affected)
 }
@@ -310,7 +310,7 @@ pub async fn restore_files(
         }
     }
     if restored > 0 {
-        state.invalidate_resource(normalized);
+        super::invalidate_project(state, hosted, normalized);
     }
     Ok(restored)
 }

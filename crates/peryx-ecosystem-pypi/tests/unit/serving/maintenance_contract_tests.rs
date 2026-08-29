@@ -190,6 +190,33 @@ fn serving_rebuilds_nested_virtual_search_views() {
     );
 }
 
+#[test]
+fn serving_retires_nested_virtual_cached_renders() {
+    let (_directory, state) = state_with_indexes(vec![
+        hosted_index(),
+        virtual_index("middle", vec![0]),
+        virtual_index("outer", vec![1]),
+    ]);
+    let keys = ["hosted", "middle", "outer"].map(|route| {
+        state
+            .serving
+            .representation_key(route, "demo", crate::cache::SIMPLE_HTML)
+    });
+
+    PypiServing
+        .apply_replicated_changes(&state.serving, &["pypi\0p\0hosted/demo".to_owned()])
+        .unwrap();
+
+    for (route, key) in ["hosted", "middle", "outer"].into_iter().zip(keys) {
+        assert_ne!(
+            state
+                .serving
+                .representation_key(route, "demo", crate::cache::SIMPLE_HTML),
+            key
+        );
+    }
+}
+
 #[tokio::test]
 async fn serving_browses_and_inspects_a_hosted_archive() {
     let (_dir, state) = state();

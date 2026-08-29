@@ -120,15 +120,32 @@ fn test_versioned_hot_cache_returns_source_revision() {
 }
 
 #[test]
-fn test_representation_keys_change_only_for_the_invalidated_resource() {
+fn test_representation_keys_change_only_for_the_invalidated_route_and_resource() {
     let cache = ServingCache::new(1024, 60);
     let first = cache.representation_key("route", "first", "json");
     let second = cache.representation_key("route", "second", "json");
+    let independent = cache.representation_key("independent", "first", "json");
 
-    cache.invalidate_resource("first");
+    cache.invalidate_resource("route", "first");
 
     assert_ne!(cache.representation_key("route", "first", "json"), first);
     assert_eq!(cache.representation_key("route", "second", "json"), second);
+    assert_eq!(cache.representation_key("independent", "first", "json"), independent);
+}
+
+#[test]
+fn test_concurrent_invalidations_advance_distinct_epochs() {
+    let cache = ServingCache::new(1024, 60);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| cache.invalidate_resource("route", "resource"));
+        }
+    });
+
+    assert_eq!(
+        cache.representation_key("route", "resource", "json"),
+        "route\0resource\0json\08"
+    );
 }
 
 #[test]

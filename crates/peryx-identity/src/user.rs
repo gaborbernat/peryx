@@ -1,7 +1,19 @@
 use std::fmt;
 
+use caseless::Caseless as _;
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization as _;
+
+/// Storage records this value so Unicode-data upgrades recheck existing identity keys.
+pub const USER_NAME_CANONICAL_VERSION: &str = "d145-casefold-16.0.0-normalization-17.0.0";
+const _: () = {
+    assert!(caseless::UNICODE_VERSION.0 == 16);
+    assert!(caseless::UNICODE_VERSION.1 == 0);
+    assert!(caseless::UNICODE_VERSION.2 == 0);
+    assert!(unicode_normalization::UNICODE_VERSION.0 == 17);
+    assert!(unicode_normalization::UNICODE_VERSION.1 == 0);
+    assert!(unicode_normalization::UNICODE_VERSION.2 == 0);
+};
 
 /// An opaque server-user identifier that remains stable when account attributes change.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -31,7 +43,7 @@ impl fmt::Display for UserId {
     }
 }
 
-/// Display names retain trimmed spelling; lookup keys use lowercase NFC.
+/// Display names retain trimmed spelling; lookup keys use Unicode canonical caseless matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserName {
     display: String,
@@ -48,7 +60,7 @@ impl UserName {
         }
         Ok(Self {
             display: display.to_owned(),
-            canonical: display.to_lowercase().nfc().collect(),
+            canonical: canonicalize(display),
         })
     }
 
@@ -66,10 +78,14 @@ impl UserName {
     pub fn with_id_suffix(&self, id: &UserId) -> Self {
         let display = format!("{} ({id})", self.display);
         Self {
-            canonical: display.to_lowercase().nfc().collect(),
+            canonical: canonicalize(&display),
             display,
         }
     }
+}
+
+fn canonicalize(value: &str) -> String {
+    value.chars().nfd().default_case_fold().nfc().collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

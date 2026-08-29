@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 
+use peryx_identity::UserId;
 use peryx_storage::meta::{
     AccountingClass, MetadataMigration, MetadataRecord, MetadataRecordSet, NewQuotaReservation, QuotaLimits, QuotaUsage,
 };
@@ -20,6 +21,21 @@ fn writable_open_applies_metadata_migrations() {
     let migrated = open_existing(&path, &plugins).unwrap();
     assert_eq!(migrated.quota_usage("source").unwrap(), QuotaUsage::default());
     assert_eq!(migrated.quota_usage("target").unwrap().accounted_bytes.reserved, 1);
+}
+
+#[test]
+fn writable_open_applies_the_user_name_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    legacy_user_store(&path);
+
+    let user = open_existing(&path, &crate::tests::support::plugins())
+        .unwrap()
+        .get_user_by_name("STRASSE")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!((user.id.as_str(), user.name.canonical()), ("usr_street", "strasse"));
 }
 
 #[test]
@@ -96,6 +112,25 @@ fn immutable_open_rejects_a_required_upgrade_without_mutating_source() {
 }
 
 #[test]
+fn immutable_open_rejects_a_user_name_upgrade_without_mutating_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    legacy_user_store(&path);
+    let before = std::fs::read(&path).unwrap();
+
+    assert_eq!(
+        open_existing_read_only(&path, &crate::tests::support::plugins())
+            .unwrap_err()
+            .to_string(),
+        format!(
+            "metadata store {} requires a schema upgrade; open it with a writable peryx command before retrying",
+            path.display()
+        )
+    );
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
 fn copied_open_migrates_the_copy_without_mutating_source() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("peryx.redb");
@@ -110,6 +145,30 @@ fn copied_open_migrates_the_copy_without_mutating_source() {
     drop(copy);
     let source = peryx_storage::meta::MetaStore::open_existing_read_only(&path).unwrap();
     assert_eq!(source.quota_usage("source").unwrap().accounted_bytes.reserved, 1);
+}
+
+#[test]
+fn copied_open_migrates_user_names_without_mutating_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    legacy_user_store(&path);
+
+    let copy = open_existing_copy(&path, &crate::tests::support::plugins()).unwrap();
+    assert_eq!(
+        copy.get_user_by_name("STRASSE").unwrap().unwrap().name.canonical(),
+        "strasse"
+    );
+    drop(copy);
+    assert_eq!(
+        peryx_storage::meta::MetaStore::open_existing_read_only(path)
+            .unwrap()
+            .get_user(&UserId::from_stored("usr_street"))
+            .unwrap()
+            .unwrap()
+            .name
+            .canonical(),
+        "straße"
+    );
 }
 
 #[test]
@@ -223,4 +282,25 @@ fn directory_entries(path: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     entries.sort();
     entries
+}
+
+fn legacy_user_store(path: &Path) {
+    let database = redb::Database::create(path).unwrap();
+    let txn = database.begin_write().unwrap();
+    let value = serde_json::to_vec(&serde_json::json!({
+        "id": "usr_street",
+        "name": { "display": "Straße", "canonical": "straße" },
+        "state": "active",
+        "revision": 1,
+    }))
+    .unwrap();
+    txn.open_table(redb::TableDefinition::<&str, &[u8]>::new("server_user"))
+        .unwrap()
+        .insert("usr_street", value.as_slice())
+        .unwrap();
+    txn.open_table(redb::TableDefinition::<&str, &str>::new("server_user_name"))
+        .unwrap()
+        .insert("straße", "usr_street")
+        .unwrap();
+    txn.commit().unwrap();
 }

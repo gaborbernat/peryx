@@ -36,6 +36,17 @@ pub enum MetaError {
     DriverRecordMissing { key: String, field: &'static str },
     #[error("external role grant key {key:?} is malformed")]
     MalformedExternalGrantKey { key: String },
+    #[error("user name {canonical_name:?} identifies multiple accounts {user_ids:?}")]
+    UserNameCollision {
+        canonical_name: String,
+        user_ids: Vec<String>,
+    },
+    #[error("server user {id} has an invalid display name")]
+    UserNameMigration {
+        id: String,
+        #[source]
+        source: peryx_identity::UserNameError,
+    },
     #[error("blob {digest} is being reclaimed; publish the reference again once its deletion finishes")]
     BlobReclaiming { digest: String },
 }

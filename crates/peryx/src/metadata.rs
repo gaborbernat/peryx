@@ -23,14 +23,17 @@ pub fn open_existing(path: &Path, plugins: &PluginRegistry) -> anyhow::Result<Me
 pub fn open_existing_read_only(path: &Path, plugins: &PluginRegistry) -> anyhow::Result<MetaStore> {
     let store = MetaStore::open_existing_read_only(path)
         .with_context(|| format!("open metadata store {} read-only", path.display()))?;
-    if !plugins.has_metadata_migrations() {
+    let user_names_require_migration = store.user_names_require_migration().context("check user-name schema")?;
+    if !user_names_require_migration && !plugins.has_metadata_migrations() {
         return Ok(store);
     }
-    let reports = plugins
+    let plugins_require_migration = plugins
         .dry_run_metadata_migrations(&store)
-        .context("check metadata schema")?;
+        .context("check metadata schema")?
+        .iter()
+        .any(|report| report.rewritten != 0);
     ensure!(
-        reports.iter().all(|report| report.rewritten == 0),
+        !user_names_require_migration && !plugins_require_migration,
         "metadata store {} requires a schema upgrade; open it with a writable peryx command before retrying",
         path.display()
     );
@@ -40,7 +43,11 @@ pub fn open_existing_read_only(path: &Path, plugins: &PluginRegistry) -> anyhow:
 pub fn open_existing_copy(path: &Path, plugins: &PluginRegistry) -> anyhow::Result<OpenedMetadata> {
     let source = MetaStore::open_existing_read_only(path)
         .with_context(|| format!("open metadata store {} read-only", path.display()))?;
-    if !plugins.has_metadata_migrations() {
+    if !source
+        .user_names_require_migration()
+        .context("check user-name schema")?
+        && !plugins.has_metadata_migrations()
+    {
         return Ok(OpenedMetadata {
             store: source,
             _probe: None,
@@ -57,6 +64,7 @@ pub fn open_existing_copy(path: &Path, plugins: &PluginRegistry) -> anyhow::Resu
 }
 
 fn migrate(store: MetaStore, plugins: &PluginRegistry) -> anyhow::Result<MetaStore> {
+    store.migrate_user_names().context("migrate user names")?;
     plugins.migrate_metadata(&store).context("migrate metadata")?;
     Ok(store)
 }

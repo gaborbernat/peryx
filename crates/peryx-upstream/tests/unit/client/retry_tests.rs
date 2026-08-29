@@ -11,7 +11,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::guarded_client;
 use crate::client::UpstreamClient;
-use crate::client::retry::{MAX_RETRIES, retry_after_at};
+use crate::client::retry::{MAX_RETRIES, retry_after, retry_after_at};
 
 #[rstest]
 #[case::seconds(Some(b"5".as_slice()), Some(Duration::from_secs(5)))]
@@ -28,7 +28,7 @@ fn test_retry_after_reads_the_header(#[case] value: Option<&[u8]>, #[case] expec
         headers.insert(RETRY_AFTER, HeaderValue::from_bytes(value).unwrap());
     }
 
-    assert_eq!(retry_after_at(&headers, SystemTime::UNIX_EPOCH), expected);
+    assert_eq!(retry_after(&headers), expected);
 }
 
 #[test]

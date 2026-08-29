@@ -24,7 +24,7 @@ pub(super) async fn selection(
     let mut filters = target.prefetch.clone();
     if let Some(mode) = options.mode {
         filters.mode = mode;
-        if matches!(mode, PrefetchMode::MetadataOnly) {
+        if mode.requires_metadata_only() {
             filters.metadata_only = true;
         }
     }

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use peryx_driver::serving::{MirrorAction, MirrorDriver as _, MirrorRequest};
 use peryx_storage::blob::Digest;
+use rstest::rstest;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -267,27 +268,7 @@ async fn sync_reports_materialization_failures() {
 #[tokio::test]
 async fn sync_downloads_metadata_and_artifacts() {
     let server = MockServer::start().await;
-    let detail = artifact_detail(&server.uri());
-    Mock::given(method("GET"))
-        .and(path("/simple/demo/"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(to_json(&detail), "application/vnd.pypi.simple.v1+json"))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/demo.whl"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"artifact"))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/demo.whl.metadata"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"metadata"))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/demo.zip"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"sdist"))
-        .mount(&server)
-        .await;
+    mount_artifact_upstream(&server, 1).await;
     let fixture = test_support::state(vec![cached_index(&format!("{}/simple/", server.uri()), false)]);
     let mut output = Vec::new();
 
@@ -305,6 +286,96 @@ async fn sync_downloads_metadata_and_artifacts() {
     assert!(output.contains("downloaded"));
     assert!(output.contains("skipped"));
     assert!(output.contains("files_downloaded\t\t\t3"));
+    server.verify().await;
+}
+
+#[rstest]
+#[case::file_mode_default("metadata-only", None, None, false)]
+#[case::file_mode_false("metadata-only", Some(false), None, false)]
+#[case::cli_mode("selected", Some(false), Some("metadata-only"), false)]
+#[case::all_metadata("all", Some(true), None, false)]
+#[case::all_artifacts("all", Some(false), None, true)]
+#[tokio::test]
+async fn sync_applies_metadata_only_after_options_merge(
+    #[case] configured_mode: &str,
+    #[case] configured_metadata_only: Option<bool>,
+    #[case] override_mode: Option<&str>,
+    #[case] downloads_artifacts: bool,
+) {
+    let server = MockServer::start().await;
+    mount_artifact_upstream(&server, u64::from(downloads_artifacts)).await;
+    Mock::given(method("GET"))
+        .and(path("/simple/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"meta":{"api-version":"1.4"},"projects":[{"name":"demo"}]}"#,
+            "application/vnd.pypi.simple.v1+json",
+        ))
+        .mount(&server)
+        .await;
+    let mut configured = toml::Table::from_iter([
+        ("mode".to_owned(), toml::Value::String(configured_mode.to_owned())),
+        (
+            "packages".to_owned(),
+            toml::Value::Array(vec![toml::Value::String("demo".to_owned())]),
+        ),
+    ]);
+    if let Some(metadata_only) = configured_metadata_only {
+        configured.insert("metadata_only".to_owned(), toml::Value::Boolean(metadata_only));
+    }
+    let mut overrides = toml::Table::new();
+    if let Some(mode) = override_mode {
+        overrides.insert("mode".to_owned(), toml::Value::String(mode.to_owned()));
+    }
+    let fixture = test_support::state(vec![cached_index(&format!("{}/simple/", server.uri()), false)]);
+    let mut output = Vec::new();
+
+    crate::PypiServing
+        .mirror(
+            fixture.state,
+            MirrorRequest {
+                action: MirrorAction::Sync,
+                index: "pypi",
+                settings: &toml::Table::new(),
+                configured: &configured,
+                overrides: &overrides,
+            },
+            &mut output,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8(output)
+            .unwrap()
+            .matches("\tskipped\tmetadata-only\n")
+            .count(),
+        if downloads_artifacts { 0 } else { 2 }
+    );
+    server.verify().await;
+}
+
+async fn mount_artifact_upstream(server: &MockServer, artifact_requests: u64) {
+    Mock::given(method("GET"))
+        .and(path("/simple/demo/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            to_json(&artifact_detail(&server.uri())),
+            "application/vnd.pypi.simple.v1+json",
+        ))
+        .expect(1)
+        .mount(server)
+        .await;
+    for (path, body, requests) in [
+        ("/demo.whl", b"artifact".as_slice(), artifact_requests),
+        ("/demo.whl.metadata", b"metadata".as_slice(), 1),
+        ("/demo.zip", b"sdist".as_slice(), artifact_requests),
+    ] {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(requests)
+            .mount(server)
+            .await;
+    }
 }
 
 #[tokio::test]

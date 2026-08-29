@@ -31,6 +31,7 @@ max_file_size_bytes = 1048576
     assert_eq!(config.abi_tags, ["none"]);
     assert_eq!(config.platform_tags, ["any"]);
     assert_eq!(config.max_file_size_bytes, Some(1_048_576));
+    assert!(config.metadata_only);
 }
 
 #[test]

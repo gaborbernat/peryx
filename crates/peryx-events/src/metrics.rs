@@ -998,7 +998,7 @@ fn aggregate(
 }
 
 fn step(receiver: &Receiver<Message>, ctx: &Aggregator, interval: Duration, state: &mut FlushState) -> bool {
-    match receive(receiver, state.pending(), interval) {
+    match receive(receiver, state.pending() || ctx.retention_days.is_some(), interval) {
         Received::Batch(first) => {
             let batch = absorb_batch(first, receiver, ctx);
             state.mark(batch.dirty);
@@ -1017,7 +1017,10 @@ fn step(receiver: &Receiver<Message>, ctx: &Aggregator, interval: Duration, stat
             true
         }
         Received::Idle => {
-            if let Err(error) = persist(ctx, state) {
+            state.mark(expire_retained(ctx.daily, ctx.retention_days, ctx.clock));
+            if state.pending()
+                && let Err(error) = persist(ctx, state)
+            {
                 tracing::error!(target: "peryx::metrics", %error, "metrics checkpoint failed");
             }
             true
@@ -1026,9 +1029,9 @@ fn step(receiver: &Receiver<Message>, ctx: &Aggregator, interval: Duration, stat
     }
 }
 
-/// Dirty aggregators wake after `idle` to bound checkpoint lag; clean aggregators block.
-fn receive(receiver: &Receiver<Message>, pending: bool, idle: Duration) -> Received {
-    if pending {
+/// Retention uses the checkpoint interval so expiry is not coupled to new traffic.
+fn receive(receiver: &Receiver<Message>, wake: bool, idle: Duration) -> Received {
+    if wake {
         match receiver.recv_timeout(idle) {
             Ok(message) => Received::Batch(message),
             Err(RecvTimeoutError::Timeout) => Received::Idle,
@@ -1048,7 +1051,7 @@ fn absorb_batch(first: Message, receiver: &Receiver<Message>, ctx: &Aggregator) 
             absorb(message, &mut tree, &mut batch);
         }
     }
-    fold_daily_batch(
+    batch.dirty |= fold_daily_batch(
         std::mem::take(&mut batch.reads),
         ctx.daily,
         ctx.retention_days,
@@ -1141,9 +1144,9 @@ fn fold_daily_batch(
     daily: &RwLock<DailyBuckets>,
     retention_days: Option<u32>,
     clock: &Clock,
-) {
+) -> bool {
     if reads.is_empty() {
-        return;
+        return expire_retained(daily, retention_days, clock);
     }
     let mut daily = daily.write().expect("metrics lock");
     for (key, bytes) in reads {
@@ -1151,15 +1154,18 @@ fn fold_daily_batch(
         totals.reads += 1;
         totals.bytes += bytes;
     }
-    if let Some(days) = retention_days {
-        expire_daily(&mut daily, clock(), days);
-    }
+    let expired = retention_days.is_some_and(|days| expire_daily(&mut daily, clock(), days));
     drop(daily);
+    expired
+}
+
+fn expire_retained(daily: &RwLock<DailyBuckets>, retention_days: Option<u32>, clock: &Clock) -> bool {
+    retention_days.is_some_and(|days| expire_daily(&mut daily.write().expect("metrics lock"), clock(), days))
 }
 
 /// Drop every bucket older than `retention_days` days. Buckets order by day first, so the expired
 /// prefix leaves in one split and the retained totals are never touched.
-fn expire_daily(daily: &mut DailyBuckets, now_secs: i64, retention_days: u32) {
+fn expire_daily(daily: &mut DailyBuckets, now_secs: i64, retention_days: u32) -> bool {
     let floor = DailyKey {
         day: utc_day(now_secs) - i64::from(retention_days),
         repository: String::new(),
@@ -1167,7 +1173,9 @@ fn expire_daily(daily: &mut DailyBuckets, now_secs: i64, retention_days: u32) {
         group: String::new(),
         source: String::new(),
     };
+    let previous_len = daily.len();
     *daily = daily.split_off(&floor);
+    daily.len() != previous_len
 }
 
 fn daily_rows(daily: &DailyBuckets) -> Vec<DailyUsage> {

@@ -138,6 +138,31 @@ impl MetricsStore for RejectingDailyStore {
     }
 }
 
+struct CheckpointStore {
+    store: AnalyticsHandle,
+    checkpointed: SyncSender<()>,
+}
+
+impl MetricsStore for CheckpointStore {
+    fn load(&self) -> Result<Option<Vec<u8>>, MetricsError> {
+        MetricsStore::load(&self.store)
+    }
+
+    fn save(&self, snapshot: &[u8]) -> Result<(), MetricsError> {
+        MetricsStore::save(&self.store, snapshot)
+    }
+
+    fn load_daily(&self) -> Result<Option<Vec<u8>>, MetricsError> {
+        MetricsStore::load_daily(&self.store)
+    }
+
+    fn save_daily(&self, snapshot: &[u8]) -> Result<(), MetricsError> {
+        MetricsStore::save_daily(&self.store, snapshot)?;
+        self.checkpointed.send(()).unwrap();
+        Ok(())
+    }
+}
+
 fn read(repository: &str, resource: &str, artifact: &str, bytes: u64) -> Observation {
     Observation::Read {
         repository: repository.into(),
@@ -599,6 +624,42 @@ fn test_the_running_aggregator_expires_a_bucket_that_ages_past_retention() {
         metrics.daily_usage().iter().map(|row| row.day).collect::<Vec<_>>(),
         [5],
         "the aged day-0 bucket expired during aggregation, leaving only day 5"
+    );
+}
+
+#[test]
+fn test_idle_retention_expires_memory_exports_and_snapshot() {
+    let (_dir, meta) = store();
+    let (day, clock) = steppable_clock();
+    let seeded = Metrics::start_durable(meta.analytics(), Some(2), clock.clone()).unwrap();
+    seeded.record(grouped_read("alpha", "resource-b", "1.0", Some("up"), 3));
+    seeded.flush().unwrap();
+    drop(seeded);
+
+    let (checkpointed, checkpoint) = sync_channel(0);
+    let metrics = Metrics::spawn(
+        Some(Arc::new(CheckpointStore {
+            store: meta.analytics(),
+            checkpointed,
+        })),
+        Some(2),
+        clock,
+        super::EVENT_QUEUE_CAPACITY,
+        Duration::ZERO,
+    )
+    .unwrap();
+    day.store(5, Ordering::SeqCst);
+    checkpoint.recv().unwrap();
+
+    assert!(metrics.daily_usage().is_empty());
+    assert!(
+        metrics
+            .export_sealed_day_batches(&ProducerId("east".to_owned()), AuthorityEpoch(1), -1)
+            .is_empty()
+    );
+    assert_eq!(
+        persisted_snapshot(meta.analytics().load_daily().unwrap()),
+        serde_json::json!({"schema": 1, "buckets": []})
     );
 }
 

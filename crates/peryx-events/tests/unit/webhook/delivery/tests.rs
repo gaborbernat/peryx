@@ -1,10 +1,12 @@
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicI64, AtomicUsize};
 
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::oneshot;
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use super::*;
 use crate::webhook::{WebhookEnvelope, WebhookRuntime, WebhookTargetConfig};
@@ -14,8 +16,8 @@ use crate::webhook::{WebhookEnvelope, WebhookRuntime, WebhookTargetConfig};
 #[case::equal(1_000, 1_000, 1)]
 #[case::past(900, 1_000, 1)]
 #[case::far_past(0, i64::MAX, 1)]
-#[case::overflow_saturates(i64::MAX, i64::MIN, 9_223_372_036_854_775_807)]
-fn test_wait_secs_never_yields_a_zero_delay_wakeup(#[case] next: i64, #[case] now: i64, #[case] expected: u64) {
+#[case::far_future(i64::MAX, i64::MIN, MAX_SCHEDULER_SLEEP_SECS)]
+fn test_wait_secs_bounds_scheduler_wakeups(#[case] next: i64, #[case] now: i64, #[case] expected: u64) {
     assert_eq!(wait_secs(next, now), expected);
 }
 
@@ -42,7 +44,7 @@ fn test_is_permanent_flags_only_non_retriable_client_errors(#[case] status: u16,
 struct TestHost {
     webhooks: WebhookRuntime,
     meta: MetaStore,
-    now: i64,
+    now: AtomicI64,
 }
 
 impl WebhookHost for TestHost {
@@ -53,7 +55,7 @@ impl WebhookHost for TestHost {
         &self.meta
     }
     fn now(&self) -> i64 {
-        self.now
+        self.now.load(Ordering::SeqCst)
     }
 }
 
@@ -71,7 +73,7 @@ fn test_record_failure_only_reschedules_retriable_responses(
     let host = TestHost {
         webhooks: WebhookRuntime::disabled(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 1_000,
+        now: AtomicI64::new(1_000),
     };
     let id = host
         .meta()
@@ -85,11 +87,19 @@ fn test_record_failure_only_reschedules_retriable_responses(
         .unwrap();
     for _ in 0..prior_attempts {
         let delivery = host.meta().get_webhook_delivery(&id).unwrap().unwrap();
-        record_failure(&host, &delivery, host.now(), Some(404), "http status 404", true);
+        record_failure(&host, &delivery, host.now(), None, Some(404), "http status 404", true);
     }
 
     let delivery = host.meta().get_webhook_delivery(&id).unwrap().unwrap();
-    record_failure(&host, &delivery, host.now(), Some(404), "http status 404", retriable);
+    record_failure(
+        &host,
+        &delivery,
+        host.now(),
+        None,
+        Some(404),
+        "http status 404",
+        retriable,
+    );
 
     let stored = host.meta().get_webhook_delivery(&id).unwrap().unwrap();
     assert_eq!(
@@ -169,7 +179,7 @@ fn test_emit_skips_disabled_webhooks() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::disabled(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 1,
+        now: AtomicI64::new(1),
     });
 
     emit(host.as_ref(), &event());
@@ -185,7 +195,7 @@ fn test_emit_skips_targets_not_subscribed_to_the_event() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![config]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 1,
+        now: AtomicI64::new(1),
     });
 
     emit(host.as_ref(), &event());
@@ -200,7 +210,7 @@ async fn test_emit_enqueues_and_delivers_the_signed_payload() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", &healthy.url)]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
 
     let handle = kick(Arc::clone(&host)).unwrap();
@@ -359,7 +369,7 @@ async fn test_kick_has_zero_runtime_for_disabled_webhooks() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::disabled(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     assert!(kick(Arc::clone(&host)).is_none());
     assert!(!host.webhooks.running.load(Ordering::Acquire));
@@ -371,7 +381,7 @@ async fn test_kick_owns_worker_startup_and_shutdown() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", "https://example.invalid/hook")]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
 
     let handle = kick(Arc::clone(&host)).unwrap();
@@ -403,7 +413,7 @@ async fn test_worker_failure_reaches_its_owner() {
     let host = Arc::new(PanickingHost(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", "https://example.invalid/hook")]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     }));
     enqueue(host.meta(), "ci", 10);
     let mut handle = kick(host).unwrap();
@@ -425,7 +435,7 @@ async fn test_kick_reuses_the_running_worker() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", "https://example.invalid/hook")]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     let handle = kick(Arc::clone(&host)).unwrap();
 
@@ -441,7 +451,7 @@ async fn test_dropped_handle_releases_the_worker() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", "https://example.invalid/hook")]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     drop(kick(Arc::clone(&host)).unwrap());
     tokio::time::timeout(Duration::from_secs(1), host.webhooks.wait_until_idle())
@@ -472,7 +482,7 @@ async fn test_worker_discards_malformed_delivery_and_reaches_valid_work() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("healthy", &healthy.url)]).unwrap(),
         meta: MetaStore::open_existing(database).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     let handle = kick(Arc::clone(&host)).unwrap();
 
@@ -493,7 +503,7 @@ async fn test_worker_reports_read_only_store_failure() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", "https://example.invalid/hook")]).unwrap(),
         meta: MetaStore::open_existing_read_only(database).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     let mut handle = kick(host).unwrap();
 
@@ -513,7 +523,7 @@ async fn test_wait_for_work_consumes_a_pending_notification() {
     let host = TestHost {
         webhooks: WebhookRuntime::disabled(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     };
     host.webhooks.notify.notify_one();
 
@@ -526,7 +536,7 @@ async fn test_empty_scheduler_wait_resumes_on_notification() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::disabled(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     let (entered_wait, entered) = oneshot::channel();
     let (completed, mut completion) = oneshot::channel();
@@ -560,7 +570,7 @@ async fn test_scheduled_wait_resumes_at_delivery_time() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::disabled(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     enqueue(host.meta(), "ci", 101);
     let (entered_wait, entered) = oneshot::channel();
@@ -583,13 +593,35 @@ async fn test_scheduled_wait_resumes_at_delivery_time() {
         .unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn test_scheduled_wait_caps_a_far_future_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(TestHost {
+        webhooks: WebhookRuntime::disabled(),
+        meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
+        now: AtomicI64::new(100),
+    });
+    enqueue(host.meta(), "ci", i64::MAX);
+    let (entered_wait, entered) = oneshot::channel();
+    let waiting = tokio::spawn({
+        let host = Arc::clone(&host);
+        async move { wait_for_work_after(host.as_ref(), || entered_wait.send(()).unwrap()).await }
+    });
+    entered.await.unwrap();
+
+    tokio::time::advance(Duration::from_secs(MAX_SCHEDULER_SLEEP_SECS)).await;
+
+    waiting.await.unwrap().unwrap();
+    assert_eq!(host.meta().next_webhook_delivery_at().unwrap(), Some(i64::MAX));
+}
+
 #[tokio::test]
 async fn test_scheduled_wait_resumes_early_on_notification() {
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::disabled(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     enqueue(host.meta(), "ci", 1000);
     let (entered_wait, entered) = oneshot::channel();
@@ -636,7 +668,7 @@ async fn test_delivery_records_http_failures(
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", &server.url)]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     let id = enqueue(host.meta(), "ci", 10);
 
@@ -648,6 +680,76 @@ async fn test_delivery_records_http_failures(
     assert_eq!(delivery.last_error.as_deref(), Some(message));
 }
 
+#[rstest]
+#[case::delay_seconds("120", 1_120)]
+#[case::http_date("Thu, 01 Jan 1970 00:18:20 GMT", 1_100)]
+#[case::local_backoff_wins("1", 1_005)]
+#[case::past_http_date("Thu, 01 Jan 1970 00:15:00 GMT", 1_005)]
+#[case::invalid("soon", 1_005)]
+#[case::overflow("18446744073709551615", i64::MAX)]
+#[tokio::test]
+async fn test_retry_after_persists_the_later_deadline(#[case] header: &str, #[case] expected: i64) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", header))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("peryx.redb");
+    let host = Arc::new(TestHost {
+        webhooks: WebhookRuntime::new(vec![target_config("ci", &server.uri())]).unwrap(),
+        meta: MetaStore::open(&database).unwrap(),
+        now: AtomicI64::new(1_000),
+    });
+    let id = enqueue(host.meta(), "ci", 10);
+
+    deliver_due(&host).await.unwrap();
+    deliver_due(&host).await.unwrap();
+    server.verify().await;
+    drop(host);
+
+    let meta = MetaStore::open_existing(database).unwrap();
+    let delivery = meta.get_webhook_delivery(&id).unwrap().unwrap();
+    assert_eq!(
+        (
+            delivery.status,
+            delivery.attempts,
+            delivery.next_attempt_at_unix,
+            delivery.response_status,
+        ),
+        (WebhookDeliveryStatus::Pending, 1, Some(expected), Some(429))
+    );
+}
+
+#[tokio::test]
+async fn test_retry_after_uses_the_response_time_clock() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(TestHost {
+        webhooks: WebhookRuntime::new(vec![target_config("ci", &server.uri())]).unwrap(),
+        meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
+        now: AtomicI64::new(1_000),
+    });
+    let response_host = Arc::clone(&host);
+    Mock::given(method("POST"))
+        .respond_with(move |_: &Request| {
+            response_host.now.store(1_100, Ordering::SeqCst);
+            ResponseTemplate::new(429).insert_header("retry-after", "Thu, 01 Jan 1970 00:17:30 GMT")
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let id = enqueue(host.meta(), "ci", 10);
+
+    deliver_due(&host).await.unwrap();
+
+    let delivery = host.meta().get_webhook_delivery(&id).unwrap().unwrap();
+    assert_eq!(delivery.updated_at_unix, 1_100);
+    assert_eq!(delivery.next_attempt_at_unix, Some(1_105));
+    server.verify().await;
+}
+
 #[tokio::test]
 async fn test_delivery_retries_network_failures() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -657,7 +759,7 @@ async fn test_delivery_retries_network_failures() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(vec![target_config("ci", &url)]).unwrap(),
         meta: MetaStore::open(dir.path().join("peryx.redb")).unwrap(),
-        now: 100,
+        now: AtomicI64::new(100),
     });
     let id = enqueue(host.meta(), "ci", 10);
 
@@ -686,7 +788,7 @@ async fn test_slow_target_does_not_block_a_healthy_one() {
         ])
         .unwrap(),
         meta,
-        now: 100,
+        now: AtomicI64::new(100),
     });
 
     let handle = kick(host.clone()).unwrap();
@@ -723,7 +825,7 @@ async fn test_in_flight_requests_stay_within_the_global_bound() {
     let host = Arc::new(TestHost {
         webhooks: WebhookRuntime::new(configs).unwrap(),
         meta,
-        now: 100,
+        now: AtomicI64::new(100),
     });
 
     let handle = kick(host.clone()).unwrap();

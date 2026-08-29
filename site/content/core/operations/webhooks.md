@@ -51,7 +51,8 @@ before verification changes the signed bytes.
 
 peryx stores each delivery before a background worker sends it. A process restart retains queued work. A `2xx` response
 completes delivery. Transport failures and HTTP `5xx` responses retry with the same delivery ID; `408` and `429` use the
-same retry path. Other `4xx` responses are final.
+same retry path. A valid `Retry-After` response delays the next attempt when it is later than peryx's local backoff, and
+the stored deadline survives a process restart. Other `4xx` responses are final.
 
 Redirects are final after the first attempt. peryx neither follows nor retries them because sending the signed payload
 to a target-selected location could move it outside the configured origin. A `302` stores

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use futures_util::StreamExt as _;
 use futures_util::stream::FuturesUnordered;
@@ -18,6 +18,13 @@ const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIAL_BACKOFF_SECS: i64 = 5;
 const MAX_BACKOFF_SECS: i64 = 300;
 const MAX_ATTEMPTS: u16 = 5;
+const MAX_SCHEDULER_SLEEP_SECS: u64 = 60 * 60;
+
+#[derive(Clone, Copy)]
+enum RetryAfter {
+    DelaySeconds(u64),
+    AtUnix(i64),
+}
 
 /// # Panics
 /// Panics if JSON serialization fails.
@@ -153,9 +160,11 @@ async fn wait_for_work_after<H: WebhookHost>(host: &H, entered_wait: impl FnOnce
     Ok(())
 }
 
-/// Clamping prevents busy-polling after clock drift or a late wakeup.
+/// Bounded sleeps re-read persisted deadlines after clock changes without overflowing `Instant`.
 fn wait_secs(next: i64, now: i64) -> u64 {
-    u64::try_from(next.saturating_sub(now)).unwrap_or(0).max(1)
+    u64::try_from(next.saturating_sub(now))
+        .unwrap_or(0)
+        .clamp(1, MAX_SCHEDULER_SLEEP_SECS)
 }
 
 /// Per-target serialization preserves order without letting one target block another.
@@ -197,12 +206,13 @@ async fn joined_webhook_task(
 }
 
 async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRecord) {
-    let now = host.now();
+    let sent_at = host.now();
     let Some(target) = host.webhooks().target(&delivery.index, &delivery.target) else {
         record_failure(
             host.as_ref(),
             &delivery,
-            now,
+            sent_at,
+            None,
             None,
             "webhook target is not configured",
             false,
@@ -221,17 +231,18 @@ async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRec
         )
         .header("x-peryx-event", delivery.event.as_str())
         .header("x-peryx-delivery", delivery.id.as_str())
-        .header("x-peryx-timestamp", now.to_string())
+        .header("x-peryx-timestamp", sent_at.to_string())
         .header(
             "x-peryx-signature",
-            signature(&target.secret, now, &delivery.id, delivery.payload.as_bytes()),
+            signature(&target.secret, sent_at, &delivery.id, delivery.payload.as_bytes()),
         )
         .body(delivery.payload.clone())
         .send()
         .await;
+    let completed_at = host.now();
     match result {
         Ok(response) if response.status().is_success() => {
-            record_success(host.as_ref(), &delivery, now, response.status().as_u16());
+            record_success(host.as_ref(), &delivery, completed_at, response.status().as_u16());
         }
         Ok(response) if response.status().is_redirection() => {
             // Retrying a redirect could expose the signed payload outside the configured origin.
@@ -239,7 +250,8 @@ async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRec
             record_failure(
                 host.as_ref(),
                 &delivery,
-                now,
+                completed_at,
+                None,
                 Some(status),
                 &format!("webhook target returned redirect {status}; redirects are not followed"),
                 false,
@@ -247,10 +259,12 @@ async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRec
         }
         Ok(response) => {
             let status = response.status().as_u16();
+            let retry_after = retry_after(response.headers());
             record_failure(
                 host.as_ref(),
                 &delivery,
-                now,
+                completed_at,
+                retry_after,
                 Some(status),
                 &format!("http status {status}"),
                 !is_permanent(status),
@@ -260,7 +274,8 @@ async fn deliver_one<H: WebhookHost>(host: &Arc<H>, delivery: WebhookDeliveryRec
             record_failure(
                 host.as_ref(),
                 &delivery,
-                now,
+                completed_at,
+                None,
                 None,
                 &err.without_url().to_string(),
                 true,
@@ -303,13 +318,25 @@ fn record_failure<H: WebhookHost>(
     host: &H,
     delivery: &WebhookDeliveryRecord,
     now: i64,
+    retry_after: Option<RetryAfter>,
     response_status: Option<u16>,
     error: &str,
     retriable: bool,
 ) {
     let attempts = delivery.attempts + 1;
     let (status, next_attempt_at_unix) = if retriable && attempts < MAX_ATTEMPTS {
-        (WebhookDeliveryStatus::Pending, Some(now + backoff_secs(attempts)))
+        let local_deadline = now.saturating_add(backoff_secs(attempts));
+        let server_deadline = retry_after.map_or(now, |retry_after| match retry_after {
+            RetryAfter::DelaySeconds(seconds) => i64::try_from(seconds)
+                .ok()
+                .and_then(|seconds| now.checked_add(seconds))
+                .unwrap_or(i64::MAX),
+            RetryAfter::AtUnix(deadline) => deadline,
+        });
+        (
+            WebhookDeliveryStatus::Pending,
+            Some(local_deadline.max(server_deadline)),
+        )
     } else {
         (WebhookDeliveryStatus::Failed, None)
     };
@@ -325,6 +352,18 @@ fn record_failure<H: WebhookHost>(
     );
     log_update_error(result.as_ref().err());
     log_delivery_failure(result.as_ref().ok().and_then(Option::as_ref));
+}
+
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<RetryAfter> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    value.parse().ok().map(RetryAfter::DelaySeconds).or_else(|| {
+        let seconds = httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        Some(RetryAfter::AtUnix(i64::try_from(seconds).unwrap_or(i64::MAX)))
+    })
 }
 
 fn log_delivery_failure(record: Option<&WebhookDeliveryRecord>) {

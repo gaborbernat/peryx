@@ -26,7 +26,8 @@ impl ServingState {
     }
 
     pub fn remember_negative(&self, key: String, ttl_secs: i64) {
-        self.cache.remember_negative(key, (self.clock)() + ttl_secs);
+        let now = (self.clock)();
+        self.cache.remember_negative_at(key, now.saturating_add(ttl_secs), now);
     }
 
     pub fn invalidate_resource(&self, route: &str, resource: &str) {

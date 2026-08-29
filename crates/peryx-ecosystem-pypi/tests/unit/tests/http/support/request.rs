@@ -181,7 +181,7 @@ async fn test_range_response_rejects_invalid_ranges(#[case] range: Option<&str>)
     );
 }
 
-pub async fn assert_metadata_range_fallback(
+pub async fn assert_metadata_range_fallback_preserves_other_resources(
     h: &Harness,
     label: &str,
     ranged: Vec<u8>,
@@ -223,6 +223,38 @@ pub async fn assert_metadata_range_fallback(
 
     assert_eq!(status, StatusCode::OK, "{label}");
     assert_eq!(body.as_bytes(), metadata, "{label}");
+
+    let next_metadata = b"Metadata-Version: 2.1\nName: peryxpkg\nVersion: 2.0\n";
+    let next_wheel = fixture_wheel_with_body_and_metadata("2.0", b"VALUE = 2\n", Some(next_metadata));
+    let next_digest = Digest::of(&next_wheel);
+    let next_filename = "peryxpkg-2.0-py3-none-any.whl";
+    h.state
+        .serving
+        .meta
+        .put_file_url(
+            next_digest.as_str(),
+            &format!("{}/files/{next_filename}", h.server.uri()),
+            "pypi",
+        )
+        .unwrap();
+    Mock::given(method("HEAD"))
+        .and(path(format!("/files/{next_filename}")))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-length", next_wheel.len()))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/files/{next_filename}")))
+        .and(header_regex("range", "^bytes=[0-9]+-[0-9]+$"))
+        .respond_with(range_response(next_wheel))
+        .mount(&h.server)
+        .await;
+
+    let next_uri = format!("/pypi/files/{}/{next_filename}.metadata", next_digest.as_str());
+    let (status, _, body) = get(&h.state, &next_uri, None).await;
+
+    assert_eq!(status, StatusCode::OK, "{label}");
+    assert_eq!(body.as_bytes(), next_metadata, "{label}");
 }
 pub fn upload_fields() -> Vec<(&'static str, &'static str)> {
     vec![

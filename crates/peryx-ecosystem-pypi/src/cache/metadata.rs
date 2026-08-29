@@ -169,20 +169,12 @@ async fn generated_wheel_metadata_by_range(
     if offline {
         return Err(CacheError::OfflineMissing("metadata"));
     }
-    if !client.may_support_ranges() {
-        return Ok(None);
-    }
     let _permit = upstream_permit(state, source_name).await?;
     match wheel_metadata_by_range(&client, url, filename).await {
         Ok(RemoteMetadata::Found(metadata)) => Ok(Some(metadata)),
         Ok(RemoteMetadata::Missing) => Err(CacheError::FileNotFound),
-        Ok(RemoteMetadata::Unsupported) => Ok(None),
+        Ok(RemoteMetadata::Unsupported) | Err(RangeError::Unsupported | RangeError::Invalid(_)) => Ok(None),
         Err(RangeError::Upstream(err)) => Err(CacheError::Upstream(err)),
-        Err(err @ (RangeError::Unsupported | RangeError::Invalid(_))) => {
-            debug_assert!(err.disables_ranges());
-            client.disable_ranges();
-            Ok(None)
-        }
     }
 }
 

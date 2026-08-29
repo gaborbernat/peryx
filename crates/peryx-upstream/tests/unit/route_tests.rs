@@ -180,12 +180,43 @@ async fn test_artifact_client_falls_back_for_range_reads() {
     let artifacts = source.artifacts();
     let url = format!("{}/files/artifact.bin?signature=origin", origin.uri());
 
-    assert!(artifacts.may_support_ranges());
     assert_eq!(artifacts.head_file_for_range(&url).await.unwrap().len, 5);
     assert_eq!(&artifacts.fetch_range(&url, 1, 3, 3).await.unwrap()[..], b"hee");
+}
 
-    artifacts.disable_ranges();
-    assert!(!artifacts.may_support_ranges());
+#[tokio::test]
+async fn test_artifact_client_keeps_origin_ranges_after_mirror_ignores_them() {
+    let origin = MockServer::start().await;
+    let mirror = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/mirror/files/artifact.bin"))
+        .and(header("range", "bytes=1-3"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"whole".to_vec()))
+        .expect(1)
+        .mount(&mirror)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/artifact.bin"))
+        .and(header("range", "bytes=1-3"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 1-3/5")
+                .set_body_bytes(b"hee".to_vec()),
+        )
+        .expect(2)
+        .mount(&origin)
+        .await;
+    let source = NamedUpstream::new(
+        "origin",
+        UpstreamClient::new(&format!("{}/api/", origin.uri())).unwrap(),
+    )
+    .with_artifact_mirror(UpstreamClient::new(&format!("{}/mirror/", mirror.uri())).unwrap(), true);
+    let artifacts = source.artifacts();
+    let url = format!("{}/files/artifact.bin", origin.uri());
+
+    for _ in 0..2 {
+        assert_eq!(artifacts.fetch_range(&url, 1, 3, 3).await.unwrap(), b"hee".as_slice());
+    }
 }
 
 #[tokio::test]
@@ -421,13 +452,4 @@ async fn test_direct_artifact_client_reads_ranges() {
         ),
         (5, bytes::Bytes::from_static(b"hee"))
     );
-}
-
-#[test]
-fn test_direct_artifact_client_uses_origin_range_state() {
-    let client = UpstreamClient::new("https://origin.example/api/").unwrap();
-    let artifacts = ArtifactClient::from(client);
-    assert!(artifacts.may_support_ranges());
-    artifacts.disable_ranges();
-    assert!(!artifacts.may_support_ranges());
 }

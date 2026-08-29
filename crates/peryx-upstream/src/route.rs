@@ -56,19 +56,6 @@ impl ArtifactClient {
         Ok(self.origin.stream_bytes(url).await?.boxed())
     }
 
-    #[must_use]
-    pub fn may_support_ranges(&self) -> bool {
-        self.mirror.as_ref().is_some_and(UpstreamClient::may_support_ranges)
-            || (self.fallback || self.mirror.is_none()) && self.origin.may_support_ranges()
-    }
-
-    pub fn disable_ranges(&self) {
-        if let Some(mirror) = &self.mirror {
-            mirror.disable_ranges();
-        }
-        self.origin.disable_ranges();
-    }
-
     /// Tries the mirror before the advertised URL when `fallback` is true.
     ///
     /// # Errors

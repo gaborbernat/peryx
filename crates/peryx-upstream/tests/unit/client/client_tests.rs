@@ -5,11 +5,13 @@ use std::thread::JoinHandle;
 
 use futures_util::TryStreamExt as _;
 use rstest::rstest;
-use wiremock::matchers::{header, header_regex, method, path};
+use wiremock::matchers::{header, header_regex, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{guarded_client, mount_get};
-use crate::client::{Auth, UpstreamClient, UpstreamError, redact_url};
+use crate::client::{
+    Auth, RANGE_SUPPRESSION_CAPACITY, RANGE_SUPPRESSION_TTL, UpstreamClient, UpstreamError, redact_url,
+};
 
 #[tokio::test]
 async fn test_fetch_bytes() {
@@ -169,7 +171,6 @@ async fn test_fetch_range_requests_identity_bytes() {
         .unwrap();
 
     assert_eq!(&bytes[..], b"hee");
-    assert!(client.may_support_ranges());
 }
 
 #[tokio::test]
@@ -192,7 +193,6 @@ async fn test_fetch_range_accepts_unknown_total() {
         .unwrap();
 
     assert_eq!(&bytes[..], b"hee");
-    assert!(client.may_support_ranges());
 }
 
 #[tokio::test]
@@ -249,7 +249,6 @@ async fn test_fetch_range_rejects_caller_budget_before_request() {
 }
 
 #[rstest]
-#[case::unsupported_status(200, None, b"whole-file".as_slice())]
 #[case::missing_content_range(206, None, b"hee".as_slice())]
 #[case::non_bytes_unit(206, Some("items 1-3/5"), b"hee".as_slice())]
 #[case::missing_total(206, Some("bytes 1-3"), b"hee".as_slice())]
@@ -258,8 +257,9 @@ async fn test_fetch_range_rejects_caller_budget_before_request() {
 #[case::end_mismatch(206, Some("bytes 1-4/6"), b"hee".as_slice())]
 #[case::non_numeric_total(206, Some("bytes 1-3/not-a-number"), b"hee".as_slice())]
 #[case::total_not_past_end(206, Some("bytes 1-3/3"), b"hee".as_slice())]
+#[case::range_not_satisfiable(416, None, b"".as_slice())]
 #[tokio::test]
-async fn test_fetch_range_disables_on_bad_range_response(
+async fn test_fetch_range_does_not_suppress_after_a_bad_range_response(
     #[case] status: u16,
     #[case] content_range: Option<&str>,
     #[case] body: &[u8],
@@ -272,22 +272,162 @@ async fn test_fetch_range_disables_on_bad_range_response(
     mount_get(&server, "/files/artifact.bin", response).await;
     let client = guarded_client(&server);
 
-    let err = client
-        .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3, 3)
+    for _ in 0..2 {
+        client
+            .fetch_range(&format!("{}/files/artifact.bin", server.uri()), 1, 3, 3)
+            .await
+            .unwrap_err();
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_fetch_range_suppresses_only_the_resource_that_ignored_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/ignored.bin"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"whole-file".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/supported.bin"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 1-3/5")
+                .set_body_bytes(b"hee".to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+    let ignored = format!("{}/files/ignored.bin", server.uri());
+
+    for _ in 0..2 {
+        assert!(matches!(
+            client.fetch_range(&ignored, 1, 3, 3).await,
+            Err(crate::RangeError::Unsupported)
+        ));
+    }
+
+    assert_eq!(
+        client
+            .fetch_range(&format!("{}/files/supported.bin", server.uri()), 1, 3, 3)
+            .await
+            .unwrap(),
+        b"hee".as_slice()
+    );
+}
+
+#[tokio::test]
+async fn test_fetch_range_suppression_applies_to_head() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/ignored.bin"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+    let url = format!("{}/files/ignored.bin", server.uri());
+
+    client.fetch_range(&url, 0, 0, 1).await.unwrap_err();
+    assert!(matches!(
+        client.head_file_for_range(&url).await,
+        Err(crate::RangeError::Unsupported)
+    ));
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_range_suppression_debug_omits_resource_urls() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/ignored.bin"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+
+    client
+        .fetch_range(&format!("{}/files/ignored.bin?token=secret", server.uri()), 0, 0, 1)
         .await
         .unwrap_err();
 
-    assert!(err.disables_ranges());
-    assert!(!client.may_support_ranges());
+    let debug = format!("{client:?}");
+    assert!(debug.contains("RangeSuppressions { .. }"));
+    assert!(!debug.contains("token=secret"));
 }
 
-#[test]
-fn test_upstream_range_error_does_not_disable_ranges() {
-    let error = crate::RangeError::Upstream(UpstreamError::InvalidResponse {
-        reason: "bad metadata".to_owned(),
-    });
+#[tokio::test]
+async fn test_fetch_range_suppression_expires() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/ignored.bin"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+    let url = format!("{}/files/ignored.bin", server.uri());
 
-    assert!(!error.disables_ranges());
+    assert!(matches!(
+        client.fetch_range(&url, 0, 0, 1).await,
+        Err(crate::RangeError::Unsupported)
+    ));
+    assert!(matches!(
+        client.fetch_range(&url, 0, 0, 1).await,
+        Err(crate::RangeError::Unsupported)
+    ));
+    tokio::time::pause();
+    tokio::time::advance(RANGE_SUPPRESSION_TTL + std::time::Duration::from_nanos(1)).await;
+    tokio::time::resume();
+    assert!(matches!(
+        client.fetch_range(&url, 0, 0, 1).await,
+        Err(crate::RangeError::Unsupported)
+    ));
+}
+
+#[tokio::test]
+async fn test_fetch_range_suppression_has_fixed_capacity() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/files/[0-9]+\.bin$"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+
+    for resource in 0..=RANGE_SUPPRESSION_CAPACITY {
+        let url = format!("{}/files/{resource}.bin", server.uri());
+        assert!(matches!(
+            client.fetch_range(&url, 0, 0, 1).await,
+            Err(crate::RangeError::Unsupported)
+        ));
+    }
+    assert!(matches!(
+        client
+            .fetch_range(
+                &format!("{}/files/{RANGE_SUPPRESSION_CAPACITY}.bin", server.uri()),
+                0,
+                0,
+                1,
+            )
+            .await,
+        Err(crate::RangeError::Unsupported)
+    ));
+    assert!(matches!(
+        client
+            .fetch_range(&format!("{}/files/0.bin", server.uri()), 0, 0, 1)
+            .await,
+        Err(crate::RangeError::Unsupported)
+    ));
+
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        RANGE_SUPPRESSION_CAPACITY + 2
+    );
 }
 
 #[tokio::test]
@@ -301,11 +441,10 @@ async fn test_fetch_range_rejects_short_body() {
         err.to_string(),
         "upstream returned an invalid byte range response: expected 3 bytes, received 2"
     );
-    assert!(!client.may_support_ranges());
 }
 
 #[tokio::test]
-async fn test_head_file_for_range_requires_byte_ranges() {
+async fn test_head_file_for_range_accepts_length_without_advisory_range_header() {
     let server = MockServer::start().await;
     Mock::given(method("HEAD"))
         .and(path("/files/artifact.bin"))
@@ -314,21 +453,82 @@ async fn test_head_file_for_range_requires_byte_ranges() {
         .await;
     let client = guarded_client(&server);
 
-    let err = client
+    let head = client
         .head_file_for_range(&format!("{}/files/artifact.bin", server.uri()))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(err.disables_ranges());
-    assert!(!client.may_support_ranges());
+    assert_eq!(head.len, 10);
 }
 
 #[tokio::test]
-async fn test_head_file_for_range_requires_content_length() {
+async fn test_head_file_for_range_probes_when_length_is_missing() {
     let server = MockServer::start().await;
     Mock::given(method("HEAD"))
         .and(path("/files/artifact.bin"))
         .respond_with(ResponseTemplate::new(200).insert_header("accept-ranges", "bytes"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/artifact.bin"))
+        .and(header("range", "bytes=0-0"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 0-0/10")
+                .set_body_bytes(b"a".to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+
+    let head = client
+        .head_file_for_range(&format!("{}/files/artifact.bin", server.uri()))
+        .await
+        .unwrap();
+
+    assert_eq!(head.len, 10);
+}
+
+#[rstest]
+#[case::method_not_allowed(405)]
+#[case::not_implemented(501)]
+#[tokio::test]
+async fn test_head_file_for_range_probes_when_head_is_unsupported(#[case] status: u16) {
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/files/artifact.bin"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/artifact.bin"))
+        .and(header("range", "bytes=0-0"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 0-0/10")
+                .set_body_bytes(b"a".to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+
+    let head = client
+        .head_file_for_range(&format!("{}/files/artifact.bin", server.uri()))
+        .await
+        .unwrap();
+
+    assert_eq!(head.len, 10);
+}
+
+#[tokio::test]
+async fn test_head_file_for_range_rejects_non_success_without_an_error_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/files/artifact.bin"))
+        .respond_with(ResponseTemplate::new(304))
+        .expect(1)
         .mount(&server)
         .await;
     let client = guarded_client(&server);
@@ -338,8 +538,45 @@ async fn test_head_file_for_range_requires_content_length() {
         .await
         .unwrap_err();
 
-    assert!(err.disables_ranges());
-    assert!(!client.may_support_ranges());
+    assert_eq!(
+        err.to_string(),
+        "upstream returned an invalid byte range response: HEAD returned a non-success response"
+    );
+}
+
+#[rstest]
+#[case::unauthorized(401)]
+#[case::not_found(404)]
+#[tokio::test]
+async fn test_head_failure_does_not_suppress_another_resource(#[case] status: u16) {
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/files/rejected.bin"))
+        .respond_with(ResponseTemplate::new(status))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/files/supported.bin"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-length", "10"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+
+    client
+        .head_file_for_range(&format!("{}/files/rejected.bin", server.uri()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        client
+            .head_file_for_range(&format!("{}/files/supported.bin", server.uri()))
+            .await
+            .unwrap()
+            .len,
+        10
+    );
 }
 
 #[tokio::test]

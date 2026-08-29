@@ -4882,6 +4882,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "futures-util",
  "http 1.5.0",
+ "httpdate",
  "peryx-core",
  "peryx-ha",
  "peryx-identity",

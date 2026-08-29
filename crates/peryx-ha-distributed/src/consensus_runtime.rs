@@ -590,21 +590,24 @@ impl OwnershipGroup {
         }
     }
 
-    /// Returns rejected state-machine transitions as invalid commands, not committed receipts.
+    /// Returns an unchanged transfer as a committed no-op so a retry receives a receipt.
     async fn submit_ownership(&self, command: OwnershipCommand) -> Result<CommandReceipt, ControlError> {
         match self.submit_command(command).await {
-            Ok(response) => match response.data {
-                OwnershipResponse::Applied(OwnershipEffect::Rejected(rejection)) => {
-                    Err(ControlError::Invalid(rejection_reason(rejection).to_owned()))
-                }
+            Ok(response) => {
+                let outcome = match response.data {
+                    OwnershipResponse::Applied(OwnershipEffect::Rejected(Rejection::SameHome)) => {
+                        CommandOutcome::NoChange
+                    }
+                    OwnershipResponse::Applied(OwnershipEffect::Rejected(Rejection::NotAssigned)) => {
+                        return Err(ControlError::Invalid(
+                            "the authority is not assigned a home to move or fence".to_owned(),
+                        ));
+                    }
+                    _ => CommandOutcome::Committed,
+                };
                 // Transfer and epoch commands have no voter transition to audit.
-                _ => Ok(committed_receipt(
-                    &response.log_id,
-                    CommandOutcome::Committed,
-                    Vec::new(),
-                    Vec::new(),
-                )),
-            },
+                Ok(committed_receipt(&response.log_id, outcome, Vec::new(), Vec::new()))
+            }
             Err(OwnershipError::NotLeader { leader }) => Err(ControlError::NotLeader { leader }),
             Err(error) => Err(ControlError::Unavailable(error.to_string())),
         }
@@ -652,13 +655,6 @@ pub fn map_write_error(error: &RaftError<u64, ClientWriteError<u64, PeryxNode>>)
             leader: forward.leader_node.as_ref().map(|node| node.addr.clone()),
         },
         other => ControlError::Unavailable(other.to_string()),
-    }
-}
-
-const fn rejection_reason(rejection: Rejection) -> &'static str {
-    match rejection {
-        Rejection::SameHome => "the authority already homes at that datacenter",
-        Rejection::NotAssigned => "the authority is not assigned a home to move or fence",
     }
 }
 

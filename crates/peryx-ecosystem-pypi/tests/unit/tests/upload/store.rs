@@ -124,7 +124,7 @@ async fn test_commit_publish_reports_the_content_and_metadata_placements() {
     let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
 
     let publish = stage_publish(&blobs, prepared).await.unwrap();
-    let published = commit_publish(&meta, "hosted", publish, None, true).unwrap();
+    let published = commit_publish(&meta, "hosted", publish, None, true, None).unwrap();
 
     assert!(published.stored);
     assert_eq!(
@@ -160,7 +160,7 @@ async fn test_commit_publish_adds_the_provenance_placement() {
     let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
 
     let publish = stage_publish(&blobs, prepared).await.unwrap();
-    let published = commit_publish(&meta, "hosted", publish, None, true).unwrap();
+    let published = commit_publish(&meta, "hosted", publish, None, true, None).unwrap();
 
     assert_eq!(
         published.placements.len(),
@@ -210,7 +210,7 @@ async fn test_store_prepared_quota_releases_when_the_existing_record_is_invalid(
 
     // Record failures after blob staging must roll back quota reservations.
     let staged = stage_publish(&blobs, prepared).await.unwrap();
-    let result = commit_publish(&meta, "hosted", staged, Some(pending), true);
+    let result = commit_publish(&meta, "hosted", staged, Some(pending), true, None);
 
     assert!(matches!(result, Err(UploadStoreError::Parse(_))));
     assert_eq!(

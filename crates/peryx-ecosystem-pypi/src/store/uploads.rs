@@ -88,6 +88,12 @@ pub enum UploadMutation {
     Delete,
 }
 
+#[derive(Clone, Copy)]
+pub enum OverrideMutation<'a> {
+    Put(&'a str),
+    Delete,
+}
+
 /// Publish a file, but only if `guard` accepts the filename's current stored record.
 ///
 /// Its metadata sibling, its record, its project, and its journal entry go in together, and the guard
@@ -112,12 +118,12 @@ pub fn publish_file_if<E: From<MetaError>>(
     guard: impl FnOnce(Option<&[u8]>) -> Result<Guard, E>,
 ) -> Result<bool, E> {
     let Some(reservation) = file.quota else {
-        return meta.commit_driver_txn(|txn| publish_file_in_txn(txn, outbox, file, guard));
+        return meta.commit_driver_txn(|txn| publish_file_in_txn(txn, outbox, file, guard, None));
     };
     meta.commit_driver_txn_with_quota_if(
         reservation.id,
         |stored| *stored,
-        |txn| publish_file_in_txn(txn, outbox, file, guard).map_err(PublishError::Body),
+        |txn| publish_file_in_txn(txn, outbox, file, guard, None).map_err(PublishError::Body),
     )
     .map_err(map_publish_error)
 }
@@ -126,15 +132,16 @@ pub fn publish_file_with_commit_if<E: From<MetaError>>(
     meta: &MetaStore,
     outbox: bool,
     file: &PublishedFile,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
     guard: impl FnOnce(Option<&[u8]>) -> Result<Guard, E>,
 ) -> Result<peryx_storage::meta::DriverCommit<bool>, E> {
     let Some(reservation) = file.quota else {
-        return meta.commit_driver_txn_with_commit(|txn| publish_file_in_txn(txn, outbox, file, guard));
+        return meta.commit_driver_txn_with_commit(|txn| publish_file_in_txn(txn, outbox, file, guard, webhook));
     };
     meta.commit_driver_txn_with_quota_if_commit(
         reservation.id,
         |stored| *stored,
-        |txn| publish_file_in_txn(txn, outbox, file, guard).map_err(PublishError::Body),
+        |txn| publish_file_in_txn(txn, outbox, file, guard, webhook).map_err(PublishError::Body),
     )
     .map_err(map_publish_error)
 }
@@ -169,11 +176,15 @@ pub fn publish_file_in_txn<E: From<MetaError>>(
     outbox: bool,
     file: &PublishedFile,
     guard: impl FnOnce(Option<&[u8]>) -> Result<Guard, E>,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<(bool, Vec<Vec<u8>>), E> {
     let upload = upload_key(file.index, file.normalized, file.filename);
     match guard(txn.get(&upload)?.as_deref())? {
         Guard::Skip => Ok((false, Vec::new())),
         Guard::Commit => {
+            if let Some(webhook) = webhook {
+                txn.enqueue_webhook_event(webhook);
+            }
             txn.reference_blob(file.artifact_sha256, file.artifact_size);
             if let Some(sibling) = &file.metadata {
                 let value = metadata_value(sibling.url, sibling.metadata_sha256, sibling.source);
@@ -322,6 +333,85 @@ pub fn mutate_uploads<E: From<MetaError>>(
                     submitted_at_unix,
                 )
             }));
+        }
+        Ok((changed, journal))
+    })
+}
+
+#[derive(Clone, Copy)]
+pub struct UploadMutationPlan<'a> {
+    pub outbox: bool,
+    pub index: &'a str,
+    pub normalized: &'a str,
+    pub action: &'a str,
+    pub submitted_at_unix: i64,
+    pub override_filenames: &'a [String],
+    pub override_mutation: OverrideMutation<'a>,
+}
+
+pub fn mutate_uploads_and_overrides<E: From<MetaError>>(
+    meta: &MetaStore,
+    plan: UploadMutationPlan<'_>,
+    guard: impl Fn() -> Result<(), E>,
+    mut mutate: impl FnMut(&str, &[u8]) -> Result<Option<Vec<u8>>, E>,
+    webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
+) -> Result<usize, E> {
+    let prefix = format!("{UPLOAD_PREFIX}{}/{}/", plan.index, plan.normalized);
+    meta.commit_driver_txn(|txn| {
+        let mut changed = 0;
+        let mut journal = Vec::new();
+        for (key, record) in txn.prefix(&prefix)? {
+            let filename = &key[prefix.len()..];
+            let Some(bytes) = mutate(filename, &record)? else {
+                continue;
+            };
+            guard()?;
+            txn.put(&key, &bytes)?;
+            changed += 1;
+            journal.extend(journal_entries(plan.outbox, || {
+                journal_bytes(
+                    plan.action,
+                    plan.normalized,
+                    journal_version(filename, &record).as_deref(),
+                    Some(filename),
+                    plan.submitted_at_unix,
+                )
+            }));
+        }
+        for filename in plan.override_filenames {
+            guard()?;
+            let key = override_key(plan.index, plan.normalized, filename);
+            let override_action = match plan.override_mutation {
+                OverrideMutation::Put(kind) => {
+                    if txn.get(&key)?.as_deref() == Some(kind.as_bytes()) {
+                        continue;
+                    }
+                    txn.put(&key, kind.as_bytes())?;
+                    if kind == "hidden" { "hide" } else { "yank" }
+                }
+                OverrideMutation::Delete => {
+                    let Some(prior) = txn.get(&key)? else {
+                        continue;
+                    };
+                    txn.remove(&key)?;
+                    if prior == b"hidden" { "restore" } else { "unyank" }
+                }
+            };
+            changed += 1;
+            journal.extend(journal_entries(plan.outbox, || {
+                journal_bytes(
+                    override_action,
+                    plan.normalized,
+                    distribution_version_segment(filename),
+                    Some(filename),
+                    plan.submitted_at_unix,
+                )
+            }));
+        }
+        if changed > 0
+            && let Some(webhook) = webhook(changed)
+        {
+            txn.enqueue_webhook_event(webhook);
         }
         Ok((changed, journal))
     })

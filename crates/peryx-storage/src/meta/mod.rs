@@ -106,11 +106,14 @@ pub use scoped_token::{
 };
 pub use user::{StoredPasswordVerifier, UserStoreError};
 pub use version::VersionPrecondition;
-pub use webhook::{NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus};
+pub use webhook::{
+    NewWebhookDelivery, WebhookDeliveryAttempt, WebhookDeliveryRecord, WebhookDeliveryStatus, WebhookEventIntent,
+};
 
 const SERIAL: TableDefinition<&str, u64> = TableDefinition::new("serial");
 const WEBHOOK_DELIVERY: TableDefinition<&str, &[u8]> = TableDefinition::new("webhook_delivery");
 const WEBHOOK_DUE: TableDefinition<&str, &str> = TableDefinition::new("webhook_due");
+const WEBHOOK_EVENT: TableDefinition<&str, &[u8]> = TableDefinition::new("webhook_event");
 const JOB_RUN: TableDefinition<&str, &[u8]> = TableDefinition::new("job_run");
 const JOB_LEASE: TableDefinition<&str, &[u8]> = TableDefinition::new("job_lease");
 /// Operation IDs make admitted-write retries idempotent.
@@ -268,6 +271,7 @@ impl MetaStore {
             txn.open_table(SERIAL)?;
             txn.open_table(WEBHOOK_DELIVERY)?;
             txn.open_table(WEBHOOK_DUE)?;
+            txn.open_table(WEBHOOK_EVENT)?;
             txn.open_table(JOB_RUN)?;
             txn.open_table(JOB_LEASE)?;
             txn.open_table(POLICY_DECISION)?;

@@ -193,7 +193,13 @@ pub fn commit_blob_membership(
 /// charged, in one metadata transaction so a crash cannot leave the repository billed for content it
 /// no longer serves. An unmetered blob has no allocation to release. Reports whether the membership
 /// existed.
-pub fn release_blob_membership(meta: &MetaStore, index: &str, repo: &str, digest: &str) -> Result<bool, ServeError> {
+pub fn release_blob_membership(
+    meta: &MetaStore,
+    index: &str,
+    repo: &str,
+    digest: &str,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
+) -> Result<bool, ServeError> {
     let allocation = QuotaAllocation {
         repository: index,
         resource: Some(repo),
@@ -204,10 +210,11 @@ pub fn release_blob_membership(meta: &MetaStore, index: &str, repo: &str, digest
         allocation,
         |deleted| *deleted,
         |txn| {
-            Ok((
-                txn.remove(&store::blob_membership_key(index, repo, digest))?,
-                Vec::new(),
-            ))
+            let removed = txn.remove(&store::blob_membership_key(index, repo, digest))?;
+            if removed && let Some(webhook) = webhook {
+                txn.enqueue_webhook_event(webhook);
+            }
+            Ok((removed, Vec::new()))
         },
     )
 }
@@ -220,6 +227,7 @@ pub struct ManifestCommit<'a> {
     pub reference: &'a Reference,
     pub reservation: Option<QuotaReservationRecord>,
     pub journal: crate::outbox::Outbox,
+    pub webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 }
 
 pub fn publish_manifest(meta: &MetaStore, commit: ManifestCommit<'_>) -> Result<bool, ServeError> {
@@ -231,6 +239,7 @@ pub fn publish_manifest(meta: &MetaStore, commit: ManifestCommit<'_>) -> Result<
         reference,
         reservation,
         journal,
+        webhook,
     } = commit;
     let body = |txn: &mut DriverTxn| {
         let tag = match reference {
@@ -238,6 +247,11 @@ pub fn publish_manifest(meta: &MetaStore, commit: ManifestCommit<'_>) -> Result<
             Reference::Digest(_) => None,
         };
         let publication = store::publish_manifest_txn(txn, index, repo, canonical, manifest, tag)?;
+        if publication.changed
+            && let Some(webhook) = webhook
+        {
+            txn.enqueue_webhook_event(webhook);
+        }
         let entries = crate::outbox::record(journal, || crate::outbox::OciMutation::PublishManifest {
             index: index.to_owned(),
             repo: repo.to_owned(),

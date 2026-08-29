@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::quota::PendingQuota;
 use crate::store::PypiStore as _;
-use crate::store::{Guard, PromotedRelease, UploadMutation};
+use crate::store::{Guard, PromotedRelease};
 use crate::upload::{self, PreparedUpload, TrashInfo, Uploaded};
 use crate::{ProjectStatus, Yanked, file_matches_version, parse_distribution_filename, to_json, versions_match};
 use peryx_core::path::local_artifact_url;
@@ -91,12 +91,20 @@ pub async fn store_upload(
     prepared: PreparedUpload,
     quota: Option<PendingQuota>,
     fence: u64,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<StoredUpload, CacheError> {
     let publish = upload::stage_publish(&state.blobs, prepared).await?;
     let published = commit_control(state, project, fence, |lease| {
         lease.check()?;
-        upload::commit_publish(&state.meta, name, publish, quota, crate::replication_enabled(state))
-            .map_err(CacheError::from)
+        upload::commit_publish(
+            &state.meta,
+            name,
+            publish,
+            quota,
+            crate::replication_enabled(state),
+            webhook,
+        )
+        .map_err(CacheError::from)
     })
     .await?;
     for (digest, size) in &published.placements {
@@ -215,39 +223,62 @@ pub async fn set_yanked(
     version: Option<&str>,
     yanked: Yanked,
 ) -> Result<usize, CacheError> {
+    set_yanked_with_webhook(state, index, hosted, normalized, version, yanked, |_| None).await
+}
+
+pub async fn set_yanked_with_webhook(
+    state: &ServingState,
+    index: &Index,
+    hosted: &str,
+    normalized: &str,
+    version: Option<&str>,
+    yanked: Yanked,
+    webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
+) -> Result<usize, CacheError> {
     let fence = control_epoch(state, normalized).await;
     let uploaded = upload_filenames(state, hosted, normalized)?;
     let served = served_filenames(state, index, normalized, version).await?;
+    let override_filenames = served
+        .into_iter()
+        .filter(|filename| !uploaded.contains(filename))
+        .collect::<Vec<_>>();
+    let override_value = yank_override_value(&yanked)?;
+    let override_mutation = override_value.as_deref().map_or(
+        crate::store::OverrideMutation::Delete,
+        crate::store::OverrideMutation::Put,
+    );
     let submitted_at_unix = (state.clock)();
     let changed = commit_control(state, normalized, fence, |lease| {
         lease.check()?;
-        let mut changed = yank_uploads(state, hosted, normalized, version, &yanked, submitted_at_unix)?;
-        for filename in served {
-            if uploaded.contains(&filename) {
-                continue;
-            }
-            lease.check()?;
-            if let Some(value) = yank_override_value(&yanked)? {
-                state.meta.put_override(
-                    crate::replication_enabled(state),
-                    hosted,
-                    normalized,
-                    &filename,
-                    &value,
-                    submitted_at_unix,
-                )?;
-                changed += 1;
-            } else if state.meta.delete_override(
-                crate::replication_enabled(state),
-                hosted,
+        let action = if matches!(yanked, Yanked::No) {
+            "unyank"
+        } else {
+            "withdraw"
+        };
+        crate::store::mutate_uploads_and_overrides(
+            &state.meta,
+            crate::store::UploadMutationPlan {
+                outbox: crate::replication_enabled(state),
+                index: hosted,
                 normalized,
-                &filename,
+                action,
                 submitted_at_unix,
-            )? {
-                changed += 1;
-            }
-        }
-        Ok(changed)
+                override_filenames: &override_filenames,
+                override_mutation,
+            },
+            || lease.check(),
+            |_filename, bytes| -> Result<Option<Vec<u8>>, CacheError> {
+                let mut uploaded: Uploaded = serde_json::from_slice(bytes)?;
+                if version.is_some_and(|version| !versions_match(&uploaded.version, version))
+                    || uploaded.file.yanked == yanked
+                {
+                    return Ok(None);
+                }
+                uploaded.file.yanked = yanked.clone();
+                Ok(Some(to_json(&uploaded).into_bytes()))
+            },
+            webhook,
+        )
     })
     .await?;
     if changed > 0 {
@@ -275,6 +306,12 @@ pub struct TrashContext<'a> {
     pub reason: Option<&'a str>,
 }
 
+#[derive(Clone, Copy)]
+pub struct RemovalContext<'a> {
+    pub volatile: bool,
+    pub trash: TrashContext<'a>,
+}
+
 /// Remove a project's files as served by `index`.
 ///
 /// Uploaded files are soft-deleted (requires `volatile`): the record is marked trashed and its blob
@@ -294,28 +331,67 @@ pub async fn remove_files(
     version: Option<&str>,
     trash: TrashContext<'_>,
 ) -> Result<usize, CacheError> {
+    remove_files_with_webhook(
+        state,
+        index,
+        hosted,
+        normalized,
+        version,
+        RemovalContext { volatile, trash },
+        |_| None,
+    )
+    .await
+}
+
+pub async fn remove_files_with_webhook(
+    state: &ServingState,
+    index: &Index,
+    hosted: &str,
+    normalized: &str,
+    version: Option<&str>,
+    removal: RemovalContext<'_>,
+    webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
+) -> Result<usize, CacheError> {
     let fence = control_epoch(state, normalized).await;
     let filenames = served_filenames(state, index, normalized, version).await?;
     let uploaded = upload_filenames(state, hosted, normalized)?;
+    let override_filenames = filenames
+        .into_iter()
+        .filter(|filename| !uploaded.contains(filename))
+        .collect::<Vec<_>>();
     let affected = commit_control(state, normalized, fence, |lease| {
         lease.check()?;
-        let mut affected = trash_uploads(state, hosted, volatile, normalized, version, trash)?;
-        for filename in filenames {
-            if uploaded.contains(&filename) {
-                continue;
-            }
-            lease.check()?;
-            state.meta.put_override(
-                crate::replication_enabled(state),
-                hosted,
+        crate::store::mutate_uploads_and_overrides(
+            &state.meta,
+            crate::store::UploadMutationPlan {
+                outbox: crate::replication_enabled(state),
+                index: hosted,
                 normalized,
-                &filename,
-                HIDDEN,
-                trash.deleted_at_unix,
-            )?;
-            affected += 1;
-        }
-        Ok(affected)
+                action: "delete-file",
+                submitted_at_unix: removal.trash.deleted_at_unix,
+                override_filenames: &override_filenames,
+                override_mutation: crate::store::OverrideMutation::Put(HIDDEN),
+            },
+            || lease.check(),
+            |_filename, bytes| -> Result<Option<Vec<u8>>, CacheError> {
+                let mut uploaded: Uploaded = serde_json::from_slice(bytes)?;
+                if version.is_some_and(|version| !versions_match(&uploaded.version, version))
+                    || uploaded.trashed.is_some()
+                {
+                    return Ok(None);
+                }
+                if !removal.volatile {
+                    return Err(CacheError::NotVolatile);
+                }
+                uploaded.trashed = Some(TrashInfo {
+                    deleted_at_unix: removal.trash.deleted_at_unix,
+                    actor: removal.trash.actor.map(str::to_owned),
+                    reason: removal.trash.reason.map(str::to_owned),
+                });
+                Ok(Some(to_json(&uploaded).into_bytes()))
+            },
+            webhook,
+        )
     })
     .await?;
     if affected > 0 {
@@ -335,30 +411,53 @@ pub async fn restore_files(
     normalized: &str,
     version: Option<&str>,
 ) -> Result<usize, CacheError> {
+    restore_files_with_webhook(state, hosted, normalized, version, |_| None).await
+}
+
+pub async fn restore_files_with_webhook(
+    state: &ServingState,
+    hosted: &str,
+    normalized: &str,
+    version: Option<&str>,
+    webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
+) -> Result<usize, CacheError> {
     let fence = control_epoch(state, normalized).await;
+    let override_filenames = state
+        .meta
+        .list_overrides(hosted, normalized)?
+        .into_iter()
+        .filter(|(filename, kind)| {
+            kind == HIDDEN && version.is_none_or(|version| file_matches_version(filename, version))
+        })
+        .map(|(filename, _)| filename)
+        .collect::<Vec<_>>();
     let submitted_at_unix = (state.clock)();
     let restored = commit_control(state, normalized, fence, |lease| {
         lease.check()?;
-        let mut restored = untrash_uploads(state, hosted, normalized, version, submitted_at_unix)?;
-        for (filename, kind) in state.meta.list_overrides(hosted, normalized)? {
-            if kind != HIDDEN {
-                continue;
-            }
-            if version.is_some_and(|version| !file_matches_version(&filename, version)) {
-                continue;
-            }
-            lease.check()?;
-            if state.meta.delete_override(
-                crate::replication_enabled(state),
-                hosted,
+        crate::store::mutate_uploads_and_overrides(
+            &state.meta,
+            crate::store::UploadMutationPlan {
+                outbox: crate::replication_enabled(state),
+                index: hosted,
                 normalized,
-                &filename,
+                action: "restore",
                 submitted_at_unix,
-            )? {
-                restored += 1;
-            }
-        }
-        Ok(restored)
+                override_filenames: &override_filenames,
+                override_mutation: crate::store::OverrideMutation::Delete,
+            },
+            || lease.check(),
+            |_filename, bytes| -> Result<Option<Vec<u8>>, CacheError> {
+                let mut uploaded: Uploaded = serde_json::from_slice(bytes)?;
+                if uploaded.trashed.is_none()
+                    || version.is_some_and(|version| !versions_match(&uploaded.version, version))
+                {
+                    return Ok(None);
+                }
+                uploaded.trashed = None;
+                Ok(Some(to_json(&uploaded).into_bytes()))
+            },
+            webhook,
+        )
     })
     .await?;
     if restored > 0 {
@@ -451,100 +550,4 @@ fn upload_filenames(state: &ServingState, hosted: &str, normalized: &str) -> Res
         .into_iter()
         .map(|(filename, _)| filename)
         .collect())
-}
-
-/// Mark uploaded records trashed, optionally limited to one version. An already-trashed record is
-/// left as it is (delete is idempotent), and a non-volatile store rejects a live match rather than
-/// touching it. The blob is never removed here, so the file stays recoverable. Returns how many
-/// records were trashed.
-fn trash_uploads(
-    state: &ServingState,
-    name: &str,
-    volatile: bool,
-    normalized: &str,
-    version: Option<&str>,
-    trash: TrashContext<'_>,
-) -> Result<usize, CacheError> {
-    state.meta.mutate_uploads(
-        crate::replication_enabled(state),
-        name,
-        normalized,
-        "delete-file",
-        trash.deleted_at_unix,
-        |_filename, bytes| {
-            let mut uploaded: Uploaded = serde_json::from_slice(bytes)?;
-            if version.is_some_and(|version| !versions_match(&uploaded.version, version)) || uploaded.trashed.is_some()
-            {
-                return Ok(UploadMutation::Keep);
-            }
-            if !volatile {
-                return Err(CacheError::NotVolatile);
-            }
-            uploaded.trashed = Some(TrashInfo {
-                deleted_at_unix: trash.deleted_at_unix,
-                actor: trash.actor.map(str::to_owned),
-                reason: trash.reason.map(str::to_owned),
-            });
-            Ok(UploadMutation::Replace(to_json(&uploaded).into_bytes()))
-        },
-    )
-}
-
-/// Clear the trashed marker off soft-deleted uploaded records, optionally limited to one version, so
-/// the files return to every served page. Returns how many records were restored.
-fn untrash_uploads(
-    state: &ServingState,
-    name: &str,
-    normalized: &str,
-    version: Option<&str>,
-    submitted_at_unix: i64,
-) -> Result<usize, CacheError> {
-    state.meta.mutate_uploads(
-        crate::replication_enabled(state),
-        name,
-        normalized,
-        "restore",
-        submitted_at_unix,
-        |_filename, bytes| {
-            let mut uploaded: Uploaded = serde_json::from_slice(bytes)?;
-            if uploaded.trashed.is_none() || version.is_some_and(|version| !versions_match(&uploaded.version, version))
-            {
-                return Ok(UploadMutation::Keep);
-            }
-            uploaded.trashed = None;
-            Ok(UploadMutation::Replace(to_json(&uploaded).into_bytes()))
-        },
-    )
-}
-
-fn yank_uploads(
-    state: &ServingState,
-    name: &str,
-    normalized: &str,
-    version: Option<&str>,
-    yanked: &Yanked,
-    submitted_at_unix: i64,
-) -> Result<usize, CacheError> {
-    let action = if matches!(yanked, Yanked::No) {
-        "unyank"
-    } else {
-        "withdraw"
-    };
-    state.meta.mutate_uploads(
-        crate::replication_enabled(state),
-        name,
-        normalized,
-        action,
-        submitted_at_unix,
-        |_filename, bytes| {
-            let mut uploaded: Uploaded = serde_json::from_slice(bytes)?;
-            if version.is_some_and(|version| !versions_match(&uploaded.version, version))
-                || uploaded.file.yanked == *yanked
-            {
-                return Ok(UploadMutation::Keep);
-            }
-            uploaded.file.yanked = yanked.clone();
-            Ok(UploadMutation::Replace(to_json(&uploaded).into_bytes()))
-        },
-    )
 }

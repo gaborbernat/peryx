@@ -4,6 +4,7 @@ use super::error::{MetaError, MetaScanError};
 use super::{
     BLOB_RECLAIM_GUARD, DRIVER_KV, DriverBatch, DriverBlobReference, DriverMutation, JOURNAL, JOURNAL_BLOBS,
     JOURNAL_MUTATIONS, JournalEntry, MetaStore, POLICY_INPUT_GENERATION, PolicyInputGeneration, SERIAL, SERIAL_KEY,
+    WebhookEventIntent,
 };
 
 impl MetaStore {
@@ -356,16 +357,19 @@ impl MetaStore {
         let mut txn = self.db.begin_write().map_err(MetaError::from)?;
         set_durability(&mut txn, durable);
         check_replica_serial(&txn, expected_serial)?;
-        let (value, journal) = {
+        let (value, journal, webhooks) = {
             let mut driver = DriverTxn {
                 table: txn.open_table(DRIVER_KV).map_err(MetaError::from)?,
                 touched: std::collections::BTreeSet::new(),
                 blobs: std::collections::BTreeSet::new(),
+                webhooks: Vec::new(),
             };
             let (value, journal) = body(&mut driver)?;
+            let webhooks = std::mem::take(&mut driver.webhooks);
             let journal = finish_journal(journal, driver).map_err(E::from)?;
-            (value, journal)
+            (value, journal, webhooks)
         };
+        Self::enqueue_webhook_events(&txn, &webhooks).map_err(E::from)?;
         check_blob_reclaim_guard(&txn, expected_serial, &journal).map_err(E::from)?;
         let journal_commit = commit_journal(&txn, &journal)?;
         if let Some((repository, catalog)) = catalog_generation {
@@ -507,6 +511,7 @@ pub struct DriverTxn<'txn> {
     table: redb::Table<'txn, &'static str, &'static [u8]>,
     touched: std::collections::BTreeSet<String>,
     blobs: std::collections::BTreeSet<DriverBlobReference>,
+    webhooks: Vec<WebhookEventIntent>,
 }
 
 /// Read-only access to opaque driver rows from one metadata snapshot.
@@ -554,6 +559,11 @@ impl DriverReadTxn {
 }
 
 impl DriverTxn<'_> {
+    /// Persist this event only if the surrounding driver mutation commits.
+    pub fn enqueue_webhook_event(&mut self, event: WebhookEventIntent) {
+        self.webhooks.push(event);
+    }
+
     /// Includes writes staged earlier in this transaction.
     ///
     /// # Errors

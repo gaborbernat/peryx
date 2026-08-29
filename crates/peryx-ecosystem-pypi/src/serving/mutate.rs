@@ -169,15 +169,6 @@ async fn yank_request(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let result = cache::set_yanked(
-        state,
-        index,
-        &hosted.name,
-        &project,
-        version.as_deref(),
-        yank_marker(query),
-    )
-    .await;
     let audit = MutationAudit {
         headers,
         action: "yank",
@@ -189,8 +180,18 @@ async fn yank_request(
         version: version.as_deref(),
         request_id: request_id(headers),
     };
+    let result = cache::set_yanked_with_webhook(
+        state,
+        index,
+        &hosted.name,
+        &project,
+        version.as_deref(),
+        yank_marker(query),
+        |count| prepare_mutation_webhook(state, webhook::YANK, &audit, count),
+    )
+    .await;
     security_mutation_event(&audit, &result);
-    emit_mutation_webhook(state, webhook::YANK, &audit, &result);
+    notify_mutation_webhook(state, &result);
     count_response(result)
 }
 
@@ -206,7 +207,6 @@ async fn restore_request(
         Ok(parsed) => parsed,
         Err(error) => return error.into_response(),
     };
-    let result = cache::restore_files(state, &hosted.name, &project, version.as_deref()).await;
     let audit = MutationAudit {
         headers,
         action: "restore",
@@ -218,8 +218,12 @@ async fn restore_request(
         version: version.as_deref(),
         request_id: request_id(headers),
     };
+    let result = cache::restore_files_with_webhook(state, &hosted.name, &project, version.as_deref(), |count| {
+        prepare_mutation_webhook(state, webhook::RESTORE, &audit, count)
+    })
+    .await;
     security_mutation_event(&audit, &result);
-    emit_mutation_webhook(state, webhook::RESTORE, &audit, &result);
+    notify_mutation_webhook(state, &result);
     count_response(result)
 }
 
@@ -238,7 +242,6 @@ pub async fn pypi_dispatch_delete(state: Arc<ServingState>, uri: axum::http::Uri
             Ok(parsed) => parsed,
             Err(error) => return error.into_response(),
         };
-        let result = cache::set_yanked(&state, index, &hosted.name, &project, version.as_deref(), Yanked::No).await;
         let audit = MutationAudit {
             headers: &headers,
             action: "unyank",
@@ -250,8 +253,18 @@ pub async fn pypi_dispatch_delete(state: Arc<ServingState>, uri: axum::http::Uri
             version: version.as_deref(),
             request_id: request_id(&headers),
         };
+        let result = cache::set_yanked_with_webhook(
+            &state,
+            index,
+            &hosted.name,
+            &project,
+            version.as_deref(),
+            Yanked::No,
+            |count| prepare_mutation_webhook(&state, webhook::UNYANK, &audit, count),
+        )
+        .await;
         security_mutation_event(&audit, &result);
-        emit_mutation_webhook(&state, webhook::UNYANK, &audit, &result);
+        notify_mutation_webhook(&state, &result);
         return count_response(result);
     }
     let (project, version) = match parse_project_version(spec) {
@@ -265,16 +278,6 @@ pub async fn pypi_dispatch_delete(state: Arc<ServingState>, uri: axum::http::Uri
         actor: actor.as_deref(),
         reason: reason.as_deref(),
     };
-    let result = cache::remove_files(
-        &state,
-        index,
-        &hosted.name,
-        volatile,
-        &project,
-        version.as_deref(),
-        trash,
-    )
-    .await;
     let audit = MutationAudit {
         headers: &headers,
         action: "delete",
@@ -286,8 +289,18 @@ pub async fn pypi_dispatch_delete(state: Arc<ServingState>, uri: axum::http::Uri
         version: version.as_deref(),
         request_id: request_id(&headers),
     };
+    let result = cache::remove_files_with_webhook(
+        &state,
+        index,
+        &hosted.name,
+        &project,
+        version.as_deref(),
+        cache::RemovalContext { volatile, trash },
+        |count| prepare_mutation_webhook(&state, webhook::DELETE, &audit, count),
+    )
+    .await;
     security_mutation_event(&audit, &result);
-    emit_mutation_webhook(&state, webhook::DELETE, &audit, &result);
+    notify_mutation_webhook(&state, &result);
     count_response(result)
 }
 
@@ -374,20 +387,14 @@ fn security_promotion_event(audit: PromotionAudit<'_>, result: &Result<usize, Ca
         .emit();
 }
 
-fn emit_mutation_webhook(
+fn prepare_mutation_webhook(
     state: &ServingState,
     event: &'static str,
     audit: &MutationAudit<'_>,
-    result: &Result<usize, CacheError>,
-) {
-    let Ok(count) = result else {
-        return;
-    };
-    if *count == 0 {
-        return;
-    }
+    count: usize,
+) -> Option<peryx_storage::meta::WebhookEventIntent> {
     let created_at_unix = (state.clock)();
-    webhook::emit(
+    webhook::prepare(
         state,
         PypiWebhook {
             event,
@@ -399,11 +406,17 @@ fn emit_mutation_webhook(
             version: audit.version,
             filename: None,
             digest: None,
-            count: *count,
+            count,
             actor: audit.actor,
             request_id: audit.request_id.as_deref(),
         },
-    );
+    )
+}
+
+fn notify_mutation_webhook(state: &ServingState, result: &Result<usize, CacheError>) {
+    if result.as_ref().is_ok_and(|count| *count > 0) {
+        peryx_events::webhook::notify(state);
+    }
 }
 
 /// Peel a trailing `/{action}` off the spec, but only when a project segment precedes it. A project

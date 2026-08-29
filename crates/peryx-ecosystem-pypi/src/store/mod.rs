@@ -41,6 +41,7 @@ pub use uploads::{
     delete_upload, list_overrides, list_upload_entries, mutate_uploads, promote_files_checked, publish_file_if,
     put_override, put_upload, scan_override_records, scan_upload_records,
 };
+pub(crate) use uploads::{OverrideMutation, UploadMutationPlan, mutate_uploads_and_overrides};
 
 /// The former `index_document` table: cached simple-index pages, keyed by the caller's route key.
 const INDEX_PREFIX: &str = "pypi\u{0}i\u{0}";

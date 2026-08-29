@@ -900,7 +900,7 @@ fn manifest_trashed_in(state: &ServingState, members: &[&Index], repo: &str, dig
     }
     Ok(false)
 }
-fn emit_webhook(
+fn prepare_webhook(
     state: &Arc<ServingState>,
     request: &Requester<'_>,
     event: &'static str,
@@ -908,8 +908,8 @@ fn emit_webhook(
     repo: &str,
     version: Option<&str>,
     digest: Option<&str>,
-) {
-    crate::webhook::emit(
+) -> Option<peryx_storage::meta::WebhookEventIntent> {
+    crate::webhook::prepare(
         state,
         &crate::webhook::OciWebhook {
             event,
@@ -920,7 +920,7 @@ fn emit_webhook(
             actor: peryx_events::security::actor(request.identity),
             request_id: request_id(request.headers),
         },
-    );
+    )
 }
 
 /// Who made a mutating request and which request it was: the two audit facts a webhook carries.

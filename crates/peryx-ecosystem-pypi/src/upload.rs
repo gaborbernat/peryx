@@ -413,28 +413,17 @@ pub(crate) fn commit_publish(
     publish: PreparedPublish,
     mut quota: Option<crate::quota::PendingQuota>,
     outbox: bool,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<Published, UploadStoreError> {
-    let PreparedPublish {
-        record,
-        metadata_digest,
-        provenance,
-    } = publish;
+    let record = &publish.record;
     let mut placements = vec![
         (record.digest.clone(), record.content_size),
-        (metadata_digest.clone(), record.metadata.len() as u64),
+        (publish.metadata_digest.clone(), record.metadata.len() as u64),
     ];
-    if let Some((digest, size)) = &provenance {
+    if let Some((digest, size)) = &publish.provenance {
         placements.push((digest.clone(), *size));
     }
-    let committed = store_record_with_commit(
-        meta,
-        name,
-        record,
-        &metadata_digest,
-        provenance.as_ref(),
-        quota.as_ref(),
-        outbox,
-    )?;
+    let committed = store_record_with_commit(meta, name, publish, quota.as_ref(), outbox, webhook)?;
     if let Some(quota) = &mut quota {
         quota.finish();
     }
@@ -564,12 +553,16 @@ fn store_record(
 fn store_record_with_commit(
     meta: &MetaStore,
     name: &str,
-    prepared: PreparedRecord,
-    metadata_digest: &Digest,
-    provenance: Option<&(Digest, u64)>,
+    publish: PreparedPublish,
     quota: Option<&crate::quota::PendingQuota>,
     outbox: bool,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<peryx_storage::meta::DriverCommit<bool>, UploadStoreError> {
+    let PreparedPublish {
+        record: prepared,
+        metadata_digest,
+        provenance,
+    } = publish;
     let PreparedRecord {
         normalized,
         display_name,
@@ -599,13 +592,13 @@ fn store_record_with_commit(
             size: metadata.len() as u64,
             source: name,
         }),
-        provenance: provenance.map(|(digest, size)| ProvenanceSibling {
+        provenance: provenance.as_ref().map(|(digest, size)| ProvenanceSibling {
             provenance_sha256: digest.as_str(),
             size: *size,
         }),
         quota: quota.map(crate::quota::PendingQuota::record),
     };
-    crate::store::publish_file_with_commit_if(meta, outbox, &file, |existing| {
+    crate::store::publish_file_with_commit_if(meta, outbox, &file, webhook, |existing| {
         upload_conflict(existing, content_digest.as_str(), &filename)
     })
 }

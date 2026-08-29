@@ -3,6 +3,7 @@ use std::sync::Arc;
 use peryx_driver::ServingState;
 use peryx_events::webhook::{WebhookEnvelope, WebhookEvent};
 use peryx_index::Index;
+use peryx_storage::meta::WebhookEventIntent;
 use serde::Serialize;
 
 pub const BLOB_DELETE: &str = "blob-delete";
@@ -21,9 +22,9 @@ pub struct OciWebhook<'a> {
     pub request_id: Option<String>,
 }
 
-pub fn emit(state: &Arc<ServingState>, webhook: &OciWebhook<'_>) {
+pub fn prepare(state: &Arc<ServingState>, webhook: &OciWebhook<'_>) -> Option<WebhookEventIntent> {
     let created_at_unix = (state.clock)();
-    peryx_events::webhook::emit(
+    peryx_events::webhook::prepare(
         state.as_ref(),
         &WebhookEvent {
             created_at_unix,
@@ -48,7 +49,7 @@ pub fn emit(state: &Arc<ServingState>, webhook: &OciWebhook<'_>) {
                 .expect("OCI webhook payload is serializable"),
             ),
         },
-    );
+    )
 }
 
 #[derive(Serialize)]

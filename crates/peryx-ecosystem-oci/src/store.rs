@@ -264,17 +264,18 @@ pub fn publish_manifest_txn(
     tag: Option<&str>,
 ) -> Result<ManifestPublication, MetaError> {
     let inserted = record_manifest_txn(txn, index, repo, digest, manifest)?;
-    txn.remove(&manifest_trash_key(index, repo, digest))?;
+    let restored_manifest = txn.remove(&manifest_trash_key(index, repo, digest))?;
     let Some(tag) = tag else {
         return Ok(ManifestPublication {
-            changed: false,
+            changed: inserted || restored_manifest,
             allocated: inserted,
         });
     };
-    txn.remove(&tag_trash_key(index, repo, tag))?;
+    let restored_tag = txn.remove(&tag_trash_key(index, repo, tag))?;
     let allocated = txn.get(&tag_key(index, repo, tag))?.as_deref() != Some(digest.as_bytes());
+    let changed_tag = put_tag_txn(txn, index, repo, tag, digest)?;
     Ok(ManifestPublication {
-        changed: put_tag_txn(txn, index, repo, tag, digest)?,
+        changed: inserted || restored_manifest || restored_tag || changed_tag,
         allocated,
     })
 }
@@ -457,6 +458,7 @@ pub fn trash_tag(
     tag: &str,
     info: &TrashInfo,
     journal: crate::outbox::Outbox,
+    webhook: impl FnOnce(&str) -> Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<Option<String>, MetaError> {
     meta.commit_driver_txn(|txn| {
         let key = tag_key(index, repo, tag);
@@ -464,6 +466,9 @@ pub fn trash_tag(
             return Ok((None, Vec::new()));
         };
         let digest = String::from_utf8_lossy(&raw).into_owned();
+        if let Some(webhook) = webhook(&digest) {
+            txn.enqueue_webhook_event(webhook);
+        }
         let trash = serde_json::to_vec(&TagTrash {
             digest: digest.clone(),
             info: info.clone(),
@@ -490,6 +495,7 @@ pub fn trash_manifest(
     digest: &str,
     info: &TrashInfo,
     journal: crate::outbox::Outbox,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<Option<usize>, MetaError> {
     meta.commit_driver_txn(|txn| {
         if txn.get(&manifest_trash_key(index, repo, digest))?.is_some()
@@ -497,6 +503,9 @@ pub fn trash_manifest(
             || txn.get(&manifest_key(digest))?.is_none()
         {
             return Ok((None, Vec::new()));
+        }
+        if let Some(webhook) = webhook {
+            txn.enqueue_webhook_event(webhook);
         }
         let tags_prefix = tag_prefix(index, repo);
         let mut tags = Vec::new();
@@ -541,6 +550,7 @@ pub fn restore_tag(
     repo: &str,
     tag: &str,
     journal: crate::outbox::Outbox,
+    webhook: impl FnOnce(&str) -> Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<RestoreTagOutcome, MetaError> {
     meta.commit_driver_txn(|txn| {
         let trash_key = tag_trash_key(index, repo, tag);
@@ -548,6 +558,9 @@ pub fn restore_tag(
             return Ok((RestoreTagOutcome::Missing, Vec::new()));
         };
         let trashed = serde_json::from_slice::<TagTrash>(&raw)?;
+        if let Some(webhook) = webhook(&trashed.digest) {
+            txn.enqueue_webhook_event(webhook);
+        }
         txn.put(&tag_key(index, repo, tag), trashed.digest.as_bytes())?;
         txn.remove(&trash_key)?;
         release_trashed_tag(txn, index, repo, &trashed.digest, tag)?;
@@ -593,12 +606,16 @@ pub fn restore_manifest(
     repo: &str,
     digest: &str,
     journal: crate::outbox::Outbox,
+    webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<RestoreManifestOutcome, MetaError> {
     meta.commit_driver_txn(|txn| {
         let trash_key = manifest_trash_key(index, repo, digest);
         let Some(raw) = txn.get(&trash_key)? else {
             return Ok((RestoreManifestOutcome::Missing, Vec::new()));
         };
+        if let Some(webhook) = webhook {
+            txn.enqueue_webhook_event(webhook);
+        }
         let trashed = serde_json::from_slice::<ManifestTrash>(&raw)?;
         let mut restored = Vec::new();
         let mut conflicts = Vec::new();

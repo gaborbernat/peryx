@@ -206,7 +206,7 @@ fn publish(
         if lease.is_some_and(|lease| !lease.admits((state.clock)())) {
             return Err(FinalizeError::Rejected(FinalizeFailure::Fenced));
         }
-        publish_file_in_txn::<FinalizeError>(txn, crate::replication_enabled(state), &file, guard)
+        publish_file_in_txn::<FinalizeError>(txn, crate::replication_enabled(state), &file, guard, None)
             .map(|(_, journal)| journal)
     })?;
     Ok(Finalization::Published {

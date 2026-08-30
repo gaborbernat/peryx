@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Extension;
@@ -10,6 +11,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::{any, delete, get, post, put};
 use http_body_util::BodyExt as _;
+use tower::{ServiceBuilder, util::MapRequestLayer};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 
 use crate::handlers;
@@ -77,7 +79,17 @@ pub fn router_with_services(state: Arc<AppState>, services: HttpDomainServices) 
     } else {
         router
     };
-    router.layer(Extension(services)).with_state(state)
+    let serving = Arc::clone(&state.serving);
+    router
+        .layer(
+            ServiceBuilder::new()
+                .layer(MapRequestLayer::new(move |request: Request| {
+                    serving.requests.fetch_add(1, Ordering::Relaxed);
+                    request
+                }))
+                .layer(Extension(services)),
+        )
+        .with_state(state)
 }
 
 fn request_span(request: &Request) -> tracing::Span {

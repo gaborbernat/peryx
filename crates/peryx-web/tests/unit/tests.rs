@@ -1,10 +1,35 @@
 use rstest::rstest;
 
+use crate::data::{LoaderEndpoint, LoaderError};
 use crate::model::{
     PolicyDecisionFilters, UiPolicyDecision, UiPolicyDecisionPage, UiSearchPage, UiSearchResult,
     blob_placement_status_label,
 };
 use peryx_core::BlobPlacementStatus;
+
+#[rstest]
+#[case::browse(LoaderEndpoint::Browse, "/+ui/browse")]
+#[case::session(LoaderEndpoint::Session, "/_/session")]
+#[case::stats(LoaderEndpoint::Stats, "/+stats")]
+#[case::status(LoaderEndpoint::Status, "/+status")]
+#[case::topology(LoaderEndpoint::Topology, "/+availability/topology")]
+fn test_loader_endpoint_display(#[case] endpoint: LoaderEndpoint, #[case] expected: &str) {
+    assert_eq!(endpoint.to_string(), expected);
+}
+
+#[rstest]
+#[case::request(LoaderError::Request(LoaderEndpoint::Session), "Request to /_/session failed.")]
+#[case::status(
+    LoaderError::Status {
+        endpoint: LoaderEndpoint::Stats,
+        status: 503,
+    },
+    "/+stats returned HTTP 503."
+)]
+#[case::invalid(LoaderError::Invalid(LoaderEndpoint::Status), "/+status returned invalid data.")]
+fn test_loader_error_display(#[case] error: LoaderError, #[case] expected: &str) {
+    assert_eq!(error.to_string(), expected);
+}
 
 fn policy_decision(state: &str, fresh: bool) -> UiPolicyDecision {
     UiPolicyDecision {

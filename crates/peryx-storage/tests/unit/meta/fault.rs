@@ -2,12 +2,13 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use redb::Database;
 #[cfg(test)]
 use redb::WriteTransaction;
 use redb::backends::InMemoryBackend;
+use rstest::rstest;
 
 use super::{MetaDatabase, MetaStore};
 
@@ -41,30 +42,42 @@ impl redb::StorageBackend for FaultBackend {
 }
 
 #[derive(Debug)]
-pub struct Fault(AtomicI64);
+pub struct Fault(AtomicUsize);
 
 impl Fault {
+    const DISABLED: usize = usize::MAX;
+    const INJECTED: usize = Self::DISABLED - 1;
+
     const fn disabled() -> Self {
-        Self(AtomicI64::new(-1))
+        Self(AtomicUsize::new(Self::DISABLED))
     }
 
-    pub fn arm(&self, after: i64) {
+    pub fn arm(&self, after: usize) {
         self.0.store(after, Ordering::SeqCst);
     }
 
     pub fn disable(&self) {
-        self.arm(-1);
+        self.0.store(Self::DISABLED, Ordering::SeqCst);
+    }
+
+    pub fn triggered(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == Self::INJECTED
     }
 
     fn pass(&self) -> io::Result<()> {
-        self.0
+        let previous = self
+            .0
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| match remaining {
-                -1 => Some(-1),
-                0 => None,
+                Self::DISABLED | Self::INJECTED => None,
+                0 => Some(Self::INJECTED),
                 _ => Some(remaining - 1),
             })
-            .map(drop)
-            .map_err(|_| io::Error::other("injected storage failure"))
+            .unwrap_or_else(|state| state);
+        if matches!(previous, 0 | Self::INJECTED) {
+            Err(io::Error::other("injected storage failure"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -142,6 +155,28 @@ fn test_backend_delegates_every_call_then_faults_on_demand() {
     assert!(disk.len().is_err());
     fault.disable();
     assert!(disk.len().is_ok());
+}
+
+#[rstest]
+#[case::exact_budget(&[false, false], false)]
+#[case::after_budget(&[false, false, true], true)]
+fn test_fault_reports_injection_only_after_the_budget(
+    #[case] expected_errors: &[bool],
+    #[case] expected_triggered: bool,
+) {
+    use redb::StorageBackend as _;
+
+    let (inner, fault) = backend();
+    let disk = faulted(&inner, &fault);
+    fault.arm(2);
+
+    assert_eq!(
+        (
+            expected_errors.iter().map(|_| disk.len().is_err()).collect::<Vec<_>>(),
+            fault.triggered(),
+        ),
+        (expected_errors.to_vec(), expected_triggered)
+    );
 }
 
 #[test]

@@ -115,22 +115,26 @@ fn assert_atomic_result(operation: Operation, running: &str, expected: &[JobRunR
 #[case::recover(Operation::Recover)]
 #[case::prune(Operation::Prune)]
 fn test_job_run_operations_remain_atomic_after_backend_failures(#[case] operation: Operation) {
-    let mut failures = 0;
-    for fail_after in 0..256 {
+    let mut injections = 0;
+    for fail_after in 0.. {
         let (store, inner, fault, running) = seeded_store();
         let expected = store.list_job_runs().unwrap();
         drop(store);
         let store = fault::reopen(&inner, &fault);
         fault.arm(fail_after);
-        if invoke(&store, &running, operation) {
-            failures += 1;
-            fault.disable();
-            drop(store);
-            let actual = fault::reopen(&inner, &fault).list_job_runs().unwrap();
-            assert_atomic_result(operation, &running, &expected, &actual);
+        let failed = invoke(&store, &running, operation);
+        if !fault.triggered() {
+            assert!(!failed);
+            break;
         }
+        assert!(failed, "{operation:?} succeeded after a fault was injected");
+        injections += 1;
+        fault.disable();
+        drop(store);
+        let actual = fault::reopen(&inner, &fault).list_job_runs().unwrap();
+        assert_atomic_result(operation, &running, &expected, &actual);
     }
-    assert!(failures > 0);
+    assert!(injections > 0);
 }
 
 #[rstest]

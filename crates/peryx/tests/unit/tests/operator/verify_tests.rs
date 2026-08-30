@@ -102,15 +102,21 @@ fn test_verify_propagates_blob_reference_driver_errors() {
 }
 
 #[rstest]
-#[case::missing(false, "missing")]
-#[case::mismatched(true, "sha256 expected")]
-fn test_verify_reports_blob_failures(#[case] tamper: bool, #[case] expected: &str) {
+#[case::missing_ancestor(BlobFailure::MissingAncestor, "missing")]
+#[case::missing_file(BlobFailure::MissingFile, "missing")]
+#[case::non_directory_ancestor(BlobFailure::NonDirectoryAncestor, "missing")]
+#[case::mismatched(BlobFailure::Mismatched, "sha256 expected")]
+fn test_verify_reports_blob_failures(#[case] failure: BlobFailure, #[case] expected: &str) {
     let fixture = valid_backup();
     let blob = fixture.backup.join(blob_relpath(&fixture.content_digest));
-    if tamper {
-        std::fs::write(blob, b"tampered").unwrap();
-    } else {
-        std::fs::remove_file(blob).unwrap();
+    match failure {
+        BlobFailure::MissingAncestor => std::fs::remove_dir_all(blob.parent().unwrap()).unwrap(),
+        BlobFailure::MissingFile => std::fs::remove_file(blob).unwrap(),
+        BlobFailure::NonDirectoryAncestor => {
+            std::fs::remove_dir_all(fixture.backup.join("blobs")).unwrap();
+            std::fs::write(fixture.backup.join("blobs"), b"not a directory").unwrap();
+        }
+        BlobFailure::Mismatched => std::fs::write(blob, b"tampered").unwrap(),
     }
     let mut out = Vec::new();
 
@@ -123,6 +129,14 @@ fn test_verify_reports_blob_failures(#[case] tamper: bool, #[case] expected: &st
         ),
         (true, true)
     );
+}
+
+#[derive(Clone, Copy)]
+enum BlobFailure {
+    MissingAncestor,
+    MissingFile,
+    NonDirectoryAncestor,
+    Mismatched,
 }
 
 #[test]
@@ -138,23 +152,90 @@ fn test_verify_rejects_an_unsupported_manifest() {
 }
 
 #[rstest]
-#[case::config("config", "config.toml")]
-#[case::metadata("metadata", "metadata/peryx.redb")]
-#[case::blob_index("blob_index", "blobs.tsv")]
-fn test_verify_rejects_invalid_manifest_paths(#[case] field: &str, #[case] expected: &str) {
+#[case::config_parent("config", "config.toml", ManifestPath::Parent)]
+#[case::metadata_parent("metadata", "metadata/peryx.redb", ManifestPath::Parent)]
+#[case::blob_index_parent("blob_index", "blobs.tsv", ManifestPath::Parent)]
+#[case::config_absolute("config", "config.toml", ManifestPath::Absolute)]
+#[case::metadata_absolute("metadata", "metadata/peryx.redb", ManifestPath::Absolute)]
+#[case::blob_index_absolute("blob_index", "blobs.tsv", ManifestPath::Absolute)]
+#[case::empty("config", "config.toml", ManifestPath::Empty)]
+#[case::current("config", "config.toml", ManifestPath::Current)]
+#[case::prefix("config", "config.toml", ManifestPath::Prefix)]
+fn test_verify_rejects_invalid_manifest_paths(#[case] field: &str, #[case] expected: &str, #[case] path: ManifestPath) {
     let fixture = valid_backup();
+    let external = fixture.root.path().join("outside");
+    std::fs::write(&external, b"external").unwrap();
+    let invalid = match path {
+        ManifestPath::Absolute => external.to_string_lossy().into_owned(),
+        ManifestPath::Current => format!("./{expected}"),
+        ManifestPath::Empty => String::new(),
+        ManifestPath::Parent => "../outside".to_owned(),
+        ManifestPath::Prefix => r"C:\outside".to_owned(),
+    };
     mutate_manifest(&fixture.backup, |manifest| {
-        manifest[field]["path"] = serde_json::json!("../outside");
+        manifest[field]["path"] = serde_json::json!(&invalid);
     });
 
     let error = backup_verify(&fixture.backup, &mut Vec::new()).unwrap_err();
 
     assert_eq!(
-        error.to_string(),
-        format!(
-            "invalid {} path \"../outside\"; expected {expected:?}",
-            field.replace('_', " ")
+        (error.to_string(), std::fs::read(external).unwrap()),
+        (
+            format!(
+                "invalid {} path {invalid:?}; expected {expected:?}",
+                field.replace('_', " ")
+            ),
+            b"external".to_vec(),
         )
+    );
+}
+
+#[derive(Clone, Copy)]
+enum ManifestPath {
+    Absolute,
+    Current,
+    Empty,
+    Parent,
+    Prefix,
+}
+
+#[cfg(unix)]
+#[test]
+fn test_verify_rejects_a_symlinked_file() {
+    let fixture = valid_backup();
+    let external = fixture.root.path().join("outside-config");
+    let expected = std::fs::read(fixture.backup.join("config.toml")).unwrap();
+    std::fs::rename(fixture.backup.join("config.toml"), &external).unwrap();
+    std::os::unix::fs::symlink(&external, fixture.backup.join("config.toml")).unwrap();
+
+    let error = backup_verify(&fixture.backup, &mut Vec::new()).unwrap_err();
+
+    assert_eq!(
+        (
+            error.to_string().contains("contains a symbolic link"),
+            std::fs::read(external).unwrap(),
+        ),
+        (true, expected)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_verify_rejects_a_symlinked_ancestor() {
+    let fixture = valid_backup();
+    let external = fixture.root.path().join("outside-blobs");
+    let blob = blob_relpath(&fixture.content_digest);
+    std::fs::rename(fixture.backup.join("blobs"), &external).unwrap();
+    std::os::unix::fs::symlink(&external, fixture.backup.join("blobs")).unwrap();
+
+    let error = backup_verify(&fixture.backup, &mut Vec::new()).unwrap_err();
+
+    assert_eq!(
+        (
+            error.to_string().contains("contains a symbolic link"),
+            std::fs::read(external.join(blob.strip_prefix("blobs/").unwrap())).unwrap(),
+        ),
+        (true, b"artifact bytes".to_vec())
     );
 }
 
@@ -221,6 +302,87 @@ fn test_verify_reports_an_unreadable_metadata_store() {
                 .contains("problem\tmetadata\tmetadata/peryx.redb\tI/O error"),
         ),
         (true, true)
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_verify_reports_metadata_read_errors() {
+    let backup_env = "PERYX_TEST_METADATA_READ_ERROR_BACKUP";
+    if let Some(backup) = std::env::var_os(backup_env) {
+        assert_metadata_read_error(std::path::Path::new(&backup));
+        return;
+    }
+    let fixture = valid_backup();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "operator::tests::verify_tests::test_verify_reports_metadata_read_errors",
+            "--nocapture",
+        ])
+        .env(backup_env, &fixture.backup)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_metadata_read_error(backup: &std::path::Path) {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::sync::mpsc;
+
+    let metadata = backup.join("metadata/peryx.redb");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&metadata)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let identity = std::fs::metadata(metadata).unwrap();
+    let (ready_send, ready_receive) = mpsc::sync_channel(0);
+    let watcher = std::thread::spawn(move || {
+        ready_send.send(()).unwrap();
+        loop {
+            #[cfg(target_os = "linux")]
+            let descriptors = std::fs::read_dir("/proc/self/fd").unwrap();
+            #[cfg(target_os = "macos")]
+            let descriptors = std::fs::read_dir("/dev/fd").unwrap();
+            for entry in descriptors.flatten() {
+                let descriptor = entry.file_name().to_string_lossy().parse::<i32>().unwrap();
+                let Ok(found) = std::fs::metadata(entry.path()) else {
+                    continue;
+                };
+                if descriptor > 2
+                    && found.ino() == identity.ino()
+                    && (cfg!(target_os = "macos") || found.dev() == identity.dev())
+                {
+                    nix::unistd::close(descriptor).unwrap();
+                    let replacement = std::fs::OpenOptions::new().write(true).open("/dev/null").unwrap();
+                    assert_eq!(replacement.as_raw_fd(), descriptor);
+                    return replacement;
+                }
+            }
+        }
+    });
+    ready_receive.recv().unwrap();
+    let mut out = Vec::new();
+
+    let error = backup_verify(backup, &mut out).unwrap_err();
+
+    let replacement = watcher.join().unwrap();
+    std::mem::forget(replacement);
+    assert_eq!(
+        (error.to_string(), String::from_utf8(out).unwrap()),
+        (
+            "backup verification failed with 1 problem(s)".to_owned(),
+            concat!(
+                "problem\tmetadata\tmetadata/peryx.redb\tI/O error: Bad file descriptor (os error 9)\n",
+                "problems\t1\n"
+            )
+            .to_owned(),
+        )
     );
 }
 

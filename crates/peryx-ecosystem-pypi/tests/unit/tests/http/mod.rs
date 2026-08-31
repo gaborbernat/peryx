@@ -13,6 +13,7 @@ mod frontier;
 mod inspect;
 mod intent_release;
 mod legacy_json;
+mod membership;
 mod metadata;
 mod mirror;
 mod mutate;

@@ -162,8 +162,8 @@ pub use multi_peer::{DEFAULT_SET_LIMITS, MemberOutcome, PeerSet, RetiredPeer, Ro
 pub use multi_pull::{PullRound, pull_round};
 pub use openapi::availability_paths;
 pub use ownership::{
-    AppliedMeta, Assignment, AssignmentCause, DatacenterId, OwnershipCommand, OwnershipEffect, OwnershipError,
-    OwnershipState, Rejection, TransferRecord,
+    AppliedMeta, Assignment, AssignmentCause, ControlRejection, ControlResolution, DatacenterId, OwnershipCommand,
+    OwnershipEffect, OwnershipError, OwnershipState, Rejection, TransferRecord, control_outcome,
 };
 pub use peer::{
     BatchFrame, BatchRequest, DEFAULT_TRANSFER_LIMITS, FrontierSync, LoopbackPeer, LoopbackTransport, PeerFault,
@@ -316,6 +316,12 @@ mod completeness_tests;
 #[cfg(test)]
 #[path = "../tests/unit/consensus_runtime_tests.rs"]
 mod consensus_runtime_tests;
+#[cfg(test)]
+#[path = "../tests/unit/control_recovery_tests.rs"]
+mod control_recovery_tests;
+#[cfg(test)]
+#[path = "../tests/unit/control_window_tests.rs"]
+mod control_window_tests;
 #[cfg(test)]
 #[path = "../tests/unit/dc_ack_tests.rs"]
 mod dc_ack_tests;

@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use rstest::rstest;
 use serde_json::{Value as JsonValue, json};
@@ -48,6 +49,41 @@ fn test_value_compare(#[case] left: Value, #[case] right: Value, #[case] expecte
 #[case::string(Value::Str("x".to_owned()), json!("x"))]
 fn test_value_to_json(#[case] value: Value, #[case] expected: JsonValue) {
     assert_eq!(value.to_json(), expected);
+}
+
+#[test]
+fn test_value_hash_agrees_with_variant_and_payload_equality() {
+    assert_eq!(
+        [
+            Value::Null,
+            Value::Null,
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Int(1),
+            Value::Int(1),
+            Value::Int(2),
+            Value::Str("one".to_owned()),
+            Value::Str("one".to_owned()),
+            Value::Str("two".to_owned()),
+            Value::Timestamp(1),
+            Value::Timestamp(1),
+            Value::Timestamp(2),
+        ]
+        .into_iter()
+        .collect::<HashSet<_>>(),
+        HashSet::from([
+            Value::Null,
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Int(1),
+            Value::Int(2),
+            Value::Str("one".to_owned()),
+            Value::Str("two".to_owned()),
+            Value::Timestamp(1),
+            Value::Timestamp(2),
+        ])
+    );
 }
 
 #[test]

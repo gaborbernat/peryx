@@ -5213,6 +5213,7 @@ name = "peryx-pql"
 version = "0.0.1"
 dependencies = [
  "base64 0.23.1",
+ "codspeed-criterion-compat",
  "rstest",
  "serde",
  "serde_json",

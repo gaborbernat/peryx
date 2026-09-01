@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use crate::ast::{AggregateFunc, Ast, Join, OrderKey, Predicate};
 use crate::catalog::DomainSchema;
@@ -365,17 +366,21 @@ fn project_rows(rows: &[Row], outputs: &[OutputColumn]) -> Vec<Vec<Value>> {
 
 fn aggregate_rows(rows: &[Row], aggregate: &crate::ast::Aggregate, outputs: &[OutputColumn]) -> Vec<Vec<Value>> {
     let mut groups: Vec<(Vec<Value>, Vec<Accumulator>)> = Vec::new();
+    let mut group_index: HashMap<Vec<Value>, usize> = HashMap::new();
     for row in rows {
-        let key: Vec<Value> = aggregate.group_by.iter().map(|name| row.get(name)).collect();
-        let slot = groups.iter_mut().find(|(existing, _)| *existing == key);
-        let accumulators = if let Some((_, accumulators)) = slot {
-            accumulators
-        } else {
-            let fresh = aggregate.terms.iter().map(|term| Accumulator::new(term.func)).collect();
-            groups.push((key, fresh));
-            &mut groups.last_mut().expect("just pushed").1
+        let slot = match group_index.entry(aggregate.group_by.iter().map(|name| row.get(name)).collect()) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let slot = groups.len();
+                groups.push((
+                    entry.key().clone(),
+                    aggregate.terms.iter().map(|term| Accumulator::new(term.func)).collect(),
+                ));
+                entry.insert(slot);
+                slot
+            }
         };
-        for (accumulator, term) in accumulators.iter_mut().zip(&aggregate.terms) {
+        for (accumulator, term) in groups[slot].1.iter_mut().zip(&aggregate.terms) {
             accumulator.observe(term.column.as_deref().map(|name| row.get(name)));
         }
     }

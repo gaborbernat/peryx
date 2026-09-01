@@ -284,6 +284,85 @@ fn test_execute_count_and_sum_aggregate() {
     );
 }
 
+#[test]
+fn test_execute_aggregate_preserves_first_seen_order_across_pages() {
+    let rows = vec![
+        decision("alpha", "a", "zebra", "cache", 50, 1),
+        decision("alpha", "b", "alpha", "cache", 40, 1),
+        decision("alpha", "c", "zebra", "cache", 30, 1),
+        decision("alpha", "d", "beta", "cache", 20, 1),
+        decision("alpha", "e", "alpha", "cache", 10, 1),
+    ];
+    let scope = operator_scope();
+    let text = "from policy.decisions aggregate count() as n by state limit 2";
+    let cursor = cursor::encode("policy.decisions", &scope, 2);
+
+    assert_eq!(
+        (
+            aggregate_query(text, rows.clone(), &scope, None),
+            aggregate_query(text, rows.clone(), &scope, None),
+            aggregate_query(text, rows, &scope, Some(&cursor)),
+        ),
+        (
+            state_count_page(&[("zebra", 2), ("alpha", 2)], Some(cursor.clone())),
+            state_count_page(&[("zebra", 2), ("alpha", 2)], Some(cursor)),
+            state_count_page(&[("beta", 1)], None),
+        )
+    );
+}
+
+#[test]
+fn test_execute_aggregate_groups_missing_and_explicit_null_values() {
+    let rows = vec![
+        Row::new().with("repository", Value::Str("alpha".to_owned())),
+        decision("alpha", "allowed", "allowed", "cache", 20, 1),
+        Row::new()
+            .with("repository", Value::Str("alpha".to_owned()))
+            .with("state", Value::Null),
+    ];
+
+    assert_eq!(
+        aggregate_query(
+            "from policy.decisions aggregate count() as n by state",
+            rows,
+            &operator_scope(),
+            None,
+        ),
+        Page {
+            outputs: vec![
+                output("state", FieldClass::Repository, ValueType::Str),
+                output("n", FieldClass::Public, ValueType::Int),
+            ],
+            rows: vec![
+                vec![Value::Null, Value::Int(2)],
+                vec![Value::Str("allowed".to_owned()), Value::Int(1)],
+            ],
+            next_cursor: None,
+        }
+    );
+}
+
+#[test]
+fn test_execute_aggregate_ranks_all_rows_before_limit() {
+    let rows = vec![
+        decision("alpha", "a", "first", "cache", 40, 1),
+        decision("alpha", "b", "winner", "cache", 30, 1),
+        decision("alpha", "c", "winner", "cache", 20, 1),
+        decision("alpha", "d", "winner", "cache", 10, 1),
+    ];
+    let scope = operator_scope();
+
+    assert_eq!(
+        aggregate_query(
+            "from policy.decisions aggregate count() as n by state order by n desc limit 1",
+            rows,
+            &scope,
+            None,
+        ),
+        state_count_page(&[("winner", 3)], Some(cursor::encode("policy.decisions", &scope, 1)))
+    );
+}
+
 #[rstest]
 #[case::tied_groups(
     "from policy.decisions aggregate count() as n by state, source order by state asc",
@@ -882,5 +961,23 @@ fn state_source_count_page(rows: &[(&str, &str, i64)]) -> Page {
             })
             .collect(),
         next_cursor: None,
+    }
+}
+
+fn aggregate_query(text: &str, rows: Vec<Row>, scope: &QueryScope, cursor: Option<&str>) -> Page {
+    execute(&parse(text).expect("parses"), scope, cursor, &TestSource::new(rows)).expect("runs")
+}
+
+fn state_count_page(rows: &[(&str, i64)], next_cursor: Option<String>) -> Page {
+    Page {
+        outputs: vec![
+            output("state", FieldClass::Repository, ValueType::Str),
+            output("n", FieldClass::Public, ValueType::Int),
+        ],
+        rows: rows
+            .iter()
+            .map(|(state, count)| vec![Value::Str((*state).to_owned()), Value::Int(*count)])
+            .collect(),
+        next_cursor,
     }
 }

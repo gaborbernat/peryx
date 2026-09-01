@@ -22,7 +22,7 @@ impl ValueType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Value {
     Null,
     Bool(bool),

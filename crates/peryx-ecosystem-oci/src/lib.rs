@@ -1,3 +1,5 @@
+#![recursion_limit = "133"]
+
 //! The OCI/Docker registry driver: the distribution-spec `/v2/` API served over peryx's
 //! content-addressed blob store and metadata store.
 //!

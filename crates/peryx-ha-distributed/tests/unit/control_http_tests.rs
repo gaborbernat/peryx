@@ -340,6 +340,14 @@ fn committed(index: u64) -> CommandReceipt {
         outcome: CommandOutcome::Committed,
         old_voters: Vec::new(),
         new_voters: Vec::new(),
+        transfer_audit: None,
+    }
+}
+
+fn committed_transfer() -> CommandReceipt {
+    CommandReceipt {
+        transfer_audit: Some(Box::new(sealed())),
+        ..committed(9)
     }
 }
 
@@ -430,6 +438,26 @@ async fn fixed_group_implements_the_control_contract() {
     assert_eq!(group.committed_epoch("proj").await, 7);
     assert!(group.admit_epoch("proj", 7).await);
     assert_eq!(group.transfer_home("proj", "west").await.unwrap(), None);
+    assert_eq!(group.pending_transfer_audits().await.unwrap(), Vec::new());
+}
+
+#[tokio::test]
+async fn fixed_group_reports_its_projected_audit_until_it_completes() {
+    let group = FixedGroup {
+        projection: Some(Arc::new(Mutex::new(Some("t-1".to_owned())))),
+    };
+
+    assert_eq!(
+        group.pending_transfer_audits().await.unwrap(),
+        vec![peryx_ha::PendingTransferAudit {
+            id: "t-1".to_owned(),
+            audit: sealed(),
+        }]
+    );
+
+    group.complete_transfer_audit("t-1").await.unwrap();
+
+    assert_eq!(group.pending_transfer_audits().await.unwrap(), Vec::new());
 }
 
 #[tokio::test]
@@ -642,7 +670,7 @@ async fn command_failures_map_to_http_statuses() {
 #[tokio::test]
 async fn transfer_commits_a_sealed_audit() {
     let (_dir, state) = app(false, false).await;
-    let services = consensus_services(Ok(committed(9)));
+    let services = consensus_services(Ok(committed_transfer()));
     let coordinator = Arc::new(TransferCoordinator::with_schedule(
         Arc::new(FixedFrontier(Ok(Some(10)))),
         Duration::ZERO,
@@ -693,7 +721,7 @@ async fn transfer_requires_scope_consensus_and_a_readable_barrier() {
     }
 
     let (_dir, state) = app(false, true).await;
-    let services = consensus_services(Ok(committed(9)));
+    let services = consensus_services(Ok(committed_transfer()));
     assert_eq!(
         send_with(
             harness(&state, services, coordinator()),
@@ -714,12 +742,12 @@ async fn transfer_maps_frontier_timeout_and_commit_failures() {
     for (frontier, control, expected) in [
         (
             FixedFrontier(Err("frontier unavailable")),
-            Ok(committed(9)),
+            Ok(committed_transfer()),
             StatusCode::SERVICE_UNAVAILABLE,
         ),
         (
             FixedFrontier(Ok(Some(0))),
-            Ok(committed(9)),
+            Ok(committed_transfer()),
             StatusCode::GATEWAY_TIMEOUT,
         ),
         (
@@ -756,7 +784,7 @@ async fn transfer_maps_frontier_timeout_and_commit_failures() {
 #[tokio::test(start_paused = true)]
 async fn active_transfer_conflicts_then_cancels() {
     let (_dir, state) = app(false, false).await;
-    let services = consensus_services(Ok(committed(9)));
+    let services = consensus_services(Ok(committed_transfer()));
     state.serving.meta.next_serial().unwrap();
     let probed = Arc::new(Notify::new());
     let coordinator = Arc::new(TransferCoordinator::with_schedule(
@@ -848,7 +876,7 @@ async fn cancel_maps_scope_unknown_and_committed_states() {
         StatusCode::NOT_FOUND
     );
 
-    let services = consensus_services(Ok(committed(9)));
+    let services = consensus_services(Ok(committed_transfer()));
     let coordinator = Arc::new(TransferCoordinator::with_schedule(
         Arc::new(FixedFrontier(Ok(Some(10)))),
         Duration::ZERO,

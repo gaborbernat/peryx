@@ -23,12 +23,14 @@ use peryx_ha::{
     PendingTransferAudit, SINGLETON_LEASE_SECS, SingletonAcquisition, SingletonLease, SingletonRelease,
     SingletonRenewal, TransferOutcome,
 };
+use peryx_storage::meta::MetaStore;
 
 type VoterId = u64;
 
 /// A peer RPC exceeding this deadline counts as a retryable loss.
 const PEER_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MEMBERSHIP_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
+const AUDIT_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(1);
 const LEARNER_CATCH_UP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct ConsensusPlan {
@@ -189,20 +191,29 @@ impl ConsensusPlan {
     /// # Errors
     /// Returns an error if startup cannot open the log directory or store, start the node, or bootstrap
     /// an inconsistent roster.
-    pub async fn ignite(&self) -> anyhow::Result<StartedRaft> {
-        self.ignite_supervised(None).await
+    pub async fn ignite(&self, audit_store: MetaStore) -> anyhow::Result<StartedRaft> {
+        self.ignite_supervised(None, audit_store).await
     }
 
-    pub(crate) async fn ignite_with_lifecycle(&self, lifecycle: Lifecycle) -> anyhow::Result<StartedRaft> {
-        self.ignite_supervised(Some(lifecycle)).await
+    pub(crate) async fn ignite_with_lifecycle(
+        &self,
+        lifecycle: Lifecycle,
+        audit_store: MetaStore,
+    ) -> anyhow::Result<StartedRaft> {
+        self.ignite_supervised(Some(lifecycle), audit_store).await
     }
 
-    async fn ignite_supervised(&self, lifecycle: Option<Lifecycle>) -> anyhow::Result<StartedRaft> {
+    async fn ignite_supervised(
+        &self,
+        lifecycle: Option<Lifecycle>,
+        audit_store: MetaStore,
+    ) -> anyhow::Result<StartedRaft> {
         let parent = self.log_path.parent().context("the consensus log path has no parent")?;
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create the consensus log directory {}", parent.display()))?;
         let log_path = self.log_path.clone();
         let local = self.local;
+        let home = self.home.clone();
         let group = self.group.clone();
         let token = self.token.clone();
         let seed = self.seed;
@@ -263,11 +274,21 @@ impl ConsensusPlan {
                             },
                         };
                         let _ = ready.send(Ok(node.clone()));
-                        runtime_cancellation.cancelled().await;
-                        node.raft()
+                        let recovery = recover_transfer_audits_on_leadership(
+                            local,
+                            node.clone(),
+                            home,
+                            audit_store,
+                            runtime_cancellation.clone(),
+                        )
+                        .await;
+                        let shutdown = node
+                            .raft()
                             .shutdown()
                             .await
-                            .context("stop the ownership consensus node")
+                            .context("stop the ownership consensus node");
+                        recovery.context("watch ownership consensus leadership")?;
+                        shutdown
                     })
                 }));
                 let result = result.unwrap_or(Err(anyhow::anyhow!("ownership consensus thread panicked")));
@@ -283,6 +304,66 @@ impl ConsensusPlan {
         }
         .complete()
         .await
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AuditRecovery {
+    Unattempted,
+    Pending(tokio::time::Instant),
+    Complete,
+}
+
+async fn recover_local_transfer_audits(node: RaftNode, home: DatacenterId, store: &MetaStore) -> AuditRecovery {
+    let ownership: Arc<dyn OwnershipAuthority> = Arc::new(OwnershipGroup::new(node, home));
+    match crate::recover_transfer_audits(&ownership, store).await {
+        Ok(_) => AuditRecovery::Complete,
+        Err(error) => {
+            tracing::warn!(%error, "transfer audit recovery after leadership change failed");
+            AuditRecovery::Pending(tokio::time::Instant::now() + AUDIT_RECOVERY_RETRY_DELAY)
+        }
+    }
+}
+
+async fn recover_transfer_audits_on_leadership(
+    local: VoterId,
+    node: RaftNode,
+    home: DatacenterId,
+    store: MetaStore,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<(), tokio::sync::watch::error::RecvError> {
+    tokio::select! {
+        () = cancellation.cancelled() => Ok(()),
+        result = watch_transfer_audits_on_leadership(local, node, home, store) => result,
+    }
+}
+
+async fn watch_transfer_audits_on_leadership(
+    local: VoterId,
+    node: RaftNode,
+    home: DatacenterId,
+    store: MetaStore,
+) -> Result<(), tokio::sync::watch::error::RecvError> {
+    let mut metrics = node.metrics();
+    let mut recovery = AuditRecovery::Unattempted;
+    loop {
+        let leads = metrics.borrow_and_update().current_leader == Some(local);
+        if !leads {
+            recovery = AuditRecovery::Unattempted;
+        } else if matches!(recovery, AuditRecovery::Unattempted) {
+            recovery = recover_local_transfer_audits(node.clone(), home.clone(), &store).await;
+        }
+        let retry = async move {
+            match recovery {
+                AuditRecovery::Pending(retry_at) if leads => tokio::time::sleep_until(retry_at).await,
+                _ => std::future::pending().await,
+            }
+        };
+        tokio::pin!(retry);
+        tokio::select! {
+            changed = metrics.changed() => changed?,
+            () = &mut retry => recovery = AuditRecovery::Unattempted,
+        }
     }
 }
 
@@ -681,14 +762,22 @@ impl OwnershipAuthority for OwnershipGroup {
     }
 
     async fn pending_transfer_audits(&self) -> Result<Vec<PendingTransferAudit>, OwnershipError> {
-        Ok(self.node.state_machine().pending_transfer_audits().await)
+        self.node
+            .raft()
+            .ensure_linearizable()
+            .await
+            .map_err(map_ownership_read_error)?;
+        Ok(self.node.state_machine().pending_transfer_audits(&self.home.0).await)
     }
 
-    /// Replicating the clearing decision keeps later leaders from projecting the fact again.
+    /// Replicating this member's acknowledgement leaves other voters' projections pending.
     async fn complete_transfer_audit(&self, id: &str) -> Result<(), OwnershipError> {
-        self.submit_command(OwnershipCommand::CompleteTransferAudit { key: id.to_owned() })
-            .await
-            .map(|_| ())
+        self.submit_command(OwnershipCommand::CompleteTransferAudit {
+            key: id.to_owned(),
+            projector: self.home.0.clone(),
+        })
+        .await
+        .map(|_| ())
     }
 
     fn cluster_status(&self) -> ClusterStatus {
@@ -965,6 +1054,15 @@ fn map_ownership_write_error(error: RaftError<VoterId, ClientWriteError<VoterId,
     }
 }
 
+fn map_ownership_read_error(error: RaftError<VoterId, CheckIsLeaderError<VoterId, PeryxNode>>) -> OwnershipError {
+    match error {
+        RaftError::APIError(CheckIsLeaderError::ForwardToLeader(forward)) => OwnershipError::NotLeader {
+            leader: forward.leader_node.map(|node| node.endpoint),
+        },
+        error => OwnershipError::Unavailable(error.to_string()),
+    }
+}
+
 /// `OpenRaft` keeps the committed node entry when `add_learner` repeats an ID, so a request that
 /// disagrees with committed metadata would commit nothing and still report success. Two IDs sharing one
 /// endpoint is worse: the leader opens a replication stream per ID to the same process, and one process
@@ -1003,6 +1101,7 @@ const fn committed_receipt(
         outcome,
         old_voters,
         new_voters,
+        transfer_audit: None,
     }
 }
 

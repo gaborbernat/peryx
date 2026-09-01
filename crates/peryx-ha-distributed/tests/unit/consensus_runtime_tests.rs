@@ -1,17 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::Duration;
 
 use crate::DatacenterId;
 use crate::ownership::{AssignmentCause, OwnershipCommand};
 use crate::raft::log_store::RaftLogStoreAdapter;
-use crate::raft::network::PeerRaftNetworkFactory;
+use crate::raft::network::{PeerRaftNetworkFactory, RaftRpc, RaftRpcHandler, RaftRpcRejection, raft_rpc_router};
 use crate::raft::persistence::RaftLogStore;
-use crate::raft::{OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode};
+use crate::raft::{OwnershipStateMachine, PeryxNode, RaftConfig, RaftNode, TypeConfig};
+use axum::body::Bytes;
 use openraft::error::{ClientWriteError, ForwardToLeader, RaftError};
+use openraft::raft::AppendEntriesRequest;
 use openraft::storage::RaftStateMachine as _;
 use openraft::testing::log_id;
 use openraft::{Entry, EntryPayload};
@@ -21,12 +23,13 @@ use peryx_ha::{
     OwnershipAuthority as _, OwnershipError, SingletonAcquisition, SingletonLease, SingletonRelease, SingletonRenewal,
     TransferOutcome,
 };
+use peryx_storage::meta::MetaStore;
 use rstest::rstest;
 use tempfile::TempDir;
 
 use super::consensus_runtime::{
-    ConsensusMember, ConsensusPlan, OwnershipGroup, OwnershipHandle, RaftExecutor, build_roster, map_write_error,
-    report_raft_exit, voter_id,
+    ConsensusMember, ConsensusPlan, OwnershipGroup, OwnershipHandle, RaftExecutor, StartedRaft, build_roster,
+    map_write_error, report_raft_exit, voter_id,
 };
 
 const TOKEN: &str = "group-secret";
@@ -50,6 +53,235 @@ fn plan_at(log_path: PathBuf, local: u64, roster: BTreeMap<u64, PeryxNode>) -> C
         log_path,
         group: "ownership".to_owned(),
         token: TOKEN.to_owned(),
+    }
+}
+
+fn audit_store(dir: &TempDir, member: &str) -> MetaStore {
+    MetaStore::open(dir.path().join(format!("{member}.redb"))).unwrap()
+}
+
+struct AppendGate {
+    blocked: AtomicBool,
+    rejected_empty: tokio::sync::mpsc::UnboundedSender<()>,
+}
+
+impl AppendGate {
+    fn new(rejected_empty: tokio::sync::mpsc::UnboundedSender<()>) -> Self {
+        Self {
+            blocked: AtomicBool::new(false),
+            rejected_empty,
+        }
+    }
+
+    fn block(&self) {
+        self.blocked.store(true, Ordering::Relaxed);
+    }
+
+    fn open(&self) {
+        self.blocked.store(false, Ordering::Relaxed);
+    }
+}
+
+struct GatedRaftRpcHandler {
+    inner: Arc<dyn RaftRpcHandler>,
+    gate: Arc<AppendGate>,
+}
+
+#[async_trait::async_trait]
+impl RaftRpcHandler for GatedRaftRpcHandler {
+    async fn handle(&self, rpc: RaftRpc, body: Bytes) -> Result<Vec<u8>, RaftRpcRejection> {
+        if rpc == RaftRpc::AppendEntries && self.gate.blocked.load(Ordering::Relaxed) {
+            let request: AppendEntriesRequest<TypeConfig> =
+                serde_json::from_slice(&body).map_err(|_| RaftRpcRejection::Malformed)?;
+            if request.entries.is_empty() {
+                let _ = self.gate.rejected_empty.send(());
+            }
+            return Err(RaftRpcRejection::Unavailable);
+        }
+        self.inner.handle(rpc, body).await
+    }
+}
+
+fn serve_gated_raft(
+    listener: tokio::net::TcpListener,
+    plan: &ConsensusPlan,
+    started: &StartedRaft,
+    gate: Arc<AppendGate>,
+) -> tokio::task::JoinHandle<std::io::Result<()>> {
+    let router = raft_rpc_router(
+        plan.local_voter(),
+        plan.token(),
+        Arc::new(GatedRaftRpcHandler {
+            inner: started.rpc_handler(),
+            gate,
+        }),
+    )
+    .unwrap();
+    tokio::spawn(std::future::IntoFuture::into_future(axum::serve(listener, router)))
+}
+
+async fn wait_for_transfer_audits(store: &MetaStore, authority: &str) -> Vec<peryx_ha::TransferAudit> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let audits = store.transfer_audits(authority).unwrap();
+            if !audits.is_empty() {
+                return audits;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+async fn stop_started_raft(started: StartedRaft) {
+    let (_, executor) = started.commit();
+    tokio::task::spawn_blocking(move || executor.shutdown_and_join())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+struct GatedCluster {
+    plans: Vec<ConsensusPlan>,
+    stores: Vec<MetaStore>,
+    gates: Vec<Arc<AppendGate>>,
+    started: Vec<Option<StartedRaft>>,
+    servers: Vec<tokio::task::JoinHandle<std::io::Result<()>>>,
+    rejected_empty: tokio::sync::mpsc::UnboundedReceiver<()>,
+}
+
+impl GatedCluster {
+    async fn ignite(datacenters: &[&str], dirs: &[TempDir]) -> Self {
+        let mut listeners = Vec::new();
+        for _ in datacenters {
+            listeners.push(Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()));
+        }
+        let members: Vec<ConsensusMember> = datacenters
+            .iter()
+            .zip(&listeners)
+            .map(|(datacenter, listener)| ConsensusMember {
+                datacenter: (*datacenter).to_owned(),
+                address: format!("http://{}/", listener.as_ref().unwrap().local_addr().unwrap()),
+            })
+            .collect();
+        let plans: Vec<ConsensusPlan> = datacenters
+            .iter()
+            .zip(dirs)
+            .enumerate()
+            .map(|(index, (datacenter, dir))| {
+                ConsensusPlan::new(
+                    (*datacenter).to_owned(),
+                    index == 0,
+                    &members,
+                    dir.path().join("raft/ownership-log.redb"),
+                    "ownership".to_owned(),
+                    TOKEN.to_owned(),
+                )
+                .unwrap()
+            })
+            .collect();
+        let stores: Vec<MetaStore> = dirs
+            .iter()
+            .zip(datacenters)
+            .map(|(dir, datacenter)| audit_store(dir, datacenter))
+            .collect();
+        let (rejected_empty, rejected_empty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gates: Vec<Arc<AppendGate>> = datacenters
+            .iter()
+            .map(|_| Arc::new(AppendGate::new(rejected_empty.clone())))
+            .collect();
+        let mut started: Vec<Option<StartedRaft>> = datacenters.iter().map(|_| None).collect();
+        let mut servers = datacenters.iter().map(|_| None).collect::<Vec<_>>();
+        // The seed bootstraps the roster, so it starts once its peers already answer.
+        for index in (1..datacenters.len()).chain([0]) {
+            let node = plans[index].ignite(stores[index].clone()).await.unwrap();
+            servers[index] = Some(serve_gated_raft(
+                listeners[index].take().unwrap(),
+                &plans[index],
+                &node,
+                Arc::clone(&gates[index]),
+            ));
+            started[index] = Some(node);
+        }
+        Self {
+            plans,
+            stores,
+            gates,
+            started,
+            servers: servers.into_iter().map(Option::unwrap).collect(),
+            rejected_empty: rejected_empty_rx,
+        }
+    }
+
+    fn node(&self, index: usize) -> &StartedRaft {
+        self.started[index].as_ref().unwrap()
+    }
+
+    fn elect(&self, index: usize, enabled: bool) {
+        self.node(index).raft().runtime_config().elect(enabled);
+    }
+
+    fn heartbeat(&self, index: usize, enabled: bool) {
+        self.node(index).raft().runtime_config().heartbeat(enabled);
+    }
+
+    fn tenure(&self, index: usize) -> (Option<u64>, u64) {
+        let metrics = self.node(index).metrics();
+        let observed = metrics.borrow();
+        (observed.current_leader, observed.current_term)
+    }
+
+    async fn wait_for_elected_leader(&self) -> usize {
+        let mut metrics = self.node(0).metrics();
+        let elected = tokio::time::timeout(
+            Duration::from_secs(10),
+            metrics.wait_for(|metrics| metrics.current_leader.is_some()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .current_leader
+        .unwrap();
+        self.plans
+            .iter()
+            .position(|plan| plan.local_voter() == elected)
+            .unwrap()
+    }
+
+    /// Waits for a survivor to win the election its blocked appends provoke, then confirms the
+    /// tenure survives a further rejected heartbeat.
+    async fn elect_replacement(&mut self, survivors: &[usize]) -> usize {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            self.rejected_empty.recv().await.unwrap();
+            let replacement = *survivors
+                .iter()
+                .find(|index| self.tenure(**index).0 == Some(self.plans[**index].local_voter()))
+                .unwrap();
+            for &index in survivors {
+                self.elect(index, false);
+            }
+            let tenure = self.tenure(replacement);
+            self.rejected_empty.recv().await.unwrap();
+            assert_eq!(self.tenure(replacement), tenure);
+            replacement
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn stop(&mut self, index: usize) {
+        stop_started_raft(self.started[index].take().unwrap()).await;
+    }
+
+    async fn shutdown(self) {
+        for started in self.started.into_iter().flatten() {
+            stop_started_raft(started).await;
+        }
+        for server in self.servers {
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
     }
 }
 
@@ -175,7 +407,7 @@ async fn test_ignite_does_not_bootstrap_a_replica_seed() {
         token: TOKEN.to_owned(),
     };
 
-    let node = plan.ignite().await.unwrap();
+    let node = plan.ignite(audit_store(&dir, "west")).await.unwrap();
 
     assert_eq!(node.leader(), None);
     node.raft().shutdown().await.unwrap();
@@ -186,7 +418,7 @@ async fn test_ignite_reports_a_bootstrap_failure() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("raft/ownership-log.redb");
     let error = plan_at(path, voter_id("west"), one_voter("east", "http://east.internal:4460/"))
-        .ignite()
+        .ignite(audit_store(&dir, "west"))
         .await
         .err()
         .expect("bootstrap fails");
@@ -214,7 +446,7 @@ async fn test_ignite_starts_and_bootstraps_a_single_node_group() {
     assert_eq!(plan.token(), TOKEN);
     assert_eq!(plan.local_voter(), voter_id("east"));
 
-    let node = plan.ignite().await.unwrap();
+    let node = plan.ignite(audit_store(&dir, "east")).await.unwrap();
 
     let mut metrics = node.metrics();
     tokio::time::timeout(
@@ -233,6 +465,151 @@ async fn test_ignite_starts_and_bootstraps_a_single_node_group() {
 }
 
 #[tokio::test]
+async fn test_ignite_projects_an_audit_left_before_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = plan_at(
+        dir.path().join("raft/ownership-log.redb"),
+        voter_id("east"),
+        one_voter("east", "http://east.internal:4460/"),
+    );
+    let store = audit_store(&dir, "east");
+    let started = plan.ignite(store.clone()).await.unwrap();
+    let group = OwnershipGroup::new((*started).clone(), DatacenterId("east".to_owned()));
+    let _ = group.claim_home("proj").await.unwrap();
+    group
+        .submit(Some("t-1"), planned_transfer_command("proj", "west"))
+        .await
+        .unwrap();
+    drop(group);
+    stop_started_raft(started).await;
+
+    let restarted = plan.ignite(store.clone()).await.unwrap();
+
+    assert_eq!(wait_for_transfer_audits(&store, "proj").await.len(), 1);
+    stop_started_raft(restarted).await;
+}
+
+#[tokio::test]
+async fn test_ignite_keeps_an_audit_pending_when_projection_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = plan_at(
+        dir.path().join("raft/ownership-log.redb"),
+        voter_id("east"),
+        one_voter("east", "http://east.internal:4460/"),
+    );
+    let audit_path = dir.path().join("east.redb");
+    let store = MetaStore::open(&audit_path).unwrap();
+    let started = plan.ignite(store.clone()).await.unwrap();
+    let group = OwnershipGroup::new((*started).clone(), DatacenterId("east".to_owned()));
+    let _ = group.claim_home("proj").await.unwrap();
+    group
+        .submit(Some("t-1"), planned_transfer_command("proj", "west"))
+        .await
+        .unwrap();
+    drop(group);
+    stop_started_raft(started).await;
+    drop(store);
+
+    let read_only = MetaStore::open_existing_read_only(&audit_path).unwrap();
+    let restarted = plan.ignite(read_only.clone()).await.unwrap();
+    let mut metrics = restarted.metrics();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        metrics.wait_for(|metrics| metrics.current_leader.is_some()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let group = OwnershipGroup::new((*restarted).clone(), DatacenterId("east".to_owned()));
+
+    assert_eq!(
+        group
+            .pending_transfer_audits()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|fact| fact.id)
+            .collect::<Vec<_>>(),
+        vec!["t-1".to_owned()]
+    );
+    assert!(read_only.transfer_audits("proj").unwrap().is_empty());
+    drop(group);
+    stop_started_raft(restarted).await;
+}
+
+#[tokio::test]
+async fn test_a_new_leader_projects_its_pending_transfer_audit() {
+    let datacenters = ["east", "west", "north"];
+    let dirs: Vec<TempDir> = datacenters.iter().map(|_| tempfile::tempdir().unwrap()).collect();
+    let mut cluster = GatedCluster::ignite(&datacenters, &dirs).await;
+    let leader = cluster.wait_for_elected_leader().await;
+    let group = OwnershipGroup::new(
+        cluster.node(leader).node().clone(),
+        DatacenterId(datacenters[leader].to_owned()),
+    );
+    let _ = group.claim_home("proj").await.unwrap();
+    group
+        .submit(Some("t-1"), planned_transfer_command("proj", "west"))
+        .await
+        .unwrap();
+    drop(group);
+    let survivors: Vec<usize> = (0..datacenters.len()).filter(|index| *index != leader).collect();
+    for &index in &survivors {
+        cluster.elect(index, false);
+        cluster.heartbeat(index, false);
+    }
+    cluster.stop(leader).await;
+    for &index in &survivors {
+        cluster.gates[index].block();
+        cluster.elect(index, true);
+    }
+    let replacement = cluster.elect_replacement(&survivors).await;
+    assert!(
+        survivors
+            .iter()
+            .all(|index| cluster.stores[*index].transfer_audits("proj").unwrap().is_empty())
+    );
+    for &index in &survivors {
+        cluster.gates[index].open();
+        cluster.elect(index, true);
+        cluster.heartbeat(index, true);
+    }
+
+    assert_eq!(
+        wait_for_transfer_audits(&cluster.stores[replacement], "proj")
+            .await
+            .len(),
+        1
+    );
+
+    cluster.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_pending_transfer_audits_requires_the_local_leader() {
+    let dir = tempfile::tempdir().unwrap();
+    let group = OwnershipGroup::new(started_node(&dir).await, DatacenterId("east".to_owned()));
+
+    assert!(matches!(
+        group.pending_transfer_audits().await,
+        Err(OwnershipError::NotLeader { .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_pending_transfer_audits_reports_a_stopped_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = leader_node(&dir).await;
+    let group = OwnershipGroup::new(node.clone(), DatacenterId("east".to_owned()));
+    node.raft().shutdown().await.unwrap();
+
+    assert!(matches!(
+        group.pending_transfer_audits().await,
+        Err(OwnershipError::Unavailable(_))
+    ));
+}
+
+#[tokio::test]
 async fn test_ignite_fails_when_the_log_directory_cannot_be_created() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path()).unwrap();
@@ -243,7 +620,7 @@ async fn test_ignite_fails_when_the_log_directory_cannot_be_created() {
         one_voter("east", "http://east.internal:4460/"),
     );
 
-    let error = plan.ignite().await.err().unwrap().to_string();
+    let error = plan.ignite(audit_store(&dir, "east")).await.err().unwrap().to_string();
 
     assert!(error.contains("log directory"), "{error}");
 }
@@ -258,7 +635,7 @@ async fn test_ignite_fails_when_the_log_store_cannot_open() {
         one_voter("east", "http://east.internal:4460/"),
     );
 
-    let error = plan.ignite().await.err().unwrap().to_string();
+    let error = plan.ignite(audit_store(&dir, "east")).await.err().unwrap().to_string();
 
     assert!(error.contains("log store"), "{error}");
 }
@@ -278,7 +655,7 @@ async fn test_ignite_fails_to_start_on_a_corrupt_store() {
         one_voter("east", "http://east.internal:4460/"),
     );
 
-    let error = plan.ignite().await.err().unwrap().to_string();
+    let error = plan.ignite(audit_store(&dir, "east")).await.err().unwrap().to_string();
 
     assert!(error.contains("start the ownership consensus node"), "{error}");
 }
@@ -308,7 +685,7 @@ async fn test_ignite_fails_to_bootstrap_a_roster_without_the_local_node() {
         one_voter("west", "http://west.internal:4460/"),
     );
 
-    let error = plan.ignite().await.err().unwrap().to_string();
+    let error = plan.ignite(audit_store(&dir, "east")).await.err().unwrap().to_string();
 
     assert!(error.contains("bootstrap the ownership consensus group"), "{error}");
 }
@@ -1611,6 +1988,7 @@ async fn test_repeating_a_transfer_returns_the_committed_no_op() {
             outcome: CommandOutcome::NoChange,
             old_voters: Vec::new(),
             new_voters: Vec::new(),
+            transfer_audit: None,
         }
     );
     assert_eq!(

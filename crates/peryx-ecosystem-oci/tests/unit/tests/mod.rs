@@ -7,6 +7,7 @@ mod conformance_tests;
 mod contents_tests;
 mod discovery_tests;
 mod frontier;
+mod ingress_admission_tests;
 mod manifest_schema_tests;
 mod metrics_tests;
 mod mirror_contract_tests;
@@ -978,6 +979,9 @@ struct EpochAuthority {
     committed: std::sync::atomic::AtomicU64,
     current: std::sync::atomic::AtomicU64,
     entered: Option<Arc<tokio::sync::Semaphore>>,
+    /// Held by a gated authority: the write waits here until the test hands it a permit, which gives a
+    /// test a place to act between a mutation's earlier metadata writes and its epoch-guarded commit.
+    released: Option<Arc<tokio::sync::Semaphore>>,
     available: bool,
 }
 
@@ -987,6 +991,7 @@ impl EpochAuthority {
             committed: std::sync::atomic::AtomicU64::new(epoch),
             current: std::sync::atomic::AtomicU64::new(epoch),
             entered: None,
+            released: None,
             available: true,
         })
     }
@@ -996,6 +1001,7 @@ impl EpochAuthority {
             committed: std::sync::atomic::AtomicU64::new(leased),
             current: std::sync::atomic::AtomicU64::new(current),
             entered: None,
+            released: None,
             available: true,
         })
     }
@@ -1005,6 +1011,7 @@ impl EpochAuthority {
             committed: std::sync::atomic::AtomicU64::new(epoch),
             current: std::sync::atomic::AtomicU64::new(epoch),
             entered: None,
+            released: None,
             available: false,
         })
     }
@@ -1016,9 +1023,29 @@ impl EpochAuthority {
                 committed: std::sync::atomic::AtomicU64::new(epoch),
                 current: std::sync::atomic::AtomicU64::new(epoch),
                 entered: Some(entered.clone()),
+                released: None,
                 available: true,
             }),
             entered,
+        )
+    }
+
+    /// An authority that parks a write inside `begin_epoch_write`, signalling on the first semaphore
+    /// once it arrives and resuming when the test posts a permit to the second. A mutation's earlier
+    /// metadata writes have committed by then and its epoch-guarded commit has not started.
+    fn gated(epoch: u64) -> (Arc<Self>, Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let released = Arc::new(tokio::sync::Semaphore::new(0));
+        (
+            Arc::new(Self {
+                committed: std::sync::atomic::AtomicU64::new(epoch),
+                current: std::sync::atomic::AtomicU64::new(epoch),
+                entered: Some(entered.clone()),
+                released: Some(released.clone()),
+                available: true,
+            }),
+            entered,
+            released,
         )
     }
 
@@ -1053,7 +1080,10 @@ impl peryx_driver::state::OwnershipAuthority for EpochAuthority {
         }
         if let Some(entered) = &self.entered {
             entered.add_permits(1);
-            return std::future::pending().await;
+            match &self.released {
+                Some(released) => released.acquire().await.expect("the gate outlives the write").forget(),
+                None => return std::future::pending().await,
+            }
         }
         let current = self.current.load(std::sync::atomic::Ordering::SeqCst);
         Ok(

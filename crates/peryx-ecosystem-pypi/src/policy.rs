@@ -210,6 +210,9 @@ pub fn compile_capabilities(config: &PypiPolicyConfig) -> Result<PolicyCapabilit
         let Ok(allowed) = VersionSpecifiers::from_str(specifier) else {
             return Err(PypiPolicyError::VersionSpecifiers(specifier.clone()));
         };
+        // The same specifier reaches a declared version string through `VersionAdmission`, which has
+        // no file to build artifact facts from.
+        capabilities = capabilities.with_owner_setting(ALLOW_VERSIONS_SETTING, specifier);
         rules.push(Arc::new(VersionRule { allowed }));
     }
     let allow = package_mask(&config.allow_package_types);
@@ -329,6 +332,91 @@ struct WheelTagSpec {
     field: &'static str,
     allow_rule: &'static str,
     block_rule: &'static str,
+}
+
+/// Where [`VersionAdmission`] reads the configured version specifier back from.
+const ALLOW_VERSIONS_SETTING: &str = "pypi.allow-versions";
+
+/// Whether policy admits a release version named on its own.
+///
+/// The version-specifier rule judges a file, and builds its version from the parsed filename. A
+/// `versions` entry has no file behind it: it arrives as upstream text that may not parse as a
+/// version at all, and routing it through [`ArtifactFacts`] would also subject it to the size and
+/// package-type rules, which have nothing to say about a release. This reads the one rule that does.
+#[derive(Debug, Clone, Default)]
+pub struct VersionAdmission {
+    allowed: Option<VersionSpecifiers>,
+}
+
+impl VersionAdmission {
+    #[must_use]
+    pub fn of(policy: &Policy) -> Self {
+        Self {
+            allowed: policy
+                .owner_setting(ALLOW_VERSIONS_SETTING)
+                .and_then(|specifier| VersionSpecifiers::from_str(specifier).ok()),
+        }
+    }
+
+    /// Whether any version rule is configured. With none every declared release stands, so the
+    /// filtering pass over a page's releases is skipped rather than walked to remove nothing.
+    #[must_use]
+    pub const fn constrains_versions(&self) -> bool {
+        self.allowed.is_some()
+    }
+
+    /// With no specifier configured every declared version stands, which keeps the upstream set
+    /// intact when no rule needs to read it. With one, a version peryx cannot parse cannot be shown
+    /// to satisfy it, so it is not listed.
+    #[must_use]
+    pub fn admits(&self, version: &str) -> bool {
+        self.allowed
+            .as_ref()
+            .is_none_or(|allowed| Version::from_str(version).is_ok_and(|version| allowed.contains(&version)))
+    }
+}
+
+/// Reduce the declared releases in `versions` to the ones policy lists, then add the releases the
+/// served files belong to. The only place either serving path decides that set.
+///
+/// The Simple Repository API requires every served file to belong to a listed version and permits a
+/// listed version to carry no files. So the set follows the declared releases through version policy
+/// rather than the surviving filenames: filtering artifacts leaves an allowed release listed even
+/// when it loses every file, while a release policy denies disappears from both halves.
+///
+/// `local` is what this index published itself, and it faces the same check, so a locally published
+/// version policy denies is no more listed than an upstream one. `served` carries the releases of the
+/// files that survived, which keeps a file whose release upstream failed to declare from being served
+/// under no listed version; those files already passed the artifact rules, version rule included, so
+/// they need no second check.
+///
+/// The caller owns the set because the streaming path has already built one to reject a duplicate
+/// `versions` entry, and building a second over a four-hundred-release page costs more than the rest
+/// of the transform.
+pub fn apply_version_policy<'a>(
+    versions: &mut BTreeSet<&'a str>,
+    admission: &VersionAdmission,
+    local: impl IntoIterator<Item = &'a str>,
+    served: impl IntoIterator<Item = &'a str>,
+) {
+    // Walking a four-hundred-release set to remove nothing is the whole cost of the filter, and no
+    // rule configured is the ordinary case.
+    if admission.constrains_versions() {
+        versions.retain(|version| admission.admits(version));
+    }
+    versions.extend(local.into_iter().filter(|version| admission.admits(version)));
+    versions.extend(served);
+}
+
+/// The release a served file belongs to, as its filename gives it.
+///
+/// A filename peryx cannot parse names no release, and the legacy egg is the standing example peryx
+/// serves anyway, so it contributes nothing rather than being withheld.
+#[must_use]
+pub fn served_version(filename: &str) -> Option<String> {
+    parse_distribution_filename(filename)
+        .ok()
+        .map(|parsed| parsed.version.to_string())
 }
 
 #[derive(Debug)]
@@ -644,10 +732,23 @@ impl PypiPolicy for Policy {
         if !self.active() {
             return Ok(detail);
         }
+        let declared = std::mem::take(&mut detail.versions);
         detail
             .files
             .retain(|file| !admission.files.contains_key(&file.filename));
-        retain_versions_with_files(&mut detail);
+        let served: Vec<String> = detail
+            .files
+            .iter()
+            .filter_map(|file| served_version(&file.filename))
+            .collect();
+        let mut listed: BTreeSet<&str> = declared.iter().map(String::as_str).collect();
+        apply_version_policy(
+            &mut listed,
+            &VersionAdmission::of(self),
+            [],
+            served.iter().map(String::as_str),
+        );
+        detail.versions = listed.into_iter().map(str::to_owned).collect();
         Ok(detail)
     }
 
@@ -810,24 +911,6 @@ fn project_size_denial<'a>(
             format!("project size {total} exceeds limit {limit}"),
         )
     })
-}
-
-fn retain_versions_with_files(detail: &mut ProjectDetail) {
-    let versions = detail
-        .files
-        .iter()
-        .filter_map(|file| parse_distribution_filename(&file.filename).ok())
-        .map(|parsed| parsed.version.to_string())
-        .collect::<BTreeSet<_>>();
-    let mut retained = BTreeSet::new();
-    detail.versions.retain(|version| {
-        if !versions.contains(version) {
-            return false;
-        }
-        retained.insert(version.clone());
-        true
-    });
-    detail.versions.extend(versions.difference(&retained).cloned());
 }
 
 #[cfg(test)]

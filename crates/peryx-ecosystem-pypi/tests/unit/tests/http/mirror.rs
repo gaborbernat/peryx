@@ -300,23 +300,53 @@ async fn test_mirror_detail_revalidate_304_serves_cached() {
     assert_eq!(second, StatusCode::OK);
     assert!(body.contains("flask"));
 }
-/// A rate-limited refresh is about the refresh, not about the copy peryx already holds, so a cached
-/// page still inside its stale bound is served rather than the failure being passed on. Every other
-/// rate-limit test runs with no cached page, which settles the question before the bound is read.
+/// A rate-limited refresh is about the refresh, not about the copy peryx already holds. A cached
+/// page still inside its stale bound is served; once it ages past the bound there is nothing to
+/// fall back on and the rate limit reaches the caller as a rate limit, which says when to come
+/// back, rather than as a gateway failure, which does not.
+///
+/// The fixture is built here rather than through `stale_page_harness`, which mounts a 503 on this
+/// same path and would answer from the arm below the one this covers. The `retry-after` matters
+/// too: a delay short enough to honour is retried instead of handed back.
+#[rstest]
+#[case::inside_the_bound(100, StatusCode::OK)]
+#[case::past_the_bound(5000, StatusCode::TOO_MANY_REQUESTS)]
 #[tokio::test]
-async fn test_mirror_detail_serves_a_cached_page_when_the_refresh_is_rate_limited() {
-    let h = stale_page_harness(300, 0).await;
+async fn test_mirror_detail_weighs_a_cached_page_against_a_rate_limit(#[case] now: i64, #[case] expected: StatusCode) {
+    let h = harness_with_stale(true, true, Policy::default(), Policy::default(), Policy::default(), 300).await;
+    h.state
+        .serving
+        .meta
+        .put_index(
+            "pypi/flask",
+            &CachedIndex {
+                source: None,
+                last_modified: None,
+                etag: None,
+                last_serial: None,
+                fetched_at_unix: 0,
+                content_type: None,
+                fresh_secs: None,
+                body: crate::to_json(&crate::ProjectDetail {
+                    meta: crate::Meta::default(),
+                    name: "flask".to_owned(),
+                    versions: vec!["1.0".to_owned()],
+                    files: vec![],
+                })
+                .into_bytes(),
+            },
+        )
+        .unwrap();
     Mock::given(method("GET"))
         .and(path("/simple/flask/"))
-        .respond_with(ResponseTemplate::new(429))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
         .mount(&h.server)
         .await;
-    h.clock.store(100, Ordering::Relaxed);
+    h.clock.store(now, Ordering::Relaxed);
 
-    let (status, _, body) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+    let (status, _, body) = get(&h.state, "/pypi/simple/flask/", Some("text/html")).await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("flask"), "{body}");
+    assert_eq!(status, expected, "{body}");
 }
 
 #[tokio::test]

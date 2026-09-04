@@ -206,6 +206,39 @@ fn registry_fsck_surfaces_a_failure_reading_blobs() {
     assert!(output.is_empty(), "reported a finding it never confirmed: {output:?}");
 }
 
+/// The tag scan is a second read, so `arm(0)` never reaches it: the manifest scan consumes the
+/// injection first. Sweeping the injection point finds the run that fails during the tags, and
+/// since both reads fail with the same text the report is the discriminator - empty means the
+/// manifest scan failed, non-empty means the manifest findings were written and the tags then did.
+#[test]
+fn registry_fsck_surfaces_a_failure_reading_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    meta.put_driver_value(&format!("oci\0m\0sha256:{}", "b".repeat(64)), b"invalid")
+        .unwrap();
+    crate::store::put_tag(&meta, "images", "app", "latest", &format!("sha256:{}", "c".repeat(64))).unwrap();
+
+    drop(meta);
+    // A handle does not survive its own injected failure: reusing one across armings leaves every
+    // later sweep step failing in the manifest scan. Each step reopens the retained pages instead.
+    let during_tags = (0..128).find(|&fail_after| {
+        let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        fault.arm(fail_after);
+        let mut output = Vec::new();
+        let failed = OciRegistry::default()
+            .fsck_metadata(&meta, &blobs(&dir), &[], &mut output)
+            .is_err();
+        fault.disable();
+        failed && !output.is_empty()
+    });
+
+    assert!(
+        during_tags.is_some(),
+        "no injection point failed after a manifest finding was written"
+    );
+}
+
 /// A finding an operator never receives is not a finding, so a report that cannot be written fails
 /// the check instead of counting the problem and returning success.
 #[test]

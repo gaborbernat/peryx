@@ -545,3 +545,56 @@ async fn test_manifest_tag_delete_never_leaves_a_torn_mapping() {
 
     assert!(failed > 0, "no injection point reached the delete");
 }
+
+/// The same guarantee for the other direction. A restore that cannot finish must leave the tag
+/// either still trashed or pointing back at exactly what it pointed at before, never at a digest
+/// neither the original write nor the restore put there.
+///
+/// The delete that sets this up runs unfaulted, so the injection lands on the restore rather than on
+/// the trashing that precedes it.
+#[tokio::test]
+async fn test_manifest_tag_restore_never_leaves_a_torn_mapping() {
+    let mut failed = 0_u32;
+    for fail_after in 0..160 {
+        let dir = tempfile::tempdir().unwrap();
+        let (pages, fault) = peryx_test_support::fault::backend();
+        let meta =
+            peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        seed_tagged_manifest(&meta);
+        let intact = tag_row(&meta).expect("the seed wrote a tag");
+        let (state, app) = faulted_app(&dir, meta);
+        send_body(
+            &app,
+            Method::DELETE,
+            "/v2/store/app/manifests/latest",
+            &[("authorization", &auth(TOKEN))],
+            Vec::new(),
+        )
+        .await;
+        fault.arm(fail_after);
+        let status = send_body(
+            &app,
+            Method::PUT,
+            "/v2/store/app/manifests/latest/restore",
+            &[("authorization", &auth(TOKEN))],
+            Vec::new(),
+        )
+        .await
+        .0;
+        fault.disable();
+        drop(app);
+        drop(state);
+
+        let meta =
+            peryx_storage::meta::MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        failed += u32::from(!status.is_success());
+        if let Some(row) = tag_row(&meta) {
+            assert_eq!(
+                row, intact,
+                "injecting after {fail_after} reads restored a tag to a digest nobody wrote, answering {status}"
+            );
+        }
+    }
+
+    assert!(failed > 0, "no injection point reached the restore");
+}

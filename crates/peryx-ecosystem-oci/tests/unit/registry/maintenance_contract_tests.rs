@@ -145,6 +145,56 @@ fn registry_fsck_reports_corrupt_manifests() {
     );
 }
 
+struct FailingWriter;
+
+impl std::io::Write for FailingWriter {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("cannot write the report"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn blobs(dir: &tempfile::TempDir) -> peryx_storage::blob::BlobStorage {
+    peryx_storage::blob::BlobStorage::filesystem(dir.path().join("blobs"))
+}
+
+/// A check that cannot read the manifests has not found the metadata clean, so it reports the read
+/// failure rather than the zero problems it happens to have counted.
+#[test]
+fn registry_fsck_surfaces_a_failure_reading_manifests() {
+    let dir = tempfile::tempdir().unwrap();
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    let mut output = Vec::new();
+    fault.arm(0);
+
+    let error = OciRegistry::default()
+        .fsck_metadata(&meta, &blobs(&dir), &[], &mut output)
+        .unwrap_err();
+
+    assert!(error.contains("injected storage failure"), "{error}");
+    assert!(output.is_empty(), "{output:?}");
+}
+
+/// A finding an operator never receives is not a finding, so a report that cannot be written fails
+/// the check instead of counting the problem and returning success.
+#[test]
+fn registry_fsck_surfaces_a_failure_writing_a_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    meta.put_driver_value(&format!("oci\0m\0sha256:{}", "b".repeat(64)), b"invalid")
+        .unwrap();
+
+    let error = OciRegistry::default()
+        .fsck_metadata(&meta, &blobs(&dir), &[], &mut FailingWriter)
+        .unwrap_err();
+
+    assert!(error.contains("cannot write the report"), "{error}");
+}
+
 #[test]
 fn registry_fsck_reports_missing_descriptor_content_and_tag_targets() {
     let dir = tempfile::tempdir().unwrap();

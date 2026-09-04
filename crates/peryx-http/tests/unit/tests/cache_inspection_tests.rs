@@ -20,6 +20,14 @@ use tower::ServiceExt as _;
 const ADMIN_PASSWORD: &str = "administrator password";
 const OPERATOR_PASSWORD: &str = "operator password";
 const ECOSYSTEM: Ecosystem = Ecosystem::new("example");
+/// Registered alongside [`ECOSYSTEM`] out of sorted order. Four of them, not two, because the
+/// registry is a hash map: with one other ecosystem an unsorted report lands in the right order half
+/// the time by luck, and the test would pass against a missing sort.
+const OTHER_ECOSYSTEMS: [(Ecosystem, &str); 3] = [
+    (Ecosystem::new("zulu"), "requests"),
+    (Ecosystem::new("alpha"), "numpy"),
+    (Ecosystem::new("earlier"), "django"),
+];
 
 #[derive(Clone, Copy)]
 enum Failure {
@@ -31,6 +39,7 @@ enum Failure {
 
 struct Inspector {
     failure: Option<Failure>,
+    resource: &'static str,
 }
 
 impl CacheInspectDriver for Inspector {
@@ -42,12 +51,12 @@ impl CacheInspectDriver for Inspector {
         }
         Ok(vec![CachePage {
             index: index_names.first().unwrap().to_string(),
-            resource: "flask".to_owned(),
+            resource: self.resource.to_owned(),
             fetched_at_unix: 900,
             fresh_secs: Some(60),
             body_bytes: 11,
             record_bytes: 17,
-            key: "pypi/flask".to_owned(),
+            key: format!("pypi/{}", self.resource),
         }])
     }
 
@@ -98,6 +107,16 @@ impl Fixture {
     }
 
     async fn with_failure(failure: Option<Failure>) -> Self {
+        Self::build(failure, false).await
+    }
+
+    /// A second index whose name is longer, and a second ecosystem registered ahead of the one that
+    /// sorts first, so both orderings the report promises have something to reorder.
+    async fn two_ecosystems() -> Self {
+        Self::build(None, true).await
+    }
+
+    async fn build(failure: Option<Failure>, second: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
         let users = UserService::with_password_settings(meta.clone(), PasswordPolicy::new(8, 1, 1).unwrap(), 2);
@@ -113,28 +132,40 @@ impl Fixture {
         let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
         let digest = blobs.blocking().put_bytes(b"payload").unwrap();
         let blob_path = blobs.filesystem_store().unwrap().path_for(&digest);
-        let mut state = AppState::with_clock(
-            meta,
-            blobs,
-            60,
-            vec![Index {
-                name: "pypi".to_owned(),
-                route: "pypi".to_owned(),
-                ecosystem: ECOSYSTEM,
-                kind: IndexKind::Hosted { volatile: false },
-                policy: Policy::default(),
-                acl: IndexAcl::default(),
-            }],
-            Arc::new(|| 1000),
-        );
+        let index = |name: &str, ecosystem| Index {
+            name: name.to_owned(),
+            route: name.to_owned(),
+            ecosystem,
+            kind: IndexKind::Hosted { volatile: false },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        };
+        let mut indexes = vec![index("pypi", ECOSYSTEM)];
+        if second {
+            indexes.push(index("pypi-mirror", OTHER_ECOSYSTEMS[0].0.clone()));
+        }
+        let mut state = AppState::with_clock(meta, blobs, 60, indexes, Arc::new(|| 1000));
         let serving = Arc::get_mut(&mut state.serving).unwrap();
         serving.users = users;
         serving.authorization = authorization;
-        let driver = Arc::new(Inspector { failure });
+        let driver = Arc::new(Inspector {
+            failure,
+            resource: "flask",
+        });
         state.register_capabilities(|registrar| {
             registrar.register_name(ECOSYSTEM, driver.clone());
             registrar.register_cache_inspect(ECOSYSTEM, driver.clone());
             registrar.register_fsck(ECOSYSTEM, driver);
+            if second {
+                for (ecosystem, resource) in OTHER_ECOSYSTEMS {
+                    let other = Arc::new(Inspector {
+                        failure: None,
+                        resource,
+                    });
+                    registrar.register_name(ecosystem.clone(), other.clone());
+                    registrar.register_cache_inspect(ecosystem, other);
+                }
+            }
         });
         Self {
             directory,
@@ -199,6 +230,34 @@ async fn test_cache_list_reports_live_pages_and_blobs() {
             fixture.digest.as_str(),
             fixture.blob_path.display()
         )
+    );
+}
+
+/// Longest first: a key belongs to the most specific index whose name prefixes it, so a page lands
+/// under `pypi-mirror` and not under the shorter `pypi` that prefixes the same key.
+#[tokio::test]
+async fn test_cache_list_attributes_pages_to_the_longest_index_name() {
+    let fixture = Fixture::two_ecosystems().await;
+
+    let (status, body) = fixture.get("/+cache", Some(("Alice", ADMIN_PASSWORD))).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(indexed_column(&body, 1), ["pypi-mirror"; 4], "{body}");
+}
+
+/// The driver registry is a hash map, so without an order of its own the two ecosystems swap places
+/// between runs and an operator diffing yesterday's report against today's reads the swap as change.
+#[tokio::test]
+async fn test_cache_list_orders_ecosystems_by_name() {
+    let fixture = Fixture::two_ecosystems().await;
+
+    let (status, body) = fixture.get("/+cache", Some(("Alice", ADMIN_PASSWORD))).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        indexed_column(&body, 2),
+        ["numpy", "django", "flask", "requests"],
+        "{body}"
     );
 }
 
@@ -333,4 +392,11 @@ async fn test_cache_inspection_contains_worker_panics() {
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, r#"{"error":"cache inspection task failed"}"#);
+}
+
+fn indexed_column(body: &str, column: usize) -> Vec<&str> {
+    body.lines()
+        .filter(|line| line.starts_with("index\t"))
+        .map(|line| line.split('\t').nth(column).unwrap())
+        .collect()
 }

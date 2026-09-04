@@ -15,7 +15,7 @@ fn test_cache_purge_project_dry_run_keeps_records() {
     );
     let meta = MetaStore::open_existing(config.data_dir.join("peryx.redb")).unwrap();
     assert!(meta.get_index("pypi/flask").unwrap().is_some());
-    assert!(meta.get_file_url(digest.as_str()).unwrap().is_some());
+    assert!(meta.get_file_url("pypi", "flask", digest.as_str()).unwrap().is_some());
 }
 
 #[test]
@@ -40,8 +40,11 @@ fn test_cache_purge_resource_missing_target_is_empty() {
     );
 }
 
+/// A purge takes the target's own download source even where another project advertises the same
+/// digest, because that row names this publication and no other. The other project's page and the
+/// hosted upload keep their own records, so the count reports one source removed rather than none.
 #[test]
-fn test_cache_purge_project_preserves_shared_and_uploaded_blobs() {
+fn test_cache_purge_project_takes_its_own_source_for_a_shared_digest() {
     let (_dir, config, digest) = cache_fixture();
     let meta = MetaStore::open_existing(config.data_dir.join("peryx.redb")).unwrap();
     meta.put_index(
@@ -71,7 +74,7 @@ fn test_cache_purge_project_preserves_shared_and_uploaded_blobs() {
     assert!(
         String::from_utf8(out)
             .unwrap()
-            .contains("dry-run\tresource\tpypi\tflask\t1\t1\t0\t0\n")
+            .contains("dry-run\tresource\tpypi\tflask\t1\t1\t1\t0\n")
     );
 }
 
@@ -163,7 +166,7 @@ fn test_cache_purge_project_yes_removes_metadata_records() {
     );
     let meta = MetaStore::open_existing(config.data_dir.join("peryx.redb")).unwrap();
     assert!(meta.get_index("pypi/flask").unwrap().is_none());
-    assert!(meta.get_file_url(digest.as_str()).unwrap().is_none());
+    assert!(meta.get_file_url("pypi", "flask", digest.as_str()).unwrap().is_none());
     assert!(meta.get_metadata_digest(digest.as_str()).unwrap().is_none());
     assert!(meta.list_projects("pypi").unwrap().is_empty());
 }
@@ -171,7 +174,7 @@ fn test_cache_purge_project_yes_removes_metadata_records() {
 #[test]
 fn test_cache_purge_orphaned_blobs_rejects_invalid_references() {
     let (_dir, meta, config) = store_and_config();
-    meta.put_file_url("bad", "https://files.example/pkg.whl", "pypi")
+    meta.put_file_url("pypi", "pkg", "bad", "https://files.example/pkg.whl", "pypi")
         .unwrap();
     drop(meta);
     let mut out = Vec::new();

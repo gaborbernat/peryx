@@ -73,7 +73,7 @@ pub async fn metadata_bytes(
         artifact_filename,
     )?;
     if let Some(FilePublication::Claimed(claim)) = publication {
-        return claimed_metadata(state, &claim, artifact_digest, route, artifact_filename).await;
+        return claimed_metadata(state, &index.name, &claim, artifact_digest, route, artifact_filename).await;
     }
     if let Some(metadata_hex) = state.meta.get_metadata_digest(artifact_digest.as_str())? {
         let metadata_digest = Digest::from_hex(&metadata_hex).ok_or(CacheError::FileNotFound)?;
@@ -81,7 +81,7 @@ pub async fn metadata_bytes(
             return read_metadata_blob(state, &metadata_digest).await;
         }
     }
-    write_generated_metadata(state, artifact_digest, route, artifact_filename).await
+    write_generated_metadata(state, &index.name, artifact_digest, route, artifact_filename).await
 }
 
 /// Whether `index` publishes `filename` at `digest`.
@@ -147,6 +147,50 @@ fn winning_publication(
     }
 }
 
+/// The download source the publication `index` serves, or `None` when it serves none.
+///
+/// A source row belongs to the index whose page advertised the download, so a virtual index holds
+/// none of its own. It walks its leaves in the shadow order that decides which publication wins, and
+/// answers with the first leaf holding one, so a virtual route resolves the same publication its
+/// membership check just matched instead of missing a row that is there.
+///
+/// A hosted index has no upstream to fetch from: its bytes are the ones peryx was given.
+///
+/// # Errors
+/// Returns [`CacheError`] when the store cannot be read.
+pub fn winning_file_source(
+    state: &ServingState,
+    index: &str,
+    project: &str,
+    sha256: &str,
+) -> Result<Option<crate::store::FileSource>, CacheError> {
+    let Some(position) = state.indexes.iter().position(|candidate| candidate.name == index) else {
+        return Ok(None);
+    };
+    file_source_at(state, position, project, sha256)
+}
+
+fn file_source_at(
+    state: &ServingState,
+    position: usize,
+    project: &str,
+    sha256: &str,
+) -> Result<Option<crate::store::FileSource>, CacheError> {
+    let index = state.index_at(position);
+    match &index.kind {
+        IndexKind::Cached { .. } => Ok(state.meta.get_file_url(&index.name, project, sha256)?),
+        IndexKind::Hosted { .. } => Ok(None),
+        IndexKind::Virtual { layers, .. } => {
+            for leaf in peryx_index::leaf_order(&state.indexes, layers) {
+                if let Some(source) = file_source_at(state, leaf, project, sha256)? {
+                    return Ok(Some(source));
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
 fn hosted_publication(
     state: &ServingState,
     index: &str,
@@ -166,6 +210,7 @@ fn hosted_publication(
 /// what the page promised never reach a reader.
 async fn claimed_metadata(
     state: &Arc<ServingState>,
+    index: &str,
     claim: &MetadataClaim,
     artifact_digest: &Digest,
     route: &str,
@@ -186,6 +231,7 @@ async fn claimed_metadata(
         Err(CacheError::Upstream(err)) if err.status() == Some(404) => {
             return recover_claimed_metadata(
                 state,
+                index,
                 &metadata_digest,
                 artifact_digest,
                 route,
@@ -213,13 +259,14 @@ async fn claimed_metadata(
 /// life, not that the artifact lacks metadata.
 async fn recover_claimed_metadata(
     state: &Arc<ServingState>,
+    index: &str,
     metadata_digest: &Digest,
     artifact_digest: &Digest,
     route: &str,
     artifact_filename: &str,
     negative_key: String,
 ) -> Result<Bytes, CacheError> {
-    let bytes = match generated_metadata_bytes(state, artifact_digest, route, artifact_filename).await {
+    let bytes = match generated_metadata_bytes(state, index, artifact_digest, route, artifact_filename).await {
         Ok(bytes) => bytes,
         Err(err) => {
             let digest = artifact_digest.as_str();
@@ -252,11 +299,12 @@ async fn read_metadata_blob(state: &Arc<ServingState>, metadata_digest: &Digest)
 
 async fn write_generated_metadata(
     state: &Arc<ServingState>,
+    index: &str,
     artifact_digest: &Digest,
     route: &str,
     artifact_filename: &str,
 ) -> Result<Bytes, CacheError> {
-    let bytes = generated_metadata_bytes(state, artifact_digest, route, artifact_filename).await?;
+    let bytes = generated_metadata_bytes(state, index, artifact_digest, route, artifact_filename).await?;
     let metadata_digest = state.blobs.put_bytes(&bytes).await?;
     record_generated_metadata(state, artifact_digest, &metadata_digest, route, artifact_filename)?;
     Ok(Bytes::from(bytes))
@@ -289,11 +337,13 @@ fn record_sidecar_placement(state: &ServingState, metadata_digest: &Digest, sour
 
 async fn generated_metadata_bytes(
     state: &Arc<ServingState>,
+    index: &str,
     artifact_digest: &Digest,
     route: &str,
     filename: &str,
 ) -> Result<Vec<u8>, CacheError> {
-    let source = state.meta.get_file_url(artifact_digest.as_str())?;
+    let project = crate::project_of_filename(filename);
+    let source = winning_file_source(state, index, &project, artifact_digest.as_str())?;
     if state.blobs.head(artifact_digest).await?.is_some() {
         let lease = state.blobs.materialize(artifact_digest).await?;
         return metadata_from_artifact_path(filename, lease.path())?.ok_or(CacheError::FileNotFound);
@@ -309,6 +359,7 @@ async fn generated_metadata_bytes(
     }
     let path = file_path(
         state.clone(),
+        index.to_owned(),
         artifact_digest.clone(),
         route.to_owned(),
         filename.to_owned(),
@@ -436,7 +487,12 @@ async fn zip_data_start(session: &RangeSession, entry: &ZipEntry) -> Result<u64,
 ///
 /// Admission precedes spawning so saturated traffic cannot create waiting tasks. Sdists remain
 /// on-demand because extracting their metadata requires a full download.
-pub(super) fn spawn_metadata_backfill(state: &Arc<ServingState>, route: String, registrations: &[Registration]) {
+pub(super) fn spawn_metadata_backfill(
+    state: &Arc<ServingState>,
+    index: String,
+    route: String,
+    registrations: &[Registration],
+) {
     let candidates = metadata_backfill_candidates(registrations);
     if candidates.is_empty() {
         return;
@@ -444,7 +500,7 @@ pub(super) fn spawn_metadata_backfill(state: &Arc<ServingState>, route: String, 
     state
         .plugin_service::<MetadataBackfills>()
         .expect("PyPI runtime installs metadata backfills")
-        .spawn(state.clone(), route, candidates);
+        .spawn(state.clone(), index, route, candidates);
 }
 
 const BACKFILL_CONCURRENCY: usize = 2;
@@ -455,7 +511,13 @@ pub(super) struct MetadataBackfills {
 }
 
 impl MetadataBackfills {
-    fn spawn(&self, state: Arc<ServingState>, route: String, candidates: Vec<MetadataBackfillCandidate>) {
+    fn spawn(
+        &self,
+        state: Arc<ServingState>,
+        index: String,
+        route: String,
+        candidates: Vec<MetadataBackfillCandidate>,
+    ) {
         let Ok(slot) = self.slots.clone().try_acquire_owned() else {
             return;
         };
@@ -466,7 +528,7 @@ impl MetadataBackfills {
             }
         }
         tasks.spawn(async move {
-            run_metadata_backfill_candidates(state, route, candidates).await;
+            run_metadata_backfill_candidates(state, index, route, candidates).await;
             drop(slot);
         });
     }
@@ -505,6 +567,7 @@ fn metadata_backfill_candidates(registrations: &[Registration]) -> Vec<MetadataB
 
 async fn run_metadata_backfill_candidates(
     state: Arc<ServingState>,
+    index: String,
     route: String,
     candidates: Vec<MetadataBackfillCandidate>,
 ) {
@@ -516,7 +579,8 @@ async fn run_metadata_backfill_candidates(
         {
             continue;
         }
-        let Err(err) = write_generated_metadata(&state, &candidate.digest, &route, &candidate.filename).await else {
+        let Err(err) = write_generated_metadata(&state, &index, &candidate.digest, &route, &candidate.filename).await
+        else {
             continue;
         };
         let digest = candidate.digest.as_str();
@@ -532,8 +596,16 @@ struct MetadataBackfillCandidate {
 
 /// # Errors
 /// Returns [`CacheError`] when the metadata store cannot be read.
-pub fn registered_file_size(state: &ServingState, digest: &Digest) -> Result<Option<u64>, CacheError> {
-    Ok(state.meta.get_file_url(digest.as_str())?.and_then(|source| source.size))
+pub fn registered_file_size(
+    state: &ServingState,
+    index: &str,
+    filename: &str,
+    digest: &Digest,
+) -> Result<Option<u64>, CacheError> {
+    Ok(
+        winning_file_source(state, index, &crate::project_of_filename(filename), digest.as_str())?
+            .and_then(|source| source.size),
+    )
 }
 
 /// Key the negative entry on the sidecar that went missing rather than on the artifact, so one

@@ -253,6 +253,8 @@ async fn test_offline_generated_wheel_metadata_range_fetch_is_unavailable() {
         .serving
         .meta
         .put_file_url(
+            "pypi",
+            "flask",
             artifact.as_str(),
             "https://example.invalid/files/flask-1.0-py3-none-any.whl",
             "pypi",
@@ -372,7 +374,7 @@ async fn test_buffered_resolution_uses_the_upstream_route() {
         state
             .serving
             .meta
-            .get_file_url(Digest::of(b"wheel").as_str())
+            .get_file_url("pypi", "flask", Digest::of(b"wheel").as_str())
             .unwrap()
             .unwrap()
             .upstream
@@ -1039,4 +1041,37 @@ async fn test_project_page_reports_an_unreachable_upstream() {
         })
         .await;
     assert!(result.is_err(), "{result:?}");
+}
+
+#[tokio::test]
+async fn test_a_source_lookup_names_an_index_this_node_does_not_serve() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, "https://example.invalid/simple/", |client| {
+        vec![Index {
+            name: "pypi".to_owned(),
+            route: "pypi".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Cached { client, offline: true },
+            policy: peryx_policy::Policy::default(),
+            acl: IndexAcl::default(),
+        }]
+    });
+    let artifact = Digest::of(b"wheel");
+    state
+        .serving
+        .meta
+        .put_file_url(
+            "pypi",
+            "flask",
+            artifact.as_str(),
+            "https://example.invalid/files/flask-1.0-py3-none-any.whl",
+            "pypi",
+        )
+        .unwrap();
+
+    assert_eq!(
+        cache::winning_file_source(&state.serving, "absent", "flask", artifact.as_str()).unwrap(),
+        None,
+        "a name no configured index answers to serves no publication, so it resolves no source"
+    );
 }

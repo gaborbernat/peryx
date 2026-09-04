@@ -1,8 +1,8 @@
 use peryx_storage::meta::{MetaStore, QuotaLimit, QuotaLimits, QuotaReservationState, QuotaUsage};
 
 use super::{
-    ManifestCommit, ReserveOutcome, commit_blob_membership, finalize, publish_manifest, quota_reservation,
-    release_blob_membership, reserve,
+    ManifestCheckpoint, ManifestCommit, ReserveOutcome, commit_blob_membership, finalize, publish_manifest,
+    quota_reservation, release_blob_membership, reserve,
 };
 use crate::name::Reference;
 use crate::registry::ServeError;
@@ -245,4 +245,23 @@ fn test_manifest_tag_replacement_commits_a_new_allocation() {
         ),
         (8, 1)
     );
+}
+
+/// A stored checkpoint that cannot be decoded has to fail the replay it was read for. Treating it as
+/// absent would let a request that already committed run a second time.
+///
+/// The round trip is the control: without it a `decode` that rejected everything would pass.
+#[test]
+fn test_manifest_checkpoint_reports_a_record_it_cannot_decode() {
+    let checkpoint = ManifestCheckpoint {
+        reference: "sha256:aa".to_owned(),
+        epoch: 3,
+        serial: 9,
+    };
+
+    assert_eq!(ManifestCheckpoint::decode(&checkpoint.encode()).unwrap(), checkpoint);
+    assert!(matches!(
+        ManifestCheckpoint::decode(b"not a checkpoint"),
+        Err(ServeError::Transport(_))
+    ));
 }

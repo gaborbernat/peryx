@@ -31,6 +31,8 @@ const OTHER_ECOSYSTEMS: [(Ecosystem, &str); 3] = [
 
 #[derive(Clone, Copy)]
 enum Failure {
+    /// Not a driver failure: the fixture roots the blob store at a regular file instead.
+    BlobScan,
     Pages,
     Counts,
     Fsck,
@@ -47,7 +49,7 @@ impl CacheInspectDriver for Inspector {
         match self.failure {
             Some(Failure::Pages) => return Err("cannot read pages".to_owned()),
             Some(Failure::Panic) => panic!("cache inspector panicked"),
-            Some(Failure::Counts | Failure::Fsck) | None => {}
+            Some(Failure::BlobScan | Failure::Counts | Failure::Fsck) | None => {}
         }
         Ok(vec![CachePage {
             index: index_names.first().unwrap().to_string(),
@@ -132,6 +134,14 @@ impl Fixture {
         let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
         let digest = blobs.blocking().put_bytes(b"payload").unwrap();
         let blob_path = blobs.filesystem_store().unwrap().path_for(&digest);
+        if matches!(failure, Some(Failure::BlobScan)) {
+            // A blob scan skips a root that does not exist and reports no blobs, so breaking the
+            // root would be silently ignored. A regular file where the digest directory belongs is
+            // a root that exists and cannot be read.
+            let digests = directory.path().join("blobs").join("sha256");
+            std::fs::remove_dir_all(&digests).unwrap();
+            std::fs::write(&digests, b"not a directory").unwrap();
+        }
         let index = |name: &str, ecosystem| Index {
             name: name.to_owned(),
             route: name.to_owned(),
@@ -365,6 +375,8 @@ async fn test_cache_list_rejects_unknown_filters() {
     "cache size failed: scan cached index pages: cannot read pages"
 )]
 #[case::size_counts(Failure::Counts, "/+cache/size", "cache size failed: cannot count records")]
+#[case::list_blobs(Failure::BlobScan, "/+cache", "cache list failed: scan blob files")]
+#[case::size_blobs(Failure::BlobScan, "/+cache/size", "cache size failed: scan blob files")]
 #[case::fsck(
     Failure::Fsck,
     "/+cache/fsck",

@@ -300,6 +300,25 @@ async fn test_mirror_detail_revalidate_304_serves_cached() {
     assert_eq!(second, StatusCode::OK);
     assert!(body.contains("flask"));
 }
+/// A rate-limited refresh is about the refresh, not about the copy peryx already holds, so a cached
+/// page still inside its stale bound is served rather than the failure being passed on. Every other
+/// rate-limit test runs with no cached page, which settles the question before the bound is read.
+#[tokio::test]
+async fn test_mirror_detail_serves_a_cached_page_when_the_refresh_is_rate_limited() {
+    let h = stale_page_harness(300, 0).await;
+    Mock::given(method("GET"))
+        .and(path("/simple/flask/"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&h.server)
+        .await;
+    h.clock.store(100, Ordering::Relaxed);
+
+    let (status, _, body) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("flask"), "{body}");
+}
+
 #[tokio::test]
 async fn test_mirror_detail_refuses_a_page_staler_than_the_bound() {
     let h = stale_page_harness(300, 0).await;

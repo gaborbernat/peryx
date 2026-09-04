@@ -179,6 +179,33 @@ fn registry_fsck_surfaces_a_failure_reading_manifests() {
     assert!(output.is_empty(), "{output:?}");
 }
 
+/// A descriptor check that cannot stat the blob store has not established the layer is absent, so
+/// the storage failure reaches the operator instead of a "missing blob" finding it did not verify.
+#[test]
+fn registry_fsck_surfaces_a_failure_reading_blobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let layer = format!("sha256:{}", "c".repeat(64));
+    let image = manifest(format!("{{\"layers\":[{{\"digest\":\"{layer}\"}}]}}").as_bytes());
+    crate::store::record_manifest(&meta, "images", "app", &digest(&image), &image).unwrap();
+    // A regular file where the blob root belongs, so every path under it fails as not a directory.
+    let root = dir.path().join("blobs");
+    std::fs::write(&root, b"not a directory").unwrap();
+    let mut output = Vec::new();
+
+    let error = OciRegistry::default()
+        .fsck_metadata(
+            &meta,
+            &peryx_storage::blob::BlobStorage::filesystem(root),
+            &[],
+            &mut output,
+        )
+        .unwrap_err();
+
+    assert!(!error.is_empty());
+    assert!(output.is_empty(), "reported a finding it never confirmed: {output:?}");
+}
+
 /// A finding an operator never receives is not a finding, so a report that cannot be written fails
 /// the check instead of counting the problem and returning success.
 #[test]

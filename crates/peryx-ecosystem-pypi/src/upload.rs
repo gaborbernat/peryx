@@ -460,10 +460,23 @@ pub fn store_prepared_blocking(
         .transpose()?;
     let provenance_ref = provenance.as_ref().map(staged_reference);
     let (content, record) = split_prepared(prepared);
+    let content_digest = content.digest().clone();
     blocking.commit(content)?;
     blocking.commit(metadata)?;
     if let Some(provenance) = provenance {
         blocking.commit(provenance)?;
+    }
+    // An import writes the same verified bytes a push does, so it owes the projection the same rows:
+    // the distribution, its metadata sidecar, and the provenance bundle when the import carried one.
+    for digest in [
+        Some(&content_digest),
+        Some(&metadata_digest),
+        provenance_ref.as_ref().map(|(digest, _)| digest),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        meta.record_committed_placement(digest.as_str(), peryx_ha::ArtifactSource::Hosted);
     }
     store_record(
         meta,

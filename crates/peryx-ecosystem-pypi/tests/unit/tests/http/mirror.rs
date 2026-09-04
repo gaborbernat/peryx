@@ -352,8 +352,10 @@ async fn test_mirror_detail_weighs_a_cached_page_against_a_rate_limit(#[case] no
 #[tokio::test]
 async fn test_mirror_detail_refuses_a_page_staler_than_the_bound() {
     let h = stale_page_harness(300, 0).await;
-    let (status, _, _) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
-    assert_ne!(status, StatusCode::OK);
+    let (status, _, body) = get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+    // Named rather than "not OK": several arms refuse, and only this one reports an upstream that
+    // failed with nothing cached left to answer from.
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
 }
 #[tokio::test]
 async fn test_mirror_detail_serves_any_age_when_the_bound_is_zero() {

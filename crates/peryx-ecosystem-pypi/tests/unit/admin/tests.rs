@@ -1062,3 +1062,43 @@ fn fsck_metadata_never_reports_fewer_problems_than_exist() {
 
     assert!(failed > 0, "no injection point reached the checks");
 }
+
+/// A purge decides what to keep from a scan of the project's file rows, so a scan that fails partway
+/// must not hand back a smaller preserved set. Preserving less means removing more, and the rows it
+/// would take are the ones a project populated by a catalog sync needs for a cold download.
+///
+/// The run is a dry run, so the store is identical at every injection point and any difference in
+/// the report comes from the scan rather than from what an earlier step deleted.
+///
+/// A store handle does not survive its own injected failure, so each step reopens the retained pages
+/// rather than reusing one handle.
+#[test]
+fn purge_project_never_preserves_less_than_it_should() {
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    seed_valid_page(&meta);
+    let uploaded = upload_record("other-1.0.tar.gz", Digest::of(b"preserved upload").as_str());
+    meta.put_upload(
+        "hosted",
+        "other",
+        "other-1.0.tar.gz",
+        crate::to_json(&uploaded).as_bytes(),
+    )
+    .unwrap();
+    let whole = super::purge_project(&meta, "pypi", "flask", false).unwrap();
+    drop(meta);
+
+    let mut failed = 0_u32;
+    for fail_after in 0..192 {
+        let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        fault.arm(fail_after);
+        let report = super::purge_project(&meta, "pypi", "flask", false);
+        fault.disable();
+        match report {
+            Ok(got) => assert_eq!(got, whole, "injecting after {fail_after} reads preserved less"),
+            Err(_) => failed += 1,
+        }
+    }
+
+    assert!(failed > 0, "no injection point reached the scan");
+}

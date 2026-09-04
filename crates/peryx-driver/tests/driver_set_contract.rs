@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use peryx_core::Ecosystem;
 use peryx_driver::serving::{
     BlobReferenceDriver, BrowseDriver, BrowseError, BrowseRequest, CacheDriver, CacheInspectDriver,
-    CapabilityRegistrar, EcosystemDriver, FsckDriver, ImportDriver, JobConfig, JobDriver, MetricsDriver, NameDriver,
-    RetentionDriver, TrashDriver,
+    CapabilityRegistrar, EcosystemDriver, FsckDriver, ImportDriver, JobConfig, JobDriver, MetadataRepairDriver,
+    MetricsDriver, NameDriver, RetentionDriver, TrashDriver,
 };
 use peryx_driver::serving::{CachePage, PurgeReport};
 use peryx_driver::{BlobReferenceScan, BlobReferenceScanError, DriverSet};
@@ -69,6 +69,28 @@ impl FsckDriver for Driver {
         _out: &mut dyn std::io::Write,
     ) -> Result<u64, String> {
         Err("fsck".to_owned())
+    }
+}
+
+impl MetadataRepairDriver for Driver {
+    fn preview_metadata_repair(
+        &self,
+        _: &peryx_storage::meta::MetaStore,
+        _: &[peryx_index::Index],
+        out: &mut dyn std::io::Write,
+    ) -> Result<u64, String> {
+        writeln!(out, "metadata\t{}\twould rebuild", self.ecosystem.as_str()).map_err(|error| error.to_string())?;
+        Ok(1)
+    }
+
+    fn repair_metadata(
+        &self,
+        _: &peryx_storage::meta::MetaStore,
+        _: &[peryx_index::Index],
+        out: &mut dyn std::io::Write,
+    ) -> Result<u64, String> {
+        writeln!(out, "metadata\t{}\trebuilt", self.ecosystem.as_str()).map_err(|error| error.to_string())?;
+        Ok(1)
     }
 }
 
@@ -459,5 +481,33 @@ async fn driver_set_dispatches_browse_capability() {
             })
             .await,
         Err(BrowseError::Internal("browse".to_owned()))
+    );
+}
+
+/// The driver registry is a hash map, so the repair report needs an order of its own or two runs
+/// list the ecosystems differently and an operator diffing them reads the swap as change.
+///
+/// Four ecosystems rather than two: with one other ecosystem an unsorted report lands in the right
+/// order half the time by luck, and the test would pass against a missing sort.
+#[test]
+fn cache_repair_reports_ecosystems_in_name_order() {
+    let mut set = DriverSet::default();
+    for name in ["zulu", "mike", "core", "alpha"] {
+        let ecosystem = Ecosystem::new(name);
+        set.register_metadata_repair(ecosystem.clone(), Arc::new(Driver { ecosystem }));
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let mut out = Vec::new();
+
+    peryx_driver::cache_inspection::write_cache_repair(&set, &meta, &[], false, &mut out).unwrap();
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "metadata\talpha\twould rebuild\n\
+         metadata\tcore\twould rebuild\n\
+         metadata\tmike\twould rebuild\n\
+         metadata\tzulu\twould rebuild\n\
+         planned\t4\n"
     );
 }

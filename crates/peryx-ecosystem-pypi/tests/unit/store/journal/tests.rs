@@ -31,6 +31,7 @@ fn value(project: &str) -> Vec<u8> {
         project: project.to_owned(),
         version: Some("1.0".to_owned()),
         filename: Some(format!("{project}-1.0.whl")),
+        python: None,
     })
     .unwrap()
 }
@@ -54,6 +55,7 @@ fn test_read_journal_entries_uses_authoritative_serials() {
                     project: "first".to_owned(),
                     version: Some("1.0".to_owned()),
                     filename: Some("first-1.0.whl".to_owned()),
+                    python: None,
                 },
                 JournalEntry {
                     serial: 2,
@@ -62,6 +64,7 @@ fn test_read_journal_entries_uses_authoritative_serials() {
                     project: "second".to_owned(),
                     version: Some("1.0".to_owned()),
                     filename: Some("second-1.0.whl".to_owned()),
+                    python: None,
                 },
             ],
         }
@@ -117,15 +120,18 @@ fn test_read_journal_entries_defaults_an_older_timestamp() {
 fn test_read_changelog_page_maps_actions_and_preserves_the_snapshot() {
     let (_dir, store) = store();
     let values = [
-        ("add-file", Some("first-1.0.whl")),
-        ("delete-file", Some("first-1.0.whl")),
-        ("yank", Some("first-1.0.whl")),
-        ("unyank", Some("first-1.0.whl")),
-        ("hide", Some("first-1.0.whl")),
-        ("restore", Some("first-1.0.whl")),
-        ("promote", None),
+        ("new-release", None, None),
+        ("add-file", Some("first-1.0.whl"), Some("py3")),
+        ("add-file", Some("first-1.0.tar.gz"), Some("source")),
+        ("add-file", Some("first-1.0.whl"), None),
+        ("delete-file", Some("first-1.0.whl"), None),
+        ("yank", Some("first-1.0.whl"), None),
+        ("unyank", Some("first-1.0.whl"), None),
+        ("hide", Some("first-1.0.whl"), None),
+        ("restore", Some("first-1.0.whl"), None),
+        ("promote", None, None),
     ]
-    .map(|(action, filename)| {
+    .map(|(action, filename, python)| {
         serde_json::to_vec(&JournalEntry {
             serial: 0,
             submitted_at_unix: 123,
@@ -133,6 +139,7 @@ fn test_read_changelog_page_maps_actions_and_preserves_the_snapshot() {
             project: "first".to_owned(),
             version: Some("1.0".to_owned()),
             filename: filename.map(str::to_owned),
+            python: python.map(str::to_owned),
         })
         .unwrap()
     });
@@ -140,15 +147,18 @@ fn test_read_changelog_page_maps_actions_and_preserves_the_snapshot() {
         .commit_driver_txn(|_| Ok::<_, MetaError>(((), values.into())))
         .unwrap();
 
-    let page = read_changelog_page(&store, -1, 7).unwrap();
+    let page = read_changelog_page(&store, -1, 10).unwrap();
 
-    assert_eq!(page.current_serial(), 7);
+    assert_eq!(page.current_serial(), 10);
     assert_eq!(
         page.entries()
             .iter()
             .map(|entry| entry.action.as_str())
             .collect::<Vec<_>>(),
         [
+            "new release",
+            "add py3 file first-1.0.whl",
+            "add source file first-1.0.tar.gz",
             "add file first-1.0.whl",
             "remove file first-1.0.whl",
             "yank first-1.0.whl",
@@ -213,6 +223,7 @@ fn test_read_journal_entries_skips_a_core_entry() {
                     project: "first".to_owned(),
                     version: Some("1.0".to_owned()),
                     filename: Some("first-1.0.whl".to_owned()),
+                    python: None,
                 },
                 JournalEntry {
                     serial: 3,
@@ -221,6 +232,7 @@ fn test_read_journal_entries_skips_a_core_entry() {
                     project: "second".to_owned(),
                     version: Some("1.0".to_owned()),
                     filename: Some("second-1.0.whl".to_owned()),
+                    python: None,
                 },
             ],
         }
@@ -268,6 +280,7 @@ fn test_read_journal_entries_skips_a_foreign_ecosystem_record() {
                     project: "first".to_owned(),
                     version: Some("1.0".to_owned()),
                     filename: Some("first-1.0.whl".to_owned()),
+                    python: None,
                 },
                 JournalEntry {
                     serial: 3,
@@ -276,6 +289,7 @@ fn test_read_journal_entries_skips_a_foreign_ecosystem_record() {
                     project: "second".to_owned(),
                     version: Some("1.0".to_owned()),
                     filename: Some("second-1.0.whl".to_owned()),
+                    python: None,
                 },
             ],
         }

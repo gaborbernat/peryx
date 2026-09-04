@@ -6,11 +6,11 @@ use uuid::Uuid;
 use super::journal::JournalEntry;
 use super::overrides::{FileOverride, OverrideMutation};
 use super::{
-    OVERRIDE_PREFIX, UPLOAD_PREFIX, metadata_key, override_key, provenance_key, provenance_prefix, provenance_value,
-    put_project_row, put_upload_row, record_str, remove_upload_row, scan_utf8_records, split_provenance_value,
-    upload_key,
+    OVERRIDE_PREFIX, UPLOAD_PREFIX, announced_release_key, metadata_key, override_key, provenance_key,
+    provenance_prefix, provenance_value, put_project_row, put_upload_row, record_str, remove_upload_row,
+    scan_utf8_records, split_provenance_value, upload_key,
 };
-use crate::distribution_version_segment;
+use crate::{distribution_python_tag, distribution_version_segment};
 
 /// The PEP 658 metadata sibling recorded alongside a published file, extracted from the
 /// distribution's own bytes at upload.
@@ -220,18 +220,20 @@ pub fn publish_file_in_txn<E: From<MetaError>>(
             }
             put_upload_row(txn, file.index, file.normalized, file.filename, file.record)?;
             put_project_row(txn, file.index, file.normalized, file.display)?;
-            Ok((
-                true,
-                journal_entries(outbox, || {
-                    journal_bytes(
-                        "add-file",
-                        file.normalized,
-                        Some(file.version),
-                        Some(file.filename),
-                        file.submitted_at_unix,
-                    )
-                }),
-            ))
+            let mut journal = Vec::new();
+            if outbox {
+                let target = JournalTarget::of(file.index, file.normalized, file.submitted_at_unix);
+                journal.extend(announce_release(txn, &target, Some(file.version))?);
+                journal.push(journal_bytes(
+                    "add-file",
+                    file.normalized,
+                    Some(file.version),
+                    Some(file.filename),
+                    Some(distribution_python_tag(file.filename)),
+                    file.submitted_at_unix,
+                ));
+            }
+            Ok((true, journal))
         }
     }
 }
@@ -295,15 +297,9 @@ pub fn promote_files_checked<E: From<MetaError>>(
                         }
                         copy_provenance_in_txn(txn, release, filename, token)?;
                         written += 1;
-                        journal.extend(journal_entries(outbox, || {
-                            journal_bytes(
-                                "add-file",
-                                release.normalized,
-                                journal_version(filename, record).as_deref(),
-                                Some(filename),
-                                release.submitted_at_unix,
-                            )
-                        }));
+                        if outbox {
+                            journal.extend(promoted_file_journal(txn, release, filename, record)?);
+                        }
                     }
                 }
             }
@@ -386,6 +382,7 @@ pub fn mutate_uploads<E: From<MetaError>>(
                     normalized,
                     journal_version(filename, &record).as_deref(),
                     Some(filename),
+                    None,
                     submitted_at_unix,
                 )
             }));
@@ -431,6 +428,7 @@ pub fn mutate_uploads_and_overrides<E: From<MetaError>>(
                     plan.normalized,
                     journal_version(filename, &record).as_deref(),
                     Some(filename),
+                    None,
                     plan.submitted_at_unix,
                 )
             }));
@@ -449,6 +447,7 @@ pub fn mutate_uploads_and_overrides<E: From<MetaError>>(
                     plan.normalized,
                     distribution_version_segment(filename),
                     Some(filename),
+                    None,
                     plan.submitted_at_unix,
                 )
             }));
@@ -533,6 +532,7 @@ pub fn delete_upload(
                         normalized,
                         journal_version(filename, &record).as_deref(),
                         Some(filename),
+                        None,
                         submitted_at_unix,
                     )
                 }),
@@ -607,6 +607,7 @@ pub fn set_override(
                     normalized,
                     distribution_version_segment(filename),
                     Some(filename),
+                    None,
                     submitted_at_unix,
                 )
             }),
@@ -681,6 +682,7 @@ fn journal_bytes(
     project: &str,
     version: Option<&str>,
     filename: Option<&str>,
+    python: Option<&str>,
     submitted_at_unix: i64,
 ) -> Vec<u8> {
     serde_json::to_vec(&JournalEntry {
@@ -690,8 +692,91 @@ fn journal_bytes(
         project: project.to_owned(),
         version: version.map(str::to_owned),
         filename: filename.map(str::to_owned),
+        python: python.map(str::to_owned),
     })
     .expect("journal entry always serializes")
+}
+
+/// The index, project, and mutation time every journal entry for one publication shares.
+struct JournalTarget<'a> {
+    index: &'a str,
+    normalized: &'a str,
+    submitted_at_unix: i64,
+}
+
+impl<'a> JournalTarget<'a> {
+    const fn of(index: &'a str, normalized: &'a str, submitted_at_unix: i64) -> Self {
+        Self {
+            index,
+            normalized,
+            submitted_at_unix,
+        }
+    }
+}
+
+/// The journal entries one promoted file contributes, in the order a client must read them.
+fn promoted_file_journal(
+    txn: &mut DriverTxn,
+    release: &PromotedRelease<'_>,
+    filename: &str,
+    record: &[u8],
+) -> Result<Vec<Vec<u8>>, MetaError> {
+    let version = journal_version(filename, record);
+    let target = JournalTarget::of(release.index, release.normalized, release.submitted_at_unix);
+    let mut entries: Vec<Vec<u8>> = announce_release(txn, &target, version.as_deref())?
+        .into_iter()
+        .collect();
+    entries.push(journal_bytes(
+        "add-file",
+        release.normalized,
+        version.as_deref(),
+        Some(filename),
+        Some(distribution_python_tag(filename)),
+        release.submitted_at_unix,
+    ));
+    Ok(entries)
+}
+
+/// Announce a release in the changelog the first time one of its files is journaled, and report the
+/// `new-release` entry that has to precede the file's own.
+///
+/// Warehouse emits `new release` when it creates the `Release` row, which happens once per version
+/// and before the file entry, so a mirror client creates the release and then attaches files to it.
+/// peryx has no release row to hang that on, so it records that a release has been announced and
+/// emits the event only when that record is absent.
+///
+/// The row tracks the announcement, not the release. An import journals nothing and so leaves the row
+/// unset, and the first file that does reach the journal still announces the version rather than
+/// attaching to a release no reader was ever told about. Nothing removes the row: deleting every file
+/// leaves the release announced, matching Warehouse, where deleting files leaves the `Release` row
+/// standing and a client keeps the release it already created.
+///
+/// The key is the version as written, where Warehouse keys on `canonicalize_version`, so a project
+/// publishing `1.0` and `1.0.0` announces each spelling although `version_key` groups them into one
+/// release on the detail page. That errs toward announcing twice, never toward not announcing: a
+/// client that hears about a release it already has re-reads a page, while one that never hears about
+/// it attaches files to a release it has not created.
+fn announce_release(
+    txn: &mut DriverTxn,
+    target: &JournalTarget<'_>,
+    version: Option<&str>,
+) -> Result<Option<Vec<u8>>, MetaError> {
+    let Some(version) = version else {
+        return Ok(None);
+    };
+    let key = announced_release_key(target.index, target.normalized, version);
+    if txn.get(&key)?.is_some() {
+        return Ok(None);
+    }
+    txn.put(&key, version.as_bytes())?;
+    Ok(Some(journal_bytes(
+        "new-release",
+        target.normalized,
+        Some(version),
+        None,
+        None,
+        target.submitted_at_unix,
+    )))
 }
 
 fn journal_entries(outbox: bool, payload: impl FnOnce() -> Vec<u8>) -> Vec<Vec<u8>> {

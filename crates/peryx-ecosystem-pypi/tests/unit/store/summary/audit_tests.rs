@@ -389,3 +389,39 @@ fn test_audit_counts_no_project_whose_key_names_no_project() {
 
     assert_eq!(audit(&meta, &hosted()), Vec::new());
 }
+
+/// The count is assembled from two scans, so a failure in either must not come back as a smaller
+/// count: a partial total reads as a real answer and an operator has no way to tell it apart from a
+/// store that genuinely holds fewer rows. Every injection point returns the whole count or an error.
+///
+/// A store handle does not survive its own injected failure, so each step reopens the retained pages
+/// rather than reusing one handle.
+#[test]
+fn summary_row_counts_never_returns_a_partial_count() {
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    meta.put_upload(
+        "hosted",
+        "flask",
+        "flask-1.0.whl",
+        br#"{"version":"1.0","file":{"filename":"flask-1.0.whl","upload-time":"2026-01-01T00:00:00Z","size":10}}"#,
+    )
+    .unwrap();
+    let clean = crate::store::summary_row_counts(&meta).unwrap();
+    assert_ne!(clean, crate::store::SummaryRowCounts::default());
+    drop(meta);
+
+    let mut failed = 0_u32;
+    for fail_after in 0..128 {
+        let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        fault.arm(fail_after);
+        let counted = crate::store::summary_row_counts(&meta);
+        fault.disable();
+        match counted {
+            Ok(counts) => assert_eq!(counts, clean, "injecting after {fail_after} reads counted short"),
+            Err(_) => failed += 1,
+        }
+    }
+
+    assert!(failed > 0, "no injection point reached either scan");
+}

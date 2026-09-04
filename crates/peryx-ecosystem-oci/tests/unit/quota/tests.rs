@@ -280,47 +280,66 @@ fn test_publish_manifest_never_commits_without_its_checkpoint() {
         bytes: b"{}".to_vec(),
     };
     let reference = Reference::Tag("stable".to_owned());
-    let mut failed = 0_u32;
+    // The control: with nothing injected the publish lands and the manifest is readable. Without it
+    // the sweep below would pass against a publish that always failed.
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    meta.claim_operation("op-1", None, 100).unwrap();
+    publish_manifest(&meta, checkpoint_commit(&manifest, &reference)).unwrap();
+    drop(meta);
+    let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    assert!(meta.get_driver_value("oci\u{0}m\u{0}sha256:a").unwrap().is_some());
+    drop(meta);
 
+    let mut failed = 0_u32;
     for fail_after in 0..192 {
         let (pages, fault) = peryx_test_support::fault::backend();
         let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        // The checkpoint refuses an operation nobody claimed, so without this every step fails for
+        // that reason instead of the injected one and the sweep proves nothing.
+        meta.claim_operation("op-1", None, 100).unwrap();
         fault.arm(fail_after);
-        let published = publish_manifest(
-            &meta,
-            ManifestCommit {
-                index: "store",
-                repo: "app",
-                canonical: "sha256:a",
-                manifest: &manifest,
-                reference: &reference,
-                referrer: None,
-                reservation: None,
-                journal: true,
-                webhook: None,
-                operation: Some(ManifestOperation {
-                    id: "op-1",
-                    reference: "stable",
-                    epoch: 1,
-                    now: 100,
-                }),
-            },
-        );
+        let published = publish_manifest(&meta, checkpoint_commit(&manifest, &reference));
         fault.disable();
         drop(meta);
 
         let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
-        let stored = meta.get_driver_value("oci\u{0}m\u{0}sha256:a").unwrap();
-        if published.is_err() {
-            failed += 1;
-            assert!(
-                stored.is_none(),
-                "injecting after {fail_after} reads left a manifest with no checkpoint"
-            );
-        } else {
-            assert!(stored.is_some(), "a publish that reported success stored no manifest");
-        }
+        let stored = meta.get_driver_value("oci\u{0}m\u{0}sha256:a").unwrap().is_some();
+        // Empty while pending, so a recorded response is what says the checkpoint landed. Presence
+        // of the record alone would only prove the claim above ran.
+        let checkpointed = meta
+            .operation_outcome("op-1")
+            .unwrap()
+            .is_some_and(|record| !record.response.is_empty());
+        failed += u32::from(published.is_err());
+        assert_eq!(
+            stored,
+            checkpointed,
+            "injecting after {fail_after} reads left manifest={stored} and checkpoint={checkpointed} \
+             disagreeing, published_ok={}",
+            published.is_ok()
+        );
     }
 
     assert!(failed > 0, "no injection point reached the publish");
+}
+
+fn checkpoint_commit<'a>(manifest: &'a Manifest, reference: &'a Reference) -> ManifestCommit<'a> {
+    ManifestCommit {
+        index: "store",
+        repo: "app",
+        canonical: "sha256:a",
+        manifest,
+        reference,
+        referrer: None,
+        reservation: None,
+        journal: true,
+        webhook: None,
+        operation: Some(ManifestOperation {
+            id: "op-1",
+            reference: "stable",
+            epoch: 1,
+            now: 100,
+        }),
+    }
 }

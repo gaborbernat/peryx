@@ -145,18 +145,6 @@ fn registry_fsck_reports_corrupt_manifests() {
     );
 }
 
-struct FailingWriter;
-
-impl std::io::Write for FailingWriter {
-    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("cannot write the report"))
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn blobs(dir: &tempfile::TempDir) -> peryx_storage::blob::BlobStorage {
     peryx_storage::blob::BlobStorage::filesystem(dir.path().join("blobs"))
 }
@@ -249,10 +237,17 @@ fn registry_fsck_surfaces_a_failure_writing_a_report() {
         .unwrap();
 
     let error = OciRegistry::default()
-        .fsck_metadata(&meta, &blobs(&dir), &[], &mut FailingWriter)
+        // A zero-capacity cursor rather than a writer of our own: a hand-rolled one would carry a
+        // `flush` nothing on this path calls, which is an uncovered arm of the test itself.
+        .fsck_metadata(
+            &meta,
+            &blobs(&dir),
+            &[],
+            &mut std::io::Cursor::new(Box::<[u8]>::default()),
+        )
         .unwrap_err();
 
-    assert!(error.contains("cannot write the report"), "{error}");
+    assert!(error.contains("failed to write whole buffer"), "{error}");
 }
 
 #[test]

@@ -489,8 +489,10 @@ async fn driver_set_dispatches_browse_capability() {
 ///
 /// Four ecosystems rather than two: with one other ecosystem an unsorted report lands in the right
 /// order half the time by luck, and the test would pass against a missing sort.
-#[test]
-fn cache_repair_reports_ecosystems_in_name_order() {
+#[rstest::rstest]
+#[case::preview(false, "would rebuild", "planned")]
+#[case::apply(true, "rebuilt", "repaired")]
+fn cache_repair_reports_ecosystems_in_name_order(#[case] apply: bool, #[case] verb: &str, #[case] label: &str) {
     let mut set = DriverSet::default();
     for name in ["zulu", "mike", "core", "alpha"] {
         let ecosystem = Ecosystem::new(name);
@@ -500,14 +502,16 @@ fn cache_repair_reports_ecosystems_in_name_order() {
     let meta = peryx_storage::meta::MetaStore::open(directory.path().join("peryx.redb")).unwrap();
     let mut out = Vec::new();
 
-    peryx_driver::cache_inspection::write_cache_repair(&set, &meta, &[], false, &mut out).unwrap();
+    peryx_driver::cache_inspection::write_cache_repair(&set, &meta, &[], apply, &mut out).unwrap();
 
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        "metadata\talpha\twould rebuild\n\
-         metadata\tcore\twould rebuild\n\
-         metadata\tmike\twould rebuild\n\
-         metadata\tzulu\twould rebuild\n\
-         planned\t4\n"
+        format!(
+            "metadata\talpha\t{verb}\n\
+             metadata\tcore\t{verb}\n\
+             metadata\tmike\t{verb}\n\
+             metadata\tzulu\t{verb}\n\
+             {label}\t4\n"
+        )
     );
 }

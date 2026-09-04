@@ -655,3 +655,67 @@ fn test_plan_error_display_names_each_failure() {
             .contains("boom")
     );
 }
+
+struct PanickingDriver;
+
+impl RetentionDriver for PanickingDriver {
+    fn validate_retention(&self, _policy: &RetentionPolicy) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn plan_retention(
+        &self,
+        _scan: &crate::serving::RetentionScan<'_>,
+        _start: &mut dyn FnMut(peryx_policy::RetentionSummary) -> Result<(), String>,
+        _emit: &mut dyn FnMut(RetentionDecision) -> Result<(), String>,
+    ) -> Result<(), String> {
+        panic!("the plugin driver came apart");
+    }
+}
+
+/// A driver that comes apart takes the worker with it, so nothing ever sends the summary the request
+/// is waiting on. The wait has to end as an interruption rather than hanging on a sender that will
+/// never write. A driver returning without a snapshot does not reach this: the export validates that
+/// itself and forwards a store error through the channel.
+#[tokio::test]
+async fn test_export_body_ends_the_wait_when_the_worker_dies() {
+    let (_dir, meta) = store();
+    let driver: Arc<dyn RetentionDriver> = Arc::new(PanickingDriver);
+    let gates = super::RetentionGates::new(1);
+    let permit = gates.try_enter("alpha").unwrap();
+    let export = super::RetentionExport {
+        index: "alpha".to_owned(),
+        ecosystem: "example".to_owned(),
+        policy: empty_policy(),
+        now: None,
+        after: 0,
+        expect: None,
+    };
+
+    let error = super::export_body(driver, meta, export, permit).await.unwrap_err();
+
+    assert!(format!("{error:?}").contains("export worker stopped"), "{error:?}");
+}
+
+/// A driver that opens a second snapshot has already sent the first, so the request is answered and
+/// the violation has to reach the caller through the body it is already streaming.
+#[tokio::test]
+async fn test_export_body_reports_a_second_snapshot_through_the_stream() {
+    let (_dir, meta) = store();
+    let driver: Arc<dyn RetentionDriver> = Arc::new(InvalidDriver(SnapshotViolation::Repeated));
+    let gates = super::RetentionGates::new(1);
+    let permit = gates.try_enter("alpha").unwrap();
+    let export = super::RetentionExport {
+        index: "alpha".to_owned(),
+        ecosystem: "example".to_owned(),
+        policy: empty_policy(),
+        now: None,
+        after: 0,
+        expect: None,
+    };
+
+    let (_, body) = super::export_body(driver, meta, export, permit).await.unwrap();
+    let error = axum::body::to_bytes(body, usize::MAX).await.unwrap_err();
+
+    assert!(format!("{error:?}").contains("more than one snapshot"), "{error:?}");
+}

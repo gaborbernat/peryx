@@ -1,8 +1,8 @@
 use peryx_storage::meta::{MetaStore, QuotaLimit, QuotaLimits, QuotaReservationState, QuotaUsage};
 
 use super::{
-    ManifestCheckpoint, ManifestCommit, ReserveOutcome, commit_blob_membership, finalize, publish_manifest,
-    quota_reservation, release_blob_membership, reserve,
+    ManifestCheckpoint, ManifestCommit, ManifestOperation, ReserveOutcome, commit_blob_membership, finalize,
+    publish_manifest, quota_reservation, release_blob_membership, reserve,
 };
 use crate::name::Reference;
 use crate::registry::ServeError;
@@ -264,4 +264,63 @@ fn test_manifest_checkpoint_reports_a_record_it_cannot_decode() {
         ManifestCheckpoint::decode(b"not a checkpoint"),
         Err(ServeError::Transport(_))
     ));
+}
+
+/// A publish that cannot record its idempotency checkpoint must not leave the manifest behind. The
+/// checkpoint is what a retry reads to decide the work is already done, so a manifest committed
+/// without one is published again on the next attempt as though it had never landed.
+///
+/// Each step gets its own backend, because a publish mutates and the next injection point would
+/// otherwise run against whatever the previous one left. The fault is armed after the store opens
+/// so the count applies to the publish rather than to creating the tables.
+#[test]
+fn test_publish_manifest_never_commits_without_its_checkpoint() {
+    let manifest = Manifest {
+        media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+        bytes: b"{}".to_vec(),
+    };
+    let reference = Reference::Tag("stable".to_owned());
+    let mut failed = 0_u32;
+
+    for fail_after in 0..192 {
+        let (pages, fault) = peryx_test_support::fault::backend();
+        let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        fault.arm(fail_after);
+        let published = publish_manifest(
+            &meta,
+            ManifestCommit {
+                index: "store",
+                repo: "app",
+                canonical: "sha256:a",
+                manifest: &manifest,
+                reference: &reference,
+                referrer: None,
+                reservation: None,
+                journal: true,
+                webhook: None,
+                operation: Some(ManifestOperation {
+                    id: "op-1",
+                    reference: "stable",
+                    epoch: 1,
+                    now: 100,
+                }),
+            },
+        );
+        fault.disable();
+        drop(meta);
+
+        let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        let stored = meta.get_driver_value("oci\u{0}m\u{0}sha256:a").unwrap();
+        if published.is_err() {
+            failed += 1;
+            assert!(
+                stored.is_none(),
+                "injecting after {fail_after} reads left a manifest with no checkpoint"
+            );
+        } else {
+            assert!(stored.is_some(), "a publish that reported success stored no manifest");
+        }
+    }
+
+    assert!(failed > 0, "no injection point reached the publish");
 }

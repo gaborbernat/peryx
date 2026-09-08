@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -3161,5 +3161,217 @@ async fn test_job_history_cleanup_reports_what_it_removed_before_cancelling() {
             changed: 8,
             ..JobReport::default()
         })
+    );
+}
+
+/// Every `peryx_driver::jobs` event, in order, as its fields keyed by name.
+///
+/// Four of the jobs below decide whether to log from a comparison whose only effect is the log
+/// line, so the recorded stream is the sole observable a test can hold them to. Each test that uses
+/// this asserts a line the job must emit before asserting one it must not, so a capture that never
+/// reached the callsite fails the test rather than passing it empty.
+#[derive(Clone)]
+struct Logged {
+    target: &'static str,
+    events: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+}
+
+impl Logged {
+    fn at(target: &'static str) -> Self {
+        Self {
+            target,
+            events: Arc::default(),
+        }
+    }
+
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(LevelFilter::TRACE)
+                .with(self.clone()),
+        )
+    }
+
+    fn events(&self) -> Vec<BTreeMap<String, String>> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl<Subscriber> tracing_subscriber::Layer<Subscriber> for Logged
+where
+    Subscriber: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: tracing_subscriber::layer::Context<'_, Subscriber>) {
+        if event.metadata().target() != self.target {
+            return;
+        }
+        let mut fields = BTreeMap::new();
+        event.record(&mut RecordedFields(&mut fields));
+        self.events.lock().unwrap().push(fields);
+    }
+}
+
+struct RecordedFields<'a>(&'a mut BTreeMap<String, String>);
+
+impl tracing::field::Visit for RecordedFields<'_> {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.0.insert(field.name().to_owned(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().to_owned(), value.to_owned());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0.insert(field.name().to_owned(), format!("{value:?}"));
+    }
+}
+
+fn logged(message: &str, field: (&str, &str)) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("message".to_owned(), message.to_owned()),
+        ("ecosystem".to_owned(), "example".to_owned()),
+        (field.0.to_owned(), field.1.to_owned()),
+    ])
+}
+
+/// An idle sweep that reclaimed nothing stays quiet, so the log carries sweeps that did work rather
+/// than a line per tick on an idle server.
+#[tokio::test]
+async fn test_idle_reclaim_logs_only_a_sweep_that_reclaimed_something() {
+    let (_dir, state) = serving();
+    let events = Logged::at("peryx_driver::jobs");
+    let _guard = events.install();
+
+    for reclaim in [2, 0] {
+        IdleReclaimJob {
+            ecosystem: Ecosystem::new("example"),
+            reclaimer: Arc::new(StubDriver::new(reclaim, Ok(RefreshSweep::default()))),
+        }
+        .run(&context(state.clone(), CancellationToken::new()))
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        events.events(),
+        vec![logged("idle resources reclaimed", ("reclaimed", "2"))]
+    );
+}
+
+/// A finalize pass that found no admitted write stays quiet, for the same reason: the log is a
+/// record of work done at the home DC, not of the poll that found none.
+#[tokio::test]
+async fn test_intent_finalize_logs_only_a_pass_that_finalized_something() {
+    let (_dir, state) = serving();
+    let events = Logged::at("peryx_driver::jobs");
+    let _guard = events.install();
+
+    for finalize in [3, 0] {
+        IntentFinalizeJob {
+            ecosystem: Ecosystem::new("example"),
+            finalizer: Arc::new(StubDriver {
+                finalize,
+                ..StubDriver::new(0, Ok(RefreshSweep::default()))
+            }),
+        }
+        .run(&context(state.clone(), CancellationToken::new()))
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        events.events(),
+        vec![logged("admitted writes finalized at home", ("finalized", "3"))]
+    );
+}
+
+/// A refresh sweep that checked nothing stays quiet. The count that decides this is what the sweep
+/// looked at, not what it changed, so a sweep that checked entries and changed none still logs.
+#[tokio::test]
+async fn test_cache_refresh_logs_only_a_sweep_that_checked_something() {
+    let (_dir, state) = serving();
+    let events = Logged::at("peryx_driver::jobs");
+    let _guard = events.install();
+
+    for sweep in [RefreshSweep { checked: 3, changed: 0 }, RefreshSweep::default()] {
+        CacheRefreshJob {
+            ecosystem: Ecosystem::new("example"),
+            refresher: Arc::new(StubDriver::new(0, Ok(sweep))),
+        }
+        .run(&context(state.clone(), CancellationToken::new()))
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(
+        events.events(),
+        vec![logged(
+            "background refresh sweep",
+            ("sweep", "RefreshSweep { checked: 3, changed: 0 }")
+        )]
+    );
+}
+
+/// Rebuild progress reports each new document count once. The first chunk boundary repeats the
+/// count the run started from, and logging that would report progress before any document was
+/// indexed.
+#[tokio::test]
+async fn test_search_rebuild_logs_each_new_document_count_once() {
+    let (_dir, state) = state_with_indexer(Arc::new(CountedDocs(2)));
+    let events = Logged::at("peryx_driver::jobs");
+    let _guard = events.install();
+
+    SearchRebuildJob::new(NonZeroUsize::new(1).unwrap())
+        .run(&context(state.serving.clone(), CancellationToken::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        events
+            .events()
+            .iter()
+            .map(|fields| (
+                fields["message"].clone(),
+                fields["indexed"].clone(),
+                fields["total"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("search rebuild progress".to_owned(), "1".to_owned(), "2".to_owned()),
+            ("search rebuild progress".to_owned(), "2".to_owned(), "2".to_owned()),
+        ]
+    );
+}
+
+/// History cleanup is a node-wide sweep, not one bound to an ecosystem or repository, and its empty
+/// scope is what makes the scheduler treat a second submission as a conflict with the first rather
+/// than as separate work. The run is not persisted, so the completion log is where that scope
+/// surfaces.
+#[tokio::test]
+async fn test_job_history_cleanup_finishes_under_a_node_wide_scope() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, JobLimits::node_local());
+    let events = Logged::at("peryx_driver::jobs::scheduler");
+    let _guard = events.install();
+
+    scheduler.run(Arc::new(JobHistoryCleanup::retaining(16))).await.unwrap();
+    scheduler.shutdown().await;
+
+    assert_eq!(
+        events
+            .events()
+            .iter()
+            .map(|fields| (
+                fields["message"].clone(),
+                fields["kind"].clone(),
+                fields["scope"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "node-local job finished".to_owned(),
+            "job_history_cleanup".to_owned(),
+            String::new()
+        )]
     );
 }

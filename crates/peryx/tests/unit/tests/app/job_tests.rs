@@ -917,26 +917,8 @@ impl peryx_driver::serving::DistributedRuntime for FinalizingRuntime {
     ) -> Result<(), String> {
         context
             .runtime()
-            .register_intent_finalizer(CORE, Arc::new(SettlingFinalizer));
+            .register_intent_finalizer(CORE, Arc::new(peryx_driver::serving::SettlingFinalizer::default()));
         Ok(())
-    }
-}
-
-struct SettlingFinalizer;
-
-#[async_trait::async_trait]
-impl peryx_driver::serving::IntentFinalizer for SettlingFinalizer {
-    async fn finalize_admitted(&self, _state: Arc<peryx_driver::state::ServingState>) -> u64 {
-        0
-    }
-
-    async fn finalize_retained(
-        &self,
-        _state: Arc<peryx_driver::state::ServingState>,
-        _authority: &str,
-        _intent_key: &str,
-    ) -> bool {
-        true
     }
 }
 

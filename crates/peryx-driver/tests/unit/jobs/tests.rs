@@ -3034,3 +3034,55 @@ async fn test_write_ledger_reap_keeps_going_while_any_ledger_still_has_rows() {
         (2, None, None)
     );
 }
+
+/// A cancelled run reports the work it already did, not zero. Those counts are what the scheduler
+/// records and an operator reads, so a report that dropped them would say a cancelled sweep touched
+/// nothing while it had in fact settled rows.
+///
+/// The sibling cancels before the first pass, where the counts are legitimately zero and a dropped
+/// field reads exactly like a kept one. This cancels from the clock the loop itself reads, so the
+/// first pass finishes and the second sees the cancellation, leaving one reaped row every time.
+#[tokio::test]
+async fn test_write_ledger_reap_reports_what_it_reaped_before_cancelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let past = -3000;
+    for operation in ["first", "second"] {
+        meta.claim_operation(operation, Some(0), past).unwrap();
+        meta.finalize_operation(
+            operation,
+            peryx_storage::meta::OperationResult::Published,
+            b"body",
+            past,
+        )
+        .unwrap();
+    }
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let cancel = CancellationToken::new();
+    let token = cancel.clone();
+    let mut state = AppState::with_clock(
+        meta,
+        blobs,
+        60,
+        Vec::new(),
+        Arc::new(move || {
+            token.cancel();
+            NOW_UNIX
+        }),
+    );
+    install_distributed(&mut state, peryx_ha::AvailabilityCapabilities::default());
+
+    let report = super::WriteLedgerReap { batch: 1 }
+        .run(&context(state.serving, cancel))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report,
+        JobRunOutcome::cancelled(JobReport {
+            processed: 1,
+            changed: 1,
+            ..JobReport::default()
+        })
+    );
+}

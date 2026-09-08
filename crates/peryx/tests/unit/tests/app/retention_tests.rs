@@ -346,3 +346,35 @@ fn export_command(cursor: Option<String>) -> RetentionCommand {
         cursor,
     })
 }
+
+/// A resource prefix is normalised through the ecosystem's own name rules before it is compiled, so
+/// a rule written the way a person writes a name selects what a rule written the way the store spells
+/// it selects. Two runs differing only in case have to produce the same plan, and would not if the
+/// prefix reached the policy verbatim: the policy version covers the compiled selectors.
+#[test]
+fn test_retention_normalizes_a_resource_prefix_before_compiling() {
+    let plan = |prefix: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::with_plugins(&plugins())
+        };
+        drop(peryx_storage::meta::MetaStore::open(config.data_dir.join("peryx.redb")).unwrap());
+        let rules = dir.path().join("rules.toml");
+        std::fs::write(
+            &rules,
+            format!("[[keep]]\nselector = \"resource-prefix\"\nprefix = \"{prefix}\"\n"),
+        )
+        .unwrap();
+        let mut args = dry_run_args("main");
+        args.rules = Some(rules);
+        let mut output = Vec::new();
+        retention_with_plugins(&config, &plugins(), &RetentionCommand::DryRun(args), &mut output).unwrap();
+        String::from_utf8(output).unwrap()
+    };
+
+    let written_by_hand = plan("Flask");
+
+    assert_eq!(written_by_hand, plan("flask"));
+    assert!(!written_by_hand.is_empty());
+}

@@ -2998,3 +2998,39 @@ async fn test_the_serving_state_hands_back_the_installed_ownership_group() {
     assert!(Arc::ptr_eq(installed, &group));
     assert_eq!(installed.cluster_status().term, 7);
 }
+
+/// The reap runs until a pass finds every ledger empty, not until any one of them comes back empty.
+/// With a batch of one and two settled operations, the first pass clears one while reporting nothing
+/// expired and nothing pruned from intents, so a loop that stopped on the first empty ledger would
+/// leave the second operation behind and report half the work as all of it.
+#[tokio::test]
+async fn test_write_ledger_reap_keeps_going_while_any_ledger_still_has_rows() {
+    let (_dir, state) = serving();
+    let past = -3000;
+    for operation in ["first", "second"] {
+        state.meta.claim_operation(operation, Some(0), past).unwrap();
+        state
+            .meta
+            .finalize_operation(
+                operation,
+                peryx_storage::meta::OperationResult::Published,
+                b"body",
+                past,
+            )
+            .unwrap();
+    }
+
+    let report = super::WriteLedgerReap { batch: 1 }
+        .run(&context(state.clone(), CancellationToken::new()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (
+            report.report().processed,
+            state.meta.operation_outcome("first").unwrap(),
+            state.meta.operation_outcome("second").unwrap(),
+        ),
+        (2, None, None)
+    );
+}

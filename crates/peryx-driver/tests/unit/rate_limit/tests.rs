@@ -981,3 +981,40 @@ async fn test_enforce_shares_one_address_bucket_when_the_class_is_declared() {
 fn test_a_configured_limiter_reports_itself_enabled() {
     assert!(RateLimiter::new(RateLimitConfig::enabled_defaults()).enabled());
 }
+
+/// A refusal names the kind of client it charged, so an operator reading the security log can tell a
+/// shared address apart from one credential spending its own bucket. Two kinds run here rather than
+/// one, because a constant answer satisfies either on its own.
+///
+/// The credentialed pair is asserted first. It has to appear before the anonymous pair's absence of
+/// `client=ip` would mean anything, since a capture that never reached the callsite reads the same as
+/// one whose event carried a different value.
+#[tokio::test]
+async fn test_a_refusal_names_the_client_kind_it_charged() {
+    let captured = crate::capture::Captured::install();
+    let (_dir, state) = routable_state(RateLimitConfig {
+        listing: RouteLimit::new(1, 60),
+        artifact: RouteLimit::new(1, 60),
+        ..RateLimitConfig::enabled_defaults()
+    });
+    let router = router(state);
+    let credentialed = || {
+        Request::get("/items/resource")
+            .header(header::AUTHORIZATION, "Bearer opaque")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    router.clone().oneshot(credentialed()).await.unwrap();
+    let by_credential = router.clone().oneshot(credentialed()).await.unwrap().status();
+    router.clone().oneshot(declared_listing(None)).await.unwrap();
+    let by_address = router.oneshot(declared_listing(None)).await.unwrap().status();
+
+    assert_eq!(
+        (by_credential, by_address),
+        (StatusCode::TOO_MANY_REQUESTS, StatusCode::TOO_MANY_REQUESTS)
+    );
+    let output = captured.output();
+    assert_eq!(output.matches(r#"client="token""#).count(), 1, "{output}");
+    assert_eq!(output.matches(r#"client="ip""#).count(), 1, "{output}");
+}

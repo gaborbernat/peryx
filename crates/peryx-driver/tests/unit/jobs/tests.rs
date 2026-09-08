@@ -3235,6 +3235,22 @@ fn logged(message: &str, field: (&str, &str)) -> BTreeMap<String, String> {
     ])
 }
 
+/// The layer sits under a `TRACE` registry, so it sees every event its thread raises and the target
+/// check is the only thing keeping a sibling module out of the capture. Both `peryx_driver::jobs` and
+/// `peryx_driver::jobs::scheduler` log here, so a capture on the parent would otherwise read the
+/// scheduler's lines as its own and the assertions below would hold against the wrong stream.
+#[test]
+fn logged_records_only_its_own_target() {
+    let events = Logged::at("peryx_driver::jobs");
+    let guard = events.install();
+
+    tracing::info!(target: "peryx_driver::jobs", ecosystem = "example", reclaimed = 1_u64, "kept");
+    tracing::info!(target: "peryx_driver::jobs::scheduler", ecosystem = "example", reclaimed = 2_u64, "dropped");
+    drop(guard);
+
+    assert_eq!(events.events(), vec![logged("kept", ("reclaimed", "1"))]);
+}
+
 /// An idle sweep that reclaimed nothing stays quiet, so the log carries sweeps that did work rather
 /// than a line per tick on an idle server.
 #[tokio::test]

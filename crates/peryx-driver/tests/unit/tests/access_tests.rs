@@ -199,7 +199,7 @@ fn app_with_acl(route: &str, resource: &str, acl: IndexAcl) -> (tempfile::TempDi
     app_with_grants(
         route,
         acl,
-        vec![
+        &[
             Grant {
                 resources: vec![Glob::new("ignored")],
                 actions: BTreeSet::from([Action::Write]),
@@ -212,11 +212,7 @@ fn app_with_acl(route: &str, resource: &str, acl: IndexAcl) -> (tempfile::TempDi
     )
 }
 
-fn app_with_grants(
-    route: &str,
-    acl: IndexAcl,
-    grants: Vec<Grant>,
-) -> (tempfile::TempDir, Arc<ServingState>, HeaderMap) {
+fn app_with_grants(route: &str, acl: IndexAcl, grants: &[Grant]) -> (tempfile::TempDir, Arc<ServingState>, HeaderMap) {
     let dir = tempfile::tempdir().unwrap();
     let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
     let blobs = peryx_storage::blob::BlobStore::new(dir.path().join("blobs"));
@@ -238,7 +234,7 @@ fn app_with_grants(
         &Principal::Named {
             subject: "reader".to_owned(),
         },
-        &grants,
+        grants,
         4_102_444_500,
         300,
     );
@@ -815,7 +811,7 @@ fn test_bearer_read_access_needs_the_action_and_the_resource_together(
             anonymous_read: false,
             tokens: Vec::new(),
         },
-        vec![Grant {
+        &[Grant {
             resources,
             actions: BTreeSet::from([action]),
         }],

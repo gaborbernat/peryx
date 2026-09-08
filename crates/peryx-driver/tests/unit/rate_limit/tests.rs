@@ -973,3 +973,11 @@ async fn test_enforce_shares_one_address_bucket_when_the_class_is_declared() {
         )
     );
 }
+
+/// A configured limiter reports itself enabled, which is what every caller checks before spending
+/// work on limiting at all. The sibling test covers the default, and a limiter that always answered
+/// "disabled" would pass that one while turning limiting off everywhere.
+#[test]
+fn test_a_configured_limiter_reports_itself_enabled() {
+    assert!(RateLimiter::new(RateLimitConfig::enabled_defaults()).enabled());
+}

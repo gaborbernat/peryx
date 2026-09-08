@@ -903,3 +903,73 @@ async fn test_enforce_keeps_a_service_post_class_off_a_get() {
         (StatusCode::NO_CONTENT, vec![("listing", 1, 0)])
     );
 }
+
+fn routable_state(config: RateLimitConfig) -> (tempfile::TempDir, AppState) {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let mut state = AppState::with_rate_limits(
+        meta,
+        blobs,
+        60,
+        vec![Index {
+            name: "items".to_owned(),
+            route: "items".to_owned(),
+            ecosystem: Ecosystem::new("example"),
+            kind: IndexKind::Hosted { volatile: true },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        }],
+        config,
+        [],
+    );
+    state.register_rate_limit_principal(Ecosystem::new("example"), &IndexedDriver);
+    state
+        .register_protocol(ProtocolDriver::Indexed(Arc::new(IndexedDriver)), default_indexer())
+        .unwrap();
+    (dir, state)
+}
+
+fn declared_listing(credential: Option<&str>) -> Request<Body> {
+    let mut request = process_request("/items/resource", RouteRateLimit::Class(RouteClass::Listing));
+    if let Some(credential) = credential {
+        request
+            .headers_mut()
+            .insert(header::AUTHORIZATION, HeaderValue::from_str(credential).unwrap());
+    }
+    request
+}
+
+/// A declared class settles the classification on its own, so the middleware skips the driver lookup
+/// and every request from one address shares that address's bucket, credential or not.
+///
+/// Resolving a driver anyway would bucket the credentialed request by its subject instead, and the
+/// pair would stop sharing - so one address could spend the class twice over. The status alone does
+/// not show it: the first request succeeds either way, and only the second reveals whether the two
+/// were charged to the same bucket.
+#[tokio::test]
+async fn test_enforce_shares_one_address_bucket_when_the_class_is_declared() {
+    let (_dir, state) = routable_state(RateLimitConfig {
+        listing: RouteLimit::new(1, 60),
+        ..RateLimitConfig::enabled_defaults()
+    });
+    let serving = state.serving.clone();
+    let router = router(state);
+
+    let credentialed = router
+        .clone()
+        .oneshot(declared_listing(Some("opaque")))
+        .await
+        .unwrap()
+        .status();
+    let anonymous = router.oneshot(declared_listing(None)).await.unwrap().status();
+
+    assert_eq!(
+        (credentialed, anonymous, charged(&serving)),
+        (
+            StatusCode::NO_CONTENT,
+            StatusCode::TOO_MANY_REQUESTS,
+            vec![("listing", 1, 1)]
+        )
+    );
+}

@@ -4,6 +4,8 @@ use std::sync::Arc;
 use peryx_identity::{ArtifactDigest, DigestDecision, RevocationReason, UserId};
 use peryx_storage::meta::{DigestRevocationQuery, DigestRevocationState, MetaStore, PutRevocationOutcome};
 
+use tracing_subscriber::layer::SubscriberExt as _;
+
 use crate::revocations::RevocationService;
 
 fn digest() -> ArtifactDigest {
@@ -120,4 +122,59 @@ fn test_revocation_service_fails_closed_on_a_store_type_error() {
 
     assert!(service.has_active().is_err());
     assert!(service.decision(&digest()).is_err());
+}
+
+/// The audit record says whether the request changed anything, so an operator replaying an incident
+/// can tell the revocation that took effect from the retries behind it. Both outcomes are asserted:
+/// the changed one proves the capture reaches this callsite, which is what stops the unchanged one
+/// from reading as a value nobody recorded.
+#[test]
+fn test_revocation_put_records_whether_it_changed_anything() {
+    let (_dir, _store, service) = service();
+    let digest = digest();
+    let actor = UserId::random();
+    let reason = RevocationReason::new("incident").unwrap();
+    let changed = ChangedFlags::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(changed.clone()),
+    );
+
+    service.put(&digest, &reason, &actor, 10).unwrap();
+    service.put(&digest, &reason, &actor, 11).unwrap();
+
+    assert_eq!(changed.recorded(), vec![true, false]);
+}
+
+#[derive(Clone, Default)]
+struct ChangedFlags(Arc<std::sync::Mutex<Vec<bool>>>);
+
+impl ChangedFlags {
+    fn recorded(&self) -> Vec<bool> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl<Subscriber> tracing_subscriber::Layer<Subscriber> for ChangedFlags
+where
+    Subscriber: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: tracing_subscriber::layer::Context<'_, Subscriber>) {
+        if event.metadata().target() == "peryx::security" {
+            event.record(&mut ChangedFlag(&mut self.0.lock().unwrap()));
+        }
+    }
+}
+
+struct ChangedFlag<'a>(&'a mut Vec<bool>);
+
+impl tracing::field::Visit for ChangedFlag<'_> {
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        if field.name() == "changed" {
+            self.0.push(value);
+        }
+    }
+
+    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
 }

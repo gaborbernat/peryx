@@ -351,8 +351,12 @@ fn export_command(cursor: Option<String>) -> RetentionCommand {
 /// a rule written the way a person writes a name selects what a rule written the way the store spells
 /// it selects. Two runs differing only in case have to produce the same plan, and would not if the
 /// prefix reached the policy verbatim: the policy version covers the compiled selectors.
-#[test]
-fn test_retention_normalizes_a_resource_prefix_before_compiling() {
+/// Both commands compile their own rules, so each needs its own normalization. They are separate
+/// call sites of the same helper, and covering one says nothing about the other.
+#[rstest]
+#[case::dry_run(false)]
+#[case::export(true)]
+fn test_retention_normalizes_a_resource_prefix_before_compiling(#[case] export: bool) {
     let plan = |prefix: &str| {
         let dir = tempfile::tempdir().unwrap();
         let config = Config {
@@ -366,15 +370,27 @@ fn test_retention_normalizes_a_resource_prefix_before_compiling() {
             format!("[[keep]]\nselector = \"resource-prefix\"\nprefix = \"{prefix}\"\n"),
         )
         .unwrap();
-        let mut args = dry_run_args("main");
-        args.rules = Some(rules);
+        let command = if export {
+            RetentionCommand::Export(RetentionExportArgs {
+                runtime: runtime_args(),
+                index: "main".to_owned(),
+                rules: Some(rules),
+                cursor: None,
+            })
+        } else {
+            let mut args = dry_run_args("main");
+            args.rules = Some(rules);
+            RetentionCommand::DryRun(args)
+        };
         let mut output = Vec::new();
-        retention_with_plugins(&config, &plugins(), &RetentionCommand::DryRun(args), &mut output).unwrap();
+        retention_with_plugins(&config, &plugins(), &command, &mut output).unwrap();
         String::from_utf8(output).unwrap()
     };
 
     let written_by_hand = plan("Flask");
 
+    // The control: a different prefix has to produce a different plan. Without it a rules file that
+    // never compiled into a selector at all would make every run identical and pass this vacuously.
+    assert_ne!(written_by_hand, plan("Django"));
     assert_eq!(written_by_hand, plan("flask"));
-    assert!(!written_by_hand.is_empty());
 }

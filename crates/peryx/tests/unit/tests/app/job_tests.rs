@@ -899,3 +899,61 @@ fn test_job_run_reports_a_store_it_cannot_open() {
     drop(meta);
     assert!(format!("{error:#}").contains("metadata"), "{error:#}");
 }
+
+/// The sibling of [`RUNTIME`] that installs a home able to publish a retained write, so a drain has
+/// a finalizer to hand its intents to rather than none at all.
+static FINALIZING_RUNTIME: FinalizingRuntime = FinalizingRuntime;
+
+struct FinalizingRuntime;
+
+// Installed as the distributed runtime rather than the ecosystem one: a registration carrying a
+// distributed runtime installs only that, so an ecosystem runtime beside it never runs. The
+// finalizer registry lives on the runtime context either way, which the distributed one lends out.
+impl peryx_driver::serving::DistributedRuntime for FinalizingRuntime {
+    fn install(
+        &self,
+        context: &mut DistributedInstallContext<'_>,
+        _: &[(&str, &CompiledEcosystemSettings)],
+    ) -> Result<(), String> {
+        context
+            .runtime()
+            .register_intent_finalizer(CORE, Arc::new(SettlingFinalizer));
+        Ok(())
+    }
+}
+
+struct SettlingFinalizer;
+
+#[async_trait::async_trait]
+impl peryx_driver::serving::IntentFinalizer for SettlingFinalizer {
+    async fn finalize_admitted(&self, _state: Arc<peryx_driver::state::ServingState>) -> u64 {
+        0
+    }
+
+    async fn finalize_retained(
+        &self,
+        _state: Arc<peryx_driver::state::ServingState>,
+        _authority: &str,
+        _intent_key: &str,
+    ) -> bool {
+        true
+    }
+}
+
+/// A drain hands its retained writes to whatever finalizers the installed ecosystems registered, so
+/// a home that can publish settles what a drain with none reports as unchanged. The count beside
+/// `processed` is what separates the two: the sibling test drains the same two writes through a
+/// registry that installed no finalizer and reports `changed 0`.
+#[test]
+fn test_job_drain_publishes_through_an_installed_finalizer() {
+    let plugins = plugins_with_distributed_runtime(&FINALIZING_RUNTIME);
+    let (_directory, config) = config_with_intents(&plugins);
+    let mut output = Vec::new();
+
+    job_with_plugins(&config, &plugins, &drain_command(), &mut output).unwrap();
+
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        "processed\t2\nchanged\t2\nquota_released\t0\nquota_remaining\t0\n"
+    );
+}

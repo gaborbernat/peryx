@@ -882,3 +882,20 @@ impl NodeJob for RunJob {
         })
     }
 }
+
+/// A node job opens its store inside the runtime it just built, so a store it cannot open fails
+/// there rather than before the runtime exists. That failure has to come back out of the runtime,
+/// past the scheduler shutdown that runs after it, rather than being lost to the shutdown.
+///
+/// Every other job test drops the store first. Holding it is what makes the open fail, since redb
+/// admits one writer at a time.
+#[test]
+fn test_job_run_reports_a_store_it_cannot_open() {
+    let plugins = plugins();
+    let (_directory, meta, config) = store_and_config(&plugins);
+
+    let error = job_with_plugins(&config, &plugins, &run_command(), &mut Vec::new()).unwrap_err();
+
+    drop(meta);
+    assert!(format!("{error:#}").contains("metadata"), "{error:#}");
+}

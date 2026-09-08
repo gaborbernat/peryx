@@ -1072,3 +1072,54 @@ async fn test_roster_frontier_reads_a_reachable_datacenter() {
 
     assert_eq!(source.applied_frontier("west").await.unwrap(), Some(1));
 }
+
+/// Answers every command as committed without sealing an audit, which consensus itself never does.
+struct UnsealedControl;
+
+#[async_trait::async_trait]
+impl peryx_ha::ControlExecutor for UnsealedControl {
+    async fn execute(
+        &self,
+        _actor: &str,
+        _key: Option<&str>,
+        _command: ControlCommand,
+    ) -> Result<peryx_ha::CommandReceipt, ControlError> {
+        Ok(peryx_ha::CommandReceipt {
+            term: 1,
+            index: 2,
+            outcome: peryx_ha::CommandOutcome::Committed,
+            old_voters: Vec::new(),
+            new_voters: Vec::new(),
+            transfer_audit: None,
+        })
+    }
+
+    fn metrics(&self) -> peryx_ha::ControlMetrics {
+        peryx_ha::ControlMetrics {
+            completed: 0,
+            p50_ms: 0,
+            p99_ms: 0,
+        }
+    }
+}
+
+/// A commit consensus applied without sealing an audit leaves the drive nothing to record, so it
+/// reports the transfer unsealed rather than carrying on with no audit to store or hand back.
+///
+/// Consensus seals every transfer it applies, so the sibling tests never reach this. It takes an
+/// executor that answers committed and seals nothing.
+#[tokio::test]
+async fn test_commit_transfer_reports_a_receipt_that_carries_no_audit() {
+    let plan = ready(request());
+    let consensus = Consensus::homed(&["proj"]);
+    let (_dir, store) = meta();
+
+    let error = commit_transfer(&plan, &UnsealedControl, &consensus, &store)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, TransferDriveError::Unsealed(id) if id == "t-1"),
+        "{error:?}"
+    );
+}

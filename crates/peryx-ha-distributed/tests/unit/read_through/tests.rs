@@ -59,7 +59,7 @@ impl BlobTransport for Peer {
             .contents
             .get(&request.digest)
             .cloned()
-            .unwrap_or_else(|| Bytes::from_static(b""));
+            .expect("the fixture seeds every digest its test asks this peer for");
         let range = request.range.unwrap_or(ByteRange {
             offset: 0,
             length: content.len(),

@@ -3086,3 +3086,80 @@ async fn test_write_ledger_reap_reports_what_it_reaped_before_cancelling() {
         })
     );
 }
+
+/// Cancels the run the first time the store is read after arming, so one pass finishes before the
+/// next sees the cancellation. This loop reads no clock, so the store is the only point inside it a
+/// test can reach; racing a spawned canceller against it would let thread order decide the outcome.
+#[derive(Debug)]
+struct CancelOnRead {
+    inner: redb::backends::InMemoryBackend,
+    cancel: CancellationToken,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl redb::StorageBackend for CancelOnRead {
+    fn len(&self) -> std::io::Result<u64> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> std::io::Result<()> {
+        if self.armed.load(Ordering::SeqCst) {
+            self.cancel.cancel();
+        }
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+        self.inner.write(offset, data)
+    }
+}
+
+/// A cancelled cleanup reports the attempts it already removed, not zero. That count is what the
+/// scheduler records, so a report that dropped it would say a cancelled sweep pruned nothing while
+/// rows had in fact gone.
+///
+/// The sibling cancels before the first pass, where the count is legitimately zero and a dropped
+/// field reads exactly like a kept one.
+#[tokio::test]
+async fn test_job_history_cleanup_reports_what_it_removed_before_cancelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = CancellationToken::new();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let meta = MetaStore::open_backend(CancelOnRead {
+        inner: redb::backends::InMemoryBackend::new(),
+        cancel: cancel.clone(),
+        armed: Arc::clone(&armed),
+    })
+    .unwrap();
+    for started_at_unix in 0..24 {
+        let id = start_corruptible_attempt(&meta);
+        meta.finish_job_run(&id, JobOutcome::succeeded(started_at_unix, 0, 0))
+            .unwrap();
+    }
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let mut state = AppState::with_clock(meta, blobs, 60, Vec::new(), TestClock::default().reader());
+    install_distributed(&mut state, peryx_ha::AvailabilityCapabilities::default());
+    armed.store(true, Ordering::SeqCst);
+
+    let report = JobHistoryCleanup { retain: 16 }
+        .run(&context(state.serving, cancel))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report,
+        JobRunOutcome::cancelled(JobReport {
+            processed: 8,
+            changed: 8,
+            ..JobReport::default()
+        })
+    );
+}

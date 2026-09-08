@@ -866,3 +866,40 @@ fn test_rate_limit_errors_keep_status_and_retry_header() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(response.headers()[header::RETRY_AFTER], "41");
 }
+
+/// The classes a request actually spent, so a test can say which bucket took the charge rather than
+/// only that some bucket refused. Two mutations of the classifier produce the same status by
+/// charging the wrong class, and a status assertion cannot tell them apart.
+fn charged(serving: &ServingState) -> Vec<(&'static str, u64, u64)> {
+    serving
+        .rate_limits
+        .counters()
+        .into_iter()
+        .filter(|snapshot| snapshot.allowed > 0 || snapshot.denied > 0)
+        .map(|snapshot| (snapshot.class, snapshot.allowed, snapshot.denied))
+        .collect()
+}
+
+/// A service only classifies its own POST. The same path arriving as a GET is classified by route,
+/// so a guard that stopped checking the method would charge a read to whatever class the service
+/// claims for its write - here the admin bucket, which is far scarcer than listing.
+#[tokio::test]
+async fn test_enforce_keeps_a_service_post_class_off_a_get() {
+    let (_dir, mut state) = app(RateLimitConfig::enabled_defaults());
+    state.register_capabilities(|registrar| {
+        registrar.register_service(Ecosystem::new("example"), Arc::new(IndexedDriver));
+    });
+    let serving = state.serving.clone();
+    let router = router(state);
+
+    let status = router
+        .oneshot(Request::get("/+special").body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status();
+
+    assert_eq!(
+        (status, charged(&serving)),
+        (StatusCode::NO_CONTENT, vec![("listing", 1, 0)])
+    );
+}

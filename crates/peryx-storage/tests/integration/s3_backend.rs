@@ -744,7 +744,7 @@ async fn minio() -> Minio {
     );
     let network = format!("peryx-s3-{suffix}");
     let name = format!("peryx-minio-{suffix}");
-    let container = GenericImage::new("minio/minio", "RELEASE.2025-04-22T22-12-26Z")
+    let container = GenericImage::new("quay.io/minio/minio", "RELEASE.2025-04-22T22-12-26Z")
         .with_wait_for(WaitFor::message_on_stderr("API:"))
         .with_cmd(["server", "/data"])
         .with_env_var("MINIO_CONSOLE_ADDRESS", ":9001")
@@ -775,7 +775,7 @@ async fn minio() -> Minio {
 
 #[cfg(feature = "container-tests")]
 async fn run_mc(minio: &Minio, args: &[&str]) {
-    let container = GenericImage::new("minio/mc", "RELEASE.2025-04-16T18-13-26Z")
+    let container = GenericImage::new("quay.io/minio/mc", "RELEASE.2025-04-16T18-13-26Z")
         .with_wait_for(WaitFor::exit(ExitWaitStrategy::new().with_exit_code(0)))
         .with_network(&minio.network)
         .with_env_var(

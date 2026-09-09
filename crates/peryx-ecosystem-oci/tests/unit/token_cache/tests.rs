@@ -191,6 +191,12 @@ async fn test_replacing_a_tuple_counts_its_weight_once() {
 #[case::zero(DeclaredLifetime::Seconds(0), None, None)]
 #[case::negative(DeclaredLifetime::Seconds(-30), None, None)]
 #[case::shorter_than_the_skew(DeclaredLifetime::Seconds(4), None, None)]
+// Exactly the skew leaves nothing to serve: the token would expire the instant it was cached, so it
+// is not worth an entry.
+#[case::exactly_the_skew(DeclaredLifetime::Seconds(5), None, None)]
+// A realm claiming a wildly negative lifetime is refused on the declaration rather than carried into
+// the arithmetic below it.
+#[case::absurdly_negative(DeclaredLifetime::Seconds(i64::MIN), None, None)]
 #[case::partly_spent(DeclaredLifetime::Seconds(300), Some(-60), Some(235))]
 #[case::spent_entirely(DeclaredLifetime::Seconds(60), Some(-120), None)]
 #[case::issued_in_the_future(DeclaredLifetime::Seconds(300), Some(60), Some(295))]
@@ -205,4 +211,34 @@ fn expiry_follows_the_declared_lifetime(
     let retained = expires_at(lifetime, issued_offset.map(|offset| now + offset), now);
 
     assert_eq!(retained, expected_remaining.map(|remaining| now + remaining));
+}
+
+/// The byte budget is what stops a handful of outsized tokens from costing more than many ordinary
+/// ones, and it is written as a product of powers of two. The tests above hold the cache under this
+/// number without saying what it is, so they hold just as well against a much smaller one.
+#[test]
+fn test_the_byte_budget_is_two_mebibytes() {
+    assert_eq!(MAX_BYTES, 2_097_152);
+}
+
+/// A hit renews the entry's place in the eviction order, so the scope a caller keeps using outlives
+/// one it fetched and abandoned. Three entries of a megabyte each overrun the byte budget by one, so
+/// exactly one leaves, and the used scope sorts ahead of the abandoned one: were the hit not to renew
+/// it, the tie-break would take the used scope instead.
+#[tokio::test]
+async fn test_a_hit_outlives_an_abandoned_scope_when_one_must_go() {
+    let identity = identity().await;
+    let mut cache = TokenCache::default();
+    let used = key(identity, "repository:a:pull");
+    let abandoned = key(identity, "repository:b:pull");
+    let token = "t".repeat(1_000_000);
+    cache.insert(used.clone(), identity, token.clone(), LIVE_UNTIL, 0);
+    cache.insert(abandoned.clone(), identity, token.clone(), LIVE_UNTIL, 0);
+
+    assert!(cache.get(&used, identity, 0).is_some(), "the hit that renews it");
+    cache.insert(key(identity, "repository:c:pull"), identity, token, LIVE_UNTIL, 0);
+
+    assert_eq!(cache.len(), 2, "one entry must leave to fit the budget");
+    assert!(cache.get(&used, identity, 0).is_some(), "the used scope stays");
+    assert!(cache.get(&abandoned, identity, 0).is_none(), "the abandoned scope goes");
 }

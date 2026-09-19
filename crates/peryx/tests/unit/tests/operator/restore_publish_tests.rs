@@ -43,6 +43,41 @@ fn test_publish_replaces_the_target(#[case] target_exists: bool) {
     assert!(!root.path().join("data.restore-old").exists());
 }
 
+#[cfg(unix)]
+#[rstest]
+#[case::new_target(false)]
+#[case::replacement(true)]
+fn test_publish_reports_a_parent_sync_failure(#[case] target_exists: bool) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("data");
+    let staging = root.path().join("staging");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("marker"), b"new").unwrap();
+    if target_exists {
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("marker"), b"old").unwrap();
+    }
+    let permissions = std::fs::metadata(root.path()).unwrap().permissions();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o333)).unwrap();
+
+    let error = publish(&staging, &target).unwrap_err();
+
+    std::fs::set_permissions(root.path(), permissions).unwrap();
+    assert!(
+        error.to_string().contains("sync restored data parent directory"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(target.join("marker")).unwrap(), b"new");
+    if target_exists {
+        assert_eq!(
+            std::fs::read(root.path().join("data.restore-old/marker")).unwrap(),
+            b"old"
+        );
+    }
+}
+
 #[test]
 fn test_rollback_publish_reports_a_failed_rollback() {
     let root = tempfile::tempdir().unwrap();

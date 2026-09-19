@@ -888,25 +888,18 @@ async fn serve_stored_blob(
 /// A blob `HEAD` response: the size and digest headers a client needs to decide whether to pull, with
 /// no body. A `HEAD` transfers no content, so a `Range` never applies (RFC 9110 s14.2) and an existing
 /// blob always answers `200` with its full representation size (OCI distribution spec).
-fn blob_head_response(digest: &str, size: Option<u64>, asked: &BlobRequest<'_>) -> Response {
+fn blob_head_response(digest: &str, size: u64, asked: &BlobRequest<'_>) -> Response {
     if asked.unchanged {
         return blob_not_modified(digest, asked);
     }
-    let mut builder = Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, OCTET_STREAM)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, header_value(asked.etag))
-        .header(DOCKER_CONTENT_DIGEST, header_value(digest));
-    if let Some(size) = size {
-        builder = builder.header(header::CONTENT_LENGTH, size);
-    }
-    let body = size.map_or_else(
-        || Body::from_stream(futures_util::stream::empty::<Result<bytes::Bytes, std::io::Error>>()),
-        |_| Body::empty(),
-    );
-    builder
-        .body(body)
+        .header(DOCKER_CONTENT_DIGEST, header_value(digest))
+        .header(header::CONTENT_LENGTH, size)
+        .body(Body::empty())
         .expect("blob head response builds from validated parts")
 }
 

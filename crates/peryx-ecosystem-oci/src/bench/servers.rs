@@ -12,6 +12,7 @@ use super::BenchEnvironment;
 use super::images::{FLEET_IMAGE, PULL_IMAGES, READINESS_IMAGE, STRESS_IMAGE};
 use peryx_bench_core::context::BenchmarkContext;
 use peryx_bench_core::servers::Server;
+use peryx_test_support::PortClaim;
 
 /// The upstream every proxy caches and `direct` pulls from, when no local mirror is set.
 const UPSTREAM: &str = "https://registry-1.docker.io";
@@ -99,6 +100,7 @@ pub(super) struct Mirror {
     port: u16,
     url: String,
     docker: PathBuf,
+    _port_claim: PortClaim,
 }
 
 impl Mirror {
@@ -121,7 +123,8 @@ impl Drop for Mirror {
 /// Returns an error when the mirror container cannot start or become ready, or an image cannot be
 /// seeded into it.
 pub(super) async fn start_mirror(environment: &BenchEnvironment) -> anyhow::Result<Mirror> {
-    let port = mirror_port()?;
+    let port_claim = PortClaim::ephemeral()?;
+    let port = port_claim.port();
     let mut command = Command::new(&environment.tools.docker);
     command
         .args(["run", "--rm", "-d", "--name", &mirror_container(port)])
@@ -148,6 +151,7 @@ pub(super) async fn start_mirror(environment: &BenchEnvironment) -> anyhow::Resu
         port,
         url: url.clone(),
         docker: environment.tools.docker.clone(),
+        _port_claim: port_claim,
     };
     wait_for_container_event(
         environment,
@@ -173,12 +177,6 @@ async fn seed_mirror(environment: &BenchEnvironment, url: &str) -> anyhow::Resul
             .with_context(|| format!("seeding {image} into the mirror"))?;
     }
     Ok(())
-}
-
-/// A free localhost port for the mirror to bind (bound then released, so docker can claim it).
-fn mirror_port() -> anyhow::Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
 }
 
 /// The mirror container's name, distinct from the competitor containers.

@@ -9,8 +9,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use crate::{
-    CLAIM_PORT_OFFSET, FIXTURE_PORT_BASE, FIXTURE_PORT_COUNT, ListenerReservation, claim_port, fixture_port_candidates,
-    free_port, startup_log,
+    CLAIM_PORT_OFFSET, FIXTURE_PORT_BASE, FIXTURE_PORT_COUNT, ListenerReservation, PortClaim, claim_port,
+    fixture_port_candidates, startup_log,
 };
 #[cfg(unix)]
 use crate::{StartupSignal, wait_for_startup};
@@ -115,12 +115,13 @@ fn reservation_holds_nothing_for_an_unused_control_number() {
 }
 
 #[test]
-fn free_port_keeps_the_claim_and_leaves_the_number_bindable() {
-    let reservation = free_port();
-    let bound = TcpListener::bind(("127.0.0.1", reservation.port)).expect("bind the freed number");
-    assert_eq!(bound.local_addr().expect("bound address").port(), reservation.port,);
+fn port_claim_keeps_the_claim_and_leaves_the_number_bindable() {
+    let claim = PortClaim::ephemeral().expect("claim a fixture port");
+    let port = claim.port();
+    let bound = TcpListener::bind(("127.0.0.1", port)).expect("bind the freed number");
+    assert_eq!(bound.local_addr().expect("bound address").port(), port);
     assert_eq!(
-        TcpListener::bind(("127.0.0.1", claim_port(reservation.port)))
+        TcpListener::bind(("127.0.0.1", claim_port(port)))
             .map_err(|error| error.kind())
             .unwrap_err(),
         ErrorKind::AddrInUse,

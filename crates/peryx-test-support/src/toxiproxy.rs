@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 
 use super::{
-    EVENT_TIMEOUT, HarnessError, ListenerReservation, StartupSignal, free_port, http_client, kill_group,
-    spawn_in_group, spawn_with_events, wait_for_line, wait_for_startup,
+    EVENT_TIMEOUT, HarnessError, PortClaim, StartupSignal, http_client, kill_group, spawn_in_group, spawn_with_events,
+    wait_for_line, wait_for_startup,
 };
 
 const CONTROL_HOST: &str = "127.0.0.1";
@@ -28,7 +28,7 @@ pub struct Toxiproxy {
     graceful_shutdown: bool,
     control_owned: bool,
     /// Held, never read: it keeps the control number out of every other draw in the run.
-    _control_claim: ListenerReservation,
+    _control_claim: PortClaim,
 }
 
 impl Toxiproxy {
@@ -65,8 +65,8 @@ impl Toxiproxy {
         graceful_shutdown: bool,
     ) -> Result<Self, HarnessError> {
         let _allocation_lock = control_allocation_lock()?;
-        let control_claim = free_port();
-        let control_port = control_claim.port;
+        let control_claim = PortClaim::ephemeral()?;
+        let control_port = control_claim.port();
         let control = format!("http://{CONTROL_HOST}:{control_port}");
         let control_owner = format!(
             "peryx-control-{}-{}",

@@ -12,6 +12,7 @@ default = []
 bench = [
   "dep:peryx-bench",
   "dep:peryx-bench-core",
+  "dep:peryx-test-support",
   "dep:tempfile",
   "dep:clap",
   "tokio/macros",
@@ -22,6 +23,7 @@ bench = [
 peryx-core.workspace = true
 peryx-bench-core = { workspace = true, optional = true }
 peryx-bench = { workspace = true, optional = true }
+peryx-test-support = { workspace = true, optional = true }
 peryx-plugin-registry.workspace = true
 peryx-driver.workspace = true
 peryx-events.workspace = true

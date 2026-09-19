@@ -412,8 +412,11 @@ async fn test_proxy_blob_head_ignores_a_range_it_has_not_cached(#[case] extra: &
     assert!(!headers.contains_key(header::CONTENT_RANGE));
 }
 
+#[rstest]
+#[case::missing(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")]
+#[case::malformed(b"HTTP/1.1 200 OK\r\ncontent-length: nope\r\nconnection: close\r\n\r\n")]
 #[tokio::test]
-async fn test_proxy_blob_head_without_upstream_length_omits_length_and_ignores_range() {
+async fn test_proxy_blob_head_rejects_an_invalid_upstream_length(#[case] response: &'static [u8]) {
     use std::io::{Read as _, Write as _};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -422,21 +425,18 @@ async fn test_proxy_blob_head_without_upstream_length_omits_length_and_ignores_r
         let (mut socket, _) = listener.accept().unwrap();
         let mut request = [0; 1024];
         let _ = socket.read(&mut request).unwrap();
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")
-            .unwrap();
+        socket.write_all(response).unwrap();
     });
     let digest = oci_digest(b"unknown-length");
     let dir = tempfile::tempdir().unwrap();
-    let (_state, app) = proxy(&dir, &base, false);
+    let (state, app) = proxy(&dir, &base, false);
     let uri = format!("/v2/hub/library/nginx/blobs/{digest}");
 
-    let (status, headers, body) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=0-3")]).await;
+    let (status, _, body) = send_with(&app, Method::HEAD, &uri, &[("range", "bytes=0-3")]).await;
     upstream.join().unwrap();
-    assert_eq!(status, StatusCode::OK);
-    assert!(!headers.contains_key(header::CONTENT_LENGTH));
-    assert!(!headers.contains_key(header::CONTENT_RANGE));
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(body.is_empty());
+    assert!(!crate::store::blob_is_member(&state.serving.meta, "hub", "library/nginx", &digest).unwrap());
 }
 
 #[tokio::test]
@@ -448,6 +448,7 @@ async fn test_proxy_blob_head_uses_an_upstream_head_not_a_download() {
     Mock::given(method("HEAD"))
         .and(path(format!("/v2/library/nginx/blobs/{digest}")))
         .respond_with(ResponseTemplate::new(200).insert_header("content-length", blob.len().to_string().as_str()))
+        .expect(1)
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
@@ -456,6 +457,7 @@ async fn test_proxy_blob_head_uses_an_upstream_head_not_a_download() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::CONTENT_LENGTH], blob.len().to_string());
     assert!(body.is_empty());
+    assert!(crate::store::blob_is_member(&state.serving.meta, "hub", "library/nginx", &digest).unwrap());
     assert!(
         state
             .serving
@@ -465,6 +467,31 @@ async fn test_proxy_blob_head_uses_an_upstream_head_not_a_download() {
             .unwrap()
             .is_none()
     );
+    state.serving.blobs.put_bytes(blob).await.unwrap();
+    let (status, headers, body) = send(&app, Method::HEAD, &format!("/v2/hub/library/nginx/blobs/{digest}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_LENGTH], blob.len().to_string());
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn test_proxy_blob_head_accepts_a_zero_byte_upstream_blob() {
+    let server = MockServer::start().await;
+    let digest = oci_digest(b"");
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/nginx/blobs/{digest}")))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-length", "0"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, headers, body) = send(&app, Method::HEAD, &format!("/v2/hub/library/nginx/blobs/{digest}")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_LENGTH], "0");
+    assert!(body.is_empty());
+    assert!(crate::store::blob_is_member(&state.serving.meta, "hub", "library/nginx", &digest).unwrap());
 }
 #[tokio::test]
 async fn test_proxy_blob_head_absent_and_upstream_error() {

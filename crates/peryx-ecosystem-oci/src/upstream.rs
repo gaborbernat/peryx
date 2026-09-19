@@ -64,6 +64,8 @@ pub enum UpstreamError {
     /// The registry throttled the pull (`429`), carrying its `Retry-After` when it sent one. Kept
     /// distinct from [`Self::Status`] so the client sees a `429` and the backoff hint, not a `502`.
     RateLimited(Option<String>),
+    /// A successful blob `HEAD` did not carry a usable representation size.
+    InvalidContentLength,
     /// The transfer failed before a usable response (connection, TLS, timeout, decode).
     Transport(String),
 }
@@ -73,6 +75,7 @@ impl std::fmt::Display for UpstreamError {
         match self {
             Self::Status(status) => write!(f, "upstream returned {status}"),
             Self::RateLimited(_) => write!(f, "upstream rate limit reached"),
+            Self::InvalidContentLength => write!(f, "upstream blob HEAD has invalid content-length"),
             Self::Transport(err) => write!(f, "{err}"),
         }
     }
@@ -205,24 +208,26 @@ impl Upstream {
     }
 
     /// Check a blob's existence and size with a `HEAD`, so a client's pre-flight `HEAD` need not pull
-    /// the whole layer. Returns the `Content-Length` when the upstream provides one.
+    /// the whole layer. A successful response must carry a valid `Content-Length`.
     ///
     /// # Errors
-    /// Returns [`UpstreamError`] on a non-success status (a `404` means absent) or a transport failure.
+    /// Returns [`UpstreamError`] on a non-success status (a `404` means absent), an invalid size, or a transport
+    /// failure.
     pub async fn blob_head(
         &self,
         client: &UpstreamClient,
         repo: &str,
         digest: &str,
         realms: &TokenRealms,
-    ) -> Result<Option<u64>, UpstreamError> {
+    ) -> Result<u64, UpstreamError> {
         let url = format!("{}v2/{repo}/blobs/{digest}", client.base_url());
         let response = self.send(Method::HEAD, client, &url, repo, None, realms).await?;
-        Ok(response
+        response
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok()))
+            .and_then(|value| value.parse().ok())
+            .ok_or(UpstreamError::InvalidContentLength)
     }
 
     /// # Errors

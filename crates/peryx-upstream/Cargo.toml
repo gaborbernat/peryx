@@ -34,6 +34,7 @@ rustix.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
+peryx-test-support.workspace = true
 rcgen = "0.14.9"
 rstest.workspace = true
 tempfile.workspace = true

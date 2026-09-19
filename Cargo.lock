@@ -5364,6 +5364,7 @@ dependencies = [
  "futures-util",
  "httpdate",
  "peryx-core",
+ "peryx-test-support",
  "rcgen 0.14.9",
  "reqwest",
  "rstest",

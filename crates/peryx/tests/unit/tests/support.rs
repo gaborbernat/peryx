@@ -17,6 +17,7 @@ use peryx_driver::serving::{
     MirrorAction, MirrorDriver, MirrorRequest, NameDriver, ProtocolDriver, RetentionDriver, RuntimeInstallContext,
 };
 use peryx_driver::state::{AppState, IndexDescription, ServingState};
+use peryx_driver::test_doubles::EcosystemDriverFixture;
 use peryx_plugin_registry::{PluginRegistration, PluginRegistry};
 use peryx_policy::{
     RetentionCandidate, RetentionClass, RetentionDecision, RetentionPolicy, RetentionSummary, RetentionVisibility,
@@ -24,7 +25,6 @@ use peryx_policy::{
 use peryx_search::default_indexer;
 use peryx_storage::blob::Digest;
 use peryx_storage::meta::MetaStore;
-use peryx_test_support::EcosystemDriverFixture;
 use utoipa::openapi::PathsBuilder;
 
 /// Leptos SSR uses process-global arenas and can lose wakes during concurrent test renders.

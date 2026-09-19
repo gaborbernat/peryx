@@ -312,7 +312,7 @@ _embedded-docs-contract:
 _paused-clock-contract:
     #!/usr/bin/env bash
     set -euo pipefail
-    harness='TestServer::start|TcpListener::bind|MockServer::start|ControlledServer::start|reqwest::(get|Client)|wiremock'
+    harness='TestServer::start|TcpListener::bind|MockServer::start|ControlledPeer::start|reqwest::(get|Client)|wiremock'
     program='
     { source[NR] = $0 }
     END {
@@ -358,7 +358,7 @@ _paused-clock-contract:
           continue
         if (reason[k] != "" && length(reason[k]) < 20)
           tell(k, "states a paused-clock reason too short for the next reader to re-check")
-        else if (reason[k] == "" && running(k) == 0)
+        else if (reason[k] == "" && index(body[k], "ControlledPeer::start") == 0 && index(body[k], "tokio::time::resume") == 0)
           tell(k, "holds a paused clock in a file that opens sockets")
       }
     }
@@ -367,28 +367,6 @@ _paused-clock-contract:
       sub(/^[ \t]+/, "", text)
       sub(/[ \t]+$/, "", text)
       return text
-    }
-    function running(start,   queue, head, tail, seen, k, words, w, i, name, text) {
-      head = 1
-      tail = 1
-      queue[1] = start
-      seen[start] = 1
-      while (head <= tail) {
-        k = queue[head++]
-        if (resumes[k])
-          return 1
-        text = body[k]
-        gsub(/[^A-Za-z0-9_]/, " ", text)
-        split(text, words, " ")
-        for (i in words) {
-          name = words[i]
-          if (name in defined) {
-            w = defined[name]
-            if (seen[w] == 0) { seen[w] = 1; queue[++tail] = w }
-          }
-        }
-      }
-      return 0
     }
     function tell(k, message) {
       printf "%s:%d: %s: %s\n", FILENAME, line_of[k], named[k], message

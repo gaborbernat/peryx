@@ -77,6 +77,8 @@ web_atoms = "0.2.6"
 url.workspace = true
 percent-encoding.workspace = true
 sha2.workspace = true
+unicode-ident.workspace = true
+unicode-normalization.workspace = true
 xml = { package = "xml-rs", version = "1.0" }
 hdrhistogram = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }

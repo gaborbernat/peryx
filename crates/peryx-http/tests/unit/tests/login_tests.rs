@@ -837,6 +837,129 @@ async fn mount_issuer(server: &MockServer, issuer: &str) {
         .await;
 }
 
+/// Starts a real login redirect against a clock fixed at `start`, then presents its callback at
+/// `start + at_callback`, so the pre-authentication handoff's own `now + TTL` computation, not a
+/// hand-sealed stand-in for it, decides whether the callback is still within its window.
+async fn pre_auth_round_trip_status(start: i64, at_callback: i64) -> StatusCode {
+    let server = MockServer::start().await;
+    let issuer = secure_origin(&server.uri());
+    mount_issuer(&server, &issuer).await;
+    let dir = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let clock = Arc::new(std::sync::atomic::AtomicI64::new(start));
+    let clock_reader = clock.clone();
+    let mut state = AppState::with_clock(
+        meta.clone(),
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        Vec::new(),
+        Arc::new(move || clock_reader.load(std::sync::atomic::Ordering::SeqCst)),
+    );
+    assert!(state.set_session_sealer(SessionSealer::new(KEY)).is_ok());
+    assert!(
+        state
+            .set_oidc_logins([OidcLoginService::new(provider(&server.uri()), meta, Vec::new())])
+            .is_ok()
+    );
+    let state = Arc::new(state);
+
+    let start_response = send(state.clone(), Method::GET, "/_/login/corporate", None).await;
+    let redirect = url::Url::parse(&location(&start_response)).unwrap();
+    let params: std::collections::HashMap<_, _> = redirect.query_pairs().into_owned().collect();
+    let cookie = set_cookies(&start_response)
+        .into_iter()
+        .find(|cookie| cookie.starts_with(&format!("{PRE_AUTH_COOKIE}=")))
+        .and_then(|cookie| cookie.split(';').next().map(str::to_owned))
+        .unwrap();
+    let id_token = mint(&issuer, &params["nonce"]);
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "at", "token_type": "Bearer", "id_token": id_token,
+        })))
+        .mount(&server)
+        .await;
+
+    clock.store(start + at_callback, std::sync::atomic::Ordering::SeqCst);
+    let uri = format!("/_/login/corporate/callback?state={}&code=auth-code", params["state"]);
+    send(state, Method::GET, &uri, Some(&cookie)).await.status()
+}
+
+#[tokio::test]
+async fn test_pre_auth_handoff_survives_up_to_its_ttl() {
+    assert_eq!(pre_auth_round_trip_status(NOW, 599).await, StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn test_pre_auth_handoff_expires_past_its_ttl() {
+    assert_eq!(pre_auth_round_trip_status(NOW, 601).await, StatusCode::BAD_REQUEST);
+}
+
+/// Completes a real login at a clock fixed at `start`, then reads `/_/session` at
+/// `start + SESSION_TTL_SECS + at_check`, so the session's own `now + TTL` computation decides
+/// whether the account is still resolvable.
+async fn session_round_trip_user(at_check: i64) -> Value {
+    let server = MockServer::start().await;
+    let issuer = secure_origin(&server.uri());
+    mount_issuer(&server, &issuer).await;
+    let dir = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let clock = Arc::new(std::sync::atomic::AtomicI64::new(NOW));
+    let clock_reader = clock.clone();
+    let mut state = AppState::with_clock(
+        meta.clone(),
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        Vec::new(),
+        Arc::new(move || clock_reader.load(std::sync::atomic::Ordering::SeqCst)),
+    );
+    assert!(state.set_session_sealer(SessionSealer::new(KEY)).is_ok());
+    assert!(
+        state
+            .set_oidc_logins([OidcLoginService::new(provider(&server.uri()), meta, Vec::new())])
+            .is_ok()
+    );
+    let state = Arc::new(state);
+
+    let start_response = send(state.clone(), Method::GET, "/_/login/corporate", None).await;
+    let redirect = url::Url::parse(&location(&start_response)).unwrap();
+    let params: std::collections::HashMap<_, _> = redirect.query_pairs().into_owned().collect();
+    let cookie = set_cookies(&start_response)
+        .into_iter()
+        .find(|cookie| cookie.starts_with(&format!("{PRE_AUTH_COOKIE}=")))
+        .and_then(|cookie| cookie.split(';').next().map(str::to_owned))
+        .unwrap();
+    let id_token = mint(&issuer, &params["nonce"]);
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "at", "token_type": "Bearer", "id_token": id_token,
+        })))
+        .mount(&server)
+        .await;
+    let uri = format!("/_/login/corporate/callback?state={}&code=auth-code", params["state"]);
+    let callback_response = send(state.clone(), Method::GET, &uri, Some(&cookie)).await;
+    let session_cookie = set_cookies(&callback_response)
+        .into_iter()
+        .find(|cookie| cookie.starts_with(&format!("{SESSION_COOKIE}=")))
+        .and_then(|cookie| cookie.split(';').next().map(str::to_owned))
+        .unwrap();
+
+    clock.store(NOW + 43_200 + at_check, std::sync::atomic::Ordering::SeqCst);
+    let session_response = send(state, Method::GET, "/_/session", Some(&session_cookie)).await;
+    body_json(session_response).await["user"].clone()
+}
+
+#[tokio::test]
+async fn test_session_survives_up_to_its_ttl() {
+    assert_ne!(session_round_trip_user(-1).await, Value::Null);
+}
+
+#[tokio::test]
+async fn test_session_expires_past_its_ttl() {
+    assert_eq!(session_round_trip_user(1).await, Value::Null);
+}
+
 #[tokio::test]
 async fn test_login_start_redirects_to_the_provider_and_seals_the_handoff() {
     let server = MockServer::start().await;
@@ -852,7 +975,8 @@ async fn test_login_start_redirects_to_the_provider_and_seals_the_handoff() {
     assert!(
         cookies.iter().any(|c| c.starts_with(&format!("{PRE_AUTH_COOKIE}="))
             && c.contains("HttpOnly")
-            && c.contains("SameSite=Lax")),
+            && c.contains("SameSite=Lax")
+            && c.contains("Max-Age=600")),
         "{cookies:?}"
     );
 }
@@ -896,9 +1020,9 @@ async fn test_a_valid_callback_creates_a_session(#[case] multiple_providers: boo
     assert_eq!(location(&response), "/");
     let cookies = set_cookies(&response);
     assert!(
-        cookies
-            .iter()
-            .any(|c| c.starts_with(&format!("{SESSION_COOKIE}=")) && c.contains("HttpOnly")),
+        cookies.iter().any(|c| c.starts_with(&format!("{SESSION_COOKIE}="))
+            && c.contains("HttpOnly")
+            && c.contains("Max-Age=43200")),
         "{cookies:?}"
     );
     assert!(

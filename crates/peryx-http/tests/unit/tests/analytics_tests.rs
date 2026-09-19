@@ -242,6 +242,28 @@ async fn test_top_resources_ranks_across_repositories_and_paginates() {
     assert_eq!(page2["next_cursor"], serde_json::Value::Null);
 }
 
+/// A page exactly as large as the remaining rows is still the last page: nothing is left to point a
+/// cursor at, so `next_cursor` must stay absent rather than offer an empty follow-up page.
+#[tokio::test]
+async fn test_top_resources_omits_a_cursor_when_the_page_exactly_fills_the_limit() {
+    let (_dir, state) = app().await;
+    seed(&state);
+
+    let (status, _, page) = get(
+        &state,
+        "/+analytics/top-resources?limit=3",
+        Some(("Alice", USER_PASSWORD)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        rows(&page, "resources", &["repository", "resource", "reads", "bytes"]).len(),
+        3
+    );
+    assert_eq!(page["next_cursor"], serde_json::Value::Null);
+}
+
 #[tokio::test]
 async fn test_repository_scope_limits_rows_to_the_authorized_repository() {
     let (_dir, state) = app().await;
@@ -472,6 +494,40 @@ async fn test_rejects_oversized_repository_filter() {
         body,
         serde_json::json!({"error": "repository filter exceeds 512 bytes"})
     );
+}
+
+/// A filter this long fails as an unmatched repository, not as oversized input: the byte limit
+/// itself sits one byte higher, and only a request past it must report the "exceeds" message.
+#[tokio::test]
+async fn test_accepts_a_repository_filter_at_exactly_the_byte_limit() {
+    let (_dir, state) = app().await;
+    seed(&state);
+    let uri = format!("/+analytics/top-resources?repository={}", "x".repeat(512));
+
+    let (status, _, body) = get(&state, &uri, Some(("Alice", USER_PASSWORD))).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_ne!(
+        body,
+        serde_json::json!({"error": "repository filter exceeds 512 bytes"})
+    );
+}
+
+/// A range whose start equals its end names a single instant, not a reversed range, so it must
+/// still be accepted.
+#[tokio::test]
+async fn test_accepts_a_time_range_whose_start_equals_its_end() {
+    let (_dir, state) = app().await;
+    seed(&state);
+
+    let (status, _, _) = get(
+        &state,
+        "/+analytics/top-resources?from=100&to=100",
+        Some(("Alice", USER_PASSWORD)),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[rstest]

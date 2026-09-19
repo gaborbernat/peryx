@@ -317,7 +317,7 @@ impl MetaStore {
         Ok(health)
     }
 
-    /// Removes up to `limit` expired terminal records. Pending records remain eligible to finalize.
+    /// Removes up to `limit` records whose retention deadline has passed. Rows without a deadline remain.
     ///
     /// # Errors
     /// Returns a store error when a row cannot be read or the delete cannot be committed.
@@ -333,7 +333,7 @@ impl MetaStore {
                 }
                 let (key, value) = entry?;
                 let record: OperationOutcomeRecord = serde_json::from_slice(value.value())?;
-                if record.state.is_terminal() && record.expiry_unix.is_some_and(|expiry| now >= expiry) {
+                if record.expiry_unix.is_some_and(|expiry| now >= expiry) {
                     doomed.push(key.value().to_owned());
                 }
             }

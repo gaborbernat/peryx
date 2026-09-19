@@ -239,49 +239,61 @@ fn test_state_reports_whether_it_is_terminal() {
 }
 
 #[test]
-fn test_prune_removes_only_expired_terminal_records() {
+fn test_prune_removes_expired_records_at_their_deadline() {
     let (_dir, store) = store();
-    store.claim_operation("pending", Some(10), 1).unwrap();
-    store.claim_operation("unexpired", Some(100), 1).unwrap();
+    store.claim_operation("pending-expired", Some(10), 1).unwrap();
+    store.claim_operation("pending-live", Some(11), 1).unwrap();
+    store.claim_operation("terminal-expired", Some(10), 1).unwrap();
     store
-        .finalize_operation("unexpired", OperationResult::Published, b"", 2)
+        .finalize_operation("terminal-expired", OperationResult::Failed, b"", 2)
         .unwrap();
-    store.claim_operation("no-expiry", None, 1).unwrap();
+    store.claim_operation("terminal-live", Some(11), 1).unwrap();
     store
-        .finalize_operation("no-expiry", OperationResult::Published, b"", 2)
+        .finalize_operation("terminal-live", OperationResult::Published, b"", 2)
         .unwrap();
-    store.claim_operation("expired", Some(10), 1).unwrap();
-    store
-        .finalize_operation("expired", OperationResult::Failed, b"", 2)
-        .unwrap();
+    store.claim_operation("permanent", None, 1).unwrap();
 
-    let pruned = store.prune_operation_outcomes(50, 10).unwrap();
+    let pruned = store.prune_operation_outcomes(10, 10).unwrap();
 
-    assert_eq!(pruned, 1);
-    assert_eq!(store.operation_outcome("expired").unwrap(), None);
-    assert!(store.operation_outcome("pending").unwrap().is_some());
-    assert!(store.operation_outcome("unexpired").unwrap().is_some());
-    assert!(store.operation_outcome("no-expiry").unwrap().is_some());
+    assert_eq!(pruned, 2);
+    assert_eq!(store.operation_outcome("pending-expired").unwrap(), None);
+    assert_eq!(store.operation_outcome("terminal-expired").unwrap(), None);
+    assert!(store.operation_outcome("pending-live").unwrap().is_some());
+    assert!(store.operation_outcome("terminal-live").unwrap().is_some());
+    assert!(store.operation_outcome("permanent").unwrap().is_some());
 }
 
 #[test]
-fn test_prune_honors_the_limit() {
+fn test_prune_honors_the_limit_across_pending_and_terminal_records() {
     let (_dir, store) = store();
-    for id in ["a", "b"] {
-        store.claim_operation(id, Some(10), 1).unwrap();
-        store
-            .finalize_operation(id, OperationResult::Published, b"", 2)
-            .unwrap();
-    }
+    store.claim_operation("a-pending", Some(10), 1).unwrap();
+    store.claim_operation("b-terminal", Some(10), 1).unwrap();
+    store
+        .finalize_operation("b-terminal", OperationResult::Published, b"", 2)
+        .unwrap();
+    store.claim_operation("c-pending", Some(10), 1).unwrap();
 
     let pruned = store.prune_operation_outcomes(50, 1).unwrap();
 
     assert_eq!(pruned, 1);
-    let remaining = ["a", "b"]
+    let remaining = ["a-pending", "b-terminal", "c-pending"]
         .iter()
         .filter(|id| store.operation_outcome(id).unwrap().is_some())
         .count();
-    assert_eq!(remaining, 1);
+    assert_eq!(remaining, 2);
+}
+
+#[test]
+fn test_claim_reopens_an_operation_after_its_expired_pending_record_is_pruned() {
+    let (_dir, store) = store();
+    store.claim_operation("op-1", Some(10), 1).unwrap();
+
+    assert_eq!(store.prune_operation_outcomes(10, 1).unwrap(), 1);
+    assert_eq!(
+        store.claim_operation("op-1", Some(20), 11).unwrap(),
+        OperationClaim::Admitted
+    );
+    assert_eq!(store.operation_outcome("op-1").unwrap(), Some(pending(Some(20), 11)));
 }
 
 fn row(operation: &str, state: OperationState, expiry_unix: Option<i64>, updated_at_unix: i64) -> OperationOutcomeRow {

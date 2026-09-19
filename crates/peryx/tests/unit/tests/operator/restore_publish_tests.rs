@@ -23,6 +23,26 @@ fn test_publish_restores_the_prior_target_when_the_swap_fails() {
     assert!(!root.path().join("data.restore-old").exists());
 }
 
+#[rstest]
+#[case::new_target(false)]
+#[case::replacement(true)]
+fn test_publish_replaces_the_target(#[case] target_exists: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("data");
+    let staging = root.path().join("staging");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("marker"), b"new").unwrap();
+    if target_exists {
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("marker"), b"old").unwrap();
+    }
+
+    publish(&staging, &target).unwrap();
+
+    assert_eq!(std::fs::read(target.join("marker")).unwrap(), b"new");
+    assert!(!root.path().join("data.restore-old").exists());
+}
+
 #[test]
 fn test_rollback_publish_reports_a_failed_rollback() {
     let root = tempfile::tempdir().unwrap();

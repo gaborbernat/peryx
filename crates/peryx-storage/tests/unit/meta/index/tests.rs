@@ -1,4 +1,4 @@
-use super::{DriverReadTxn, MetaError, MetaScanError, MetaStore};
+use super::{DriverBatch, DriverReadTxn, MetaError, MetaScanError, MetaStore};
 
 #[test]
 fn test_driver_prefix_keys_limited_bounds_results() {
@@ -221,6 +221,40 @@ fn test_remove_driver_values_if_stops_after_prefix() {
         meta.remove_driver_values_if("catalog/", 10, |_| Ok(false))
             .unwrap()
             .is_empty()
+    );
+}
+
+#[test]
+fn test_remove_driver_values_if_stops_at_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    for key in ["catalog/1", "catalog/2", "catalog/3"] {
+        meta.put_driver_value(key, b"value").unwrap();
+    }
+
+    let removed = meta.remove_driver_values_if("catalog/", 2, |_| Ok(true)).unwrap();
+
+    assert_eq!(removed, vec!["catalog/1".to_owned(), "catalog/2".to_owned()]);
+    assert_eq!(meta.driver_prefix_keys("catalog/").unwrap(), vec!["catalog/3"]);
+}
+
+#[test]
+fn test_commit_driver_batch_skips_the_fsync_only_when_not_durable() {
+    fn attempt(durable: bool, fail_after: usize) -> bool {
+        let (store, _inner, fault) = crate::meta::fault::initialized();
+        let mut batch = DriverBatch::new();
+        batch.put("catalog/1".to_owned(), b"value".to_vec());
+        fault.arm(fail_after);
+        store.commit_driver_batch(&batch, durable).is_ok()
+    }
+
+    let budget = (0..64)
+        .find(|&fail_after| attempt(false, fail_after))
+        .expect("a non-durable commit fits its operation budget somewhere in this range");
+
+    assert!(
+        !attempt(true, budget),
+        "a durable commit needs one more backend operation than a non-durable one: the fsync"
     );
 }
 

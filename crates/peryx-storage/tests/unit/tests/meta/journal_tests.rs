@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use crate::meta::{JournalRecord, MetaError, MetaStore};
+use crate::meta::{DriverMutation, JournalRecord, MetaError, MetaStore};
 
 use super::store;
 
@@ -226,4 +226,23 @@ fn test_journal_snapshot_honors_a_zero_limit() {
     let snapshot = store.journal_snapshot(0, 0).unwrap();
     assert_eq!(snapshot.current_serial, 1);
     assert!(snapshot.records.is_empty());
+}
+
+#[test]
+fn test_driver_mutation_key_names_the_row_it_changed() {
+    assert_eq!(
+        DriverMutation::Put {
+            key: "catalog/1".to_owned(),
+            value: vec![1],
+        }
+        .key(),
+        "catalog/1"
+    );
+    assert_eq!(
+        DriverMutation::Delete {
+            key: "catalog/2".to_owned()
+        }
+        .key(),
+        "catalog/2"
+    );
 }

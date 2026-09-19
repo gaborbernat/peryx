@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use crate::meta::{
     LegacyMetadataSource, MetaError, MetaStore, MetadataMigration, MetadataMigrationError, MetadataMigrationReport,
-    MetadataRecord, MetadataRecordSet, MetadataValueKind,
+    MetadataRecord, MetadataRecordSet, MetadataValueKind, POLICY_DECISION_CURRENT, QUOTA_USAGE,
 };
 
 #[derive(Clone, Copy)]
@@ -1042,6 +1042,48 @@ fn test_metadata_migration_reports_write_failure() {
         }),
         Err(MetadataMigrationError::Store(_))
     ));
+}
+
+/// The outer migration loop keeps calling `collect_bytes` until a page comes back empty (see the
+/// `257`-record tests above), so a page capped at one row instead of `BATCH_SIZE` still finishes and
+/// reports the same totals - the cap itself is only visible on the page a single call returns.
+#[test]
+fn test_collect_bytes_caps_a_page_at_the_batch_size() {
+    let (directory, store) = store();
+    drop(store);
+    write_bytes(
+        &database_path(&directory),
+        "quota_usage",
+        &(0..257)
+            .map(|index| (format!("key-{index:03}"), b"value".to_vec()))
+            .collect::<Vec<_>>(),
+    );
+    let store = MetaStore::open_existing(database_path(&directory)).unwrap();
+    let txn = store.db.begin_write().unwrap();
+
+    let page = super::collect_bytes(&txn, QUOTA_USAGE, None, None).unwrap();
+
+    assert_eq!(page.len(), 256);
+}
+
+#[test]
+fn test_collect_text_caps_a_page_at_the_batch_size() {
+    let (directory, store) = store();
+    drop(store);
+    let records = (0..257)
+        .map(|index| (format!("key-{index:03}"), "value".to_owned()))
+        .collect::<Vec<_>>();
+    let records = records
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    write_text(&database_path(&directory), "policy_decision_current", &records);
+    let store = MetaStore::open_existing(database_path(&directory)).unwrap();
+    let txn = store.db.begin_write().unwrap();
+
+    let page = super::collect_text(&txn, POLICY_DECISION_CURRENT, None, None).unwrap();
+
+    assert_eq!(page.len(), 256);
 }
 
 fn store() -> (TempDir, MetaStore) {

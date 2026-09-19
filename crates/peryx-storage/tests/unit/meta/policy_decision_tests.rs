@@ -174,3 +174,60 @@ fn test_history_eviction_leaves_the_artifact_scan_on_current_decisions() {
         )])
     );
 }
+
+#[test]
+fn test_current_policy_decisions_for_artifacts_returns_every_wanted_artifact() {
+    let (_dir, store) = store();
+    for artifact in ["artifact-1.0.bin", "artifact-2.0.bin"] {
+        store
+            .record_policy_decision_with_history_limit(
+                NewPolicyDecision {
+                    artifact: Some(artifact),
+                    ..decision_in("tenant-a", "flask", 0)
+                },
+                16,
+            )
+            .unwrap();
+    }
+
+    let decisions = store
+        .current_policy_decisions_for_artifacts("tenant-a", "flask", &["artifact-1.0.bin", "artifact-2.0.bin"])
+        .unwrap();
+
+    assert_eq!(decisions.len(), 2);
+    assert!(decisions.contains_key("artifact-1.0.bin"));
+    assert!(decisions.contains_key("artifact-2.0.bin"));
+}
+
+#[test]
+fn test_validate_decision_accepts_a_reason_at_the_byte_limit() {
+    let reason = "a".repeat(MAX_REASON_BYTES);
+
+    assert!(
+        validate_decision(&NewPolicyDecision {
+            reason: Some(&reason),
+            ..decision("resource", 0)
+        })
+        .is_ok()
+    );
+}
+
+#[test]
+fn test_valid_cursor_rejects_a_short_cursor() {
+    assert!(!valid_cursor("pd_1234"));
+}
+
+#[test]
+fn test_valid_cursor_rejects_the_wrong_prefix() {
+    assert!(!valid_cursor(&format!("px_{}", "0".repeat(16))));
+}
+
+#[test]
+fn test_valid_cursor_rejects_a_non_hex_tail() {
+    assert!(!valid_cursor(&format!("pd_{}g", "0".repeat(15))));
+}
+
+#[test]
+fn test_valid_cursor_accepts_the_full_shape() {
+    assert!(valid_cursor(&format!("pd_{}", "0".repeat(16))));
+}

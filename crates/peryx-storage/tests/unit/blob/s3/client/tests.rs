@@ -968,15 +968,6 @@ fn multipart_part_response() -> http::Response<SdkBody> {
         .unwrap()
 }
 
-fn multipart_complete_response() -> http::Response<SdkBody> {
-    http::Response::builder()
-        .status(200)
-        .body(SdkBody::from(
-            "<CompleteMultipartUploadResult><ETag>etag</ETag></CompleteMultipartUploadResult>",
-        ))
-        .unwrap()
-}
-
 fn multipart_ok_response() -> http::Response<SdkBody> {
     http::Response::builder().status(200).body(SdkBody::empty()).unwrap()
 }
@@ -993,12 +984,8 @@ async fn test_put_whole_retries_conflicts_up_to_the_configured_budget() {
             ..base_settings()
         },
         move |_| {
-            let attempt = counted.fetch_add(1, Ordering::SeqCst);
-            if attempt < 5 {
-                xml_error(409, "ConditionalRequestConflict")
-            } else {
-                xml_error(500, "InternalError")
-            }
+            counted.fetch_add(1, Ordering::SeqCst);
+            xml_error(409, "ConditionalRequestConflict")
         },
     );
 
@@ -1024,14 +1011,8 @@ async fn test_put_multipart_recovers_a_stale_upload_only_once() {
             let id = counted_create.fetch_add(1, Ordering::SeqCst);
             multipart_create_response(&format!("upload-{id}"))
         } else if query.contains("partNumber=") {
-            let attempt = counted_part.fetch_add(1, Ordering::SeqCst);
-            if attempt < 5 {
-                xml_error(404, "NoSuchUpload")
-            } else {
-                multipart_part_response()
-            }
-        } else if request.method() == http::Method::POST {
-            multipart_complete_response()
+            counted_part.fetch_add(1, Ordering::SeqCst);
+            xml_error(404, "NoSuchUpload")
         } else {
             multipart_ok_response()
         }
@@ -1058,12 +1039,8 @@ async fn test_put_multipart_retries_a_conflicted_completion_up_to_budget() {
         } else if query.contains("partNumber=") {
             multipart_part_response()
         } else if request.method() == http::Method::POST {
-            let attempt = counted_complete.fetch_add(1, Ordering::SeqCst);
-            if attempt < 5 {
-                xml_error(409, "ConditionalRequestConflict")
-            } else {
-                multipart_complete_response()
-            }
+            counted_complete.fetch_add(1, Ordering::SeqCst);
+            xml_error(409, "ConditionalRequestConflict")
         } else {
             multipart_ok_response()
         }

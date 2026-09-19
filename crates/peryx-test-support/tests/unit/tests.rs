@@ -24,10 +24,11 @@ use peryx_driver::serving::{
     AbsoluteProtocolDriver, CapabilityRegistrar, ClientDiscovery, EcosystemDriver, NameDriver,
 };
 use peryx_driver::state::{AppState, IndexDescription};
+use peryx_driver::test_doubles::EcosystemDriverFixture;
 use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::MetaStore;
 use peryx_test_support::{
-    ADMIN_PASSWORD, ADMIN_USER, Cluster, EcosystemDriverFixture, HarnessError, MemberSpec, Node, OwnershipControl,
+    ADMIN_PASSWORD, ADMIN_USER, Cluster, ControlledPeer, HarnessError, MemberSpec, Node, OwnershipControl,
     ProcessHarness, ProcessLimit, Role, Topology, Toxiproxy, cargo_binary, process_alive, reachable_through,
 };
 use tempfile::TempDir;
@@ -49,6 +50,17 @@ impl NameDriver for NameFixture {
 
 fn fixture_capabilities(registrar: &mut dyn CapabilityRegistrar) {
     registrar.register_name(OTHER_ECOSYSTEM, Arc::new(NameFixture));
+}
+
+#[tokio::test(start_paused = true)]
+async fn controlled_peer_accepts_the_client_connection() {
+    let peer = ControlledPeer::start().await;
+    peer.run_clock();
+    let client = tokio::spawn(tokio::net::TcpStream::connect(peer.address()));
+    let connection = peer.accept(Duration::from_secs(1)).await;
+    let client = client.await.unwrap().unwrap();
+
+    assert_eq!(connection.peer_addr().unwrap(), client.local_addr().unwrap());
 }
 
 #[test]

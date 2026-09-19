@@ -18,13 +18,13 @@ use peryx_driver::serving::{
     IndexSummaryError, MetricsDriver, RecentWrite,
 };
 use peryx_driver::state::{AppState, Index, IndexDescription, IndexKind, describe_index};
+use peryx_driver::test_doubles::EcosystemDriverFixture;
 use peryx_events::metrics::{MetricFamily, MetricKind};
 use peryx_identity::{
     Action, Glob, Grant, GrantScope, IndexAcl, NamedToken, Role, SESSION_COOKIE, ServerUser, SessionSealer,
 };
 use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::MetaStore;
-use peryx_test_support::EcosystemDriverFixture;
 use tower::ServiceExt as _;
 
 const FIXTURE_ECOSYSTEM: Ecosystem = Ecosystem::new("fixture");

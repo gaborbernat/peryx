@@ -1,6 +1,6 @@
-use std::net::SocketAddr;
 use std::time::Duration;
 
+use peryx_test_support::ControlledPeer;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
@@ -15,7 +15,7 @@ const SERVER_STEP: Duration = Duration::from_secs(30);
 
 #[tokio::test(start_paused = true)]
 async fn test_bounded_read_deadline_stops_periodic_chunks() {
-    let mut server = ControlledServer::start().await;
+    let mut server = ControlledServer::start(ControlledPeer::start().await);
     let url = url::Url::parse(&server.url()).unwrap();
     let client = UpstreamClient::new(url.as_str()).unwrap();
     let started = tokio::time::Instant::now();
@@ -53,7 +53,7 @@ async fn test_bounded_read_deadline_stops_periodic_chunks() {
 
 #[tokio::test(start_paused = true)]
 async fn test_bounded_read_accepts_a_body_near_the_deadline() {
-    let mut server = ControlledServer::start().await;
+    let mut server = ControlledServer::start(ControlledPeer::start().await);
     let url = url::Url::parse(&server.url()).unwrap();
     let client = UpstreamClient::new(url.as_str()).unwrap();
     let started = tokio::time::Instant::now();
@@ -78,7 +78,7 @@ async fn test_bounded_read_accepts_a_body_near_the_deadline() {
 
 #[tokio::test(start_paused = true)]
 async fn test_bounded_read_retries_with_the_remaining_budget() {
-    let mut server = ControlledServer::start().await;
+    let mut server = ControlledServer::start(ControlledPeer::start().await);
     let url = url::Url::parse(&server.url()).unwrap();
     let client = UpstreamClient::new(url.as_str()).unwrap();
     let started = tokio::time::Instant::now();
@@ -143,7 +143,7 @@ enum ServerEvent {
 }
 
 struct ControlledServer {
-    address: SocketAddr,
+    address: std::net::SocketAddr,
     commands: mpsc::UnboundedSender<ServerCommand>,
     events: mpsc::UnboundedReceiver<ServerEvent>,
     clock_running: bool,
@@ -151,9 +151,8 @@ struct ControlledServer {
 }
 
 impl ControlledServer {
-    async fn start() -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+    fn start(peer: ControlledPeer) -> Self {
+        let address = peer.address();
         let (commands, received_commands) = mpsc::unbounded_channel();
         let (events, received_events) = mpsc::unbounded_channel();
         Self {
@@ -161,7 +160,7 @@ impl ControlledServer {
             commands,
             events: received_events,
             clock_running: false,
-            task: tokio::spawn(serve(listener, received_commands, events)),
+            task: tokio::spawn(serve(peer, received_commands, events)),
         }
     }
 
@@ -217,12 +216,12 @@ impl Drop for ControlledServer {
 }
 
 async fn serve(
-    listener: tokio::net::TcpListener,
+    peer: ControlledPeer,
     mut commands: mpsc::UnboundedReceiver<ServerCommand>,
     events: mpsc::UnboundedSender<ServerEvent>,
 ) {
     loop {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut socket = peer.accept(SERVER_STEP).await;
         read_request(&mut socket).await;
         events.send(ServerEvent::Requested).unwrap();
         while let ServerCommand::Write(bytes) = commands.recv().await.unwrap() {

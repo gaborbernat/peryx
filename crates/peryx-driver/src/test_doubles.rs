@@ -4,10 +4,11 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse as _, Response};
 use peryx_core::Ecosystem;
-use peryx_driver::discovery::{BaseUrl, minimal_entry};
-use peryx_driver::rate_limit::RouteClass;
-use peryx_driver::serving::{AbsoluteProtocolDriver, CapabilityRegistrar, ClientDiscovery, EcosystemDriver};
-use peryx_driver::state::{AppState, IndexDescription, ServingState};
+
+use crate::discovery::{BaseUrl, minimal_entry};
+use crate::rate_limit::RouteClass;
+use crate::serving::{AbsoluteProtocolDriver, CapabilityRegistrar, ClientDiscovery, EcosystemDriver};
+use crate::state::{AppState, IndexDescription, ServingState};
 
 #[derive(Clone)]
 pub struct EcosystemDriverFixture {

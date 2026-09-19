@@ -31,14 +31,14 @@ redb-fault = ["dep:redb"]
 [dependencies]
 async-trait.workspace = true
 axum.workspace = true
-peryx-core.workspace = true
-peryx-driver.workspace = true
+peryx-driver = { workspace = true, features = ["test-doubles"] }
 redb = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["blocking", "gzip", "http2", "json", "rustls-no-provider", "stream"] }
 rustls.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "test-util", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", features = ["fs", "poll", "signal"] }
@@ -48,6 +48,7 @@ unix-ancillary = "0.4.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+peryx-core.workspace = true
 peryx-storage.workspace = true
 temp-env.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

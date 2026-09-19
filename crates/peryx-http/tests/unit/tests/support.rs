@@ -4,8 +4,8 @@ use peryx_driver::serving::{
     IndexSummaryDriver, IndexSummaryError, RecentWrite,
 };
 use peryx_driver::state::{AppState, IndexDescription};
+use peryx_driver::test_doubles::EcosystemDriverFixture;
 use peryx_identity::parse_basic;
-use peryx_test_support::EcosystemDriverFixture;
 
 pub const EXTERNAL_USER: &str = "external";
 pub const EXAMPLE_CREDENTIALS: ExampleCredentials = ExampleCredentials;

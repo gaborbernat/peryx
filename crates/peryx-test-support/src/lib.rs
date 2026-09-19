@@ -1,7 +1,7 @@
 //! The harness drives production binaries through public APIs. Each child owns a process group so
 //! [`Drop`] reaps descendants after failures.
 
-mod driver;
+mod controlled_peer;
 #[cfg(feature = "redb-fault")]
 pub mod fault;
 mod process_fixture;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-pub use driver::EcosystemDriverFixture;
+pub use controlled_peer::ControlledPeer;
 pub use toxiproxy::{Proxy, Toxiproxy};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(20);

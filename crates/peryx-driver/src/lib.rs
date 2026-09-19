@@ -25,6 +25,8 @@ pub mod revocations;
 pub mod route_auth;
 pub mod serving;
 pub mod state;
+#[cfg(any(test, feature = "test-doubles"))]
+pub mod test_doubles;
 pub mod tokens;
 pub mod trash;
 pub mod users;

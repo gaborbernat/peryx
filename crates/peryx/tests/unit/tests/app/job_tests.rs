@@ -12,13 +12,13 @@ use peryx_driver::serving::{
     CompiledEcosystemSettings, DistributedInstallContext, EcosystemConfig, EcosystemOpenApi, EcosystemRegistration,
     EcosystemRuntime, ProtocolDriver, RuntimeInstallContext,
 };
+use peryx_driver::test_doubles::EcosystemDriverFixture;
 use peryx_plugin_registry::{
     OperatorJob, OperatorJobDefaults, OperatorJobOptions, OperatorJobRequest, PluginRegistration, PluginRegistry,
 };
 use peryx_storage::meta::{
     IntentAdmission, IntentLimits, IntentPhase, JobKind, JobOutcome, JobState, MetaStore, NewJobRun,
 };
-use peryx_test_support::EcosystemDriverFixture;
 use rstest::rstest;
 use utoipa::openapi::PathsBuilder;
 

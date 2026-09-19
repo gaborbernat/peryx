@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use peryx_core::PrometheusSource as _;
 use peryx_storage::meta::{MetaError, MetaStore};
-use peryx_test_support::fault;
+use peryx_test_support::{ControlledPeer, fault};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::support::{TestServer, http_contract};
@@ -255,14 +255,11 @@ const TIMER_TICK: Duration = Duration::from_millis(1);
 /// the read below ends on that close. Returning only then is what makes the caller's
 /// [`tokio::time::pause`] safe: the beacon is parked on its interval timer with nothing on the wire, so
 /// there is no in-flight request for the paused clock to jump past.
-async fn answer_beat(listener: &tokio::net::TcpListener) {
-    tokio::time::timeout(BEAT_ARRIVAL, exchange_beat(listener))
-        .await
-        .expect("the beacon sends its next beat");
+async fn answer_beat(peer: &ControlledPeer) {
+    exchange_beat(peer.accept(BEAT_ARRIVAL).await).await;
 }
 
-async fn exchange_beat(listener: &tokio::net::TcpListener) {
-    let (mut connection, _) = listener.accept().await.unwrap();
+async fn exchange_beat(mut connection: tokio::net::TcpStream) {
     let mut buffer = [0; 1024];
     let mut request = Vec::new();
     while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -287,24 +284,24 @@ async fn exchange_beat(listener: &tokio::net::TcpListener) {
 /// the test's own clock produced rather than ones the beacon timed.
 #[tokio::test]
 async fn test_run_beats_each_interval_until_it_is_dropped() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream = format!("http://{}/", listener.local_addr().unwrap());
+    let peer = ControlledPeer::start().await;
+    let upstream = format!("http://{}/", peer.address());
     let dir = tempfile::tempdir().unwrap();
     let interval = Duration::from_secs(5);
     let beacon = BeaconSender::new(&upstream, TOKEN, "replica-a", 1, seeded_meta(&dir, 4), interval).unwrap();
     let start = tokio::time::Instant::now();
     let running = tokio::spawn(beacon.run());
 
-    answer_beat(&listener).await;
+    answer_beat(&peer).await;
     tokio::time::pause();
     // A paused clock auto-advances to the earliest pending timer, so sleeping stops at the beacon's timer
     // when the beacon is due sooner than this and leaves its dial on the socket for the check below.
     // Advancing would jump straight over an early beat and report the interval the test chose.
     tokio::time::sleep(interval.checked_sub(TIMER_TICK).unwrap()).await;
-    let early = std::future::poll_fn(|context| Poll::Ready(listener.poll_accept(context))).await;
+    let early = std::future::poll_fn(|context| Poll::Ready(peer.poll_accept(context))).await;
     assert!(early.is_pending(), "the beacon beat before its interval elapsed");
     tokio::time::resume();
-    answer_beat(&listener).await;
+    answer_beat(&peer).await;
 
     running.abort();
     assert_eq!(

@@ -9,9 +9,9 @@ use axum::Router;
 use peryx_core::{Ecosystem, TopologyMember, TopologyMode};
 use peryx_driver::serving::{AbsoluteProtocolDriver, IndexCredentialDriver};
 use peryx_driver::state::AppState;
+use peryx_driver::test_doubles::EcosystemDriverFixture;
 use peryx_identity::parse_basic;
 use peryx_storage::meta::MetaStore;
-use peryx_test_support::EcosystemDriverFixture;
 
 use crate::evidence_gather::{GatherEnd, GatherOutcome, RetiredSources, SourceFailure, outcome};
 use crate::{DcDurabilityMetrics, DistributedAnalyticsCompleteness, DistributedBlobDurability};

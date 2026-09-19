@@ -205,14 +205,14 @@ fn AnalyticsFilterFields(
 }
 
 #[derive(Clone, Copy)]
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 struct AnalyticsUi {
     result: WriteSignal<Option<Result<UiUsagePage, String>>>,
     loading: WriteSignal<bool>,
 }
 
 #[derive(Clone, Copy)]
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 struct AnalyticsState {
     user: ReadSignal<String>,
     password: ReadSignal<String>,
@@ -234,7 +234,7 @@ fn submit(event: &leptos::ev::SubmitEvent, state: AnalyticsState) {
     submit_query(state);
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn submit_query(state: AnalyticsState) {
     let filters = state.filters.get_untracked();
     state.set_active.set(filters.clone());
@@ -260,7 +260,7 @@ fn analytics_results(loading: bool, result: Option<Result<UiUsagePage, String>>)
     }
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn previous_disabled(state: AnalyticsState) -> bool {
     reactive_value(&state.previous).is_empty() || reactive_value(&state.loading)
 }
@@ -270,7 +270,7 @@ fn previous_disabled_view(state: AnalyticsState) -> impl Fn() -> bool {
     move || previous_disabled(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn previous_page(state: AnalyticsState) {
     let mut cursors = state.previous.get_untracked();
     if let Some(cursor) = cursors.pop() {
@@ -291,7 +291,7 @@ fn previous_page_action<Event>(state: AnalyticsState) -> impl FnMut(Event) {
     move |_| previous_page(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn next_disabled(state: AnalyticsState) -> bool {
     reactive_value(&state.loading) || next_cursor(reactive_value(&state.result)).is_none()
 }
@@ -301,7 +301,7 @@ fn next_disabled_view(state: AnalyticsState) -> impl Fn() -> bool {
     move || next_disabled(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn next_page(state: AnalyticsState) {
     if let Some(next) = next_cursor(state.result.get_untracked()) {
         state
@@ -323,17 +323,17 @@ fn next_page_action<Event>(state: AnalyticsState) -> impl FnMut(Event) {
     move |_| next_page(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn next_cursor(result: Option<Result<UiUsagePage, String>>) -> Option<String> {
     result.and_then(Result::ok).and_then(|page| page.next_cursor)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn set_text(signal: WriteSignal<String>, value: String) {
     signal.set(value);
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn update_filter(signal: WriteSignal<AnalyticsFilters>, field: AnalyticsFilterField, value: String) {
     signal.update(|filters| match field {
         AnalyticsFilterField::View => filters.view = value,
@@ -345,7 +345,7 @@ fn update_filter(signal: WriteSignal<AnalyticsFilters>, field: AnalyticsFilterFi
 }
 
 #[derive(Clone, Copy)]
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 enum AnalyticsFilterField {
     View,
     Repository,
@@ -354,7 +354,7 @@ enum AnalyticsFilterField {
     Limit,
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn run_query(filters: &AnalyticsFilters, cursor: Option<&str>, user: String, password: String, ui: AnalyticsUi) {
     let url = match filters.url(cursor) {
         Ok(url) => url,
@@ -364,13 +364,13 @@ fn run_query(filters: &AnalyticsFilters, cursor: Option<&str>, user: String, pas
             return;
         }
     };
-    #[cfg(all(not(feature = "ssr"), feature = "hydrate"))]
+    #[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
     {
         let view = filters.view();
         ui.loading.set(true);
         leptos::task::spawn_local(load_analytics(url, view, user, password, ui));
     }
-    #[cfg(not(all(not(feature = "ssr"), feature = "hydrate")))]
+    #[cfg(not(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
     drop((url, user, password));
 }
 

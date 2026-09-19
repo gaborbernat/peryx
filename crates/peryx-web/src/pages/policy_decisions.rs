@@ -217,14 +217,14 @@ fn PolicyDecisionFilterFields(
 }
 
 #[derive(Clone, Copy)]
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 struct PolicyDecisionUi {
     result: WriteSignal<Option<Result<UiPolicyDecisionPage, String>>>,
     loading: WriteSignal<bool>,
 }
 
 #[derive(Clone, Copy)]
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 struct PolicyDecisionState {
     user: ReadSignal<String>,
     password: ReadSignal<String>,
@@ -246,7 +246,7 @@ fn submit(event: &leptos::ev::SubmitEvent, state: PolicyDecisionState) {
     submit_query(state);
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn submit_query(state: PolicyDecisionState) {
     let filters = state.filters.get_untracked();
     state.set_active.set(filters.clone());
@@ -261,7 +261,7 @@ fn submit_query(state: PolicyDecisionState) {
     );
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn previous_disabled(state: PolicyDecisionState) -> bool {
     reactive_value(&state.previous).is_empty() || reactive_value(&state.loading)
 }
@@ -271,7 +271,7 @@ fn previous_disabled_view(state: PolicyDecisionState) -> impl Fn() -> bool {
     move || previous_disabled(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn previous_page(state: PolicyDecisionState) {
     let mut cursors = state.previous.get_untracked();
     if let Some(cursor) = cursors.pop() {
@@ -292,7 +292,7 @@ fn previous_page_action<Event>(state: PolicyDecisionState) -> impl FnMut(Event) 
     move |_| previous_page(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn next_disabled(state: PolicyDecisionState) -> bool {
     reactive_value(&state.loading) || next_cursor(reactive_value(&state.result)).is_none()
 }
@@ -302,7 +302,7 @@ fn next_disabled_view(state: PolicyDecisionState) -> impl Fn() -> bool {
     move || next_disabled(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn next_page(state: PolicyDecisionState) {
     if let Some(next) = next_cursor(state.result.get_untracked()) {
         state
@@ -324,17 +324,17 @@ fn next_page_action<Event>(state: PolicyDecisionState) -> impl FnMut(Event) {
     move |_| next_page(state)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn next_cursor(result: Option<Result<UiPolicyDecisionPage, String>>) -> Option<String> {
     result.and_then(Result::ok).and_then(|page| page.next_cursor)
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn set_text(signal: WriteSignal<String>, value: String) {
     signal.set(value);
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn update_filter(signal: WriteSignal<PolicyDecisionFilters>, field: PolicyDecisionFilterField, value: String) {
     signal.update(|filters| match field {
         PolicyDecisionFilterField::Repository => filters.repository = value,
@@ -348,7 +348,7 @@ fn update_filter(signal: WriteSignal<PolicyDecisionFilters>, field: PolicyDecisi
 }
 
 #[derive(Clone, Copy)]
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 enum PolicyDecisionFilterField {
     Repository,
     State,
@@ -359,7 +359,7 @@ enum PolicyDecisionFilterField {
     Limit,
 }
 
-#[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
+#[cfg(any(test, all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
 fn run_query(
     filters: &PolicyDecisionFilters,
     cursor: Option<&str>,

@@ -91,25 +91,6 @@ fn test_manifest_page_breadcrumbs_link_back_to_the_repository() {
 }
 
 #[test]
-fn test_manifest_page_row_reports_size_and_media_type_text() {
-    let manifest =
-        br#"{"layers":[{"digest":"sha256:abc","size":42,"mediaType":"application/vnd.oci.image.layer.v1.tar"}]}"#;
-    let page = manifest_page(
-        "oci",
-        "team/app",
-        "latest",
-        manifest_content_from_bytes(manifest).unwrap(),
-    );
-    let BrowseSection::Table { rows, .. } = &page.sections[1] else {
-        panic!("manifest table missing");
-    };
-    assert_eq!(
-        (rows[0].cells[1].text.as_str(), rows[0].cells[2].text.as_str()),
-        ("42", "application/vnd.oci.image.layer.v1.tar")
-    );
-}
-
-#[test]
 fn test_members_page_breadcrumbs_and_subtitle_name_the_manifest_and_digest() {
     let page = members_page("oci", "team/app", "latest", "sha256:abc", vec![]);
     assert_eq!(page.breadcrumbs.last().map(|link| link.label.as_str()), Some("latest"));
@@ -143,10 +124,18 @@ fn test_manifest_page_only_links_supported_layer_media_types(#[case] media_type:
     assert_eq!(
         (
             rows[0].cells[0].href.is_some(),
+            rows[0].cells[1].text.as_str(),
+            rows[0].cells[2].text.as_str(),
             rows[0].cells[3].href.is_some(),
             rows[0].cells[3].text.as_str(),
         ),
-        (browsable, browsable, if browsable { "contents" } else { "" }),
+        (
+            browsable,
+            "1",
+            media_type,
+            browsable,
+            if browsable { "contents" } else { "" }
+        ),
     );
 }
 

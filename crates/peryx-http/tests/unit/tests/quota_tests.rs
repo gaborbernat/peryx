@@ -373,6 +373,24 @@ async fn test_detail_rejects_invalid_requests(#[case] uri: &str, #[case] error: 
     assert_eq!(body, serde_json::json!({ "error": error }));
 }
 
+/// A filter this long fails as an unmatched repository, not as oversized input: the byte limit
+/// itself sits one byte higher, and only a request past it must report the "exceeds" message.
+#[tokio::test]
+async fn test_detail_accepts_a_repository_filter_at_exactly_the_byte_limit() {
+    let (_dir, state) = app().await;
+    let uri = format!("/+quota/repository?repository={}", "x".repeat(512));
+
+    let (status, _, body) = get(&state, &uri, Some(("Alice", USER_PASSWORD))).await;
+
+    assert_ne!(
+        (status, &body),
+        (
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "repository filter exceeds 512 bytes"})
+        )
+    );
+}
+
 #[rstest]
 #[case::limit_zero("/+quota?limit=0", StatusCode::BAD_REQUEST, "limit must be between 1 and 100")]
 #[case::limit_large("/+quota?limit=101", StatusCode::BAD_REQUEST, "limit must be between 1 and 100")]

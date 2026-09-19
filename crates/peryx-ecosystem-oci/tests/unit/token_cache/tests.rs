@@ -221,6 +221,32 @@ fn test_the_byte_budget_is_two_mebibytes() {
     assert_eq!(MAX_BYTES, 2_097_152);
 }
 
+/// With no hit to renew anyone's place, insertion order alone must still break an eviction tie: the
+/// entry inserted first is the one that goes, whatever its key sorts as.
+#[tokio::test]
+async fn test_insertion_order_alone_breaks_an_eviction_tie() {
+    let identity = identity().await;
+    let mut cache = TokenCache::default();
+    let token = "t".repeat(1_000_000);
+    let oldest = key(identity, "repository:z:pull");
+    cache.insert(oldest.clone(), identity, token.clone(), LIVE_UNTIL, 0);
+    cache.insert(
+        key(identity, "repository:a:pull"),
+        identity,
+        token.clone(),
+        LIVE_UNTIL,
+        0,
+    );
+
+    cache.insert(key(identity, "repository:m:pull"), identity, token, LIVE_UNTIL, 0);
+
+    assert_eq!(cache.len(), 2, "one entry must leave to fit the budget");
+    assert!(
+        cache.get(&oldest, identity, 0).is_none(),
+        "the entry inserted first must be the one that goes"
+    );
+}
+
 /// A hit renews the entry's place in the eviction order, so the scope a caller keeps using outlives
 /// one it fetched and abandoned. Three entries of a megabyte each overrun the byte budget by one, so
 /// exactly one leaves, and the used scope sorts ahead of the abandoned one: were the hit not to renew

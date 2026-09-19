@@ -10,11 +10,15 @@ use futures_util::{StreamExt as _, stream};
 use http_body_util::BodyExt as _;
 use peryx_driver::AppState;
 #[cfg(unix)]
+use peryx_storage::blob::BlobStore;
+#[cfg(unix)]
 use peryx_storage::meta::MetaStore;
 use tokio::sync::oneshot;
 use tower::ServiceExt as _;
 
 use super::{auth, body_has_code, send_body};
+#[cfg(unix)]
+use super::{install_oci, router, writable_index};
 use crate::upload_session::UploadStore as _;
 
 const TOKEN: &str = "s3cret";
@@ -30,6 +34,54 @@ fn registry(dir: &tempfile::TempDir) -> (Arc<AppState>, axum::Router, Arc<Atomic
     let ticking = now.clone();
     let (state, app) = crate::tests::hosted_with_clock(dir, TOKEN, Arc::new(move || ticking.load(Ordering::Relaxed)));
     (state, app, now)
+}
+
+/// Two hosted indexes, each openable for its own uploads, so a retained stage's metric can be checked
+/// against the index that actually opened it rather than whichever one merely exists.
+#[cfg(unix)]
+fn two_index_registry(dir: &tempfile::TempDir) -> (Arc<AppState>, axum::Router, Arc<AtomicI64>) {
+    let now = Arc::new(AtomicI64::new(1000));
+    let ticking = now.clone();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let mut state = AppState::with_clock(
+        meta,
+        blobs,
+        60,
+        vec![
+            writable_index("images", "images", true, TOKEN),
+            writable_index("vault", "vault", true, TOKEN),
+        ],
+        Arc::new(move || ticking.load(Ordering::Relaxed)),
+    );
+    install_oci(&mut state, std::collections::HashMap::new(), false);
+    let state = Arc::new(state);
+    (state.clone(), router(state), now)
+}
+
+/// Open a session and stage one chunk into it, against a caller-named index.
+#[cfg(unix)]
+async fn open_session_in(app: &axum::Router, index: &str, chunk: &[u8]) -> String {
+    let (status, headers, _) = send_body(
+        app,
+        Method::POST,
+        &format!("/v2/{index}/app/blobs/uploads/"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let location = headers[header::LOCATION].to_str().unwrap().to_owned();
+    let (status, _, _) = send_body(
+        app,
+        Method::PATCH,
+        &location,
+        &[("authorization", &auth(TOKEN))],
+        chunk.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    location.rsplit('/').next().unwrap().to_owned()
 }
 
 /// Open a session and stage one chunk into it, handing back the session id.
@@ -140,6 +192,34 @@ async fn test_a_retained_stage_for_a_departed_index_is_still_retried() {
 
     assert!(state.serving.meta.upload_record(&session).unwrap().is_some());
     assert_eq!(reclaim(&state).await, 1);
+}
+
+/// A retained stage is counted against the index that opened it, not against some other configured
+/// index a lookup happened to land on.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_a_retained_stage_is_counted_against_its_own_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app, now) = two_index_registry(&dir);
+    open_session_in(&app, "images", b"a-layer").await;
+    now.store(LONG_AFTER, Ordering::Relaxed);
+    let uploads = dir.path().join("blobs/uploads");
+
+    set_mode(&uploads, 0o555);
+    assert_eq!(reclaim(&state).await, 0);
+    set_mode(&uploads, 0o755);
+
+    state.serving.metrics.flush().unwrap();
+    let counters = state.serving.metrics.index_totals();
+    let retained = |route: &str| {
+        counters
+            .get(route)
+            .and_then(|counters| counters.ecosystem.get("upload_stage_retained"))
+            .copied()
+            .unwrap_or(0)
+    };
+    assert_eq!(retained("images"), 1);
+    assert_eq!(retained("vault"), 0);
 }
 
 /// The retained row is durable, so the retry survives the restart that a transient backend failure

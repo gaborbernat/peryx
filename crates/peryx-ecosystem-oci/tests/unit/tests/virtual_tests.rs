@@ -152,6 +152,44 @@ async fn test_virtual_digest_delete_wins_an_inflight_proxy_pull() {
     assert_eq!(pull.await.unwrap().0, StatusCode::NOT_FOUND);
 }
 
+/// A tag-list scan reads the hosted layer's active tags before it waits on the proxy layer's upstream
+/// fetch. A delete that lands in that gap trashes the tag at the very layer the scan already read it
+/// from, and only that layer's own tombstone masks it - a tombstone from any other layer would leave
+/// it alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_virtual_tag_list_hides_a_tag_trashed_at_its_own_layer_mid_scan() {
+    let server = MockServer::start().await;
+    let (gate, response) = gated_response(
+        ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":[]}"#.to_vec(), "application/json"),
+    );
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+    push_to_virtual(&app, "latest", &manifest("images")).await;
+
+    let list_app = app.clone();
+    let list = tokio::spawn(async move { send(&list_app, Method::GET, "/v2/reg/app/tags/list").await });
+    let release = gate.entered().await;
+    let delete = send_body(
+        &app,
+        Method::DELETE,
+        "/v2/reg/app/manifests/latest",
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(delete.0, StatusCode::ACCEPTED);
+    drop(release);
+
+    let (status, _, body) = list.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert!(!std::str::from_utf8(&body).unwrap().contains("latest"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_virtual_tag_delete_wins_an_inflight_proxy_pull() {
     let server = MockServer::start().await;

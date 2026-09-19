@@ -100,6 +100,22 @@ async fn synced_against(content: HashMap<String, Answer>, refs: &[String]) -> Ve
     .unwrap()
 }
 
+/// A body of exactly the manifest ceiling is a legitimate manifest, not an abusive one: the bound
+/// rejects a body that exceeds it, not one that just meets it.
+#[tokio::test]
+async fn test_mirror_accepts_a_manifest_body_at_exactly_the_ceiling() {
+    let prefix = format!(r#"{{"schemaVersion":2,"mediaType":"{INDEX_TYPE}","manifests":[],"annotations":{{"pad":""#);
+    let suffix = "\"}}";
+    let padding = MAX_MANIFEST_BYTES - prefix.len() - suffix.len();
+    let body = format!("{prefix}{}{suffix}", "x".repeat(padding)).into_bytes();
+    assert_eq!(body.len(), MAX_MANIFEST_BYTES);
+    let content = HashMap::from([(manifest_path("library/app", "latest"), Answer::whole(INDEX_TYPE, body))]);
+
+    let rows = synced_against(content, &["library/app:latest".to_owned()]).await;
+
+    assert_eq!(rows[0].status, "synced");
+}
+
 /// Both failures land after the response head, which is where the run used to abort with nothing
 /// mirrored and no summary: the image selected behind the bad one was never even requested.
 #[rstest]

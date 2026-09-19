@@ -120,6 +120,7 @@ async fn test_get_with_a_wildcard_or_empty_accept_serves_the_index(#[case] accep
 #[case::type_wildcard("application/*")]
 #[case::exact_with_positive_quality("application/vnd.oci.image.index.v1+json;q=0.5")]
 #[case::higher_quality_duplicate_wins("application/*;q=0.7, application/*;q=0")]
+#[case::later_higher_quality_duplicate_wins("application/*;q=0, application/*;q=0.7")]
 #[case::non_quality_parameters_ignored("application/*;charset=utf-8;profile")]
 #[tokio::test]
 async fn test_get_serves_the_index_when_a_media_range_covers_it(#[case] accept: &str) {

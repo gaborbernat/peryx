@@ -340,7 +340,6 @@ async fn mirror_rejects_unknown_indexes_and_empty_selections() {
     let dir = tempfile::tempdir().unwrap();
     let (state, _) = app_with(&dir, oci_index("store", "oci", IndexKind::Hosted { volatile: false }));
     let empty = toml::Table::new();
-    let mut output = Vec::new();
     let request = |index| MirrorRequest {
         action: MirrorAction::Plan,
         index,
@@ -349,18 +348,24 @@ async fn mirror_rejects_unknown_indexes_and_empty_selections() {
         overrides: &empty,
     };
 
-    assert!(
+    assert_eq!(
         OciRegistry::default()
-            .mirror(state.clone(), request("missing"), &mut output)
+            .mirror(state.clone(), request("missing"), &mut Vec::new())
             .await
-            .is_err()
+            .unwrap_err(),
+        "unknown OCI index \"missing\""
     );
-    assert!(
-        OciRegistry::default()
-            .mirror(state, request("oci"), &mut output)
-            .await
-            .is_err()
-    );
+    // An index resolves by its route ("oci") as much as by its name ("store"); either one
+    // must reach the empty-selection check rather than the unknown-index one.
+    for index in ["oci", "store"] {
+        assert_eq!(
+            OciRegistry::default()
+                .mirror(state.clone(), request(index), &mut Vec::new())
+                .await
+                .unwrap_err(),
+            "mirroring an OCI index needs at least one image (--image or [index.prefetch] packages)"
+        );
+    }
 }
 
 #[tokio::test]

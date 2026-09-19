@@ -214,6 +214,121 @@ async fn test_an_interrupted_install_leaves_the_previous_state_usable_and_a_rest
     assert_eq!(replica.staged_checkpoint().unwrap(), None);
 }
 
+/// A restart with the same manifest must pick up from the staged cursor rather than discard it and
+/// start over, or an interruption near the end of a large transfer would refetch it whole every retry.
+#[tokio::test]
+async fn test_a_restart_resumes_from_the_staged_cursor_not_from_the_beginning() {
+    struct RecordingCursors {
+        inner: CheckpointPeer,
+        cursors: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl PeerTransport for RecordingCursors {
+        async fn fetch_batch(&self, request: BatchRequest) -> Result<BatchFrame, TransportError> {
+            self.inner.fetch_batch(request).await
+        }
+
+        async fn checkpoint_manifest(&self) -> Result<CheckpointManifest, TransportError> {
+            self.inner.checkpoint_manifest().await
+        }
+
+        async fn checkpoint_chunk(&self, cursor: &str) -> Result<CheckpointWindow, TransportError> {
+            self.cursors
+                .lock()
+                .expect("the recorder is usable")
+                .push(cursor.to_owned());
+            self.inner.checkpoint_chunk(cursor).await
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let writer = store(&dir, "writer.redb");
+    rows(&writer, 40);
+    published(&writer);
+    let replica = store(&dir, "replica.redb");
+    Replica::new(&replica, ONE)
+        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2), SOURCE)
+        .await
+        .unwrap_err();
+    let staged = replica.staged_checkpoint().unwrap().unwrap();
+    assert!(staged.received > 0, "the test needs a partial transfer to resume from");
+
+    let peer = RecordingCursors {
+        inner: CheckpointPeer::serving(writer.clone()),
+        cursors: Mutex::new(Vec::new()),
+    };
+    assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
+    Replica::new(&replica, ONE)
+        .install_checkpoint(&peer, SOURCE)
+        .await
+        .unwrap();
+
+    let first_cursor_requested = peer.cursors.lock().unwrap().first().cloned().unwrap();
+    assert_eq!(
+        first_cursor_requested, staged.cursor,
+        "a restart resumes from the staged cursor, not the beginning"
+    );
+}
+
+/// The retry peer refuses a chunk requested from the very start, so this only passes if the installer
+/// resumed from the staged cursor rather than reopening the transfer.
+struct RefusingFromScratch(MetaStore);
+
+#[async_trait]
+impl PeerTransport for RefusingFromScratch {
+    async fn fetch_batch(&self, _request: BatchRequest) -> Result<BatchFrame, TransportError> {
+        Err(TransportError::CheckpointRequired)
+    }
+
+    async fn checkpoint_manifest(&self) -> Result<CheckpointManifest, TransportError> {
+        self.0
+            .checkpoint_manifest()
+            .map_err(|_| TransportError::Malformed)?
+            .ok_or(TransportError::CheckpointUnavailable)
+    }
+
+    async fn checkpoint_chunk(&self, cursor: &str) -> Result<CheckpointWindow, TransportError> {
+        if cursor == peryx_storage::meta::CheckpointCursor::start().token() {
+            return Err(TransportError::Disconnected);
+        }
+        let cursor = peryx_storage::meta::CheckpointCursor::from_token(cursor).ok_or(TransportError::Malformed)?;
+        let chunk = self
+            .0
+            .checkpoint_chunk(&cursor, CHUNK)
+            .map_err(|_| TransportError::Malformed)?;
+        Ok(CheckpointWindow {
+            bytes: chunk.bytes,
+            next: chunk.next.token(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_a_matching_staged_manifest_resumes_rather_than_restarting() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = store(&dir, "writer.redb");
+    rows(&writer, 40);
+    let manifest = published(&writer);
+    let replica = store(&dir, "replica.redb");
+
+    Replica::new(&replica, ONE)
+        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2), SOURCE)
+        .await
+        .unwrap_err();
+    let staged = replica.staged_checkpoint().unwrap().unwrap();
+    assert!(staged.received > 0 && staged.received < manifest.bytes);
+
+    let peer = RefusingFromScratch(writer.clone());
+    assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
+    let serial = Replica::new(&replica, ONE)
+        .install_checkpoint(&peer, SOURCE)
+        .await
+        .unwrap();
+
+    assert_eq!(serial, manifest.serial);
+}
+
 #[tokio::test]
 async fn test_a_corrupted_checkpoint_is_rejected_and_does_not_replace_live_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -238,6 +353,72 @@ async fn test_a_corrupted_checkpoint_is_rejected_and_does_not_replace_live_state
             .as_deref(),
         Some(&b"display"[..])
     );
+}
+
+/// A peer that keeps claiming more data is available after every byte the manifest promises has already
+/// arrived. The transfer must stop on byte count alone rather than trust that claim, or a misbehaving
+/// peer could keep it fetching forever.
+#[tokio::test]
+async fn test_the_transfer_stops_once_every_byte_arrives_even_if_the_peer_claims_more() {
+    struct ClaimsMoreAfterEveryByteArrives {
+        payload: Vec<u8>,
+        manifest: CheckpointManifest,
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl PeerTransport for ClaimsMoreAfterEveryByteArrives {
+        async fn fetch_batch(&self, _request: BatchRequest) -> Result<BatchFrame, TransportError> {
+            Err(TransportError::CheckpointRequired)
+        }
+
+        async fn checkpoint_manifest(&self) -> Result<CheckpointManifest, TransportError> {
+            Ok(self.manifest.clone())
+        }
+
+        async fn checkpoint_chunk(&self, _cursor: &str) -> Result<CheckpointWindow, TransportError> {
+            let mut calls = self.calls.lock().expect("the counter is usable");
+            *calls += 1;
+            if *calls == 1 {
+                Ok(CheckpointWindow {
+                    bytes: self.payload.clone(),
+                    next: "not-actually-done".to_owned(),
+                })
+            } else {
+                Err(TransportError::Disconnected)
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let writer = store(&dir, "writer.redb");
+    rows(&writer, 12);
+    let manifest = published(&writer);
+    let whole = writer
+        .checkpoint_chunk(
+            &peryx_storage::meta::CheckpointCursor::start(),
+            usize::try_from(manifest.bytes).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        whole.bytes.len() as u64,
+        manifest.bytes,
+        "the test needs the whole manifest in one window"
+    );
+    let replica = store(&dir, "replica.redb");
+    let peer = ClaimsMoreAfterEveryByteArrives {
+        payload: whole.bytes,
+        manifest: manifest.clone(),
+        calls: Mutex::new(0),
+    };
+    assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
+
+    let serial = Replica::new(&replica, ONE)
+        .install_checkpoint(&peer, SOURCE)
+        .await
+        .unwrap();
+
+    assert_eq!(serial, manifest.serial);
 }
 
 #[tokio::test]
@@ -331,4 +512,109 @@ async fn test_a_window_that_overruns_the_manifest_drops_the_staging() {
 
     assert!(matches!(refused, SyncError::CheckpointChunk(_)), "{refused:?}");
     assert_eq!(replica.staged_checkpoint().unwrap(), None);
+}
+
+fn fake_manifest(bytes: u64) -> CheckpointManifest {
+    CheckpointManifest {
+        identity: identity(),
+        serial: 1,
+        rows: 0,
+        revocations: 0,
+        blobs: 0,
+        bytes,
+        digest: "deadbeef".to_owned(),
+    }
+}
+
+/// Reports exactly the declared byte count in one window while still pointing past it, so only the
+/// byte-count guard can be what stops the transfer.
+struct ExactByteCountPeer {
+    manifest: CheckpointManifest,
+    calls: Mutex<usize>,
+}
+
+#[async_trait]
+impl PeerTransport for ExactByteCountPeer {
+    async fn fetch_batch(&self, _request: BatchRequest) -> Result<BatchFrame, TransportError> {
+        Err(TransportError::CheckpointRequired)
+    }
+
+    async fn checkpoint_manifest(&self) -> Result<CheckpointManifest, TransportError> {
+        Ok(self.manifest.clone())
+    }
+
+    async fn checkpoint_chunk(&self, _cursor: &str) -> Result<CheckpointWindow, TransportError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(CheckpointWindow {
+            bytes: vec![0; usize::try_from(self.manifest.bytes).expect("a test checkpoint fits a pointer")],
+            next: peryx_storage::meta::CheckpointCursor::Rows {
+                after: Some("more".to_owned()),
+            }
+            .token(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_reaching_the_declared_byte_count_stops_the_transfer() {
+    let dir = tempfile::tempdir().unwrap();
+    let replica = store(&dir, "replica.redb");
+    let peer = ExactByteCountPeer {
+        manifest: fake_manifest(5),
+        calls: Mutex::new(0),
+    };
+    assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
+
+    let _ = Replica::new(&replica, ONE).install_checkpoint(&peer, SOURCE).await;
+
+    assert_eq!(
+        *peer.calls.lock().unwrap(),
+        1,
+        "the transfer should stop as soon as it reaches the declared byte count",
+    );
+}
+
+/// Reports fewer bytes than declared but signals `Done` immediately, so only the cursor guard can be
+/// what stops the transfer.
+struct ShortDonePeer {
+    manifest: CheckpointManifest,
+    calls: Mutex<usize>,
+}
+
+#[async_trait]
+impl PeerTransport for ShortDonePeer {
+    async fn fetch_batch(&self, _request: BatchRequest) -> Result<BatchFrame, TransportError> {
+        Err(TransportError::CheckpointRequired)
+    }
+
+    async fn checkpoint_manifest(&self) -> Result<CheckpointManifest, TransportError> {
+        Ok(self.manifest.clone())
+    }
+
+    async fn checkpoint_chunk(&self, _cursor: &str) -> Result<CheckpointWindow, TransportError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(CheckpointWindow {
+            bytes: vec![0; 3],
+            next: peryx_storage::meta::CheckpointCursor::Done.token(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_a_done_cursor_stops_the_transfer_short_of_the_declared_byte_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let replica = store(&dir, "replica.redb");
+    let peer = ShortDonePeer {
+        manifest: fake_manifest(5),
+        calls: Mutex::new(0),
+    };
+    assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
+
+    let _ = Replica::new(&replica, ONE).install_checkpoint(&peer, SOURCE).await;
+
+    assert_eq!(
+        *peer.calls.lock().unwrap(),
+        1,
+        "a done cursor should stop the transfer even short of the declared byte count",
+    );
 }

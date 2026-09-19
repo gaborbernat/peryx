@@ -187,6 +187,32 @@ async fn test_metadata_backfill_tasks_finish(#[case] drop_owner: bool) {
     assert!(task.is_finished());
 }
 
+#[tokio::test]
+async fn test_dropping_metadata_backfills_aborts_its_in_flight_tasks() {
+    let backfills = MetadataBackfills::default();
+    let (started, started_rx) = tokio::sync::oneshot::channel();
+    let task = backfills
+        .tasks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .spawn(async move {
+            started.send(()).unwrap();
+            // Aborted below while parked here.
+            loop {
+                std::future::pending::<()>().await;
+            }
+        });
+    started_rx.await.unwrap();
+
+    drop(backfills);
+    tokio::task::yield_now().await;
+
+    assert!(
+        task.is_finished(),
+        "dropping the owner must abort its still-running tasks"
+    );
+}
+
 async fn drain(backfills: &MetadataBackfills) {
     let mut tasks = {
         let mut owned = backfills

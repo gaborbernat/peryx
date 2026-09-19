@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -414,6 +415,24 @@ async fn test_get_reads_a_whole_object_without_a_range() {
 
     assert_eq!(get.total_bytes, 7);
     assert_eq!(collect_body(get).await, b"package");
+}
+
+#[rstest]
+#[case::precondition_without_if_match_reports_the_bare_conflict(None, 412, "PreconditionFailed", false)]
+#[case::a_different_error_with_if_match_reports_itself(Some("\"etag\""), 404, "NoSuchKey", false)]
+#[case::precondition_with_if_match_reports_a_generation_change(Some("\"etag\""), 412, "PreconditionFailed", true)]
+#[tokio::test]
+async fn test_get_reports_a_generation_change_only_for_a_pinned_precondition(
+    #[case] if_match: Option<&str>,
+    #[case] status: u16,
+    #[case] code: &str,
+    #[case] expect_generation_changed: bool,
+) {
+    let client = get_client(xml_error(status, code));
+
+    let error = client.get("cache/sha256/digest", None, if_match).await.err().unwrap();
+
+    assert_eq!(matches!(error, S3Error::GenerationChanged), expect_generation_changed);
 }
 
 #[tokio::test(start_paused = true)]
@@ -846,5 +865,258 @@ async fn test_a_replacement_during_verification_yields_no_receipt() {
     assert_eq!(
         std::error::Error::source(&error).unwrap().to_string(),
         "object changed during read"
+    );
+}
+
+#[tokio::test]
+async fn test_open_accepts_a_range_whose_start_equals_its_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = multipart_backend(dir.path(), base_settings(), |_| {
+        http::Response::builder()
+            .status(200)
+            .header("Content-Length", "8")
+            .header("ETag", "\"resident\"")
+            .body(SdkBody::empty())
+            .unwrap()
+    });
+
+    let read = backend.open(Digest::of(b"package"), Some(2..2)).await.unwrap();
+
+    assert_eq!(read.metadata.bytes, 8);
+    assert_eq!(read.range, 2..2);
+}
+
+#[tokio::test]
+async fn test_open_accepts_a_range_ending_at_the_total_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = multipart_backend(dir.path(), base_settings(), |request| {
+        if request.method() == http::Method::HEAD {
+            http::Response::builder()
+                .status(200)
+                .header("Content-Length", "8")
+                .header("ETag", "\"resident\"")
+                .body(SdkBody::empty())
+                .unwrap()
+        } else {
+            http::Response::builder()
+                .status(206)
+                .header("Content-Range", "bytes 0-7/8")
+                .body(SdkBody::from(b"packages".to_vec()))
+                .unwrap()
+        }
+    });
+
+    let read = backend.open(Digest::of(b"package"), Some(0..8)).await.unwrap();
+
+    assert_eq!(read.range, 0..8);
+}
+
+/// A commit-path `S3Backend` whose multipart requests are answered by `respond`, with settings free to
+/// diverge from `base_settings` so a test can force the multipart path and a fixed part count.
+fn multipart_backend(
+    staging: &std::path::Path,
+    settings: S3Settings,
+    respond: impl Fn(&http::Request<SdkBody>) -> http::Response<SdkBody> + Send + Sync + 'static,
+) -> S3Backend {
+    let config = S3Config::new(settings).unwrap();
+    let service = S3Client::service_config(
+        &config,
+        Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .credentials_provider(Credentials::new("id", "secret", None, None, "test"))
+            .region(Region::new("us-east-1"))
+            .http_client(infallible_client_fn(move |request: http::Request<SdkBody>| {
+                respond(&request)
+            })),
+    );
+    S3Backend {
+        client: S3Client {
+            config,
+            client: Arc::new(OnceCell::from(Client::from_conf(service))),
+        },
+        staging: BlobStore::new(staging),
+        acquisitions: Arc::default(),
+    }
+}
+
+/// Small, fixed-size parts so an 8-byte stage splits into exactly two.
+fn multipart_settings(max_retries: u32) -> S3Settings {
+    S3Settings {
+        multipart_threshold: 1,
+        part_size: 5 << 20,
+        upload_concurrency: 1,
+        max_retries,
+        checksum_writes: false,
+        ..base_settings()
+    }
+}
+
+fn multipart_create_response(upload_id: &str) -> http::Response<SdkBody> {
+    http::Response::builder()
+        .status(200)
+        .body(SdkBody::from(format!(
+            "<InitiateMultipartUploadResult><UploadId>{upload_id}</UploadId></InitiateMultipartUploadResult>"
+        )))
+        .unwrap()
+}
+
+fn multipart_part_response() -> http::Response<SdkBody> {
+    http::Response::builder()
+        .status(200)
+        .header("ETag", "part-etag")
+        .body(SdkBody::empty())
+        .unwrap()
+}
+
+fn multipart_complete_response() -> http::Response<SdkBody> {
+    http::Response::builder()
+        .status(200)
+        .body(SdkBody::from(
+            "<CompleteMultipartUploadResult><ETag>etag</ETag></CompleteMultipartUploadResult>",
+        ))
+        .unwrap()
+}
+
+fn multipart_ok_response() -> http::Response<SdkBody> {
+    http::Response::builder().status(200).body(SdkBody::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn test_put_whole_retries_conflicts_up_to_the_configured_budget() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let dir = tempfile::tempdir().unwrap();
+    let backend = multipart_backend(
+        dir.path(),
+        S3Settings {
+            max_retries: 1,
+            ..base_settings()
+        },
+        move |_| {
+            let attempt = counted.fetch_add(1, Ordering::SeqCst);
+            if attempt < 5 {
+                xml_error(409, "ConditionalRequestConflict")
+            } else {
+                xml_error(500, "InternalError")
+            }
+        },
+    );
+
+    let error = commit_staged(&backend).await.unwrap_err();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "one retry, then give up");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "conditional write conflicted with another request"
+    );
+}
+
+#[tokio::test]
+async fn test_put_multipart_recovers_a_stale_upload_only_once() {
+    let create_calls = Arc::new(AtomicUsize::new(0));
+    let part_attempts = Arc::new(AtomicUsize::new(0));
+    let counted_create = Arc::clone(&create_calls);
+    let counted_part = Arc::clone(&part_attempts);
+    let dir = tempfile::tempdir().unwrap();
+    let backend = multipart_backend(dir.path(), multipart_settings(0), move |request| {
+        let query = request.uri().query().unwrap_or_default().to_owned();
+        if query == "uploads" {
+            let id = counted_create.fetch_add(1, Ordering::SeqCst);
+            multipart_create_response(&format!("upload-{id}"))
+        } else if query.contains("partNumber=") {
+            let attempt = counted_part.fetch_add(1, Ordering::SeqCst);
+            if attempt < 5 {
+                xml_error(404, "NoSuchUpload")
+            } else {
+                multipart_part_response()
+            }
+        } else if request.method() == http::Method::POST {
+            multipart_complete_response()
+        } else {
+            multipart_ok_response()
+        }
+    });
+
+    let error = commit_staged(&backend).await.unwrap_err();
+
+    assert_eq!(create_calls.load(Ordering::SeqCst), 2, "recovers once, then gives up");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "multipart upload no longer exists"
+    );
+}
+
+#[tokio::test]
+async fn test_put_multipart_retries_a_conflicted_completion_up_to_budget() {
+    let complete_calls = Arc::new(AtomicUsize::new(0));
+    let counted_complete = Arc::clone(&complete_calls);
+    let dir = tempfile::tempdir().unwrap();
+    let backend = multipart_backend(dir.path(), multipart_settings(1), move |request| {
+        let query = request.uri().query().unwrap_or_default().to_owned();
+        if query == "uploads" {
+            multipart_create_response("upload-1")
+        } else if query.contains("partNumber=") {
+            multipart_part_response()
+        } else if request.method() == http::Method::POST {
+            let attempt = counted_complete.fetch_add(1, Ordering::SeqCst);
+            if attempt < 5 {
+                xml_error(409, "ConditionalRequestConflict")
+            } else {
+                multipart_complete_response()
+            }
+        } else {
+            multipart_ok_response()
+        }
+    });
+
+    let error = commit_staged(&backend).await.unwrap_err();
+
+    assert_eq!(complete_calls.load(Ordering::SeqCst), 2, "one retry, then give up");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "conditional write conflicted with another request"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_upload_parts_reports_the_first_failure_not_the_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = S3Settings {
+        upload_concurrency: 2,
+        ..multipart_settings(0)
+    };
+    let backend = multipart_backend(dir.path(), settings, |request| {
+        let query = request.uri().query().unwrap_or_default().to_owned();
+        if query == "uploads" {
+            multipart_create_response("upload-1")
+        } else if query.contains("partNumber=1") {
+            // Resolves after part 2, so the loop meets part 2's failure first.
+            let body = StreamBody::new(futures_util::stream::once(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok::<_, Infallible>(Frame::data(Bytes::from_static(
+                    b"<Error><Code>NoSuchKey</Code></Error>",
+                )))
+            }));
+            http::Response::builder()
+                .status(404)
+                .body(SdkBody::from_body_1_x(body))
+                .unwrap()
+        } else if query.contains("partNumber=2") {
+            xml_error(404, "NoSuchBucket")
+        } else {
+            multipart_ok_response()
+        }
+    });
+
+    let payload = Bytes::from(vec![0_u8; 2 * (5 << 20)]);
+    let digest = Digest::of(&payload);
+    let mut write = backend.begin().await.unwrap();
+    write.write_chunk(payload).await.unwrap();
+    let error = write.commit(&digest).await.unwrap_err();
+
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "bucket not found",
+        "the first failure (part 2) must win over the later one (part 1)"
     );
 }

@@ -449,6 +449,35 @@ fn test_digest_revocation_open_leaves_a_consistent_count_untouched() {
     assert!(!store.has_active_digest_revocation().unwrap());
 }
 
+/// A wrong entry keeps the index the same length as the record table, so only the per-row completeness
+/// check (not a length mismatch) can tell backfill the index still needs rebuilding.
+#[test]
+fn test_digest_revocation_open_rebuilds_an_index_whose_length_hides_a_wrong_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    write_raw_revocation_rows(&path, &[revocation(1, DigestRevocationState::Active)]);
+    let database = redb::Database::open(&path).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.open_table(redb::TableDefinition::<&str, ()>::new("digest_revocation_by_status"))
+        .unwrap()
+        .insert("stale\0entry", ())
+        .unwrap();
+    txn.commit().unwrap();
+    drop(database);
+
+    let store = MetaStore::open(&path).unwrap();
+
+    let active = store
+        .query_digest_revocations(&DigestRevocationQuery {
+            status: Some(DigestRevocationStatus::Active),
+            ..DigestRevocationQuery::default()
+        })
+        .unwrap()
+        .revocations;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].digest, digest(1));
+}
+
 #[test]
 fn test_digest_revocation_open_reconciles_a_drifted_active_count() {
     let (dir, store) = store();

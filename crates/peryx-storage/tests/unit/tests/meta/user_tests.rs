@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 
-use peryx_identity::{PasswordCheck, PasswordPolicy, ServerUser, UserId, UserLifecycleChange, UserName, UserState};
+use peryx_identity::{
+    PasswordCheck, PasswordPolicy, ServerUser, USER_NAME_CANONICAL_VERSION, UserId, UserLifecycleChange, UserName,
+    UserState,
+};
 use redb::{ReadableDatabase as _, ReadableTable as _, TableDefinition};
 use rstest::rstest;
 
@@ -560,4 +563,28 @@ fn test_user_name_migration_check_rejects_an_incompatible_schema_table() {
     });
 
     assert!(matches!(store.user_names_require_migration(), Err(MetaError::Table(_))));
+}
+
+#[test]
+fn test_user_names_require_migration_matches_the_canonical_version_exactly() {
+    let (_dir, store) = raw_store(|txn| {
+        txn.open_table(RAW_USER_NAME_SCHEMA)
+            .unwrap()
+            .insert("canonical", USER_NAME_CANONICAL_VERSION)
+            .unwrap();
+    });
+
+    assert!(!store.user_names_require_migration().unwrap());
+}
+
+#[test]
+fn test_user_names_require_migration_flags_a_stale_version() {
+    let (_dir, store) = raw_store(|txn| {
+        txn.open_table(RAW_USER_NAME_SCHEMA)
+            .unwrap()
+            .insert("canonical", "stale")
+            .unwrap();
+    });
+
+    assert!(store.user_names_require_migration().unwrap());
 }

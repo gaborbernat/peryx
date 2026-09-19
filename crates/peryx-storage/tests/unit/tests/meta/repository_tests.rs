@@ -111,6 +111,19 @@ fn test_create_repository_validates_every_field(
 }
 
 #[test]
+fn test_create_repository_accepts_fields_at_their_byte_limit() {
+    let (_dir, store) = store();
+    let route = "r".repeat(512);
+    let display_name = "n".repeat(256);
+
+    assert!(
+        store
+            .create_repository(new_repo(&route, &display_name, "alpha", &UserId::random()), 1)
+            .is_ok()
+    );
+}
+
+#[test]
 fn test_update_repository_preserves_identity_and_advances_the_version() {
     let (_dir, store) = store();
     let creator = UserId::random();

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::io::{Read as _, Seek as _};
 use std::sync::OnceLock;
 
+use redb::ReadableTable as _;
 use rstest::rstest;
 
 use super::store;
@@ -157,6 +158,45 @@ fn test_webhook_event_fan_out_uses_stable_delivery_identities() {
             .collect::<HashSet<_>>(),
         HashSet::from(["audit", "deploy"])
     );
+}
+
+#[test]
+fn test_webhook_event_delivery_ids_stay_contiguous_across_events() {
+    let (_dir, store) = store();
+    let first = enqueue_event(
+        &store,
+        WebhookEventIntent {
+            index: "hosted".to_owned(),
+            targets: vec!["audit".to_owned(), "deploy".to_owned()],
+            event: "upload".to_owned(),
+            payload: r#"{"event":"upload"}"#.to_owned(),
+            created_at_unix: 10,
+        },
+    )
+    .unwrap();
+    assert!(store.fan_out_webhook_event(&first).unwrap());
+    let second = enqueue_event(
+        &store,
+        WebhookEventIntent {
+            index: "hosted".to_owned(),
+            targets: vec!["ci".to_owned()],
+            event: "upload".to_owned(),
+            payload: r#"{"event":"upload"}"#.to_owned(),
+            created_at_unix: 11,
+        },
+    )
+    .unwrap();
+    assert!(store.fan_out_webhook_event(&second).unwrap());
+
+    let mut ids: Vec<u64> = store
+        .list_webhook_deliveries()
+        .unwrap()
+        .into_iter()
+        .map(|delivery| u64::from_str_radix(delivery.id.trim_start_matches("wd_"), 16).unwrap())
+        .collect();
+    ids.sort_unstable();
+
+    assert_eq!(ids, vec![1, 2, 3]);
 }
 
 #[test]
@@ -395,17 +435,20 @@ enum QueueDamage {
     MalformedTimestamp,
     MissingRecord,
     InvalidJson,
+    MismatchedAttempt,
 }
 
 #[rstest]
 #[case::malformed_timestamp(QueueDamage::MalformedTimestamp, "malformed_due_keys")]
 #[case::missing_record(QueueDamage::MissingRecord, "dangling_due_rows")]
 #[case::invalid_json(QueueDamage::InvalidJson, "malformed_delivery_records")]
+#[case::mismatched_attempt(QueueDamage::MismatchedAttempt, "dangling_due_rows")]
 fn test_webhook_queue_scan_skips_and_cleans_damaged_rows(#[case] damage: QueueDamage, #[case] count: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peryx.redb");
     let store = MetaStore::open(&path).unwrap();
-    let damaged = matches!(damage, QueueDamage::InvalidJson).then(|| enqueue(&store, "hosted", "broken", 10));
+    let damaged = matches!(damage, QueueDamage::InvalidJson | QueueDamage::MismatchedAttempt)
+        .then(|| enqueue(&store, "hosted", "broken", 10));
     let healthy = enqueue(&store, "hosted", "healthy", 20);
     drop(store);
     damage_queue(&path, damage, damaged.as_deref());
@@ -458,6 +501,17 @@ fn damage_queue(path: &std::path::Path, damage: QueueDamage, damaged: Option<&st
                 .insert(damaged.unwrap(), b"{".as_slice())
                 .unwrap();
         }
+        QueueDamage::MismatchedAttempt => {
+            let mut deliveries = txn
+                .open_table(redb::TableDefinition::<&str, &[u8]>::new("webhook_delivery"))
+                .unwrap();
+            let bytes = deliveries.get(damaged.unwrap()).unwrap().unwrap().value().to_vec();
+            let mut record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            record["next_attempt_at_unix"] = serde_json::json!(999);
+            deliveries
+                .insert(damaged.unwrap(), serde_json::to_vec(&record).unwrap().as_slice())
+                .unwrap();
+        }
     }
     txn.commit().unwrap();
 }
@@ -485,6 +539,20 @@ fn test_list_due_returns_one_record_per_target_in_due_order() {
 
     let ids: Vec<&str> = due.iter().map(|record| record.id.as_str()).collect();
     assert_eq!(ids, [slow_first.as_str(), healthy.as_str()]);
+}
+
+#[test]
+fn test_webhook_due_order_survives_a_negative_timestamp() {
+    let (_dir, store) = store();
+    let negative = enqueue(&store, "hosted", "past", -5);
+    let positive = enqueue(&store, "hosted", "future", 5);
+
+    let due = store.list_due_webhook_deliveries(5, 10, &none()).unwrap();
+
+    assert_eq!(
+        due.iter().map(|record| record.id.as_str()).collect::<Vec<_>>(),
+        vec![negative.as_str(), positive.as_str()]
+    );
 }
 
 #[test]

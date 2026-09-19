@@ -43,3 +43,7 @@ impl RepairScan {
         !self.corrupt.is_empty()
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/meta/repair/tests.rs"]
+mod tests;

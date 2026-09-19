@@ -1,13 +1,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use super::{
-    BlobError, Digest, MAX_MULTIPART_BYTES, MAX_PART_SIZE, S3Backend, S3Config, S3Error, S3Settings, UploadAcquisition,
-    multipart_part_size,
-};
-use crate::blob::BlobErrorKind;
 use rstest::rstest;
 use tokio::sync::watch;
+
+use super::{
+    BlobError, Digest, MAX_MULTIPART_BYTES, MAX_PART_SIZE, S3Backend, S3Config, S3Error, S3Settings, UploadAcquisition,
+    multipart_part_size, read_journal,
+};
+use crate::blob::BlobErrorKind;
 
 fn backend(staging: &Path) -> S3Backend {
     S3Backend::new(
@@ -120,4 +121,26 @@ async fn test_recovery_leaves_a_journal_every_owner_has_not_released() {
     drop(first);
     assert_eq!(backend.recover_multipart_uploads().await.unwrap(), 0);
     assert!(!journal.exists());
+}
+
+#[tokio::test]
+async fn test_read_journal_accepts_content_up_to_the_size_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal");
+    let upload_id = "a".repeat(4_096);
+    tokio::fs::write(&path, upload_id.as_bytes()).await.unwrap();
+
+    assert_eq!(read_journal(&path).await.unwrap(), Some(upload_id));
+    assert!(path.exists());
+}
+
+#[tokio::test]
+async fn test_read_journal_discards_content_over_the_size_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("journal");
+    let oversized = "a".repeat(4_097);
+    tokio::fs::write(&path, oversized.as_bytes()).await.unwrap();
+
+    assert_eq!(read_journal(&path).await.unwrap(), None);
+    assert!(!path.exists());
 }

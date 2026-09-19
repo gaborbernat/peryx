@@ -415,10 +415,10 @@ fn test_recovery_fails_all_interrupted_runs_in_bounded_batches_and_survives_rest
 #[test]
 fn test_recovery_continues_after_a_full_batch() {
     let (_dir, store) = store();
-    let ids = (0..128)
+    let ids = (0..129)
         .map(|started_at_unix| start_job(&store, "hosted", started_at_unix))
         .collect::<Vec<_>>();
-    assert_eq!(store.recover_interrupted_job_runs(200).unwrap(), 128);
+    assert_eq!(store.recover_interrupted_job_runs(200).unwrap(), 129);
     assert!(
         [ids.first().unwrap(), ids.last().unwrap()]
             .into_iter()

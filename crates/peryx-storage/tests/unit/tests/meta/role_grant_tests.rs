@@ -487,6 +487,41 @@ fn test_a_user_filter_clamps_a_cursor_outside_its_range(#[case] cursor: &str, #[
     assert_eq!(page.next_cursor, None);
 }
 
+/// A cursor from a stale scope sorts below the queried user's whole key range, not just below one of
+/// its rows, so clamping it to the prefix is what keeps a sibling user's row - which sorts between the
+/// cursor and the prefix - out of the page.
+#[test]
+fn test_a_user_filter_clamps_a_stale_cursor_past_a_sibling_row() {
+    let before = UserId::from_stored("usr_10000000000000000000000000000000");
+    let between = UserId::from_stored("usr_30000000000000000000000000000000");
+    let selected = UserId::from_stored("usr_50000000000000000000000000000000");
+    let (_dir, store) = raw_store(|txn| {
+        for id in [&before, &between, &selected] {
+            persist_user(txn, id);
+        }
+    });
+    for user in [&before, &between, &selected] {
+        store
+            .create_managed_grant(
+                &RoleGrant::new(user.clone(), Role::Operator, GrantScope::Server),
+                &selected,
+                0,
+            )
+            .unwrap();
+    }
+
+    let page = store
+        .list_managed_grants(&RoleGrantQuery {
+            filter: RoleGrantFilter::User(selected.clone()),
+            cursor: Some("usr_20000000000000000000000000000000".to_owned()),
+            limit: 10,
+        })
+        .unwrap();
+
+    assert_eq!(page.grants.len(), 1);
+    assert_eq!(page.grants[0].grant.user, selected);
+}
+
 #[test]
 fn test_a_resource_filter_uses_the_scope_index_without_leaking_a_prefix_sibling() {
     let users = [

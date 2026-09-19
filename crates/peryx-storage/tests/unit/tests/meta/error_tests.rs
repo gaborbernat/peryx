@@ -21,6 +21,12 @@ fn test_database_already_open_error_is_classified() {
 }
 
 #[test]
+fn test_other_errors_are_not_classified_as_database_already_open() {
+    let decode = serde_json::from_slice::<serde_json::Value>(b"not json").unwrap_err();
+    assert!(!MetaError::Decode(decode).is_database_already_open());
+}
+
+#[test]
 fn test_scan_visit_error_reports_visitor_display_and_source() {
     let error = MetaScanError::Visit(std::io::Error::other("visitor stopped"));
     assert_eq!(error.to_string(), "visitor stopped");

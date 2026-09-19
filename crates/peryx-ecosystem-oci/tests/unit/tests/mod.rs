@@ -644,6 +644,33 @@ fn proxy_with_upstream_limit(dir: &TempDir, upstream: &str, upstream_concurrency
     Arc::new(state)
 }
 
+/// Two cached indexes, each carrying its own upstream fetch cap, so a mirror run against one proves
+/// it read its own ceiling rather than the other index's.
+fn proxy_pair_with_upstream_limits(
+    dir: &TempDir,
+    upstream: &str,
+    hub_limit: usize,
+    vault_limit: usize,
+) -> Arc<AppState> {
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(dir.path().join("blobs"));
+    let cached = || IndexKind::Cached {
+        client: UpstreamClient::new(upstream).unwrap(),
+        offline: false,
+    };
+    let mut state = AppState::with_limits(
+        meta,
+        blobs,
+        60,
+        vec![oci_index("hub", "hub", cached()), oci_index("vault", "vault", cached())],
+        Arc::new(|| 1000),
+        RateLimitConfig::default(),
+        vec![("hub".to_owned(), hub_limit), ("vault".to_owned(), vault_limit)],
+    );
+    install_oci(&mut state, HashMap::new(), false);
+    Arc::new(state)
+}
+
 /// Shared bytes must not share repository authorization.
 fn proxy_pair(dir: &TempDir, up_a: &str, up_b: &str) -> (Arc<AppState>, axum::Router) {
     let cached = |upstream: &str| IndexKind::Cached {

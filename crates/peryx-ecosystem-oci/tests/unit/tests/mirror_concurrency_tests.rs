@@ -199,6 +199,62 @@ async fn test_mirror_overlaps_sibling_manifests_up_to_the_ceiling(
     );
 }
 
+/// A mirror run reads the ceiling of the index it was asked to mirror, not any other cached index's
+/// cap. `vault` is given a ceiling too small to fill the barrier `hub`'s own ceiling sizes, so a run
+/// that grabbed `vault`'s cap by mistake would starve the barrier and never finish.
+#[tokio::test]
+async fn test_mirror_reads_its_own_index_ceiling_not_a_sibling_index() {
+    const CEILING: usize = 5;
+    let children: Vec<Vec<u8>> = (0..CEILING * 2)
+        .map(|slot| index_over(&[], &format!("child-{slot}")))
+        .collect();
+    let digests: Vec<String> = children.iter().map(|body| oci_digest(body)).collect();
+    let root = index_over(
+        &digests.iter().map(String::as_str).collect::<Vec<_>>(),
+        "a wide image index",
+    );
+    let mut content = HashMap::from([(manifest_path("library/app", "latest"), (INDEX_TYPE, root))]);
+    content.extend(
+        digests
+            .iter()
+            .zip(children)
+            .map(|(digest, body)| (manifest_path("library/app", digest), (INDEX_TYPE, body))),
+    );
+    let held = digests
+        .iter()
+        .map(|digest| manifest_path("library/app", digest))
+        .collect();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let state = super::proxy_pair_with_upstream_limits(&dir, &base, CEILING, 1);
+    let registry = registry(content, held, CEILING);
+
+    let rows = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        serve_until_done(
+            listener,
+            &registry,
+            mirror(
+                &state.serving,
+                &state.serving.indexes[0],
+                IndexSettings::default(),
+                &["library/app:latest".to_owned()],
+                MirrorMode::Sync,
+            ),
+        ),
+    )
+    .await
+    .expect("hub's own ceiling fills the barrier without waiting on vault's")
+    .unwrap();
+
+    assert_eq!(registry.observed.lock().unwrap().peak, CEILING);
+    assert_eq!(
+        rows.last().unwrap().reason,
+        format!("{} synced, 0 cached, 0 errors", digests.len() + 1)
+    );
+}
+
 /// A manifest's config and layers are independent of one another, so they move together rather than
 /// one at a time behind the manifest that named them.
 #[tokio::test]

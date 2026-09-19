@@ -1,4 +1,4 @@
-use super::{Action, resource_scope, scope_actions};
+use super::{Action, ScopeResource, parse_scope, resource_scope, scope_actions};
 
 #[test]
 fn test_scope_actions_maps_each_verb() {
@@ -7,6 +7,15 @@ fn test_scope_actions_maps_each_verb() {
     assert_eq!(scope_actions("delete"), &[Action::Delete]);
     assert_eq!(scope_actions("*"), &[Action::Read, Action::Write, Action::Delete]);
     assert!(scope_actions("mystery").is_empty());
+}
+
+#[test]
+fn test_parse_scope_rejects_a_repository_scope_with_an_empty_name() {
+    assert!(parse_scope("repository::pull").is_none());
+    assert!(matches!(
+        parse_scope("repository:team/app:pull").unwrap().resource,
+        ScopeResource::Repository(name) if name == "team/app"
+    ));
 }
 
 #[test]

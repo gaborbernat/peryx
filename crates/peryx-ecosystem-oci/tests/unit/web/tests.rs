@@ -2,7 +2,10 @@ use rstest::rstest;
 
 use peryx_core::BrowseSection;
 
-use super::{MemberChunk, manifest_content_from_bytes, manifest_page, member_page, members_from_bytes, pull_command};
+use super::{
+    MemberChunk, index_page, manifest_content_from_bytes, manifest_page, member_page, members_from_bytes, members_page,
+    pull_command,
+};
 use crate::name::Reference;
 
 #[test]
@@ -65,6 +68,52 @@ fn test_manifest_page_totals_sizes_and_saturates_overflow(
             if is_index { "Platform manifests" } else { "Layers" },
         ),
     );
+}
+
+#[test]
+fn test_index_page_titles_the_route() {
+    let page = index_page("oci", vec!["team/app".to_owned()]);
+    assert_eq!(page.title, "oci");
+}
+
+#[test]
+fn test_manifest_page_breadcrumbs_link_back_to_the_repository() {
+    let page = manifest_page(
+        "oci",
+        "team/app",
+        "latest",
+        manifest_content_from_bytes(br#"{"layers":[]}"#).unwrap(),
+    );
+    assert_eq!(
+        page.breadcrumbs.last().map(|link| link.label.as_str()),
+        Some("team/app")
+    );
+}
+
+#[test]
+fn test_manifest_page_row_reports_size_and_media_type_text() {
+    let manifest =
+        br#"{"layers":[{"digest":"sha256:abc","size":42,"mediaType":"application/vnd.oci.image.layer.v1.tar"}]}"#;
+    let page = manifest_page(
+        "oci",
+        "team/app",
+        "latest",
+        manifest_content_from_bytes(manifest).unwrap(),
+    );
+    let BrowseSection::Table { rows, .. } = &page.sections[1] else {
+        panic!("manifest table missing");
+    };
+    assert_eq!(
+        (rows[0].cells[1].text.as_str(), rows[0].cells[2].text.as_str()),
+        ("42", "application/vnd.oci.image.layer.v1.tar")
+    );
+}
+
+#[test]
+fn test_members_page_breadcrumbs_and_subtitle_name_the_manifest_and_digest() {
+    let page = members_page("oci", "team/app", "latest", "sha256:abc", vec![]);
+    assert_eq!(page.breadcrumbs.last().map(|link| link.label.as_str()), Some("latest"));
+    assert_eq!(page.subtitle.as_deref(), Some("sha256:abc"));
 }
 
 #[rstest]

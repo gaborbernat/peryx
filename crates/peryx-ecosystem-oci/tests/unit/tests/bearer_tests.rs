@@ -10,6 +10,7 @@ use rstest::rstest;
 use tower::ServiceExt as _;
 
 use peryx_identity::{Action, Glob, Grant, Principal, TokenScope};
+use peryx_index::Index;
 
 use super::{
     assert_registry_version, auth, body_has_code, current_unix_time, hosted_writable, oci_digest, realm_app,
@@ -99,6 +100,50 @@ async fn test_v2_accepts_forwarded_realm_only_from_a_trusted_proxy(
     );
 }
 
+/// An untrusted peer naming only one forwarding header still gets neither believed: a spoofed host
+/// with no matching proto, or a spoofed proto with no matching host, is as untrustworthy as both.
+#[rstest]
+#[case::host_only("x-forwarded-host", "registry.example")]
+#[case::proto_only("x-forwarded-proto", "https")]
+#[tokio::test]
+async fn test_v2_strips_a_lone_forwarded_header_from_an_untrusted_peer(
+    #[case] header_name: &str,
+    #[case] header_value: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = realm_app_with_clock_and_limits(
+        &dir,
+        vec![scoped_index(
+            "store",
+            "store",
+            "ci",
+            SECRET,
+            "team/*",
+            &[Action::Read, Action::Write],
+        )],
+        Arc::new(current_unix_time),
+        RateLimitConfig {
+            trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
+            ..RateLimitConfig::default()
+        },
+        300,
+    );
+    let mut request = Request::builder()
+        .uri("/v2/")
+        .header("host", "internal.test:5000")
+        .header(header_name, header_value)
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo("192.0.2.1:443".parse::<std::net::SocketAddr>().unwrap()));
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.headers()[header::WWW_AUTHENTICATE],
+        "Bearer realm=\"http://internal.test:5000/v2/token\",service=\"peryx\""
+    );
+}
+
 #[tokio::test]
 async fn test_v2_stays_open_for_an_anonymous_deployment() {
     let dir = tempfile::tempdir().unwrap();
@@ -113,6 +158,22 @@ async fn test_v2_stays_open_for_an_anonymous_deployment() {
     let (status, headers, _) = send(&app, Method::GET, "/v2/").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["docker-distribution-api-version"], "registry/2.0");
+}
+
+/// A realm index still names a token even while it leaves reads open to anyone, and `docker login`
+/// needs the challenge to discover the realm before it can push - anonymous reads alone must not
+/// suppress it.
+#[tokio::test]
+async fn test_v2_challenges_when_an_index_names_a_token_even_with_anonymous_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = Index {
+        acl: super::writer_acl(SECRET),
+        ..super::oci_index("store", "store", super::IndexKind::Hosted { volatile: true })
+    };
+    let (_state, app) = realm_app(&dir, vec![index]);
+    let (status, headers, _) = send(&app, Method::GET, "/v2/").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(headers.contains_key(header::WWW_AUTHENTICATE));
 }
 
 #[rstest]
@@ -212,6 +273,9 @@ async fn test_catalog_rejects_unverified_credentials(
         ),
         (StatusCode::UNAUTHORIZED, expected_challenge, false)
     );
+    // The catalog sits outside revocation governance, so its rejection carries no cache policy of
+    // its own - only a governed read route stamps one on a denial.
+    assert!(!headers.contains_key(header::CACHE_CONTROL), "{headers:?}");
 }
 
 #[rstest]

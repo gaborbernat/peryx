@@ -1,9 +1,10 @@
 use axum::http::{Method, StatusCode, header};
 use rstest::rstest;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{proxy, proxy_with_settings, send, virtual_stack};
+use crate::store;
 use crate::{IndexSettings, LibraryPrefix};
 
 async fn mount_tags(server: &MockServer, upstream_repo: &str, body: &'static [u8]) {
@@ -12,6 +13,31 @@ async fn mount_tags(server: &MockServer, upstream_repo: &str, body: &'static [u8
         .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_vec(), "application/json"))
         .mount(server)
         .await;
+}
+
+/// A tag-list body of exactly the tags-list ceiling is a legitimate page, not an abusive one: the
+/// bound rejects a body that exceeds it, not one that just meets it.
+#[tokio::test]
+async fn test_proxied_tag_list_accepts_a_body_at_exactly_the_ceiling() {
+    const MAX_TAGS_BYTES: usize = 4 * 1024 * 1024;
+    let server = MockServer::start().await;
+    let prefix = r#"{"name":"app","tags":[],"pad":""#;
+    let suffix = "\"}";
+    let padding = MAX_TAGS_BYTES - prefix.len() - suffix.len();
+    let body = format!("{prefix}{}{suffix}", "x".repeat(padding)).into_bytes();
+    assert_eq!(body.len(), MAX_TAGS_BYTES);
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["name"], "hub/app");
 }
 
 #[tokio::test]
@@ -49,6 +75,40 @@ async fn test_cached_tag_list_serves_the_client_name_without_upstream() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["name"], "hub/app");
     assert_eq!(json["tags"], serde_json::json!(["v0"]));
+}
+
+/// A cached tag page is trusted for exactly `ttl_secs`: at that exact age the registry must
+/// revalidate against upstream rather than serve the stale page one more time.
+#[tokio::test]
+async fn test_cached_tag_list_revalidates_exactly_at_the_ttl_boundary() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":["fresh"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    // `proxy` fixes the clock at 1000 and the ttl at 60 seconds, so 940 ages the cached page to
+    // exactly the boundary.
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "",
+        940,
+        None,
+        br#"{"name":"app","tags":["cached"]}"#,
+    )
+    .unwrap();
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["tags"], serde_json::json!(["fresh"]));
 }
 
 #[tokio::test]
@@ -108,6 +168,74 @@ async fn test_virtual_tag_list_names_the_client_repository() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["name"], "reg/app");
     assert!(json["tags"].as_array().unwrap().iter().any(|tag| tag == "latest"));
+}
+
+/// A page whose `last` cursor always advances, so each page is cached under its own query and a
+/// revisited one cannot masquerade as fresh.
+struct EndlessNextPage;
+
+impl wiremock::Respond for EndlessNextPage {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let last: u64 = request
+            .url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "last").then(|| value.parse().ok()).flatten())
+            .unwrap_or(0);
+        ResponseTemplate::new(200)
+            .insert_header("link", format!("</v2/app/tags/list?last={}>; rel=\"next\"", last + 1))
+            .set_body_raw(br#"{"name":"app","tags":[]}"#.to_vec(), "application/json")
+    }
+}
+
+/// A virtual tag union follows a `next` link across pages by re-issuing the exact query the link
+/// names; a query sliced one character short or long would ask upstream for something it never
+/// offered.
+#[tokio::test]
+async fn test_virtual_tag_union_follows_the_exact_next_page_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param_is_missing("last"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", "</v2/app/tags/list?last=b>; rel=\"next\"")
+                .set_body_raw(br#"{"name":"app","tags":["a"]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param("last", "b"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":["b"]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/reg/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["tags"], serde_json::json!(["a", "b"]));
+}
+
+/// An upstream that never stops linking a next page cannot make a virtual tag union walk forever: the
+/// scan stops after exactly `MAX_TAG_PAGES` fetches.
+#[tokio::test]
+async fn test_virtual_tag_union_pagination_stops_exactly_at_the_page_cap() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(EndlessNextPage)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+
+    let (status, ..) = send(&app, Method::GET, "/v2/reg/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(server.received_requests().await.unwrap().len(), 100);
 }
 
 #[rstest]

@@ -346,6 +346,44 @@ async fn test_revoked_proxy_tag_never_serves_from_cache(#[case] fetched_at: i64)
     assert!(body_has_code(&response, "MANIFEST_UNKNOWN"), "{response:?}");
 }
 
+/// A cached tag target is trusted for exactly `ttl_secs`: at that exact age a tag-list scan must
+/// revalidate it against upstream rather than reuse the stale target one more time.
+#[tokio::test]
+async fn test_proxy_tag_target_revalidates_exactly_at_the_ttl_boundary() {
+    let server = MockServer::start().await;
+    let digest = format!("sha256:{}", "5".repeat(64));
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(br#"{"name":"app","tags":["latest"]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).insert_header("docker-content-digest", digest.as_str()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    store::put_tag(&state.serving.meta, "hub", "app", "latest", &digest).unwrap();
+    // `proxy` fixes the clock at 1000 and the ttl at 60 seconds, so 940 ages the target to exactly
+    // the boundary.
+    store::set_tag_freshness(&state.serving.meta, "hub", "app", "latest", &digest, 940).unwrap();
+    // A tag list only resolves each tag's target when a revocation is active; the revoked digest
+    // itself is unrelated to `latest`, so it exists only to take that path.
+    revoke(&state, &format!("sha256:{}", "6".repeat(64)));
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"name":"hub/app","tags":["latest"]})
+    );
+}
+
 #[tokio::test]
 async fn test_legacy_manifest_negotiation_cannot_select_a_revoked_child() {
     let dir = tempfile::tempdir().unwrap();
@@ -919,4 +957,55 @@ async fn test_referrers_accept_sha512_subject_with_active_revocations() {
         ),
         (StatusCode::OK, serde_json::json!([descriptor]))
     );
+}
+
+/// A cached upstream referrers page is trusted for exactly `ttl_secs`: at that exact age the proxy
+/// must revalidate against upstream rather than serve the stale page one more time.
+#[tokio::test]
+async fn test_proxy_referrers_revalidate_exactly_at_the_ttl_boundary() {
+    let server = MockServer::start().await;
+    let subject = format!("sha256:{}", "a".repeat(64));
+    let fresh_referrer = format!("sha256:{}", "b".repeat(64));
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/referrers/{subject}")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                serde_json::json!({
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.oci.image.index.v1+json",
+                    "manifests": [{"mediaType": MANIFEST_TYPE, "digest": fresh_referrer, "size": 1}],
+                })
+                .to_string()
+                .into_bytes(),
+                "application/vnd.oci.image.index.v1+json",
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let cached_referrer = format!("sha256:{}", "c".repeat(64));
+    // `proxy` fixes the clock at 1000 and the ttl at 60 seconds, so 940 ages the cached page to
+    // exactly the boundary.
+    store::set_referrer_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        &subject,
+        940,
+        &[serde_json::json!({"mediaType": MANIFEST_TYPE, "digest": cached_referrer, "size": 1})],
+    )
+    .unwrap();
+
+    let (status, _, body) = send(&app, Method::GET, &format!("/v2/hub/app/referrers/{subject}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let document = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+    let digests: Vec<&str> = document["manifests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|manifest| manifest["digest"].as_str().unwrap())
+        .collect();
+    assert_eq!(digests, vec![fresh_referrer.as_str()]);
 }

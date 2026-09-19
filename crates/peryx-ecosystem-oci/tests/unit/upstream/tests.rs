@@ -13,6 +13,21 @@ fn header(value: &str) -> HeaderValue {
     HeaderValue::from_str(value).unwrap()
 }
 
+/// The default clock names the real wall time, not a placeholder: a token cached against it must
+/// expire when the calendar says it does, not on some fixed date a mock could stand in for.
+#[test]
+fn test_unix_now_reads_the_real_wall_clock() {
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .cast_signed();
+
+    let now = unix_now();
+
+    assert!((now - before).abs() < 10, "unix_now={now} before={before}");
+}
+
 #[test]
 fn test_parse_bearer_reads_realm_service_scope() {
     let challenge = parse_bearer(&header(
@@ -260,6 +275,51 @@ async fn test_fetch_token_rejects_an_oversized_response() {
     assert!(error.to_string().contains("exceeds"), "{error}");
 }
 
+/// A token response of exactly the size cap is a legitimate response, not an abusive one: the bound
+/// rejects a body that exceeds it, not one that just meets it.
+#[tokio::test]
+async fn test_fetch_token_accepts_a_response_at_exactly_the_size_cap() {
+    let server = MockServer::start().await;
+    let base = format!("{}/", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .and(Unauthenticated)
+        .respond_with(challenge(&base))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let prefix = r#"{"token":"tok","filler":""#;
+    let suffix = "\"}";
+    let padding = (1usize << 20) - prefix.len() - suffix.len();
+    let body = format!("{prefix}{}{suffix}", "x".repeat(padding));
+    assert_eq!(body.len(), 1 << 20);
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .and(match_header("authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let response = Upstream::new()
+        .manifest(
+            &upstream_client(&base, credentials(Auth::None)),
+            "library/nginx",
+            "latest",
+            &TokenRealms::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 #[rstest]
 #[case::realm_exact_token("realm=invalid")]
 #[case::realm_mixed_quoted(r#"ReAlM="://""#)]
@@ -311,6 +371,7 @@ async fn test_manifest_selects_bearer_after_duplicate_parameter_field() {
 
 #[rstest]
 #[case::missing_name("Bearer =token")]
+#[case::garbage_before_a_valid_realm("Bearer =token,realm=foo")]
 #[case::unterminated_quote(r#"Bearer realm="https://auth.example/token"#)]
 #[case::unterminated_escape(r#"Bearer realm="https://auth.example/token\"#)]
 #[case::unterminated_after_escape(r#"Bearer realm="https://auth.example/\token"#)]

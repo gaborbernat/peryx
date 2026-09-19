@@ -51,3 +51,7 @@ impl ThroughputBudget {
         elapsed > earned
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/throughput/tests.rs"]
+mod tests;

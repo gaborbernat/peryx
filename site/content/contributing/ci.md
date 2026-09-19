@@ -29,22 +29,10 @@ Bring the job back when a crate is published, or when the workspace reaches a ve
 needs the `baseline` output on the `contracts` job as well, which went with it. Until then `just semver` answers the
 same question on demand and states a release type so the checks run.
 
-A `LEAK` or `LEAK-FAIL` from nextest names a victim rather than a culprit. Nextest reports one when a test process has
-exited and its captured output has not reached EOF, which means another live process still holds the write end of that
-pipe. macOS creates a pipe and sets `FD_CLOEXEC` on it in two steps, so a test binary spawned inside that window
-inherits another test's capture pipe and holds it until it exits. The retaining process is whichever test happened to
-start during the window, and the reported test is whichever happened to finish first. Neither did anything wrong.
-
-Measured on this workspace: of 2,560 children spawned from tests, 37 inherited a descriptor they were never given, and
-every one was a pipe, often both ends of the same one. Twelve tests that only sleep for three seconds, beside a hundred
-that only print, reproduce `LEAK-FAIL` on the printing ones with no subprocess anywhere in the package. Closing
-inherited descriptors in a child changes nothing, because a child is not what holds the pipe.
-
-So a `LEAK` says nothing about the test it names, and the test needs no repair. Record it against
-[#1629](https://github.com/tox-dev/peryx/issues/1629) and move on. Raising `leak-timeout`, excluding a test, retrying,
-or serialising the run would each hide the report without changing what it reports.
-[nextest-rs/nextest#3553](https://github.com/nextest-rs/nextest/pull/3553) fixes the spawn boundary upstream and is not
-yet in a release.
+A `LEAK` or `LEAK-FAIL` from nextest requires investigation. Nextest 0.9.145 fixes the macOS capture-pipe inheritance
+race in [nextest-rs/nextest#3553](https://github.com/nextest-rs/nextest/pull/3553), so an observed leak is no longer
+explained by that upstream defect. Do not increase `leak-timeout`, exclude a test, retry, or serialise the run instead
+of finding the process that retains the descriptor.
 
 The nightly mutation run examines production code only. `.cargo/mutants.toml` excludes benchmark workloads under
 `crates/*/src/bench/`, the shared harness in `crates/peryx-test-support/`, and the fixture binaries under
@@ -151,7 +139,7 @@ of local build state.
 
 [codspeed-simulation]: https://github.com/CodSpeedHQ/codspeed/blob/v5.2.1/README.md
 [nextest-archives]: https://nexte.st/docs/ci-features/archiving/
-[nextest-sanitizer-target]: https://github.com/nextest-rs/nextest/blob/cargo-nextest-0.9.143/nextest-runner/src/cargo_config/target_triple.rs
+[nextest-sanitizer-target]: https://github.com/nextest-rs/nextest/blob/cargo-nextest-0.9.145/nextest-runner/src/cargo_config/target_triple.rs
 [nextest-timeouts]: https://nexte.st/docs/features/slow-tests/#terminating-tests-after-a-timeout
 [rust-sanitizers]: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/sanitizer.html
 [tokio-notify]: https://docs.rs/tokio/latest/tokio/sync/struct.Notify.html

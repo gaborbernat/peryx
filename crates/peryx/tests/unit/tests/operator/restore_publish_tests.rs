@@ -5,10 +5,7 @@ use rstest::rstest;
 
 #[cfg(unix)]
 use super::cleanup_restore_failure;
-use super::{
-    ensure_blob_copy_matches, ensure_copy_matches, publish, rollback_publish, sibling_path, staging_path, sync_parent,
-    sync_tree,
-};
+use super::{ensure_blob_copy_matches, ensure_copy_matches, publish, rollback_publish, sibling_path, staging_path};
 use crate::operator::ManifestFile;
 
 #[test]
@@ -89,20 +86,6 @@ fn test_member_copy_rejects_changes_after_verification(#[case] sha256: &str, #[c
     let error = ensure_copy_matches(&actual, &expected, "metadata").unwrap_err();
 
     assert_eq!(error.to_string(), "backup metadata changed after verification");
-}
-
-#[test]
-fn test_sync_tree_reports_a_missing_directory() {
-    let error = sync_tree(Path::new("/peryx/no/such/staging")).unwrap_err();
-
-    assert_eq!(error.to_string(), "read directory /peryx/no/such/staging");
-}
-
-#[test]
-fn test_sync_parent_reports_a_parentless_path() {
-    let error = sync_parent(Path::new("/")).unwrap_err();
-
-    assert_eq!(error.to_string(), "path / has no parent directory");
 }
 
 #[test]

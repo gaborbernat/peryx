@@ -254,7 +254,7 @@ fn stage_backup(
         .context(format!("restore blob {}", digest.as_str()))?;
         ensure_blob_copy_matches(&copied, &digest, entry.size_bytes)?;
     }
-    sync_tree(staging)?;
+    sync_tree(staging).context(format!("sync restore staging tree {}", staging.display()))?;
     Ok(())
 }
 
@@ -289,7 +289,10 @@ fn reset_staging(staging: &Path) -> anyhow::Result<()> {
 fn publish(staging: &Path, data_dir: &Path) -> anyhow::Result<()> {
     if !data_dir.exists() {
         std::fs::rename(staging, data_dir).context(format!("publish restored data to {}", data_dir.display()))?;
-        sync_parent(data_dir)?;
+        sync_parent(data_dir).context(format!(
+            "sync restored data parent directory for {}",
+            data_dir.display()
+        ))?;
         return Ok(());
     }
     let aside = aside_path(data_dir)?;
@@ -297,7 +300,10 @@ fn publish(staging: &Path, data_dir: &Path) -> anyhow::Result<()> {
     std::fs::rename(data_dir, &aside).context(format!("move existing restore target {} aside", data_dir.display()))?;
     match std::fs::rename(staging, data_dir) {
         Ok(()) => {
-            sync_parent(data_dir)?;
+            sync_parent(data_dir).context(format!(
+                "sync restored data parent directory for {}",
+                data_dir.display()
+            ))?;
             remove_any(&aside)?;
             Ok(())
         }

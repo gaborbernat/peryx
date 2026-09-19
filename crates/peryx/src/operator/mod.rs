@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, bail};
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::fs::{Dir, OpenOptions};
-use peryx_storage::blob::Digest;
+use peryx_storage::blob::{Digest, sync_parent, sync_tree};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -408,43 +408,6 @@ fn backup_blob_path(root: &Path, digest: &Digest) -> PathBuf {
 fn backup_blob_relpath(digest: &Digest) -> String {
     let hex = digest.as_str();
     format!("blobs/sha256/{}/{}/{}", &hex[0..2], &hex[2..4], hex)
-}
-
-/// Flush a directory tree from the leaves up, so every entry written below `path` is durable before
-/// the tree itself is linked under a name a reader will follow.
-fn sync_tree(path: &Path) -> anyhow::Result<()> {
-    for entry in std::fs::read_dir(path).context(format!("read directory {}", path.display()))? {
-        let child = entry
-            .context(format!("read directory entry in {}", path.display()))?
-            .path();
-        if child.is_dir() {
-            sync_tree(&child)?;
-        }
-    }
-    sync_dir(path)
-}
-
-/// Flush the directory a path is named in. Synchronizing a file does not make the directory entry
-/// that names it durable, so a publication survives a power loss only once its parent is flushed too.
-fn sync_parent(path: &Path) -> anyhow::Result<()> {
-    let parent = path
-        .parent()
-        .context(format!("path {} has no parent directory", path.display()))?;
-    sync_dir(parent)
-}
-
-#[cfg(unix)]
-fn sync_dir(path: &Path) -> anyhow::Result<()> {
-    File::open(path)
-        .context(format!("open directory {} for sync", path.display()))?
-        .sync_all()
-        .context(format!("sync directory {}", path.display()))
-}
-
-/// Windows offers no directory-entry flush, so publication relies on the rename alone.
-#[cfg(not(unix))]
-fn sync_dir(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
 }
 
 fn is_empty_dir(path: &Path) -> anyhow::Result<bool> {

@@ -250,12 +250,12 @@ impl BackupTarget {
     /// after it was inspected fails, so a backup another attempt already published is never replaced.
     fn publish(self) -> anyhow::Result<()> {
         let Self { mut staging, path, .. } = self;
-        sync_tree(staging.path())?;
+        sync_tree(staging.path()).context(format!("sync backup staging tree {}", staging.path().display()))?;
         rename_into_place(staging.path(), &path)?;
         // The staged tree now lives at the final path; leaving cleanup armed would aim it at a name
         // another attempt is free to reserve.
         staging.disable_cleanup(true);
-        sync_parent(&path)
+        sync_parent(&path).context(format!("sync backup parent directory for {}", path.display()))
     }
 
     #[cfg(unix)]

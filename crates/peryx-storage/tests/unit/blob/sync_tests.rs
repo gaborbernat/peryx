@@ -1,6 +1,29 @@
 use std::path::Path;
 
-use super::{create_dir_durable, sync_parent};
+use super::{create_dir_durable, sync_parent, sync_tree};
+
+#[test]
+fn test_sync_tree_rejects_a_missing_directory() {
+    let error = sync_tree(Path::new("/peryx/no/such/staging")).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_sync_tree_reports_an_unreadable_child() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let child = dir.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o333)).unwrap();
+
+    let error = sync_tree(dir.path()).unwrap_err();
+
+    std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
 
 #[test]
 fn test_sync_parent_flushes_the_directory_holding_the_entry() {

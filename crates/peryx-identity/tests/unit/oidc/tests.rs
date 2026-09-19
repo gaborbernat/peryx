@@ -10,8 +10,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::tests::oidc_http::{
-    MAX_DISCOVERY_BYTES, MAX_JWKS_BYTES, TestHttpServer, TestResponseBody, padded_json, routed_transport,
-    secure_origin, transport,
+    MAX_DISCOVERY_BYTES, MAX_JWKS_BYTES, TestHttpServer, TestResponseBody, UNAVAILABLE_ADDR, padded_json,
+    routed_transport, secure_origin, transport,
 };
 
 const NOW: i64 = 2_000_000_000;
@@ -762,9 +762,7 @@ async fn test_key_set_host_the_policy_permits_still_verifies() {
 
 #[tokio::test]
 async fn test_unavailable_discovery_endpoint_is_reported() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let issuer = format!("https://{}", listener.local_addr().unwrap());
-    drop(listener);
+    let issuer = format!("https://{UNAVAILABLE_ADDR}");
     assert_eq!(
         test_verifier(&issuer)
             .verify_identity(&identity(&issuer, "key-1", "unavailable"), NOW)
@@ -775,9 +773,7 @@ async fn test_unavailable_discovery_endpoint_is_reported() {
 
 #[tokio::test]
 async fn test_unavailable_key_set_endpoint_is_reported() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let key_set_url = format!("https://{}/keys", listener.local_addr().unwrap());
-    drop(listener);
+    let key_set_url = format!("https://{UNAVAILABLE_ADDR}/keys");
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/.well-known/openid-configuration"))

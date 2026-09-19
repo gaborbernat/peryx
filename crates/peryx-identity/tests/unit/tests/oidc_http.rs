@@ -12,6 +12,11 @@ use crate::OidcHttpTransport;
 pub const MAX_DISCOVERY_BYTES: usize = 65_536;
 pub const MAX_JWKS_BYTES: usize = 1_048_576;
 
+/// A loopback address nothing ever listens on: unprivileged processes cannot bind port 1, so a
+/// connection to it always refuses, unlike a freed ephemeral port another test's own bind can race
+/// to reclaim before this one connects.
+pub const UNAVAILABLE_ADDR: &str = "127.0.0.1:1";
+
 pub fn transport(destination: &str) -> Arc<dyn OidcHttpTransport> {
     routed_transport(destination, &[], &[])
 }

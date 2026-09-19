@@ -8,8 +8,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::tests::oidc_http::{
-    MAX_DISCOVERY_BYTES, TestHttpServer, TestResponseBody, insecure_transport, padded_json, routed_transport,
-    secure_origin, transport,
+    MAX_DISCOVERY_BYTES, TestHttpServer, TestResponseBody, UNAVAILABLE_ADDR, insecure_transport, padded_json,
+    routed_transport, secure_origin, transport,
 };
 use crate::{ExternalIdentityResolution, ExternalLinkRequest, ServerUser, UserId, UserState};
 
@@ -671,16 +671,13 @@ async fn test_token_response_size_bound(#[case] size: usize, #[case] accepted: b
 
 #[tokio::test]
 async fn test_token_exchange_transport_failure_stays_unavailable() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let dead = listener.local_addr().unwrap();
-    drop(listener);
     let server = MockServer::start().await;
     mount_discovery(
         &server,
         json!({
             "issuer": issuer(&server),
             "authorization_endpoint": format!("{}/authorize", secure_origin(&server.uri())),
-            "token_endpoint": format!("https://{dead}/token"),
+            "token_endpoint": format!("https://{UNAVAILABLE_ADDR}/token"),
             "jwks_uri": format!("{}/jwks", secure_origin(&server.uri())),
             "id_token_signing_alg_values_supported": ["RS256"],
         }),
@@ -960,10 +957,7 @@ async fn test_cold_provider_failure_is_rate_limited() {
 
 #[tokio::test]
 async fn test_cold_provider_network_failure_is_unavailable() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-    let provider = provider(&format!("http://{address}"));
+    let provider = provider(&format!("http://{UNAVAILABLE_ADDR}"));
     assert!(matches!(
         provider.authorization(NOW).await,
         Err(OidcProviderError::Unavailable)

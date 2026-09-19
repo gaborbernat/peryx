@@ -831,6 +831,18 @@ fn test_prepare_rejects_invalid_requires_python_and_clock() {
     "2fast",
     "must be a dotted sequence of Python identifiers"
 )]
+#[case::hard_keyword(
+    "Import-Name: class\n",
+    "Import-Name",
+    "class",
+    "must be a dotted sequence of Python identifiers"
+)]
+#[case::normalized_hard_keyword(
+    "Import-Name: ｃｌａｓｓ\n",
+    "Import-Name",
+    "ｃｌａｓｓ",
+    "must be a dotted sequence of Python identifiers"
+)]
 #[case::empty_component(
     "Import-Name: foo..bar\n",
     "Import-Name",
@@ -881,6 +893,24 @@ fn test_prepare_rejects_import_name_declared_as_both_exclusive_and_namespace() {
 }
 
 #[test]
+fn test_prepare_rejects_normalized_import_name_declared_as_both_exclusive_and_namespace() {
+    let bytes = wheel_metadata_bytes(
+        "Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\nImport-Name: cafe\u{301}\nImport-Namespace: café\n"
+            .as_bytes(),
+    );
+    let (_dir, staged) = staged_upload(&bytes);
+
+    assert_eq!(
+        prepare(staged_form(&bytes), staged, "root/hosted", 1000).unwrap_err(),
+        UploadError::InvalidMetadataValue {
+            field: "Import-Namespace",
+            value: "café".to_owned(),
+            reason: "is already declared exclusive by Import-Name",
+        }
+    );
+}
+
+#[test]
 fn test_prepare_rejects_import_name_before_metadata_2_5() {
     let bytes = wheel_metadata_bytes(b"Metadata-Version: 2.4\nName: Flask\nVersion: 1.0\nImport-Name: foo\n");
     let (_dir, staged) = staged_upload(&bytes);
@@ -897,16 +927,16 @@ fn test_prepare_rejects_import_name_before_metadata_2_5() {
 
 #[test]
 fn test_prepare_accepts_valid_import_names_and_namespaces() {
-    let bytes = wheel_metadata_bytes(
-        b"Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\nRequires-Python: >=3.8\n\
-          Import-Name: flask\nImport-Name: flask.cli; private\nImport-Namespace: shared.plugins\n",
-    );
+    let metadata = "Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\nRequires-Python: >=3.8\n\
+          Import-Name: flask\nImport-Name: cafe\u{301}.cli; private\nImport-Namespace: shared.plugins\nImport-Namespace: match\n";
+    let bytes = wheel_metadata_bytes(metadata.as_bytes());
     let (_dir, staged) = staged_upload(&bytes);
     let prepared = prepare(staged_form(&bytes), staged, "root/hosted", 1000).unwrap();
 
     let doc = crate::parse_metadata(std::str::from_utf8(&prepared.metadata).unwrap()).unwrap();
-    assert_eq!(doc.import_names, ["flask", "flask.cli; private"]);
-    assert_eq!(doc.import_namespaces, ["shared.plugins"]);
+    assert_eq!(prepared.metadata.as_slice(), metadata.as_bytes());
+    assert_eq!(doc.import_names, ["flask", "cafe\u{301}.cli; private"]);
+    assert_eq!(doc.import_namespaces, ["shared.plugins", "match"]);
 }
 
 #[test]

@@ -8,6 +8,8 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use md5::{Digest as _, Md5};
+use unicode_ident::{is_xid_continue, is_xid_start};
+use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
 use crate::archive::ValidatedArchive;
@@ -1043,13 +1045,13 @@ fn validate_dynamic(metadata: &CoreMetadataDoc) -> Result<(), UploadError> {
 /// modules), optionally suffixed `; private`. A name given as both exclusive and shared is ambiguous,
 /// so the spec forbids it.
 fn validate_import_names(metadata: &CoreMetadataDoc) -> Result<(), UploadError> {
-    let mut exclusive: HashSet<&str> = HashSet::with_capacity(metadata.import_names.len());
+    let mut exclusive = HashSet::with_capacity(metadata.import_names.len());
     for raw in &metadata.import_names {
         exclusive.insert(validate_import_value("Import-Name", raw, true)?);
     }
     for raw in &metadata.import_namespaces {
         let name = validate_import_value("Import-Namespace", raw, false)?;
-        if exclusive.contains(name) {
+        if exclusive.contains(&name) {
             return Err(UploadError::InvalidMetadataValue {
                 field: "Import-Namespace",
                 value: raw.clone(),
@@ -1060,7 +1062,7 @@ fn validate_import_names(metadata: &CoreMetadataDoc) -> Result<(), UploadError> 
     Ok(())
 }
 
-fn validate_import_value<'a>(field: &'static str, raw: &'a str, allow_empty: bool) -> Result<&'a str, UploadError> {
+fn validate_import_value(field: &'static str, raw: &str, allow_empty: bool) -> Result<String, UploadError> {
     let (name, marker) = crate::metadata::import_parts(raw);
     let invalid = |reason| UploadError::InvalidMetadataValue {
         field,
@@ -1071,21 +1073,68 @@ fn validate_import_value<'a>(field: &'static str, raw: &'a str, allow_empty: boo
         return Err(invalid("the only marker allowed after ';' is 'private'"));
     }
     if name.is_empty() {
-        return allow_empty.then_some(name).ok_or_else(|| invalid("must not be empty"));
+        return allow_empty
+            .then(String::new)
+            .ok_or_else(|| invalid("must not be empty"));
     }
-    if name.split('.').all(is_python_identifier) {
-        Ok(name)
-    } else {
-        Err(invalid("must be a dotted sequence of Python identifiers"))
-    }
+    name.split('.')
+        .map(normalize_python_identifier)
+        .collect::<Option<Vec<_>>>()
+        .map(|parts| parts.join("."))
+        .ok_or_else(|| invalid("must be a dotted sequence of Python identifiers"))
 }
 
-fn is_python_identifier(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
-        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+fn normalize_python_identifier(component: &str) -> Option<String> {
+    let normalized = component.nfkc().collect::<String>();
+    let mut characters = normalized.chars();
+    let first = characters.next()?;
+    (first == '_' || is_xid_start(first))
+        .then_some(())
+        .filter(|()| !is_python_hard_keyword(&normalized))?;
+    characters
+        .all(|character| character == '_' || is_xid_continue(character))
+        .then_some(normalized)
+}
+
+fn is_python_hard_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "False"
+            | "None"
+            | "True"
+            | "and"
+            | "as"
+            | "assert"
+            | "async"
+            | "await"
+            | "break"
+            | "class"
+            | "continue"
+            | "def"
+            | "del"
+            | "elif"
+            | "else"
+            | "except"
+            | "finally"
+            | "for"
+            | "from"
+            | "global"
+            | "if"
+            | "import"
+            | "in"
+            | "is"
+            | "lambda"
+            | "nonlocal"
+            | "not"
+            | "or"
+            | "pass"
+            | "raise"
+            | "return"
+            | "try"
+            | "while"
+            | "with"
+            | "yield"
+    )
 }
 
 fn validate_contact_addresses(metadata: &CoreMetadataDoc) -> Result<(), UploadError> {

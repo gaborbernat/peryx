@@ -1301,6 +1301,17 @@ async fn ownership_authority_defaults_fail_closed_without_singleton_support() {
     ));
 }
 
+#[tokio::test]
+async fn ownership_authority_defaults_fail_closed_without_transfer_audit_support() {
+    let authority = AuthorityWithoutWriteLeases;
+
+    assert_eq!(authority.pending_transfer_audits().await.unwrap(), Vec::new());
+    assert!(matches!(
+        authority.complete_transfer_audit("audit-1").await,
+        Err(OwnershipError::Unavailable(message)) if message == "transfer audit recovery is unavailable"
+    ));
+}
+
 #[test]
 fn frontier_reply_serialization_preserves_the_contract() {
     let reply = FrontierReply {

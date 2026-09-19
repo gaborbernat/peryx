@@ -148,6 +148,26 @@ fn test_execute_refuses_a_wide_fan_out_ordered_by_a_probe_column() {
     );
 }
 
+#[test]
+fn test_execute_walks_exactly_the_match_cap_without_erroring() {
+    // A single outer row against exactly `MAX_JOIN_MATCHES` probe rows walks the cap precisely once;
+    // a predicate that never matches forces the full walk instead of stopping at a page bound.
+    let source = WideJoinSource::sized(1, 25_000);
+    assert_eq!(
+        execute(
+            &parse(r#"from wide_outer join wide_probe on key where key == "never" select key"#).expect("parses"),
+            &operator_scope(),
+            None,
+            &source,
+        ),
+        Ok(Page {
+            outputs: vec![output("key", FieldClass::Public, ValueType::Str)],
+            rows: Vec::new(),
+            next_cursor: None,
+        })
+    );
+}
+
 fn cost_exceeded() -> PqlError {
     PqlError::CostExceeded(
         "joining `wide_outer` to `wide_probe` matches more than 25000 row pairs; add a join key that narrows it"
@@ -175,13 +195,21 @@ fn output(name: &str, class: FieldClass, value_type: ValueType) -> OutputColumn 
 struct WideJoinSource {
     outer: DomainSchema,
     probe: DomainSchema,
+    outer_rows: i64,
+    probe_rows: i64,
 }
 
 impl WideJoinSource {
     fn new() -> Self {
+        Self::sized(WIDE_ROWS, WIDE_ROWS)
+    }
+
+    fn sized(outer_rows: i64, probe_rows: i64) -> Self {
         Self {
             outer: wide_schema("wide_outer", "rank"),
             probe: wide_schema("wide_probe", "weight"),
+            outer_rows,
+            probe_rows,
         }
     }
 }
@@ -199,7 +227,12 @@ impl DataSource for WideJoinSource {
     fn fetch(&self, domain: &str, _scope: &QueryScope, _filter: Option<&FetchFilter>) -> Result<Vec<Row>, PqlError> {
         assert!(matches!(domain, "wide_outer" | "wide_probe"));
         let metric = if domain == "wide_outer" { "rank" } else { "weight" };
-        Ok((0..WIDE_ROWS)
+        let rows = if domain == "wide_outer" {
+            self.outer_rows
+        } else {
+            self.probe_rows
+        };
+        Ok((0..rows)
             .map(|index| {
                 Row::new()
                     .with("key", Value::Str("same".to_owned()))

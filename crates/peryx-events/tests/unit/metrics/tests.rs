@@ -126,6 +126,30 @@ impl MetricsStore for RejectingCheckpointStore {
     }
 }
 
+struct MigratedLifetimeOnlyStore {
+    committed: Arc<Mutex<Option<AnalyticsDelta>>>,
+}
+
+impl MetricsStore for MigratedLifetimeOnlyStore {
+    fn load_checkpoint(&self) -> Result<AnalyticsCheckpoint, MetricsError> {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "artifacts": [{"repository": "alpha", "resource": "demo", "artifact": "demo-1.bin", "reads": 3, "bytes": 9}],
+        }))
+        .unwrap();
+        Ok(AnalyticsCheckpoint {
+            lifetime: Vec::new(),
+            daily: Vec::new(),
+            migrated_lifetime: Some(bytes),
+            migrated_daily: None,
+        })
+    }
+
+    fn commit_checkpoint(&self, delta: &AnalyticsDelta) -> Result<(), MetricsError> {
+        *self.committed.lock().unwrap() = Some(delta.clone());
+        Ok(())
+    }
+}
+
 struct CheckpointStore {
     store: AnalyticsHandle,
     checkpointed: SyncSender<()>,
@@ -289,6 +313,24 @@ fn test_persisted_rows_carry_neutral_key_dimensions() {
             migrated_daily: None,
         }
     );
+}
+
+#[test]
+fn test_spawn_persists_a_lone_legacy_migration() {
+    let committed = Arc::new(Mutex::new(None));
+    let store = Arc::new(MigratedLifetimeOnlyStore {
+        committed: Arc::clone(&committed),
+    });
+
+    Metrics::spawn(Some(store), None, clock_on_day(4), 1, Duration::from_mins(1)).unwrap();
+
+    let delta = committed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("only migrated_lifetime is set");
+    assert_eq!(delta.lifetime.len(), 1);
+    assert!(delta.clear_migrated);
 }
 
 #[test]
@@ -771,6 +813,16 @@ fn test_drain_applies_without_persisting_observations() {
 
     assert_eq!(metrics.index_totals()["alpha"].base.reads, 1);
     assert_eq!(persisted_reads(&meta.analytics()), None);
+}
+
+#[test]
+fn test_pending_is_true_from_daily_alone() {
+    let mut state = FlushState::durable(true, Arc::new(RwLock::new(None)));
+    assert!(!state.pending());
+
+    state.daily.insert(DailyUsageKey::default());
+
+    assert!(state.pending());
 }
 
 #[test]

@@ -1344,6 +1344,40 @@ fn test_scope_string_inserts_and_deduplicates_openid() {
     );
 }
 
+fn entry_with(fresh_until: i64, present_keys: &[&str]) -> Entry {
+    Entry {
+        endpoints: Endpoints {
+            authorization: Url::parse("https://issuer.example/authorize").unwrap(),
+            token: Url::parse("https://issuer.example/token").unwrap(),
+        },
+        keys: present_keys
+            .iter()
+            .map(|kid| ((*kid).to_owned(), DecodingKey::from_secret(b"k")))
+            .collect(),
+        window: CacheWindow {
+            fresh_until,
+            hard_until: fresh_until,
+            storable: true,
+        },
+    }
+}
+
+#[rstest]
+#[case::miss_inside_window(NOW + 10, Some("missing"), &[], true)]
+#[case::held_key_inside_window(NOW + 10, Some("present"), &["present"], false)]
+#[case::miss_outside_window(NOW - 10, Some("missing"), &[], false)]
+#[case::at_fresh_until_boundary_is_outside_window(NOW, Some("missing"), &[], false)]
+fn test_entry_misses_only_a_wanted_key_inside_the_fresh_window(
+    #[case] fresh_until: i64,
+    #[case] want_key: Option<&str>,
+    #[case] present_keys: &[&str],
+    #[case] expected: bool,
+) {
+    let entry = entry_with(fresh_until, present_keys);
+
+    assert_eq!(entry.misses(want_key, NOW), expected);
+}
+
 #[rstest]
 #[case::http_issuer(OidcProviderBuildError::InvalidIssuer, |s: &mut OidcProviderSettings| s.issuer = "http://issuer.example".to_owned())]
 #[case::issuer_query(OidcProviderBuildError::InvalidIssuer, |s: &mut OidcProviderSettings| s.issuer = "https://issuer.example/?x=1".to_owned())]

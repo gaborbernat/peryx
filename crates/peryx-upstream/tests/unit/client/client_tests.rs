@@ -446,6 +446,7 @@ fn test_range_session_debug_redacts_the_pinned_url() {
 #[case::missing_total(206, Some("bytes 0-0"), b"a".as_slice())]
 #[case::missing_span(206, Some("bytes 0/5"), b"a".as_slice())]
 #[case::span_mismatch(206, Some("bytes 1-1/5"), b"a".as_slice())]
+#[case::span_start_mismatch_only(206, Some("bytes 1-0/5"), b"a".as_slice())]
 #[case::non_numeric_total(206, Some("bytes 0-0/not-a-number"), b"a".as_slice())]
 #[case::total_not_past_end(206, Some("bytes 0-0/0"), b"a".as_slice())]
 #[case::unknown_total(206, Some("bytes 0-0/*"), b"a".as_slice())]

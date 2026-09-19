@@ -29,6 +29,11 @@ async fn replay(script: Vec<Chunk>) -> Vec<Result<usize, UpstreamError>> {
         .await
 }
 
+#[test]
+fn test_throughput_floor_is_sixty_four_kib_per_second() {
+    assert_eq!(THROUGHPUT_FLOOR.get(), 65_536);
+}
+
 fn floor_for(span: Duration) -> usize {
     usize::try_from(THROUGHPUT_FLOOR.get() * span.as_secs()).unwrap()
 }

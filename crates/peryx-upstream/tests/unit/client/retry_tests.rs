@@ -115,6 +115,32 @@ async fn test_fetch_bytes_honors_retry_after_on_a_retryable_status() {
     assert_eq!(&bytes[..], b"artifactbytes");
 }
 
+/// A `Retry-After` sitting exactly on the honored cap still gets waited out rather than handed back:
+/// the call is still sleeping well after a delay past the cap would already have returned.
+#[tokio::test]
+async fn test_fetch_bytes_keeps_retrying_when_retry_after_sits_on_the_honored_cap() {
+    let server = MockServer::start().await;
+    let at_cap = MAX_HONORED_RETRY_AFTER.as_secs().to_string();
+    Mock::given(method("GET"))
+        .and(path("/files/artifact.bin"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", at_cap.as_str()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = guarded_client(&server);
+
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(200),
+        client.fetch_bytes(&format!("{}/files/artifact.bin", server.uri())),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "a delay at the honored cap should still be waited out"
+    );
+}
+
 /// The status the call reports comes from a real 503 exchange, so the clock runs until that exchange is
 /// over and pauses only for the backoff, which is the only interval this test measures.
 #[tokio::test]

@@ -843,6 +843,23 @@ fn test_execute_join_rejects_unbounded_outer_without_leading_filter() {
 }
 
 #[test]
+fn test_execute_join_merges_bounded_only_when_both_sides_are_bounded() {
+    // `big` is unbounded and `policy.decisions` is bounded; a merged schema that called the pair
+    // bounded would skip the cheap-grouping check below instead of rejecting `name`.
+    let refused = query(
+        "from big join policy.decisions on repository aggregate count() as n by name",
+        &operator_scope(),
+        None,
+    );
+    assert_eq!(
+        refused,
+        Err(PqlError::Validation(
+            "group key `name` is not cheap to group on".to_owned()
+        ))
+    );
+}
+
+#[test]
 fn test_execute_join_admits_bounded_outer_with_leading_filter() {
     let page = query(
         r#"from big join policy.decisions on repository where repository == "alpha" select name, resource order by resource asc"#,

@@ -136,6 +136,28 @@ fn sibling_absolute_prefix_segments_are_accepted() {
 }
 
 #[test]
+fn route_prefixes_chain_browse_paths_before_absolute_prefixes() {
+    let mut registrations = registrations();
+    registrations[0].registration = &SECONDARY_V20_REGISTRATION;
+    registrations[1].registration = &PRIMARY_V2_REGISTRATION;
+
+    assert_eq!(
+        PluginRegistry::new(registrations)
+            .unwrap()
+            .route_prefixes()
+            .collect::<Vec<_>>(),
+        vec![
+            (SECONDARY, "/browse/shared"),
+            (SECONDARY, "/browse/beta"),
+            (SECONDARY, "/v20/"),
+            (PRIMARY, "/browse/shared"),
+            (PRIMARY, "/browse/alpha"),
+            (PRIMARY, "/v2/"),
+        ]
+    );
+}
+
+#[test]
 fn mismatched_protocol_driver_is_rejected() {
     let mut registrations = registrations();
     registrations[1].registration = &MISMATCHED_REGISTRATION;

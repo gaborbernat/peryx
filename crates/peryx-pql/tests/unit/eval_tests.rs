@@ -101,7 +101,11 @@ fn test_evaluate_boolean_logic() {
         &Predicate::Or(Box::new(no.clone()), Box::new(no.clone())),
         &row
     ));
-    assert!(evaluate(&Predicate::Not(Box::new(no)), &row));
+    assert!(evaluate(&Predicate::Not(Box::new(no.clone())), &row));
+    assert!(evaluate(
+        &Predicate::Not(Box::new(Predicate::Or(Box::new(no.clone()), Box::new(no)))),
+        &row
+    ));
 }
 
 #[test]

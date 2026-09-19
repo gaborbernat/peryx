@@ -216,7 +216,7 @@ fn test_exact_resource_matching_does_not_expand_globs(
 
 #[rstest]
 #[case::active(i64::MAX, Err(Denial::Unauthenticated))]
-#[case::expired(0, Err(Denial::Unavailable))]
+#[case::expired(1_000, Err(Denial::Unavailable))]
 fn test_authorize_classifies_anonymous_by_live_grants(#[case] expires_at: i64, #[case] expected: Result<(), Denial>) {
     let acl = acl(vec![NamedToken {
         expires_at: Some(expires_at),

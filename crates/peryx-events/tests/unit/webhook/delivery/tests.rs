@@ -24,6 +24,11 @@ fn test_wait_secs_bounds_scheduler_wakeups(#[case] next: i64, #[case] now: i64, 
 }
 
 #[test]
+fn test_scheduler_sleep_is_capped_at_one_hour() {
+    assert_eq!(MAX_SCHEDULER_SLEEP_SECS, 3_600);
+}
+
+#[test]
 fn test_backoff_caps() {
     assert_eq!(backoff_secs(1), 5);
     assert_eq!(backoff_secs(3), 45);

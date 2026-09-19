@@ -239,47 +239,46 @@ url = "https://github.com/leptos-rs/cargo-leptos/releases/download/v0.3.7/cargo-
 url_api = "https://api.github.com/repos/leptos-rs/cargo-leptos/releases/assets/465714617"
 
 [[tools."github:nextest-rs/nextest"]]
-version = "0.9.143"
+version = "0.9.145"
 backend = "github:nextest-rs/nextest"
 
 [tools."github:nextest-rs/nextest".options]
 version_prefix = "cargo-nextest-"
 
 [tools."github:nextest-rs/nextest"."platforms.linux-arm64"]
-checksum = "sha256:2a64b3566a92508550a7ab29c3e8db25472ca37730ecb4d22100b6aa440c2a68"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-aarch64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/501881925"
+checksum = "sha256:0ad2815fd91a7ecec3a7e25c749b584f66729ac688fd26b2fd494f7ff94b7fd0"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.145/cargo-nextest-0.9.145-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/568837128"
 provenance = "github-attestations"
 
 [tools."github:nextest-rs/nextest"."platforms.linux-x64"]
-checksum = "sha256:66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/501882467"
+checksum = "sha256:32aa82416099eb12fffae9cf1a279ad201fecbd3f74826c613e32e9006b29867"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.145/cargo-nextest-0.9.145-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/568838794"
 provenance = "github-attestations"
 
 [tools."github:nextest-rs/nextest"."platforms.macos-arm64"]
-checksum = "sha256:4830d430411148d17602a75cc880bfb4dc8dac153dea59a48a2ef4cc93577f07"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-universal-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/501885637"
+checksum = "sha256:52ecaedb4f5af9267ef7ed02bc937d2a15a94ff96cb663080e81311f798c9905"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.145/cargo-nextest-0.9.145-universal-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/568848732"
 provenance = "github-attestations"
-provenance_verified = true
 
 [tools."github:nextest-rs/nextest"."platforms.macos-x64"]
-checksum = "sha256:4830d430411148d17602a75cc880bfb4dc8dac153dea59a48a2ef4cc93577f07"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-universal-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/501885637"
+checksum = "sha256:52ecaedb4f5af9267ef7ed02bc937d2a15a94ff96cb663080e81311f798c9905"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.145/cargo-nextest-0.9.145-universal-apple-darwin.tar.gz"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/568848732"
 provenance = "github-attestations"
 
 [tools."github:nextest-rs/nextest"."platforms.windows-arm64"]
-checksum = "sha256:58c1637ba2396e6c556aa0092f9aa4388695594b8ddda5a4b8b39212574678ce"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-aarch64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/501886128"
+checksum = "sha256:c1659805ebf3fd21400163e59e2ea5abbe981437d9d2a9e369cf32afe606b816"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.145/cargo-nextest-0.9.145-aarch64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/568853584"
 provenance = "github-attestations"
 
 [tools."github:nextest-rs/nextest"."platforms.windows-x64"]
-checksum = "sha256:c670ba18e8731fd2eff33a47af33a0fa53d1afa6d0678344e82dc6f8fc7344ac"
-url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/501885754"
+checksum = "sha256:5bc4b6789103e9834f596eff2b290cfb5b2b69e5413c78bbaa5acc835ac5baa0"
+url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.145/cargo-nextest-0.9.145-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/568848390"
 provenance = "github-attestations"
 
 [[tools."github:obi1kenobi/cargo-semver-checks"]]

@@ -36,8 +36,14 @@ fn test_deadline_follows_the_grace_window() {
     assert_eq!(record().deadline_unix(), 1_000 + TRASH_GRACE_SECS);
 }
 
+#[test]
+fn test_trash_grace_is_thirty_days_in_seconds() {
+    assert_eq!(TRASH_GRACE_SECS, 2_592_000);
+}
+
 #[rstest]
 #[case::restorable(true, 1_000, TrashState::Restorable)]
+#[case::at_deadline(true, 1_000 + TRASH_GRACE_SECS, TrashState::Expired)]
 #[case::past_deadline(true, 1_000 + TRASH_GRACE_SECS + 1, TrashState::Expired)]
 #[case::content_removed(false, 1_000, TrashState::Expired)]
 fn test_state(#[case] retained: bool, #[case] now: i64, #[case] expected: TrashState) {

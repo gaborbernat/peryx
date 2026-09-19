@@ -9,7 +9,7 @@ use super::{
     write_one, write_profile,
 };
 #[cfg(target_os = "macos")]
-use super::{model, sysctl, sysctl_with};
+use super::{cores, model, sysctl, sysctl_with};
 
 /// Below this a returned figure cannot be a measurement: even a saturated CI disk moves far more
 /// than a kilobyte a second, so anything slower is a constant standing in for one.
@@ -102,6 +102,20 @@ fn core_description_handles_split_and_uniform_cpus() {
             })
         }),
         None
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cores_reports_what_sysctl_and_the_system_report() {
+    let logical = System::new_all().cpus().len();
+    assert_eq!(
+        cores(logical),
+        describe_cores(
+            logical,
+            sysctl("hw.perflevel0.logicalcpu"),
+            sysctl("hw.perflevel1.logicalcpu")
+        )
     );
 }
 

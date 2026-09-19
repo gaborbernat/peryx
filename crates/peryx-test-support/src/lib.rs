@@ -1689,6 +1689,32 @@ fn fixture_port_candidates() -> impl Iterator<Item = u16> {
     (0..FIXTURE_PORT_COUNT).map(move |offset| FIXTURE_PORT_BASE + (start + offset) % FIXTURE_PORT_COUNT)
 }
 
+/// Keeps parallel harnesses from selecting the same child-owned port.
+#[derive(Debug)]
+pub struct PortClaim(ListenerReservation);
+
+impl PortClaim {
+    /// Draws a port and retains its companion claim until this value drops.
+    ///
+    /// # Errors
+    /// Returns an I/O error when no fixture port is available.
+    pub fn ephemeral() -> std::io::Result<Self> {
+        let reservation = ListenerReservation::ephemeral()?;
+        Ok(Self(ListenerReservation {
+            port: reservation.port,
+            claim: reservation.claim,
+            #[cfg(unix)]
+            listener: None,
+        }))
+    }
+
+    /// Returns the port the child may bind.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.0.port
+    }
+}
+
 #[derive(Debug)]
 struct ListenerReservation {
     port: u16,
@@ -1818,17 +1844,6 @@ struct HeldListeners {
     public: Option<TcpListener>,
     #[cfg(unix)]
     availability: Option<TcpListener>,
-}
-
-/// A claimed number with nothing listening on it, for a caller whose own child binds it.
-fn free_port() -> ListenerReservation {
-    let reservation = ListenerReservation::ephemeral().expect("claim a fixture port");
-    ListenerReservation {
-        port: reservation.port,
-        claim: reservation.claim,
-        #[cfg(unix)]
-        listener: None,
-    }
 }
 
 /// Spawn a stand-alone node forced onto `port`, so a self-test can prove the harness detects a port

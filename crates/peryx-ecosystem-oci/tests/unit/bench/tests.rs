@@ -297,6 +297,26 @@ async fn mirror_boundaries_cover_success_and_failure() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
+async fn mirror_holds_its_port_claim_until_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let tools = Tools::install(directory.path());
+    tools.set_mode("claim-lifecycle");
+
+    let mirror = servers::start_mirror(&tools.environment(None)).await.unwrap();
+    let claim_port = std::fs::read_to_string(tools.directory.join("claim.port"))
+        .unwrap()
+        .trim()
+        .parse::<u16>()
+        .unwrap();
+    assert!(std::net::TcpListener::bind(("127.0.0.1", claim_port)).is_err());
+
+    drop(mirror);
+
+    std::net::TcpListener::bind(("127.0.0.1", claim_port)).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
 async fn workload_boundaries_cover_success_and_failure() {
     let directory = tempfile::tempdir().unwrap();
     let tools = Tools::install(directory.path());
@@ -575,6 +595,10 @@ if [ "$1" = run ]; then
     shift
   done
   port=$(printf %s "$mapping" | cut -d: -f2)
+  if [ "$mode" = claim-lifecycle ]; then
+    claim=$((port + 5000))
+    printf '%s\n' "$claim" >"${0%/*}/claim.port"
+  fi
   if [ "$detached" = true ]; then
     ready=${TMPDIR:-/tmp}/peryx-oci-ready-$port
     pidfile=${TMPDIR:-/tmp}/peryx-oci-pid-$port

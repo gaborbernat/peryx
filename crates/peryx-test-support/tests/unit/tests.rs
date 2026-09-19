@@ -63,6 +63,17 @@ async fn controlled_peer_accepts_the_client_connection() {
     assert_eq!(connection.peer_addr().unwrap(), client.local_addr().unwrap());
 }
 
+#[tokio::test(start_paused = true)]
+async fn controlled_peer_poll_accepts_the_client_connection() {
+    let peer = ControlledPeer::start().await;
+    peer.run_clock();
+    let client = tokio::spawn(tokio::net::TcpStream::connect(peer.address()));
+    let connection = std::future::poll_fn(|context| peer.poll_accept(context)).await.unwrap();
+    let client = client.await.unwrap().unwrap();
+
+    assert_eq!(connection.peer_addr().unwrap(), client.local_addr().unwrap());
+}
+
 #[test]
 fn ecosystem_driver_fixture_registers_declared_behavior() {
     let directory = tempfile::tempdir().unwrap();

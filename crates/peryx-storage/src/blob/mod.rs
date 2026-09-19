@@ -35,14 +35,26 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Syncing a file does not make its rename crash-durable: the directory entry reaches disk only once the
-/// containing directory is itself flushed. A caller that discarded this failure would hand out a
-/// durability receipt for a placement the filesystem never confirmed.
+/// Sync a directory tree from its leaves to its root.
+///
+/// # Errors
+/// Returns the failure to read, open, or flush a directory in the tree.
+pub fn sync_tree(path: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let child = entry?.path();
+        if child.is_dir() {
+            sync_tree(&child)?;
+        }
+    }
+    sync_dir(path)
+}
+
+/// Sync the directory that holds an entry.
 ///
 /// # Errors
 /// Returns the failure to open or flush the parent directory, or [`std::io::ErrorKind::InvalidInput`]
 /// when `path` names no entry in a directory.
-fn sync_parent(path: &Path) -> std::io::Result<()> {
+pub fn sync_parent(path: &Path) -> std::io::Result<()> {
     match path.parent() {
         // A bare file name is an entry in the working directory, which is what has to be flushed.
         Some(parent) if parent.as_os_str().is_empty() => sync_dir(Path::new(".")),

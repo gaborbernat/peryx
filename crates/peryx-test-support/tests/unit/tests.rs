@@ -696,6 +696,18 @@ fn process_accepts_the_startup_signal_as_its_first_event() {
 }
 
 #[test]
+fn process_accepts_the_startup_signal_after_another_event() {
+    with_fixture(|fixture| {
+        let node = fixture
+            .harness()
+            .spawn_with_config("after-boot", "")
+            .expect("start after the boot event");
+
+        assert!(node.is_ready());
+    });
+}
+
+#[test]
 fn process_reports_failure_after_startup_signal() {
     with_fixture(|fixture| {
         fs::write(fixture.serve_mode(), "signal-only").expect("set startup mode");

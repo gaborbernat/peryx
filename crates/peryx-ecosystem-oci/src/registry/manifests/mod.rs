@@ -264,11 +264,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 served =
                     store::get_manifest(&state.meta, digest)?.map(|manifest| manifest_response(manifest, digest, head));
             }
-            if served.is_none()
-                && let Some(client) = member.proxy_client()
-            {
+            if served.is_none() && member.proxy_client().is_some() {
                 served = self
-                    .pull_manifest_by_digest(state, client, &member.name, repo, digest, head, accept)
+                    .pull_manifest_by_digest(state, member, repo, digest, head, accept)
                     .await?;
             }
             if served.is_some() {
@@ -293,13 +291,14 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
     async fn pull_manifest_by_digest(
         &self,
         state: &ServingState,
-        client: &UpstreamClient,
-        index: &str,
+        member: &Index,
         repo: &str,
         digest: &str,
         head: bool,
         accept: Option<&str>,
     ) -> Result<Option<Response>, ServeError> {
+        let index = &member.name;
+        let client = member.proxy_client().expect("proxy member required");
         let gate_key = format!("oci\u{0}manifest\u{0}{digest}");
         let gate = flight_gate(state, &gate_key);
         let _guard = gate.lock().await;
@@ -403,7 +402,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         head: bool,
         accept: Option<&str>,
     ) -> Result<Option<Response>, ServeError> {
-        let Some(client) = member.proxy_client() else {
+        if member.proxy_client().is_none() {
             return Ok(match store::get_tag(&state.meta, &member.name, repo, tag)? {
                 Some(digest) if digest_decision(state, &digest)? == DigestDecision::Revoked => {
                     Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown"))
@@ -429,9 +428,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         if state.negative_fresh(&tag_miss_key(&member.name, repo, tag)) {
             return Ok(None);
         }
-        let fetched = self
-            .revalidate_tag(state, client, &member.name, repo, tag, head, accept)
-            .await;
+        let fetched = self.revalidate_tag(state, member, repo, tag, head, accept).await;
         state.cache.forget_flight(&gate_key);
         fetched
     }
@@ -439,13 +436,14 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
     async fn revalidate_tag(
         &self,
         state: &ServingState,
-        client: &UpstreamClient,
-        index: &str,
+        member: &Index,
         repo: &str,
         tag: &str,
         head: bool,
         accept: Option<&str>,
     ) -> Result<Option<Response>, ServeError> {
+        let index = &member.name;
+        let client = member.proxy_client().expect("proxy member required");
         if head {
             return self.revalidate_tag_head(state, client, index, repo, tag, accept).await;
         }

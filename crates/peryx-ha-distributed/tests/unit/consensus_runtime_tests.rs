@@ -2365,7 +2365,12 @@ async fn test_replacing_a_voter_retries_after_a_joint_consensus_timeout() {
         group.cluster_status().voters,
         vec!["east".to_owned(), "west".to_owned()]
     );
+    let last_applied = east_metrics.borrow().last_applied;
     gate.open();
+    east_metrics
+        .wait_for(|metrics| metrics.last_applied > last_applied)
+        .await
+        .unwrap();
     let retried = group.submit(None, command).await.unwrap().receipt;
 
     assert_eq!(

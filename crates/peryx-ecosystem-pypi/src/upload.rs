@@ -1078,22 +1078,19 @@ fn validate_import_value(field: &'static str, raw: &str, allow_empty: bool) -> R
             .ok_or_else(|| invalid("must not be empty"));
     }
     name.split('.')
-        .map(normalize_python_identifier)
-        .collect::<Option<Vec<_>>>()
-        .map(|parts| parts.join("."))
+        .all(is_python_identifier)
+        .then(|| name.nfkc().collect())
         .ok_or_else(|| invalid("must be a dotted sequence of Python identifiers"))
 }
 
-fn normalize_python_identifier(component: &str) -> Option<String> {
-    let normalized = component.nfkc().collect::<String>();
-    let mut characters = normalized.chars();
-    let first = characters.next()?;
+fn is_python_identifier(component: &str) -> bool {
+    let mut characters = component.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
     (first == '_' || is_xid_start(first))
-        .then_some(())
-        .filter(|()| !is_python_hard_keyword(&normalized))?;
-    characters
-        .all(|character| character == '_' || is_xid_continue(character))
-        .then_some(normalized)
+        && !is_python_hard_keyword(component)
+        && characters.all(|character| character == '_' || is_xid_continue(character))
 }
 
 fn is_python_hard_keyword(name: &str) -> bool {

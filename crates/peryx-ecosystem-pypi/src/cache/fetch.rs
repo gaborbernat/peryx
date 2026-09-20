@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::catalog::redact_url;
 use crate::policy::PypiPolicy as _;
-use crate::simple::{DetailSink, File, absolutize, stream_detail_json};
+use crate::simple::{DetailSink, File, StreamDetailError, absolutize, stream_detail_json};
 use crate::store::PypiStore as _;
 use crate::store::{
     CachedIndex, ProjectGeneration, abort_project_generation, active_project_generation, begin_project_generation,
@@ -252,8 +252,7 @@ pub async fn refresh_stale_pages(state: &Arc<ServingState>) -> Result<RefreshSum
             let result = fetch_and_store(state, &key, &index.name, &project, client).await;
             release_then(state, &key, guard, || (current.body, result))
         };
-        summary.checked += 1;
-        match &result {
+        match result {
             Ok(Some(record)) => {
                 let changed = before != record.body;
                 if changed {
@@ -271,11 +270,27 @@ pub async fn refresh_stale_pages(state: &Arc<ServingState>) -> Result<RefreshSum
             Err(err) => {
                 let reason = err.user_message();
                 log_cache_sync(&index.route, &project, "failure", false, Some(&reason));
+                if !is_recoverable_refresh_error(&err) {
+                    return Err(err);
+                }
             }
         }
-        result?;
+        summary.checked += 1;
     }
     Ok(summary)
+}
+
+const fn is_recoverable_refresh_error(error: &CacheError) -> bool {
+    matches!(
+        error,
+        CacheError::Upstream(_)
+            | CacheError::Parse(_)
+            | CacheError::Simple(_)
+            | CacheError::Unavailable
+            | CacheError::OfflineMissing(_)
+            | CacheError::RateLimited { .. }
+            | CacheError::UpstreamRateLimited { .. }
+    )
 }
 
 fn log_cache_sync(index: &str, project: &str, result: &'static str, changed: bool, reason: Option<&str>) {
@@ -641,7 +656,11 @@ fn parse_project(
     } = input;
     let mut batcher = FileBatcher::new(meta, index, project, policy, generation, upstream, max_files);
     let header = if format == "json" {
-        let detail = stream_detail_json(reader, base, &mut batcher)?;
+        let detail = stream_detail_json(reader, base, &mut batcher).map_err(|error| match error {
+            StreamDetailError::Simple(error) => ProjectSyncError::Simple(error),
+            StreamDetailError::Reader(error) => ProjectSyncError::Io(error),
+            StreamDetailError::Sink(error) => error,
+        })?;
         ParsedDetailHeader {
             versions: detail.versions,
             project_status: detail.meta.project_status,

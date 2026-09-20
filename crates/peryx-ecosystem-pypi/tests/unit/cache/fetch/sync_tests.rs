@@ -835,6 +835,42 @@ fn test_parse_project_rejects_too_many_files() {
 }
 
 #[test]
+fn test_parse_project_preserves_a_json_storage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peryx.redb");
+    drop(MetaStore::open(&path).unwrap());
+    let meta = MetaStore::open_existing_read_only(path).unwrap();
+    let files = (0..PROJECT_FILE_BATCH)
+        .map(|ordinal| {
+            format!(
+                r#"{{"filename":"flask-{ordinal}.tar.gz","url":"flask-{ordinal}.tar.gz","hashes":{{"sha256":"{}"}},"size":1}}"#,
+                "a".repeat(64),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(r#"{{"meta":{{"api-version":"1.4"}},"versions":[],"name":"flask","files":[{files}]}}"#);
+
+    let error = parse_project(
+        &mut std::io::Cursor::new(body),
+        ParseProject {
+            format: "json",
+            base: &url::Url::parse("https://files.example/simple/flask/").unwrap(),
+            meta: &meta,
+            index: "pypi",
+            policy: &Policy::default(),
+            project: "flask",
+            generation: 1,
+            upstream: None,
+            max_files: super::MAX_PROJECT_FILES,
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ProjectSyncError::Store(_)));
+}
+
+#[test]
 fn test_parse_project_flushes_at_the_batch_limit() {
     let (_dir, meta) = store();
     let (id, _) = begin_project_generation(&meta, "pypi", "flask").unwrap();

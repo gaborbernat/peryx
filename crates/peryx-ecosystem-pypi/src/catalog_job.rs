@@ -23,6 +23,8 @@ use crate::store::list_catalog_projects;
 
 const CATALOG_SYNC: &str = "catalog_sync";
 const MAX_PROGRESS_UPDATES: usize = 100;
+const MAX_PROJECT_FAILURE_DIAGNOSTICS: usize = 3;
+const MAX_PROJECT_FAILURE_DIAGNOSTIC_BYTES: usize = 512;
 pub const DEFAULT_CATALOG_PROJECTS: usize = 10_000;
 pub const DEFAULT_CATALOG_CONCURRENCY: usize = 4;
 pub const DEFAULT_CATALOG_TIMEOUT: Duration = Duration::from_mins(15);
@@ -471,6 +473,7 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
     let meta = &state.meta;
     let inflight = &state.cache.inflight;
     let root = tokio::select! {
+        biased;
         () = ctx.cancelled() => return Ok(JobRunOutcome::cancelled(JobReport::default())),
         root = sync_catalog(client, inflight, meta, repository, fallback_source) => root,
     };
@@ -487,11 +490,11 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
     let projects = catalog_projects_or_error(list_catalog_projects(meta, repository, parameters.max_projects.get()))?;
     let total = projects.len();
     let progress_interval = total.div_ceil(MAX_PROGRESS_UPDATES).max(1);
-    let mut outcomes = stream::iter(projects)
-        .map(|project| async move {
+    let mut outcomes = stream::iter(projects.into_iter().enumerate())
+        .map(|(ordinal, project)| async move {
             let outcome =
                 sync_project_files(client, inflight, meta, repository, policy, &project, fallback_source).await;
-            (project, outcome)
+            (ordinal, project, outcome)
         })
         .buffer_unordered(parameters.concurrency.get());
     let mut report = JobReport {
@@ -499,29 +502,97 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
         changed: root_changed,
         ..JobReport::default()
     };
+    let mut failures = 0;
+    let mut failure_diagnostics: Vec<(usize, JobFailure)> = Vec::with_capacity(MAX_PROJECT_FAILURE_DIAGNOSTICS);
     loop {
         let next = tokio::select! {
+            biased;
             () = ctx.cancelled() => return Ok(JobRunOutcome::cancelled(report)),
             next = outcomes.next() => next,
         };
-        let Some((project, outcome)) = next else {
-            return Ok(JobRunOutcome::succeeded(report));
+        let Some((ordinal, project, outcome)) = next else {
+            return failure_diagnostics.first().map_or_else(
+                || Ok(JobRunOutcome::succeeded(report)),
+                |(_, error)| {
+                    Err(JobFailure::new(
+                        error.code(),
+                        project_failure_summary(failures, &failure_diagnostics),
+                    ))
+                },
+            );
         };
         report.processed += 1;
         match outcome {
             Ok(ProjectSyncOutcome::Published { .. }) => report.changed += 1,
             Ok(ProjectSyncOutcome::NotModified { .. } | ProjectSyncOutcome::Missing) => {}
             Err(error) => {
-                let error = project_error(&error);
-                return Err(JobFailure::new(
-                    error.code(),
-                    format!("project {project:?}: {}", error.message()),
-                ));
+                let Some(error) = recoverable_project_error(&error) else {
+                    return Err(project_error(&error));
+                };
+                failures += 1;
+                record_project_failure(&mut failure_diagnostics, ordinal, &project, &error);
             }
         }
         if report.processed.is_multiple_of(progress_interval as u64) || report.processed == total as u64 {
             tracing::info!(repository, processed = report.processed, total, "catalog sync progress");
         }
+    }
+}
+
+fn record_project_failure(
+    diagnostics: &mut Vec<(usize, JobFailure)>,
+    ordinal: usize,
+    project: &str,
+    error: &JobFailure,
+) {
+    if diagnostics.len() == MAX_PROJECT_FAILURE_DIAGNOSTICS
+        && diagnostics.last().is_some_and(|(last, _)| ordinal > *last)
+    {
+        return;
+    }
+    let position = diagnostics.partition_point(|(existing, _)| *existing < ordinal);
+    diagnostics.insert(
+        position,
+        (
+            ordinal,
+            JobFailure::new(error.code(), project_failure_diagnostic(project, error)),
+        ),
+    );
+    diagnostics.truncate(MAX_PROJECT_FAILURE_DIAGNOSTICS);
+}
+
+fn project_failure_diagnostic(project: &str, error: &JobFailure) -> String {
+    truncate_utf8(
+        format!("project {project:?}: {}", error.message()),
+        MAX_PROJECT_FAILURE_DIAGNOSTIC_BYTES,
+    )
+}
+
+fn project_failure_summary(failures: u64, diagnostics: &[(usize, JobFailure)]) -> String {
+    let mut summary = format!("{failures} project sync failures");
+    for (_, error) in diagnostics {
+        summary.push_str("; ");
+        summary.push_str(error.message());
+    }
+    summary
+}
+
+fn truncate_utf8(text: String, maximum: usize) -> String {
+    if text.len() <= maximum {
+        return text;
+    }
+    let end = text.floor_char_boundary(maximum);
+    text[..end].to_owned()
+}
+
+fn recoverable_project_error(error: &ProjectSyncError) -> Option<JobFailure> {
+    match error {
+        ProjectSyncError::Upstream(_)
+        | ProjectSyncError::Status(_)
+        | ProjectSyncError::Simple(_)
+        | ProjectSyncError::TooLarge
+        | ProjectSyncError::TooManyFiles => Some(project_error(error)),
+        ProjectSyncError::Store(_) | ProjectSyncError::Io(_) => None,
     }
 }
 

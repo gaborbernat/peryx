@@ -4,7 +4,7 @@ use std::error::Error as _;
 use super::{sample_detail, sample_list, sha256};
 use crate::{
     CoreMetadata, File, Meta, ProjectDetail, ProjectList, ProjectListEntry, ProjectStatus, Provenance, SimpleError,
-    Yanked, parse_index, render_legacy_json, to_json,
+    StreamDetailError, Yanked, parse_index, render_legacy_json, to_json,
 };
 
 #[test]
@@ -522,6 +522,38 @@ impl crate::simple::DetailSink for Boom {
     }
 }
 
+struct BrokenReader;
+
+impl std::io::Read for BrokenReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("local reader failed"))
+    }
+}
+
+struct InterruptOnceReader {
+    reader: std::io::Cursor<&'static [u8]>,
+    interrupted: bool,
+}
+
+impl InterruptOnceReader {
+    fn new(body: &'static [u8]) -> Self {
+        Self {
+            reader: std::io::Cursor::new(body),
+            interrupted: false,
+        }
+    }
+}
+
+impl std::io::Read for InterruptOnceReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if !self.interrupted {
+            self.interrupted = true;
+            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+        }
+        self.reader.read(buffer)
+    }
+}
+
 fn detail_base() -> url::Url {
     url::Url::parse("https://pypi.org/simple/flask/").unwrap()
 }
@@ -568,7 +600,10 @@ fn test_stream_detail_json_rejects_unknown_project_status() {
         "name":"demo","files":[]}"#;
     let mut sink = Collect::default();
     let error = crate::simple::stream_detail_json(std::io::Cursor::new(body), &detail_base(), &mut sink).unwrap_err();
-    assert!(matches!(&error, SimpleError::InvalidProjectStatus(status) if status == "frozen"));
+    assert!(matches!(
+        &error,
+        StreamDetailError::Simple(SimpleError::InvalidProjectStatus(status)) if status == "frozen"
+    ));
 }
 
 #[test]
@@ -645,7 +680,33 @@ fn test_stream_detail_json_rejects_non_array_files() {
 fn test_stream_detail_json_surfaces_a_sink_error() {
     let body = br#"{"meta":{},"name":"flask","files":[{"filename":"f","url":"u","hashes":{}}]}"#;
     let mut sink = Boom;
-    assert!(crate::simple::stream_detail_json(std::io::Cursor::new(&body[..]), &detail_base(), &mut sink).is_err());
+    let error =
+        crate::simple::stream_detail_json(std::io::Cursor::new(&body[..]), &detail_base(), &mut sink).unwrap_err();
+
+    assert!(matches!(error, StreamDetailError::Sink(error) if error == "sink rejected the file"));
+}
+
+#[test]
+fn test_stream_detail_json_preserves_a_reader_error() {
+    let mut sink = Collect::default();
+
+    let error = crate::simple::stream_detail_json(BrokenReader, &detail_base(), &mut sink).unwrap_err();
+
+    assert!(matches!(error, StreamDetailError::Reader(error) if error.to_string() == "local reader failed"));
+}
+
+#[test]
+fn test_stream_detail_json_retries_an_interrupted_reader() {
+    let mut sink = Collect::default();
+
+    let detail = crate::simple::stream_detail_json(
+        InterruptOnceReader::new(br#"{"meta":{},"name":"flask","files":[]}"#),
+        &detail_base(),
+        &mut sink,
+    )
+    .unwrap();
+
+    assert_eq!(detail.name, "flask");
 }
 
 #[test]

@@ -135,7 +135,7 @@ async fn test_serving_refresh_stale_reports_the_sweep() {
 }
 
 #[tokio::test]
-async fn test_serving_refresh_stale_surfaces_errors_as_strings() {
+async fn test_serving_refresh_stale_records_project_errors() {
     let h = harness().await;
     let digest = Digest::of(b"wheel");
     let file_url = format!("{}/files/flask.whl", h.server.uri());
@@ -151,11 +151,11 @@ async fn test_serving_refresh_stale_surfaces_errors_as_strings() {
     mount_page(&h.server, "invalid".to_owned(), ResponseTemplate::new(200)).await;
     h.clock.fetch_add(61, Ordering::Relaxed);
 
-    let err = crate::serving::PypiServing
+    let summary = crate::serving::PypiServing
         .refresh_stale(h.state.serving.clone())
         .await
-        .unwrap_err();
-    assert!(err.contains("simple API document could not be parsed"));
+        .unwrap();
+    assert_eq!((summary.checked, summary.changed), (1, 0));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -291,13 +291,10 @@ async fn test_refresh_sweep_logs_mirror_sync_failure() {
     let logs = LogCapture::default();
     let guard = logs.install();
 
-    let err = refresh_stale_pages(&h.state.serving).await.unwrap_err();
+    let summary = refresh_stale_pages(&h.state.serving).await.unwrap();
 
     drop(guard);
-    assert!(
-        err.user_message()
-            .starts_with("simple API document could not be parsed")
-    );
+    assert_eq!((summary.checked, summary.changed), (1, 0));
     let events = logs.security_events();
     let sync = events
         .iter()
@@ -307,6 +304,55 @@ async fn test_refresh_sweep_logs_mirror_sync_failure() {
     assert_eq!(field(sync, "resource"), Some("flask"));
     assert!(field(sync, "reason").is_some_and(|reason| reason.starts_with("simple API document could not be parsed")));
     assert_eq!(sync["fields"]["changed"], false);
+}
+
+#[tokio::test]
+async fn test_refresh_sweep_continues_after_a_project_failure() {
+    let h = harness().await;
+    let old = Digest::of(b"wheel-v1");
+    let new = Digest::of(b"wheel-v2");
+    for project in ["broken", "healthy"] {
+        h.state
+            .serving
+            .meta
+            .put_index(
+                &format!("pypi/{project}"),
+                &CachedIndex {
+                    source: None,
+                    last_modified: None,
+                    etag: None,
+                    last_serial: None,
+                    fetched_at_unix: 0,
+                    content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
+                    fresh_secs: None,
+                    body: detail_json(old.as_str(), &format!("{}/files/{project}.whl", h.server.uri())).into_bytes(),
+                },
+            )
+            .unwrap();
+    }
+    Mock::given(method("GET"))
+        .and(path("/simple/broken/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("invalid", "application/vnd.pypi.simple.v1+json"))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/simple/healthy/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            detail_json(new.as_str(), &format!("{}/files/healthy.whl", h.server.uri())),
+            "application/vnd.pypi.simple.v1+json",
+        ))
+        .expect(1)
+        .mount(&h.server)
+        .await;
+
+    assert_eq!(
+        refresh_stale_pages(&h.state.serving).await.unwrap(),
+        crate::cache::RefreshSummary { checked: 2, changed: 1 }
+    );
+    let healthy = h.state.serving.meta.get_index("pypi/healthy").unwrap().unwrap();
+    assert!(String::from_utf8(healthy.body).unwrap().contains(new.as_str()));
+    h.server.verify().await;
 }
 
 #[tokio::test]
@@ -604,7 +650,7 @@ async fn test_refresh_sweep_sends_validators_only_to_the_source_that_answered() 
 }
 
 #[tokio::test]
-async fn test_refresh_sweep_rejects_a_304_from_a_source_that_never_answered() {
+async fn test_refresh_sweep_tolerates_a_304_from_a_source_that_never_answered() {
     let (first, second) = (MockServer::start().await, MockServer::start().await);
     let dir = tempfile::tempdir().unwrap();
     let state = routed_page_from_second(&dir, &first, &second).await;
@@ -612,9 +658,7 @@ async fn test_refresh_sweep_rejects_a_304_from_a_source_that_never_answered() {
     // `first` was asked unconditionally, so its "not modified" is about no page peryx holds.
     mount_not_modified(&first).await;
 
-    let error = refresh_stale_pages(&state.serving).await.unwrap_err();
-
-    assert!(matches!(error, crate::cache::CacheError::Unavailable));
+    assert_eq!(refresh_stale_pages(&state.serving).await.unwrap().checked, 1);
     let untouched = state.serving.meta.get_index("pypi/flask").unwrap().unwrap();
     assert_eq!(untouched, stored);
 }

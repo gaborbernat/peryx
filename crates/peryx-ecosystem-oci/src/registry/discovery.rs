@@ -17,12 +17,6 @@ struct ProxyTagPage {
     stale_error: Option<crate::upstream::UpstreamError>,
 }
 
-#[derive(serde::Deserialize)]
-struct UpstreamTagPage {
-    name: String,
-    tags: Vec<String>,
-}
-
 enum TagTarget {
     Digest(String),
     Missing,
@@ -774,11 +768,31 @@ fn tag_page_body(name: &str, tags: &[String]) -> Vec<u8> {
 }
 
 fn validate_tag_page(body: &[u8], expected_name: &str) -> Result<Vec<String>, ServeError> {
-    let page: UpstreamTagPage = serde_json::from_slice(body).map_err(invalid_tag_page)?;
-    if page.name != expected_name {
+    let document: serde_json::Value = serde_json::from_slice(body).map_err(invalid_tag_page)?;
+    let Some(fields) = document.as_object() else {
+        return Err(invalid_tag_page("tag page is not an object"));
+    };
+    if fields.get("name").and_then(serde_json::Value::as_str) != Some(expected_name) {
         return Err(invalid_tag_page("tag page names another repository"));
     }
-    Ok(page.tags)
+    let Some(tags) = fields
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|tags| tags.iter().map(serde_json::Value::as_str).collect::<Option<Vec<_>>>())
+    else {
+        return Err(invalid_tag_page("tag page has no string tag array"));
+    };
+    if !tags_are_ordered(&tags) {
+        return Err(invalid_tag_page("tag page tags are not ordered"));
+    }
+    Ok(tags.into_iter().map(str::to_owned).collect())
+}
+
+fn tags_are_ordered(tags: &[&str]) -> bool {
+    tags.windows(2).all(|pair| pair[0] <= pair[1])
+        || tags
+            .windows(2)
+            .all(|pair| pair[0].to_ascii_lowercase() <= pair[1].to_ascii_lowercase())
 }
 
 fn invalid_tag_page(error: impl std::fmt::Display) -> ServeError {

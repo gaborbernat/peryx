@@ -158,20 +158,528 @@ async fn test_manifest_token_endpoint_failure_is_a_gateway_error() {
 async fn test_manifest_head_by_tag_returns_headers_only() {
     let server = MockServer::start().await;
     let body = br#"{"schemaVersion":2}"#;
-    Mock::given(method("GET"))
+    Mock::given(method("HEAD"))
         .and(path("/v2/app/manifests/v1"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_vec(), MANIFEST_TYPE))
+        .and(match_header("accept", MANIFEST_TYPE))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", oci_digest(body).as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", body.len().to_string().as_str()),
+        )
+        .expect(1)
         .mount(&server)
         .await;
-    mount_head_without_digest(&server, "/v2/app/manifests/v1").await;
     let dir = tempfile::tempdir().unwrap();
-    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
-    let (status, headers, got) = send(&app, Method::HEAD, "/v2/hub/app/manifests/v1").await;
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, headers, got) = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/hub/app/manifests/v1",
+        &[("accept", MANIFEST_TYPE)],
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["docker-content-digest"], oci_digest(body));
+    assert_eq!(headers[header::CONTENT_TYPE], MANIFEST_TYPE);
     assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
+    assert_eq!(headers[header::ETAG], format!("\"{}\"", oci_digest(body)));
     assert!(got.is_empty());
+    assert_eq!(
+        (
+            store::get_tag(&state.serving.meta, "hub", "app", "v1").unwrap(),
+            store::get_manifest(&state.serving.meta, &oci_digest(body)).unwrap(),
+            store::manifest_is_member(&state.serving.meta, "hub", "app", &oci_digest(body)).unwrap(),
+        ),
+        (None, None, false)
+    );
 }
+
+#[tokio::test]
+async fn test_manifest_head_by_digest_returns_upstream_headers_without_storage() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2,"config":{}}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header(
+                    "content-type",
+                    "application/vnd.oci.image.manifest.v1+json; charset=utf-8",
+                )
+                .insert_header("content-length", body.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, headers, got) = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{digest}")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], digest);
+    assert_eq!(
+        headers[header::CONTENT_TYPE],
+        "application/vnd.oci.image.manifest.v1+json; charset=utf-8"
+    );
+    assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
+    assert_eq!(headers[header::ETAG], format!("\"{digest}\""));
+    assert!(got.is_empty());
+    assert!(!store::manifest_is_member(&state.serving.meta, "hub", "app", &digest).unwrap());
+}
+
+#[rstest]
+#[case::non_ok_success(206, MANIFEST_TYPE)]
+#[case::malformed_type(200, "application")]
+#[case::wildcard_type(200, "*/*")]
+#[case::wildcard_subtype(200, "application/*")]
+#[tokio::test]
+async fn test_manifest_head_rejects_invalid_metadata_without_a_get(#[case] upstream: u16, #[case] media_type: &str) {
+    let server = MockServer::start().await;
+    let digest = oci_digest(b"manifest");
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(upstream)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", media_type)
+                .insert_header("content-length", "8"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, body) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+    assert_eq!(headers.get("docker-content-digest"), None);
+    assert_eq!(headers.get(header::ETAG), None);
+    assert!(body.is_empty(), "{body:?}");
+    assert_eq!(
+        (
+            store::get_tag(&state.serving.meta, "hub", "app", "latest").unwrap(),
+            store::get_manifest(&state.serving.meta, &digest).unwrap(),
+        ),
+        (None, None)
+    );
+}
+
+#[tokio::test]
+async fn test_cold_manifest_head_honors_if_none_match() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", body.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, response) = send_with(
+        &app,
+        Method::HEAD,
+        &format!("/v2/hub/app/manifests/{digest}"),
+        &[("if-none-match", &format!("\"{digest}\""))],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert_eq!(headers[header::ETAG], format!("\"{digest}\""));
+    assert!(response.is_empty());
+}
+
+#[tokio::test]
+async fn test_manifest_head_by_digest_rejects_a_mismatched_digest_without_a_get() {
+    let server = MockServer::start().await;
+    let requested = oci_digest(b"requested");
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{requested}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", oci_digest(b"other").as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", "5"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{requested}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, _, body) = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{requested}")).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(body.is_empty(), "{body:?}");
+    assert!(!store::manifest_is_member(&state.serving.meta, "hub", "app", &requested).unwrap());
+}
+
+#[tokio::test]
+async fn test_manifest_head_with_missing_digest_is_a_gateway_error_without_a_get() {
+    let server = MockServer::start().await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", "17"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, _, body) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(body.is_empty(), "{body:?}");
+    assert_eq!(
+        store::get_tag(&state.serving.meta, "hub", "app", "latest").unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn test_manifest_head_rejects_missing_type_and_malformed_length() {
+    let server = MockServer::start().await;
+    let digest = oci_digest(b"manifest");
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/missing-type"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-length", "8"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/bad-length"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", "+8"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    for reference in ["missing-type", "bad-length"] {
+        assert_eq!(
+            send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{reference}"))
+                .await
+                .0,
+            StatusCode::BAD_GATEWAY
+        );
+    }
+    assert!(!store::manifest_is_member(&state.serving.meta, "hub", "app", &digest).unwrap());
+}
+
+#[rstest]
+#[case::unauthorized(401, StatusCode::UNAUTHORIZED, None)]
+#[case::forbidden(403, StatusCode::NOT_FOUND, None)]
+#[case::rate_limited(429, StatusCode::TOO_MANY_REQUESTS, Some("7"))]
+#[case::server_error(500, StatusCode::BAD_GATEWAY, None)]
+#[tokio::test]
+async fn test_cold_manifest_head_preserves_upstream_status(
+    #[case] upstream: u16,
+    #[case] expected: StatusCode,
+    #[case] retry_after: Option<&str>,
+) {
+    let server = MockServer::start().await;
+    let mut response = ResponseTemplate::new(upstream);
+    if let Some(retry_after) = retry_after {
+        response = response.insert_header("retry-after", retry_after);
+    }
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(response)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let (status, headers, _) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(status, expected);
+    assert_eq!(
+        headers.get(header::RETRY_AFTER).and_then(|value| value.to_str().ok()),
+        retry_after
+    );
+}
+
+#[tokio::test]
+async fn test_stale_manifest_head_serves_cached_metadata_after_an_upstream_failure() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) =
+        crate::tests::proxy_with_clock(&dir, &format!("{}/", server.uri()), std::sync::Arc::new(|| 1_000));
+    record_stale_tag(&state, &digest, body);
+
+    let (status, headers, response) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], digest);
+    assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
+    assert!(response.is_empty());
+}
+
+#[tokio::test]
+async fn test_stale_manifest_head_survives_a_transport_failure() {
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = crate::tests::proxy_with_clock(&dir, "http://127.0.0.1:1/", std::sync::Arc::new(|| 1_000));
+    record_stale_tag(&state, &digest, body);
+
+    let (status, headers, response) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], digest);
+    assert!(response.is_empty());
+}
+
+#[tokio::test]
+async fn test_invalid_manifest_head_metadata_bypasses_a_stale_tag() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", body.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) =
+        crate::tests::proxy_with_clock(&dir, &format!("{}/", server.uri()), std::sync::Arc::new(|| 1_000));
+    record_stale_tag(&state, &digest, body);
+
+    let (status, _, response) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(response.is_empty(), "{response:?}");
+}
+
+#[tokio::test]
+async fn test_non_ok_successful_manifest_head_bypasses_a_stale_tag() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", body.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) =
+        crate::tests::proxy_with_clock(&dir, &format!("{}/", server.uri()), std::sync::Arc::new(|| 1_000));
+    record_stale_tag(&state, &digest, body);
+
+    assert_eq!(
+        send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[rstest]
+#[case::unchanged(false)]
+#[case::changed(true)]
+#[tokio::test]
+async fn test_stale_manifest_head_does_not_update_the_tag_mapping_or_freshness(#[case] changed: bool) {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let cached = oci_digest(body);
+    let upstream = if changed {
+        format!("sha256:{}", "a".repeat(64))
+    } else {
+        cached.clone()
+    };
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", upstream.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", "17"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) =
+        crate::tests::proxy_with_clock(&dir, &format!("{}/", server.uri()), std::sync::Arc::new(|| 1_000));
+    record_stale_tag(&state, &cached, body);
+
+    let (status, headers, response) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(
+        (status, headers["docker-content-digest"].as_bytes(), response.is_empty()),
+        (StatusCode::OK, upstream.as_bytes(), true)
+    );
+    assert_eq!(
+        (
+            store::get_tag(&state.serving.meta, "hub", "app", "latest").unwrap(),
+            store::tag_freshness(&state.serving.meta, "hub", "app", "latest").unwrap(),
+        ),
+        (Some(cached.clone()), Some((900, cached)))
+    );
+}
+
+#[tokio::test]
+async fn test_manifest_head_404_retires_a_stale_tag_and_records_the_miss() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) =
+        crate::tests::proxy_with_clock(&dir, &format!("{}/", server.uri()), std::sync::Arc::new(|| 1_000));
+    record_stale_tag(&state, &digest, body);
+
+    assert_eq!(
+        send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        store::get_tag(&state.serving.meta, "hub", "app", "latest").unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn test_virtual_manifest_head_falls_through_a_hosted_miss_to_the_proxy() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", body.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = crate::tests::virtual_stack(&dir, &format!("{}/", server.uri()));
+
+    let (status, headers, response) = send(&app, Method::HEAD, "/v2/reg/app/manifests/latest").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], digest);
+    assert!(response.is_empty());
+}
+
+#[tokio::test]
+async fn test_warm_manifest_head_requires_local_repository_membership() {
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy_pair(&dir, "http://127.0.0.1:1/", "http://127.0.0.1:1/");
+    store::record_manifest(
+        &state.serving.meta,
+        "hub",
+        "app",
+        &digest,
+        &Manifest {
+            media_type: MANIFEST_TYPE.to_owned(),
+            bytes: body.to_vec(),
+        },
+    )
+    .unwrap();
+
+    let warm = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{digest}")).await;
+    let foreign = send(&app, Method::HEAD, &format!("/v2/vault/app/manifests/{digest}")).await;
+
+    assert_eq!((warm.0, warm.2.is_empty()), (StatusCode::OK, true));
+    assert_eq!(foreign.0, StatusCode::BAD_GATEWAY);
+    assert!(!store::manifest_is_member(&state.serving.meta, "vault", "app", &digest).unwrap());
+}
+
+fn record_stale_tag(state: &peryx_driver::AppState, digest: &str, body: &[u8]) {
+    store::record_manifest(
+        &state.serving.meta,
+        "hub",
+        "app",
+        digest,
+        &Manifest {
+            media_type: MANIFEST_TYPE.to_owned(),
+            bytes: body.to_vec(),
+        },
+    )
+    .unwrap();
+    store::put_tag(&state.serving.meta, "hub", "app", "latest", digest).unwrap();
+    store::set_tag_freshness(&state.serving.meta, "hub", "app", "latest", digest, 900).unwrap();
+}
+
 #[tokio::test]
 async fn test_manifest_by_digest_served_from_cache_without_upstream() {
     let dir = tempfile::tempdir().unwrap();

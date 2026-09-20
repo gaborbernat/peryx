@@ -346,6 +346,384 @@ async fn test_revoked_proxy_tag_never_serves_from_cache(#[case] fetched_at: i64)
     assert!(body_has_code(&response, "MANIFEST_UNKNOWN"), "{response:?}");
 }
 
+#[tokio::test]
+async fn test_revoked_cold_manifest_head_is_not_published() {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", body.len().to_string().as_str()),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    revoke(&state, &digest);
+
+    let (status, _, response) = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{digest}")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(response.is_empty(), "{response:?}");
+    assert!(!store::manifest_is_member(&state.serving.meta, "hub", "app", &digest).unwrap());
+}
+
+#[rstest]
+#[case::tag("latest")]
+#[case::digest("{digest}")]
+#[tokio::test]
+async fn test_cold_manifest_head_drops_an_upstream_digest_revoked_during_the_request(#[case] reference: &str) {
+    let server = MockServer::start().await;
+    let body = br#"{"schemaVersion":2}"#;
+    let digest = oci_digest(body);
+    let reference = if reference == "latest" {
+        "latest".to_owned()
+    } else {
+        digest.clone()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let revoking = state.clone();
+    let revoked = digest.clone();
+    let advertised = digest.clone();
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{reference}")))
+        .respond_with(move |_: &wiremock::Request| {
+            revoke(&revoking, &revoked);
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", advertised.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", body.len().to_string().as_str())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{reference}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let (status, _, response) = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{reference}")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(response.is_empty(), "{response:?}");
+    assert_eq!(
+        (
+            store::get_manifest(&state.serving.meta, &digest).unwrap(),
+            store::get_tag(&state.serving.meta, "hub", "app", "latest").unwrap(),
+            store::manifest_is_member(&state.serving.meta, "hub", "app", &digest).unwrap(),
+            state.serving.meta.get_artifact_placement(&digest).unwrap(),
+        ),
+        (None, None, false, None)
+    );
+}
+
+#[tokio::test]
+async fn test_revocation_during_cold_docker_list_fetch_blocks_the_child_head() {
+    let server = MockServer::start().await;
+    let child = br#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}"#;
+    let child_digest = oci_digest(child);
+    let list = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{LIST_TYPE}","manifests":[{{"digest":"{child_digest}","platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+    )
+    .into_bytes();
+    let list_digest = oci_digest(&list);
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let revoking = state.clone();
+    let revoked = list_digest.clone();
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(move |_: &wiremock::Request| {
+            revoke(&revoking, &revoked);
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list.clone(), LIST_TYPE)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let (status, _, response) = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/hub/app/manifests/latest",
+        &[("accept", LEGACY_ACCEPT)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(response.is_empty(), "{response:?}");
+}
+
+#[tokio::test]
+async fn test_trashing_a_cold_docker_list_tag_during_its_fetch_blocks_the_child_head() {
+    let server = MockServer::start().await;
+    let child = br#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}"#;
+    let child_digest = oci_digest(child);
+    let list = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{LIST_TYPE}","manifests":[{{"digest":"{child_digest}","platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+    )
+    .into_bytes();
+    let list_digest = oci_digest(&list);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    store::put_tag(&state.serving.meta, "hub", "app", "latest", &list_digest).unwrap();
+    let trashing = state.clone();
+    let parent = list_digest.clone();
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(move |_: &wiremock::Request| {
+            assert_eq!(
+                store::trash_tag(
+                    &trashing.serving.meta,
+                    "hub",
+                    "app",
+                    "latest",
+                    &peryx_core::TrashInfo {
+                        deleted_at_unix: 1_000,
+                        actor: None,
+                        reason: None,
+                    },
+                    false,
+                    |_| None,
+                )
+                .unwrap(),
+                Some(parent.clone())
+            );
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", parent.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list.clone(), LIST_TYPE)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let (status, _, response) = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/hub/app/manifests/latest",
+        &[("accept", LEGACY_ACCEPT)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(response.is_empty(), "{response:?}");
+}
+
+#[rstest]
+#[case::revoked(true, StatusCode::NOT_FOUND)]
+#[case::clear(false, StatusCode::OK)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cold_docker_list_head_rechecks_a_revocation_committed_after_upstream_head(
+    #[case] revoke_parent: bool,
+    #[case] expected: StatusCode,
+) {
+    use std::collections::HashMap;
+
+    let server = MockServer::start().await;
+    let child = br#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}"#;
+    let child_digest = oci_digest(child);
+    let list = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{LIST_TYPE}","manifests":[{{"digest":"{child_digest}","platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+    )
+    .into_bytes();
+    let list_digest = oci_digest(&list);
+    let (pages, _fault) = peryx_test_support::fault::backend();
+    let (backend, gate, release) = peryx_test_support::fault::gated_reads(&pages);
+    let meta = peryx_storage::meta::MetaStore::open_backend(backend).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        vec![super::oci_index(
+            "hub",
+            "hub",
+            peryx_index::IndexKind::Cached {
+                client: peryx_upstream::UpstreamClient::new(&format!("{}/", server.uri())).unwrap(),
+                offline: false,
+            },
+        )],
+        Arc::new(|| 1_000),
+    );
+    super::install_oci(&mut state, HashMap::new(), false);
+    let state = Arc::new(state);
+    let app = peryx_http::router(state.clone());
+    assert!(!state.serving.revocations.has_active().unwrap());
+    for row in 0..32 {
+        state
+            .serving
+            .meta
+            .put_driver_value(&format!("fixture\0{row:02}"), b"value")
+            .unwrap();
+    }
+    let armed = gate.clone();
+    let parent_response = list_digest.clone();
+    let parent_size = list.len();
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(move |_: &wiremock::Request| {
+            armed.arm();
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", parent_response.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", parent_size.to_string().as_str())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list.clone(), LIST_TYPE),
+        )
+        .expect(u64::from(!revoke_parent))
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{child_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", child_digest.as_str())
+                .insert_header("content-type", LEGACY_ACCEPT)
+                .insert_header("content-length", child.len().to_string().as_str()),
+        )
+        .expect(u64::from(!revoke_parent))
+        .mount(&server)
+        .await;
+
+    let uri = format!("/v2/hub/app/manifests/{list_digest}");
+    let request = tokio::spawn({
+        let app = app.clone();
+        async move { send_with(&app, Method::HEAD, &uri, &[("accept", LEGACY_ACCEPT)]).await }
+    });
+    assert!(gate.wait_for_arrival(std::time::Duration::from_secs(5)));
+    if revoke_parent {
+        let state = state.clone();
+        let digest = list_digest.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || revoke(&state, &digest)),
+        )
+        .await
+        .expect("revocation controller timed out")
+        .expect("revocation controller panicked");
+    }
+    drop(release);
+    let (status, headers, response) = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .expect("manifest request timed out")
+        .expect("manifest request panicked");
+
+    assert_eq!(status, expected);
+    assert!(response.is_empty(), "{response:?}");
+    if !revoke_parent {
+        assert_eq!(headers["docker-content-digest"], child_digest);
+    }
+}
+
+#[tokio::test]
+async fn test_cold_docker_list_does_not_head_a_revoked_child() {
+    let server = MockServer::start().await;
+    let child = br#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json"}"#;
+    let child_digest = oci_digest(child);
+    let list = format!(
+        r#"{{"schemaVersion":2,"mediaType":"{LIST_TYPE}","manifests":[{{"digest":"{child_digest}","platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#,
+    )
+    .into_bytes();
+    let list_digest = oci_digest(&list);
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    revoke(&state, &child_digest);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list, LIST_TYPE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        send_with(
+            &app,
+            Method::HEAD,
+            "/v2/hub/app/manifests/latest",
+            &[("accept", LEGACY_ACCEPT)],
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
 /// A cached tag target is trusted for exactly `ttl_secs`: at that exact age a tag-list scan must
 /// revalidate it against upstream rather than reuse the stale target one more time.
 #[tokio::test]

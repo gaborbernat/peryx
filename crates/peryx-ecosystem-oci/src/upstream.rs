@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use mediatype::MediaType;
 use peryx_identity::strip_auth_scheme;
 use peryx_upstream::{
     Auth, CredentialError, CredentialProvider, CredentialProviderId, CredentialSnapshot, UpstreamClient,
@@ -31,6 +32,13 @@ application/vnd.docker.distribution.manifest.list.v2+json, \
 application/vnd.oci.image.manifest.v1+json, \
 application/vnd.oci.image.index.v1+json, \
 */*";
+
+#[derive(Clone)]
+pub struct ManifestHead {
+    pub digest: String,
+    pub media_type: String,
+    pub bytes: u64,
+}
 
 fn content_length(headers: &HeaderMap) -> Option<u64> {
     let mut lengths = headers
@@ -80,6 +88,8 @@ pub enum UpstreamError {
     RateLimited(Option<String>),
     /// A successful blob `HEAD` did not carry a usable representation size.
     InvalidContentLength,
+    /// A successful manifest `HEAD` did not identify one concrete manifest representation.
+    InvalidManifestHead,
     /// The transfer failed before a usable response (connection, TLS, timeout, decode).
     Transport(String),
 }
@@ -90,6 +100,7 @@ impl std::fmt::Display for UpstreamError {
             Self::Status(status) => write!(f, "upstream returned {status}"),
             Self::RateLimited(_) => write!(f, "upstream rate limit reached"),
             Self::InvalidContentLength => write!(f, "upstream blob HEAD has invalid content-length"),
+            Self::InvalidManifestHead => write!(f, "upstream manifest HEAD has invalid metadata"),
             Self::Transport(err) => write!(f, "{err}"),
         }
     }
@@ -206,6 +217,46 @@ impl Upstream {
             .get("docker-content-digest")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned))
+    }
+
+    /// Read a manifest's representation metadata without downloading or recording its body.
+    ///
+    /// # Errors
+    /// Returns [`UpstreamError`] on a non-`200` response, invalid metadata, or a transport failure.
+    pub async fn manifest_head(
+        &self,
+        client: &UpstreamClient,
+        repo: &str,
+        reference: &str,
+        accept: Option<&str>,
+        realms: &TokenRealms,
+    ) -> Result<ManifestHead, UpstreamError> {
+        let url = format!("{}v2/{repo}/manifests/{reference}", client.base_url());
+        let response = self
+            .send(
+                Method::HEAD,
+                client,
+                &url,
+                repo,
+                accept.or(Some(ACCEPT_MANIFESTS)),
+                realms,
+            )
+            .await?;
+        if response.status() != StatusCode::OK {
+            return Err(UpstreamError::InvalidManifestHead);
+        }
+        let digest = unique_header(response.headers(), "docker-content-digest")
+            .filter(|digest| valid_sha256_digest(digest))
+            .ok_or(UpstreamError::InvalidManifestHead)?;
+        let media_type = unique_header(response.headers(), reqwest::header::CONTENT_TYPE.as_str())
+            .filter(|media_type| concrete_media_type(media_type))
+            .ok_or(UpstreamError::InvalidManifestHead)?;
+        let bytes = content_length(response.headers()).ok_or(UpstreamError::InvalidManifestHead)?;
+        Ok(ManifestHead {
+            digest,
+            media_type,
+            bytes,
+        })
     }
 
     /// # Errors
@@ -503,6 +554,24 @@ impl Upstream {
             "bearer realm redirected more than {MAX_TOKEN_REALM_REDIRECTS} times"
         )))
     }
+}
+
+fn unique_header(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?.to_owned();
+    values.next().is_none().then_some(value)
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn concrete_media_type(value: &str) -> bool {
+    MediaType::parse(value).is_ok_and(|media_type| media_type.ty != "*" && media_type.subty != "*")
 }
 
 /// How many redirects a token realm may take before the exchange gives up. A token endpoint answers

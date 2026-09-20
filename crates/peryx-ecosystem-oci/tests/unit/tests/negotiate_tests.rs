@@ -538,10 +538,11 @@ async fn test_get_legacy_negotiation_rejects_an_evicted_parent_without_fetching_
         &dir,
         &format!("{}/", server.uri()),
         Arc::new(move || {
-            if let Some(meta) = clock_meta.get() {
-                meta.remove_driver_values_if(&format!("oci\0m\0{evicted}"), 1, |_| Ok(true))
-                    .unwrap();
-            }
+            clock_meta
+                .get()
+                .unwrap()
+                .remove_driver_values_if(&format!("oci\0m\0{evicted}"), 1, |_| Ok(true))
+                .unwrap();
             1_000
         }),
     );

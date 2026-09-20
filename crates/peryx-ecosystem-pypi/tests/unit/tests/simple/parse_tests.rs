@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error as _;
+use std::io::Read as _;
 
 use super::{sample_detail, sample_list, sha256};
 use crate::{
@@ -522,38 +523,6 @@ impl crate::simple::DetailSink for Boom {
     }
 }
 
-struct BrokenReader;
-
-impl std::io::Read for BrokenReader {
-    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("local reader failed"))
-    }
-}
-
-struct InterruptOnceReader {
-    reader: std::io::Cursor<&'static [u8]>,
-    interrupted: bool,
-}
-
-impl InterruptOnceReader {
-    fn new(body: &'static [u8]) -> Self {
-        Self {
-            reader: std::io::Cursor::new(body),
-            interrupted: false,
-        }
-    }
-}
-
-impl std::io::Read for InterruptOnceReader {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        if !self.interrupted {
-            self.interrupted = true;
-            return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
-        }
-        self.reader.read(buffer)
-    }
-}
-
 fn detail_base() -> url::Url {
     url::Url::parse("https://pypi.org/simple/flask/").unwrap()
 }
@@ -689,24 +658,58 @@ fn test_stream_detail_json_surfaces_a_sink_error() {
 #[test]
 fn test_stream_detail_json_preserves_a_reader_error() {
     let mut sink = Collect::default();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("detail.json");
+    std::fs::write(&path, b"").unwrap();
+    let mut reader = std::fs::File::options().write(true).open(path).unwrap();
+    let expected = reader.read(&mut [0]).unwrap_err();
 
-    let error = crate::simple::stream_detail_json(BrokenReader, &detail_base(), &mut sink).unwrap_err();
+    let error = crate::simple::stream_detail_json(&mut reader, &detail_base(), &mut sink).unwrap_err();
 
-    assert!(matches!(error, StreamDetailError::Reader(error) if error.to_string() == "local reader failed"));
+    assert!(matches!(
+        error,
+        StreamDetailError::Reader(error)
+            if (error.raw_os_error(), error.kind()) == (expected.raw_os_error(), expected.kind())
+    ));
 }
 
-#[test]
-fn test_stream_detail_json_retries_an_interrupted_reader() {
-    let mut sink = Collect::default();
+enum StreamErrorSource {
+    Simple,
+    Reader,
+    None,
+}
 
-    let detail = crate::simple::stream_detail_json(
-        InterruptOnceReader::new(br#"{"meta":{},"name":"flask","files":[]}"#),
-        &detail_base(),
-        &mut sink,
-    )
-    .unwrap();
-
-    assert_eq!(detail.name, "flask");
+#[rstest::rstest]
+#[case::simple(
+    StreamDetailError::from(SimpleError::InvalidProjectStatus("frozen".to_owned())),
+    "invalid upstream project status marker \"frozen\"",
+    StreamErrorSource::Simple,
+)]
+#[case::reader(
+    StreamDetailError::from(std::io::Error::other("reader failed")),
+    "reader failed",
+    StreamErrorSource::Reader
+)]
+#[case::sink(StreamDetailError::Sink("sink failed".to_owned()), "sink failed", StreamErrorSource::None)]
+fn test_stream_detail_error_preserves_variant_display_and_source(
+    #[case] error: StreamDetailError<String>,
+    #[case] display: &str,
+    #[case] source: StreamErrorSource,
+) {
+    assert_eq!(error.to_string(), display);
+    match source {
+        StreamErrorSource::Simple => assert!(
+            error
+                .source()
+                .is_some_and(|source| source.downcast_ref::<SimpleError>().is_some())
+        ),
+        StreamErrorSource::Reader => assert!(
+            error
+                .source()
+                .is_some_and(|source| source.downcast_ref::<std::io::Error>().is_some())
+        ),
+        StreamErrorSource::None => assert!(error.source().is_none()),
+    }
 }
 
 #[test]

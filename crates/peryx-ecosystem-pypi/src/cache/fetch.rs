@@ -455,6 +455,16 @@ pub enum ProjectSyncError {
     TooManyFiles,
 }
 
+impl From<StreamDetailError<Self>> for ProjectSyncError {
+    fn from(error: StreamDetailError<Self>) -> Self {
+        match error {
+            StreamDetailError::Simple(error) => Self::Simple(error),
+            StreamDetailError::Reader(error) => Self::Io(error),
+            StreamDetailError::Sink(error) => error,
+        }
+    }
+}
+
 /// Fetch and atomically publish one project's remote file-metadata generation on `index`.
 ///
 /// The detail page is fetched conditionally: a `304` refreshes the active generation's validators in
@@ -656,11 +666,7 @@ fn parse_project(
     } = input;
     let mut batcher = FileBatcher::new(meta, index, project, policy, generation, upstream, max_files);
     let header = if format == "json" {
-        let detail = stream_detail_json(reader, base, &mut batcher).map_err(|error| match error {
-            StreamDetailError::Simple(error) => ProjectSyncError::Simple(error),
-            StreamDetailError::Reader(error) => ProjectSyncError::Io(error),
-            StreamDetailError::Sink(error) => error,
-        })?;
+        let detail = stream_detail_json(reader, base, &mut batcher)?;
         ParsedDetailHeader {
             versions: detail.versions,
             project_status: detail.meta.project_status,

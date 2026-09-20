@@ -216,14 +216,12 @@ impl<Reader> CapturingReader<Reader> {
 
 impl<Reader: Read> Read for CapturingReader<Reader> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            match self.reader.read(buffer) {
-                Ok(read) => return Ok(read),
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) => {
-                    self.error = Some(error);
-                    return Err(std::io::Error::other("project detail reader failed"));
-                }
+        match self.reader.read(buffer) {
+            Ok(read) => Ok(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Err(error),
+            Err(error) => {
+                self.error = Some(error);
+                Err(std::io::Error::other("project detail reader failed"))
             }
         }
     }

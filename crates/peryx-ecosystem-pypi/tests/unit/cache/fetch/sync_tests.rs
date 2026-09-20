@@ -8,10 +8,11 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{
-    MAX_PROJECT_BYTES, PROJECT_FILE_BATCH, ParseProject, ProjectSyncError, ProjectSyncOutcome, parse_project,
-    publish_project_response, sync_project_files, write_project_chunk,
+    MAX_PROJECT_BYTES, PROJECT_FILE_BATCH, ParseProject, ProjectSyncOutcome, parse_project, publish_project_response,
+    sync_project_files, write_project_chunk,
 };
 use crate::SimpleClientExt as _;
+use crate::cache::ProjectSyncError;
 use crate::simple::{CoreMetadata, DetailSink as _, File, Provenance, Yanked};
 use crate::simple_client::CachedValidators;
 use crate::store::PypiStore as _;
@@ -19,6 +20,7 @@ use crate::store::{
     FilePublication, MetadataClaim, ProjectGeneration, active_project_generation, begin_project_generation,
     get_file_publication, list_project_files, project_meta_state, publish_project_generation, put_project_files,
 };
+use crate::{SimpleError, StreamDetailError};
 
 const JSON: &str = "application/vnd.pypi.simple.v1+json";
 
@@ -806,6 +808,37 @@ fn test_project_sync_error_messages_name_the_limit() {
 }
 
 #[test]
+fn test_project_sync_error_converts_a_simple_error() {
+    let error = ProjectSyncError::from(StreamDetailError::Simple(SimpleError::InvalidProjectStatus(
+        "frozen".to_owned(),
+    )));
+
+    assert!(matches!(
+        error,
+        ProjectSyncError::Simple(SimpleError::InvalidProjectStatus(status)) if status == "frozen"
+    ));
+}
+
+#[test]
+fn test_project_sync_error_converts_a_reader_error() {
+    let source = std::io::Error::from_raw_os_error(5);
+    let expected = (source.raw_os_error(), source.kind());
+    let error = ProjectSyncError::from(StreamDetailError::Reader(source));
+
+    assert!(matches!(
+        error,
+        ProjectSyncError::Io(error) if (error.raw_os_error(), error.kind()) == expected
+    ));
+}
+
+#[test]
+fn test_project_sync_error_preserves_a_sink_error() {
+    let error = ProjectSyncError::from(StreamDetailError::Sink(ProjectSyncError::TooManyFiles));
+
+    assert!(matches!(error, ProjectSyncError::TooManyFiles));
+}
+
+#[test]
 fn test_parse_project_rejects_too_many_files() {
     let (_dir, meta) = store();
     let (id, _) = begin_project_generation(&meta, "pypi", "flask").unwrap();
@@ -834,40 +867,40 @@ fn test_parse_project_rejects_too_many_files() {
     assert!(matches!(error, ProjectSyncError::TooManyFiles));
 }
 
-#[test]
-fn test_parse_project_preserves_a_json_storage_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("peryx.redb");
-    drop(MetaStore::open(&path).unwrap());
-    let meta = MetaStore::open_existing_read_only(path).unwrap();
-    let files = (0..PROJECT_FILE_BATCH)
-        .map(|ordinal| {
-            format!(
-                r#"{{"filename":"flask-{ordinal}.tar.gz","url":"flask-{ordinal}.tar.gz","hashes":{{"sha256":"{}"}},"size":1}}"#,
-                "a".repeat(64),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    let body = format!(r#"{{"meta":{{"api-version":"1.4"}},"versions":[],"name":"flask","files":[{files}]}}"#);
+#[tokio::test]
+async fn test_sync_persists_json_project_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/simple/flask/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"meta":{"api-version":"1.4"},"name":"flask","versions":[],"project-status":{"status":"archived","reason":"upstream retired it"},"files":[]}"#,
+            JSON,
+        ))
+        .mount(&server)
+        .await;
+    let client = client_for(&server);
+    let (_dir, meta) = store();
 
-    let error = parse_project(
-        &mut std::io::Cursor::new(body),
-        ParseProject {
-            format: "json",
-            base: &url::Url::parse("https://files.example/simple/flask/").unwrap(),
-            meta: &meta,
-            index: "pypi",
-            policy: &Policy::default(),
-            project: "flask",
-            generation: 1,
-            upstream: None,
-            max_files: super::MAX_PROJECT_FILES,
-        },
+    sync_project_files(
+        &client,
+        &Inflight::default(),
+        &meta,
+        "pypi",
+        &Policy::default(),
+        "flask",
+        client.base_url(),
     )
-    .unwrap_err();
+    .await
+    .unwrap();
 
-    assert!(matches!(error, ProjectSyncError::Store(_)));
+    let active = active_project_generation(&meta, "pypi", "flask").unwrap().unwrap();
+    assert_eq!(
+        (
+            active.project_status.as_deref(),
+            active.project_status_reason.as_deref()
+        ),
+        (Some("archived"), Some("upstream retired it"))
+    );
 }
 
 #[test]

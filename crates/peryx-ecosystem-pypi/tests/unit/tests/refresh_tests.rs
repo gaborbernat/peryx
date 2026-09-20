@@ -10,7 +10,7 @@ use peryx_upstream::{NamedUpstream, UpstreamClient, UpstreamRouter};
 use wiremock::matchers::{header as match_header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::http::{detail_json, get, harness, harness_with_policies, routed_state};
+use super::http::{detail_json, get, harness, harness_with_policies, reopened_read_only_harness, routed_state};
 use super::{LogCapture, field};
 use crate::cache::refresh_stale_pages;
 use peryx_policy::{Policy, PolicyConfig};
@@ -156,6 +156,37 @@ async fn test_serving_refresh_stale_records_project_errors() {
         .await
         .unwrap();
     assert_eq!((summary.checked, summary.changed), (1, 0));
+}
+
+#[tokio::test]
+async fn test_serving_refresh_stale_surfaces_metadata_store_errors() {
+    let h = harness().await;
+    let digest = Digest::of(b"wheel-v1");
+    let file_url = format!("{}/files/flask.whl", h.server.uri());
+    mount_page(
+        &h.server,
+        detail_json(digest.as_str(), &file_url),
+        ResponseTemplate::new(200),
+    )
+    .await;
+    get(&h.state, "/pypi/simple/flask/", Some("application/json")).await;
+
+    let h = reopened_read_only_harness(h);
+    h.server.reset().await;
+    mount_page(
+        &h.server,
+        detail_json(Digest::of(b"wheel-v2").as_str(), &file_url),
+        ResponseTemplate::new(200),
+    )
+    .await;
+    h.clock.fetch_add(61, Ordering::Relaxed);
+
+    let error = crate::serving::PypiServing
+        .refresh_stale(h.state.serving.clone())
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("read-only"));
 }
 
 #[tokio::test(flavor = "current_thread")]

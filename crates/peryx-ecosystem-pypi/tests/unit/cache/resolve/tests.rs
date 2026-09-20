@@ -17,29 +17,85 @@ fn detail(status: Option<&str>, reason: &str) -> ProjectDetail {
     }
 }
 
+fn resolved(detail: ProjectDetail) -> ResolvedPage {
+    ResolvedPage {
+        detail,
+        last_serial: None,
+        owners: BTreeMap::new(),
+    }
+}
+
 #[test]
 fn test_merge_candidates_keeps_the_first_status_of_equal_severity() {
     let merged = merge_candidates(
         "pkg",
         vec![
-            (0, detail(Some("quarantined"), "first")),
-            (1, detail(Some("quarantined"), "second")),
+            (0, resolved(detail(Some("quarantined"), "first"))),
+            (1, resolved(detail(Some("quarantined"), "second"))),
         ],
     )
     .unwrap();
 
-    assert_eq!(merged.meta.project_status_reason.as_deref(), Some("first"));
+    assert_eq!(merged.detail.meta.project_status_reason.as_deref(), Some("first"));
 }
 
 #[test]
 fn test_merge_candidates_prefers_the_more_severe_status() {
     let merged = merge_candidates(
         "pkg",
-        vec![(0, detail(None, "active")), (1, detail(Some("archived"), "archived"))],
+        vec![
+            (0, resolved(detail(None, "active"))),
+            (1, resolved(detail(Some("archived"), "archived"))),
+        ],
     )
     .unwrap();
 
-    assert_eq!(merged.meta.project_status.as_deref(), Some("archived"));
+    assert_eq!(merged.detail.meta.project_status.as_deref(), Some("archived"));
+}
+
+#[test]
+fn test_merge_candidates_keeps_the_first_file_owner() {
+    let filename = "pkg-1.0-py3-none-any.whl";
+    let owner = |leaf: &str, kind: ResolvedFileKind| ResolvedPage {
+        detail: ProjectDetail {
+            meta: Meta::default(),
+            name: "pkg".to_owned(),
+            versions: Vec::new(),
+            files: vec![File {
+                filename: filename.to_owned(),
+                url: String::new(),
+                hashes: BTreeMap::new(),
+                requires_python: None,
+                size: None,
+                upload_time: None,
+                yanked: Yanked::No,
+                core_metadata: CoreMetadata::Absent,
+                dist_info_metadata: CoreMetadata::Absent,
+                gpg_sig: None,
+                provenance: Provenance::default(),
+            }],
+        },
+        last_serial: None,
+        owners: BTreeMap::from([(
+            filename.to_owned(),
+            ResolvedFileOwner {
+                leaf: leaf.to_owned(),
+                kind,
+            },
+        )]),
+    };
+    let merged = merge_candidates(
+        "pkg",
+        vec![
+            (0, owner("hosted", ResolvedFileKind::Hosted)),
+            (1, owner("pypi", ResolvedFileKind::Cached)),
+        ],
+    )
+    .unwrap();
+
+    let owner = merged.owner(filename).unwrap();
+    assert_eq!(owner.leaf(), "hosted");
+    assert!(owner.is_hosted());
 }
 
 #[test]

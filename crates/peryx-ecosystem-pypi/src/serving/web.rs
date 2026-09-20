@@ -1,7 +1,6 @@
 //! Producing the web UI's neutral view models from the `PyPI` serving layer, so the web crate renders
 //! a project page without any knowledge of the Simple API, wheels, or PEP 658.
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -19,17 +18,16 @@ use peryx_driver::serving::{BrowseDriver as _, BrowseError, BrowseRequest};
 use peryx_driver::{AppState, ServingState};
 use peryx_ha::{ArtifactPlacement, ArtifactPlacementStore, ArtifactSource, ByteAvailability};
 use peryx_identity::{Denial, ResourceMatch};
-use peryx_index::{Index, IndexKind};
+use peryx_index::Index;
 use peryx_storage::blob::{BlobLease, Digest};
 
-use crate::cache::{self, CacheError};
+use crate::cache;
 use crate::store::PypiStore as _;
 use crate::view::{
     AttestationView, FileView, MetadataBlock, MetadataView, ProjectView, ProvenanceSource, ProvenanceView, SubjectMatch,
 };
 use crate::{
-    ProjectDetail, file_matches_version, normalize_name, normalize_name_cow, parse_version, to_json, ui_meta,
-    ui_project_from_detail,
+    file_matches_version, normalize_name, normalize_name_cow, parse_version, to_json, ui_meta, ui_project_from_detail,
 };
 
 pub(super) const BROWSE_PATHS: &[&str] = &[
@@ -705,7 +703,7 @@ pub(super) async fn project_page(
     let route = state.index_at(position).route.clone();
     let normalized = normalize_name(&project);
     let index = state.index_at(position);
-    let Some((detail, hosted)) = resolve_detail_and_hosted(&state, index, &normalized, &route)
+    let Some(resolved) = cache::resolve_detail_for_ui(&state, index, &normalized, &route)
         .await
         .map_err(|err| {
             format!(
@@ -717,7 +715,7 @@ pub(super) async fn project_page(
         return Ok(None);
     };
     // `to_json` serializes the detail, so parsing it straight back cannot fail.
-    let value = serde_json::from_str(&to_json(&detail)).expect("to_json emits JSON that round-trips");
+    let value = serde_json::from_str(&to_json(&resolved.detail)).expect("to_json emits JSON that round-trips");
     let mut ui = ui_project_from_detail(&value);
     if let Some(display) = state
         .meta
@@ -727,8 +725,32 @@ pub(super) async fn project_page(
         ui.name = display;
     }
     apply_actions(&route, &mut ui);
-    apply_placement(&state, &index.name, &normalized, &hosted, &mut ui).map_err(crate::error_message)?;
-    apply_provenance(&state, &hosted, &normalized, &mut ui).await;
+    for file in &mut ui.files {
+        let owner = resolved
+            .owner(&file.filename)
+            .expect("resolved files retain their leaf owner");
+        let placement =
+            ArtifactPlacementStore::get_artifact_placement(&state.meta, &file.sha256).map_err(crate::error_message)?;
+        if owner.is_hosted() {
+            file.upstream = None;
+            file.source = UiArtifactSource::Hosted;
+            file.availability = ui_availability(resolve_file_placement(true, placement).availability);
+            file.provenance_detail = hosted_provenance(&state, owner.leaf(), &normalized, file).await;
+        } else {
+            file.upstream = state
+                .meta
+                .get_file_url(owner.leaf(), &normalized, &file.sha256)
+                .map_err(crate::error_message)?
+                .and_then(|source| source.upstream);
+            file.source = UiArtifactSource::Proxy;
+            file.availability = ui_availability(cached_availability(placement));
+            file.provenance_detail = file.provenance.as_ref().map(|_| ProvenanceView {
+                source: ProvenanceSource::Mirrored,
+                attestations: Vec::new(),
+                malformed: false,
+            });
+        }
+    }
     let default = default_version(&ui);
     // A pre-PEP 700 upstream names no versions, so no release owns a file and the newest sibling stands in.
     let sibling = match default.as_deref() {
@@ -817,81 +839,10 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// Resolve a project's detail together with the filenames its hosted layers published, so both store
-/// reads share the caller's one error mapping.
-async fn resolve_detail_and_hosted(
-    state: &ServingState,
-    index: &Index,
-    project: &str,
-    route: &str,
-) -> Result<Option<(ProjectDetail, BTreeMap<String, String>)>, CacheError> {
-    let Some(detail) = cache::resolve_detail(state, index, project, route).await? else {
-        return Ok(None);
-    };
-    let mut hosted = BTreeMap::new();
-    collect_hosted_filenames(state, index, project, &mut hosted)?;
-    Ok(Some((detail, hosted)))
-}
-
-/// The hosted (upload) layer that published each filename of `project`, merged across a virtual
-/// index's layers so a merged page can tell an uploaded file from a mirrored one and can name the
-/// layer that owns the publication.
-///
-/// The walk follows shadow order, the order [`cache::resolve_detail`] merges pages in, and keeps the
-/// first layer to claim a filename, so the panel reads the same publication the page serves.
-fn collect_hosted_filenames(
-    state: &ServingState,
-    index: &Index,
-    project: &str,
-    names: &mut BTreeMap<String, String>,
-) -> Result<(), peryx_storage::meta::MetaError> {
-    match &index.kind {
-        IndexKind::Hosted { .. } => {
-            for (filename, _record) in state.meta.list_upload_entries(&index.name, project)? {
-                names.entry(filename).or_insert_with(|| index.name.clone());
-            }
-        }
-        IndexKind::Virtual { layers, .. } => {
-            for pos in peryx_index::shadow_order(&state.indexes, layers) {
-                collect_hosted_filenames(state, state.index_at(pos), project, names)?;
-            }
-        }
-        IndexKind::Cached { .. } => {}
-    }
-    Ok(())
-}
-
-/// Resolve each file's #441 placement (its source and its projected byte availability) from one
-/// indexed lookup per file, without probing the content store. A hosted upload shadows a same-named
-/// upstream file, the dependency-confusion order [`cache::resolve_detail`] merged the page by, so
-/// hosted-layer membership forces the `Hosted` source over any stale proxied placement.
-///
-/// The availability comes straight from the stored projection, which a repair pass keeps in step with
-/// the content store; a listing therefore never reads a blob per row. A file the placement store has
-/// not recorded - an upstream catalog entry never fetched - stays proxied and remote-only.
-fn apply_placement(
-    state: &ServingState,
-    index: &str,
-    normalized: &str,
-    hosted: &BTreeMap<String, String>,
-    ui: &mut ProjectView,
-) -> Result<(), peryx_storage::meta::MetaError> {
-    for file in &mut ui.files {
-        let is_hosted = hosted.contains_key(&file.filename);
-        file.upstream = if is_hosted {
-            None
-        } else {
-            state
-                .meta
-                .get_file_url(index, normalized, &file.sha256)?
-                .and_then(|source| source.upstream)
-        };
-        let placement = ArtifactPlacementStore::get_artifact_placement(&state.meta, &file.sha256)?;
-        let resolved = resolve_file_placement(is_hosted, placement);
-        file.source = ui_source(resolved.source);
-        file.availability = ui_availability(resolved.availability);
-    }
-    Ok(())
+fn cached_availability(placement: Option<ArtifactPlacement>) -> ByteAvailability {
+    placement
+        .filter(|placement| placement.availability == ByteAvailability::Local)
+        .map_or(ByteAvailability::RemoteOnly, |placement| placement.availability)
 }
 
 /// The source and availability to report for one file, given whether an upload record already
@@ -921,14 +872,6 @@ pub fn resolve_file_placement(hosted: bool, placement: Option<ArtifactPlacement>
     })
 }
 
-const fn ui_source(source: ArtifactSource) -> UiArtifactSource {
-    match source {
-        ArtifactSource::Hosted => UiArtifactSource::Hosted,
-        ArtifactSource::Proxy => UiArtifactSource::Proxy,
-        ArtifactSource::Generated => UiArtifactSource::Generated,
-    }
-}
-
 const fn ui_availability(availability: ByteAvailability) -> UiByteAvailability {
     match availability {
         ByteAvailability::Local => UiByteAvailability::Local,
@@ -941,41 +884,16 @@ const fn ui_availability(availability: ByteAvailability) -> UiByteAvailability {
 /// object stays well under this, which bounds the read regardless.
 const MAX_PROVENANCE_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Fill each file's provenance panel from the publication's own record, read locally.
-///
-/// A hosted file's stored provenance document is summarized into per-attestation records; a mirrored
-/// file is flagged as an upstream claim without reading or fetching its document. This reads only
-/// local storage - it never calls upstream and never verifies a signature - so a listing stays a
-/// projection of what peryx already holds.
-async fn apply_provenance(
-    state: &Arc<ServingState>,
-    hosted: &BTreeMap<String, String>,
-    normalized: &str,
-    ui: &mut ProjectView,
-) {
-    for file in &mut ui.files {
-        file.provenance_detail = provenance_detail(state, hosted, normalized, file).await;
-    }
-}
-
 /// The provenance panel for one file, or `None` when it advertises no provenance. A hosted document
 /// that cannot be read is reported as `malformed` rather than hidden, so the page never implies an
 /// advertised attestation is absent.
-async fn provenance_detail(
+async fn hosted_provenance(
     state: &Arc<ServingState>,
-    hosted: &BTreeMap<String, String>,
+    index: &str,
     normalized: &str,
     file: &FileView,
 ) -> Option<ProvenanceView> {
     file.provenance.as_ref()?;
-    // `apply_placement` marks exactly the files in `hosted` as hosted, so membership is the source.
-    let Some(index) = hosted.get(&file.filename) else {
-        return Some(ProvenanceView {
-            source: ProvenanceSource::Mirrored,
-            attestations: Vec::new(),
-            malformed: false,
-        });
-    };
     let attestations = hosted_attestations(state, index, normalized, file).await;
     Some(ProvenanceView {
         source: ProvenanceSource::Hosted,

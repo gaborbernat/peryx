@@ -173,6 +173,30 @@ async fn test_catalog_lists_oci_repositories_with_pagination() {
 }
 
 #[tokio::test]
+async fn test_catalog_reports_a_storage_failure() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta =
+        peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    let mut state = peryx_driver::AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        vec![writable_index("store", "store", true, "s3cret")],
+        Arc::new(|| 1000),
+    );
+    super::super::install_oci(&mut state, HashMap::new(), false);
+    let app = peryx_http::router(Arc::new(state));
+
+    fault.arm(0);
+    assert_eq!(send(&app, Method::GET, "/v2/_catalog").await.0, StatusCode::BAD_GATEWAY);
+    assert!(fault.triggered());
+}
+
+#[tokio::test]
 async fn test_catalog_keeps_digest_only_manifests_until_they_are_trashed() {
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = crate::tests::hosted_writable(&dir, "s3cret");

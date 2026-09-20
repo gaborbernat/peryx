@@ -291,6 +291,33 @@ fn test_catalog_repositories_honor_repository_manifest_trash() {
 }
 
 #[test]
+fn test_catalog_repositories_never_returns_a_partial_list_after_a_storage_fault() {
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    put_tag(&meta, "store", "tagged", "latest", "sha256:tagged").unwrap();
+    record_manifest(&meta, "store", "digest-only", "sha256:digest", &image("{}")).unwrap();
+    drop(meta);
+
+    let expected = ["digest-only".to_owned(), "tagged".to_owned()];
+    let mut failed = 0_u32;
+    for fail_after in 0..128 {
+        let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        fault.arm(fail_after);
+        let listed = meta.read_driver_txn(|txn| list_catalog_repositories(txn, "store"));
+        let faulted = fault.triggered();
+        fault.disable();
+        match listed {
+            Ok(repositories) => assert_eq!(repositories, expected),
+            Err(_) => {
+                assert!(faulted);
+                failed += 1;
+            }
+        }
+    }
+    assert!(failed > 0);
+}
+
+#[test]
 fn test_put_tag_reports_insert_and_repoints() {
     let (_dir, meta) = store();
 

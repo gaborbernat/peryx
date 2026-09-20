@@ -9,7 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{
     app_with_indexes, auth, body_has_code, hosted_writable, image_manifest, mount_head_without_digest, oci_digest,
-    oci_index, proxy, seed_config, send_body, send_with,
+    oci_index, proxy, proxy_with_clock, seed_config, send_body, send_with,
 };
 use crate::registry::MAX_MANIFEST_BYTES;
 
@@ -505,13 +505,84 @@ async fn test_get_fetches_the_amd64_child_from_a_proxy_member() {
 }
 
 #[tokio::test]
-async fn test_cold_head_negotiates_a_docker_list_with_one_parent_get_and_child_head() {
+async fn test_get_legacy_negotiation_rejects_an_evicted_parent_without_fetching_the_child() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
+
     let server = MockServer::start().await;
     let child_digest = oci_digest(&DOCKER_CHILD);
     let list = amd64_docker_list(&child_digest);
     let list_digest = oci_digest(&list);
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(list, LIST_TYPE))
+        .expect(1)
+        .mount(&server)
+        .await;
     Mock::given(method("HEAD"))
         .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let meta = Arc::new(OnceLock::<peryx_storage::meta::MetaStore>::new());
+    let cleared = Arc::new(AtomicBool::new(false));
+    let clock_meta = meta.clone();
+    let clock_cleared = cleared.clone();
+    let evicted = list_digest.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let (app_state, app) = proxy_with_clock(
+        &dir,
+        &format!("{}/", server.uri()),
+        Arc::new(move || {
+            if let Some(meta) = clock_meta.get()
+                && !clock_cleared.load(Ordering::SeqCst)
+            {
+                let removed = meta
+                    .remove_driver_values_if(&format!("oci\0m\0{evicted}"), 1, |_| Ok(true))
+                    .unwrap();
+                clock_cleared.store(!removed.is_empty(), Ordering::SeqCst);
+            }
+            1_000
+        }),
+    );
+    meta.set(app_state.serving.meta.clone()).unwrap();
+
+    let (status, _, body) = send_with(
+        &app,
+        Method::GET,
+        "/v2/hub/library/app/manifests/latest",
+        &[("accept", IMAGE_ACCEPT)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&body, "MANIFEST_UNKNOWN"), "{body:?}");
+    assert!(cleared.load(Ordering::SeqCst));
+    assert_eq!(
+        crate::store::get_manifest(meta.get().unwrap(), &list_digest).unwrap(),
+        None
+    );
+}
+
+#[rstest]
+#[case::tag("latest")]
+#[case::digest("{list_digest}")]
+#[tokio::test]
+async fn test_cold_head_negotiates_a_docker_list_without_storage(#[case] reference: &str) {
+    let server = MockServer::start().await;
+    let child_digest = oci_digest(&DOCKER_CHILD);
+    let list = amd64_docker_list(&child_digest);
+    let list_digest = oci_digest(&list);
+    let reference = reference.replace("{list_digest}", &list_digest);
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/app/manifests/{reference}")))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("docker-content-digest", list_digest.as_str())
@@ -552,7 +623,7 @@ async fn test_cold_head_negotiates_a_docker_list_with_one_parent_get_and_child_h
     let (status, headers, body) = send_with(
         &app,
         Method::HEAD,
-        "/v2/hub/library/app/manifests/latest",
+        &format!("/v2/hub/library/app/manifests/{reference}"),
         &[("accept", IMAGE_ACCEPT)],
     )
     .await;
@@ -566,7 +637,7 @@ async fn test_cold_head_negotiates_a_docker_list_with_one_parent_get_and_child_h
     let conditional = send_with(
         &app,
         Method::HEAD,
-        "/v2/hub/library/app/manifests/latest",
+        &format!("/v2/hub/library/app/manifests/{reference}"),
         &[
             ("accept", IMAGE_ACCEPT),
             ("if-none-match", &format!("\"{child_digest}\"")),
@@ -581,11 +652,12 @@ async fn test_cold_head_negotiates_a_docker_list_with_one_parent_get_and_child_h
             crate::store::get_manifest(&state.serving.meta, &list_digest).unwrap(),
             crate::store::get_tag(&state.serving.meta, "hub", "library/app", "latest").unwrap(),
             crate::store::tag_freshness(&state.serving.meta, "hub", "library/app", "latest").unwrap(),
+            crate::store::manifest_is_member(&state.serving.meta, "hub", "library/app", &list_digest).unwrap(),
             crate::store::manifest_is_member(&state.serving.meta, "hub", "library/app", &child_digest).unwrap(),
             state.serving.meta.get_artifact_placement(&list_digest).unwrap(),
             state.serving.meta.get_artifact_placement(&child_digest).unwrap(),
         ),
-        (None, None, None, false, None, None)
+        (None, None, None, false, false, None, None)
     );
 }
 

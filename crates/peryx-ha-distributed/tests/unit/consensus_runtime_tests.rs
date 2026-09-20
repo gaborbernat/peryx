@@ -2332,7 +2332,7 @@ async fn test_reacquiring_within_one_term_fences_the_previous_holder() {
 /// node being promoted, so the commit under it waits on that node alone. A peer that answered long
 /// enough to catch up and then stopped used to leave the call waiting with nothing to wait on.
 #[tokio::test]
-async fn test_replacing_a_voter_gives_up_when_the_promoted_peer_stops_answering() {
+async fn test_replacing_a_voter_retries_after_a_joint_consensus_timeout() {
     let east_dir = tempfile::tempdir().unwrap();
     let west_dir = tempfile::tempdir().unwrap();
     let (east, _, east_served) = mounted_leader(&east_dir).await;
@@ -2361,20 +2361,15 @@ async fn test_replacing_a_voter_gives_up_when_the_promoted_peer_stops_answering(
     .unwrap();
     let group = Arc::new(OwnershipGroup::new(east.clone(), DatacenterId("east".to_owned())));
     let address = format!("http://{}/", west_listener.local_addr().unwrap());
+    let command = ControlCommand::ReplaceVoter {
+        remove: "east".to_owned(),
+        datacenter: "west".to_owned(),
+        address,
+    };
     let replacing = tokio::spawn({
         let group = Arc::clone(&group);
-        async move {
-            group
-                .submit(
-                    None,
-                    ControlCommand::ReplaceVoter {
-                        remove: "east".to_owned(),
-                        datacenter: "west".to_owned(),
-                        address,
-                    },
-                )
-                .await
-        }
+        let command = command.clone();
+        async move { group.submit(None, command).await }
     });
     let mut east_metrics = east.metrics();
     east_metrics
@@ -2411,8 +2406,24 @@ async fn test_replacing_a_voter_gives_up_when_the_promoted_peer_stops_answering(
         group.cluster_status().voters,
         vec!["east".to_owned(), "west".to_owned()]
     );
+    let last_applied = east_metrics.borrow().last_applied;
+    gate.open();
+    east_metrics
+        .wait_for(|metrics| metrics.last_applied > last_applied)
+        .await
+        .unwrap();
+    let retried = group.submit(None, command).await.unwrap().receipt;
+
+    assert_eq!(
+        (retried.old_voters, retried.new_voters, group.cluster_status().voters),
+        (
+            vec!["east".to_owned(), "west".to_owned()],
+            vec!["west".to_owned()],
+            vec!["west".to_owned()],
+        )
+    );
     stop_mounted(&east, east_served).await;
-    west_served.abort();
+    stop_mounted(&west, west_served).await;
 }
 
 /// A voter's identity is derived from its datacenter name and nothing else, so every node in the group

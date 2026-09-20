@@ -147,8 +147,13 @@ before it reaches the log, so a learner cannot join on an address static members
 `promote_voter` and `replace_voter` hold the roster rewrite until the incoming datacenter has replicated the leader's
 latest log entry. A `replace_voter` keeps the outgoing voter until the learner clears that barrier.
 
-After 30 seconds, the endpoint returns `503 Service Unavailable` and retains the previous roster. The learner keeps
-replicating after the refusal; a retry resumes the same catch-up path.
+After 30 seconds, the endpoint returns `503 Service Unavailable`. A learner that has not caught up leaves the previous
+roster intact. A replacement that has entered Raft joint consensus can instead leave both the outgoing and incoming
+datacenters as voters. That state needs a majority from each voter set for reads and writes.
+
+Peryx does not roll the replacement back or retry it in the background. Restore quorum, then retry the same
+`replace_voter` command through this listener. The retry completes the uniform roster with the incoming datacenter as
+its only voter; it does not add a second replacement.
 
 ```
 POST /availability/v1/commands

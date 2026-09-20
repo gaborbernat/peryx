@@ -482,9 +482,11 @@ async fn test_stale_manifest_head_does_not_update_the_tag_mapping_or_freshness(#
     let server = MockServer::start().await;
     let body = br#"{"schemaVersion":2}"#;
     let cached = oci_digest(body);
-    let upstream = changed
-        .then(|| format!("sha256:{}", "a".repeat(64)))
-        .unwrap_or_else(|| cached.clone());
+    let upstream = if changed {
+        format!("sha256:{}", "a".repeat(64))
+    } else {
+        cached.clone()
+    };
     Mock::given(method("HEAD"))
         .and(path("/v2/app/manifests/latest"))
         .respond_with(

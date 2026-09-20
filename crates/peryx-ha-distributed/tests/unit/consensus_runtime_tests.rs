@@ -1815,11 +1815,13 @@ async fn test_a_forwarded_claim_is_unavailable_when_the_leader_listener_closes()
     east.raft().shutdown().await.unwrap();
     west_served.abort();
     assert!(west_served.await.unwrap_err().is_cancelled());
-    assert_eq!(
-        result,
-        Err(OwnershipError::Unavailable(
-            "peer unreachable before the rpc completed".to_owned()
-        ))
+    assert!(
+        matches!(
+            &result,
+            Err(OwnershipError::Unavailable(message))
+                if message == "peer unreachable before the rpc completed"
+        ),
+        "{result:?}"
     );
 }
 

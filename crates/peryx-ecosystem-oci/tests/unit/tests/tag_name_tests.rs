@@ -239,24 +239,10 @@ async fn test_virtual_tag_union_pagination_stops_exactly_at_the_page_cap() {
 }
 
 #[rstest]
-#[case::null_tags(br#"{"name":"app","tags":null}"#)]
-#[case::absent_tags(br#"{"name":"app"}"#)]
-#[tokio::test]
-async fn test_proxied_tag_list_normalizes_an_empty_tag_set(#[case] body: &'static [u8]) {
-    let server = MockServer::start().await;
-    mount_tags(&server, "app", body).await;
-    let dir = tempfile::tempdir().unwrap();
-    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
-
-    let (status, _, out) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
-    assert_eq!(status, StatusCode::OK);
-    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(json["name"], "hub/app");
-    assert_eq!(json["tags"], serde_json::json!([]));
-}
-
-#[rstest]
 #[case::not_an_object(br#"["app"]"#)]
+#[case::wrong_name(br#"{"name":"other","tags":["latest"]}"#)]
+#[case::absent_tags(br#"{"name":"app"}"#)]
+#[case::null_tags(br#"{"name":"app","tags":null}"#)]
 #[case::tags_not_an_array(br#"{"name":"app","tags":"latest"}"#)]
 #[case::tags_hold_a_non_string(br#"{"name":"app","tags":[1]}"#)]
 #[case::not_json(br"not json")]
@@ -269,4 +255,109 @@ async fn test_proxied_tag_list_rejects_a_body_that_is_not_a_tag_list(#[case] bod
 
     let (status, _, _) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn test_proxied_tag_list_preserves_upstream_order_and_duplicates() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "app", br#"{"name":"app","tags":["v2","v1","v1"]}"#).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"name":"hub/app","tags":["v2","v1","v1"]})
+    );
+}
+
+#[tokio::test]
+async fn test_invalid_cached_tag_list_is_replaced_before_serving() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":["fresh"]}"#.to_vec(), "application/json"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "",
+        1_000,
+        None,
+        br#"{"name":"app","tags":["v2",7]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(send(&app, Method::GET, "/v2/hub/app/tags/list").await.0, StatusCode::OK);
+    server.reset().await;
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"name":"hub/app","tags":["fresh"]})
+    );
+}
+
+#[tokio::test]
+async fn test_truncated_cached_tag_list_is_replaced_before_serving() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":["fresh"]}"#.to_vec(), "application/json"),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    state
+        .serving
+        .meta
+        .put_driver_value("oci\0tp\0hub\0app\0", &[0; 7])
+        .unwrap();
+
+    assert_eq!(send(&app, Method::GET, "/v2/hub/app/tags/list").await.0, StatusCode::OK);
+    server.reset().await;
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"name":"hub/app","tags":["fresh"]})
+    );
+}
+
+#[tokio::test]
+async fn test_truncated_cached_tag_list_is_evicted_before_a_failed_refetch() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    state
+        .serving
+        .meta
+        .put_driver_value("oci\0tp\0hub\0app\0", &[0; 7])
+        .unwrap();
+
+    let _ = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Missing
+    );
 }

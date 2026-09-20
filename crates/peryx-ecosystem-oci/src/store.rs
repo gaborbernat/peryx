@@ -751,28 +751,43 @@ pub fn set_tag_page(
     meta.put_driver_value(&tag_page_key(index, repo, query), &value)
 }
 
+/// # Errors
+/// Returns a store error if the deletion fails.
+pub fn delete_tag_page(meta: &MetaStore, index: &str, repo: &str, query: &str) -> Result<(), MetaError> {
+    meta.delete_driver_value(&tag_page_key(index, repo, query))?;
+    Ok(())
+}
+
 /// A stored tag-list page: when it was fetched, the `Link` to the next page, and the body.
 pub type TagPage = (i64, Option<String>, Vec<u8>);
 
+/// The selected tag-page cache key's state.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TagPageRead {
+    Missing,
+    Invalid,
+    Page(TagPage),
+}
+
 /// # Errors
 /// Returns a store error if the read fails.
-pub fn tag_page(meta: &MetaStore, index: &str, repo: &str, query: &str) -> Result<Option<TagPage>, MetaError> {
+pub fn tag_page(meta: &MetaStore, index: &str, repo: &str, query: &str) -> Result<TagPageRead, MetaError> {
     let Some(raw) = meta.get_driver_value(&tag_page_key(index, repo, query))? else {
-        return Ok(None);
+        return Ok(TagPageRead::Missing);
     };
     let Some((at, rest)) = raw.split_first_chunk::<8>() else {
-        return Ok(None);
+        return Ok(TagPageRead::Invalid);
     };
     let Some((length, rest)) = rest.split_first_chunk::<4>() else {
-        return Ok(None);
+        return Ok(TagPageRead::Invalid);
     };
     let length = u32::from_be_bytes(*length) as usize;
     if rest.len() < length {
-        return Ok(None);
+        return Ok(TagPageRead::Invalid);
     }
     let (link, body) = rest.split_at(length);
     let link = (!link.is_empty()).then(|| String::from_utf8_lossy(link).into_owned());
-    Ok(Some((i64::from_be_bytes(*at), link, body.to_vec())))
+    Ok(TagPageRead::Page((i64::from_be_bytes(*at), link, body.to_vec())))
 }
 
 fn referrer_page_key(index: &str, repo: &str, subject: &str) -> String {

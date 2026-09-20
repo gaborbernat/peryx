@@ -590,7 +590,7 @@ async fn test_active_proxy_tag_filter_rejects_an_invalid_document(#[case] body: 
 }
 
 #[tokio::test]
-async fn test_active_proxy_tag_filter_accepts_a_null_tag_list() {
+async fn test_active_proxy_tag_filter_rejects_a_null_tag_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v2/app/tags/list"))
@@ -603,11 +603,9 @@ async fn test_active_proxy_tag_filter_accepts_a_null_tag_list() {
     let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
     revoke(&state, &format!("sha256:{}", "8".repeat(64)));
 
-    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
-    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({"name":"hub/app","tags":[]})
+        send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
     );
 }
 
@@ -861,7 +859,7 @@ async fn test_mixed_target_responses_filter_without_false_absence() {
 }
 
 #[tokio::test]
-async fn test_virtual_tag_union_ignores_an_invalid_proxy_page() {
+async fn test_virtual_tag_union_fails_for_an_invalid_proxy_page() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v2/app/tags/list"))
@@ -872,10 +870,24 @@ async fn test_virtual_tag_union_ignores_an_invalid_proxy_page() {
     let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
 
     let (status, _, body) = send(&app, Method::GET, "/v2/reg/app/tags/list").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body:?}");
+}
+
+#[tokio::test]
+async fn test_revocation_filtered_tag_list_fails_for_an_invalid_proxy_page() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(b"not json".to_vec(), "application/json"))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    revoke(&state, &format!("sha256:{}", "1".repeat(64)));
+
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({"name":"reg/app","tags":[]})
+        send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
     );
 }
 

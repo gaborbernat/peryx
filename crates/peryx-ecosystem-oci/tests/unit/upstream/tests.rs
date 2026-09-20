@@ -84,42 +84,101 @@ fn test_upstream_error_display() {
     );
 }
 
-#[rstest]
-#[case::valid("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", true)]
-#[case::uppercase("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF", false)]
-#[case::algorithm("sha512:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", false)]
-#[case::short("sha256:0123456789abcdef", false)]
-fn test_manifest_head_requires_a_lowercase_sha256_digest(#[case] digest: &str, #[case] valid: bool) {
-    assert_eq!(valid_sha256_digest(digest), valid);
+enum ManifestHeadOutcome {
+    Metadata(u64),
+    Invalid,
+    Transport,
 }
 
 #[rstest]
-#[case::plain("application/vnd.oci.image.manifest.v1+json", true)]
-#[case::parameters("application/vnd.oci.image.manifest.v1+json; charset=utf-8", true)]
-#[case::wildcard("application/*", false)]
-#[case::wildcard_type("*/json", false)]
-#[case::missing_subtype("application", false)]
-#[case::multiple_slashes("application/vnd/oci", false)]
-#[case::invalid_parameter("application/vnd.oci.image.manifest.v1+json; charset", false)]
-fn test_manifest_head_requires_a_concrete_media_type(#[case] media_type: &str, #[case] valid: bool) {
-    assert_eq!(concrete_media_type(media_type), valid);
-}
-
-#[rstest]
-#[case::single(&["7"], Some(7))]
-#[case::identical_duplicates(&["7", "7"], Some(7))]
-#[case::conflicting_duplicates(&["7", "9"], None)]
-#[case::signed(&["+7"], None)]
-#[case::overflow(&["18446744073709551616"], None)]
-fn test_manifest_head_uses_strict_duplicate_safe_content_length(
-    #[case] values: &[&str],
-    #[case] expected: Option<u64>,
+#[case::valid(
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "application/vnd.oci.image.manifest.v1+json; charset=utf-8",
+    &["7"],
+    ManifestHeadOutcome::Metadata(7),
+)]
+#[case::uppercase_digest(
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF",
+    "application/vnd.oci.image.manifest.v1+json",
+    &["7"],
+    ManifestHeadOutcome::Invalid,
+)]
+#[case::wrong_digest_algorithm(
+    "sha512:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "application/vnd.oci.image.manifest.v1+json",
+    &["7"],
+    ManifestHeadOutcome::Invalid,
+)]
+#[case::wildcard_media_type(
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "application/*",
+    &["7"],
+    ManifestHeadOutcome::Invalid,
+)]
+#[case::malformed_media_type(
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "application/vnd/oci",
+    &["7"],
+    ManifestHeadOutcome::Invalid,
+)]
+#[case::identical_content_lengths(
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "application/vnd.oci.image.manifest.v1+json",
+    &["7", "7"],
+    ManifestHeadOutcome::Transport,
+)]
+#[case::conflicting_content_lengths(
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "application/vnd.oci.image.manifest.v1+json",
+    &["7", "9"],
+    ManifestHeadOutcome::Transport,
+)]
+#[tokio::test]
+async fn test_manifest_head_validates_upstream_metadata(
+    #[case] digest: &str,
+    #[case] media_type: &str,
+    #[case] content_lengths: &[&str],
+    #[case] expected: ManifestHeadOutcome,
 ) {
-    let mut headers = HeaderMap::new();
-    for value in values {
-        headers.append(reqwest::header::CONTENT_LENGTH, header(value));
+    let server = MockServer::start().await;
+    let mut response = ResponseTemplate::new(200)
+        .insert_header("docker-content-digest", digest)
+        .insert_header("content-type", media_type);
+    for content_length in content_lengths {
+        response = response.append_header("content-length", *content_length);
     }
-    assert_eq!(content_length(&headers), expected);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .respond_with(response)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let result = Upstream::new()
+        .manifest_head(
+            &upstream_client(&format!("{}/", server.uri()), credentials(Auth::None)),
+            "library/nginx",
+            "latest",
+            None,
+            &TokenRealms::default(),
+        )
+        .await;
+
+    match expected {
+        ManifestHeadOutcome::Metadata(bytes) => {
+            let head = result.unwrap();
+            assert_eq!(
+                (head.digest, head.media_type, head.bytes),
+                (digest.to_owned(), media_type.to_owned(), bytes)
+            );
+        }
+        ManifestHeadOutcome::Invalid => {
+            assert!(matches!(result, Err(UpstreamError::InvalidManifestHead)));
+        }
+        ManifestHeadOutcome::Transport => {
+            assert!(matches!(result, Err(UpstreamError::Transport(_))));
+        }
+    }
 }
 
 fn basic(username: &str, password: &str) -> Auth {

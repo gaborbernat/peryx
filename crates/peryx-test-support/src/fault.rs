@@ -81,10 +81,13 @@ impl ReadGate {
     /// Panics if the gate mutex is poisoned.
     #[must_use]
     pub fn wait_for_arrival(&self, timeout: Duration) -> bool {
-        let state = self.state.lock().expect("read gate is never poisoned");
         let (state, _) = self
             .arrived
-            .wait_timeout_while(state, timeout, |state| !state.arrived && !state.released)
+            .wait_timeout_while(
+                self.state.lock().expect("read gate is never poisoned"),
+                timeout,
+                |state| !state.arrived && !state.released,
+            )
             .expect("read gate is never poisoned");
         let arrived = state.arrived;
         drop(state);
@@ -99,7 +102,7 @@ impl ReadGate {
         state.armed = false;
         state.arrived = true;
         self.arrived.notify_all();
-        let state = self
+        state = self
             .released
             .wait_while(state, |state| !state.released)
             .expect("read gate is never poisoned");

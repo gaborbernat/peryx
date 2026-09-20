@@ -369,7 +369,7 @@ async fn test_revoked_cold_manifest_head_is_not_published() {
     let (status, _, response) = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{digest}")).await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body_has_code(&response, "MANIFEST_UNKNOWN"), "{response:?}");
+    assert!(response.is_empty(), "{response:?}");
     assert!(!store::manifest_is_member(&state.serving.meta, "hub", "app", &digest).unwrap());
 }
 
@@ -426,7 +426,7 @@ async fn test_revocation_during_cold_docker_list_fetch_blocks_the_child_head() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body_has_code(&response, "MANIFEST_UNKNOWN"), "{response:?}");
+    assert!(response.is_empty(), "{response:?}");
 }
 
 #[tokio::test]

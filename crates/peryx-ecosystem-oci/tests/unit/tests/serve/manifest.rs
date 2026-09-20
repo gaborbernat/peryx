@@ -276,12 +276,18 @@ async fn test_manifest_head_by_digest_rejects_a_mismatched_digest_without_a_get(
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{requested}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
     let (status, _, body) = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{requested}")).await;
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert!(body_has_code(&body, "UNKNOWN"), "{body:?}");
+    assert!(body.is_empty(), "{body:?}");
     assert!(!store::manifest_is_member(&state.serving.meta, "hub", "app", &requested).unwrap());
 }
 
@@ -298,12 +304,18 @@ async fn test_manifest_head_with_missing_digest_is_a_gateway_error_without_a_get
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
     let (status, _, body) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert!(body_has_code(&body, "UNKNOWN"), "{body:?}");
+    assert!(body.is_empty(), "{body:?}");
     assert_eq!(
         store::get_tag(&state.serving.meta, "hub", "app", "latest").unwrap(),
         None
@@ -444,7 +456,7 @@ async fn test_invalid_manifest_head_metadata_bypasses_a_stale_tag() {
     let (status, _, response) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert!(body_has_code(&response, "UNKNOWN"), "{response:?}");
+    assert!(response.is_empty(), "{response:?}");
 }
 
 #[tokio::test]

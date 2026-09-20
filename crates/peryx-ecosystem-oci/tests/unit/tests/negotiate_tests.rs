@@ -622,7 +622,7 @@ async fn test_cold_head_rejects_an_unacceptable_oci_index_without_a_get() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body_has_code(&response, "MANIFEST_UNKNOWN"), "{response:?}");
+    assert!(response.is_empty(), "{response:?}");
 }
 
 #[tokio::test]

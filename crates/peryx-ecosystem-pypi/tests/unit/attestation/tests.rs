@@ -412,6 +412,13 @@ fn test_build_provenance_accepts_many_repeated_compatibility_tags() {
 }
 
 #[rstest::rstest]
+#[case::missing_platform("peryxpkg-1.0-py3-none.whl")]
+#[case::extra_component("peryxpkg-1.0-build-py3-none-any-extra.whl")]
+fn test_wheel_tags_reject_invalid_shapes(#[case] filename: &str) {
+    assert_eq!(wheel_tags(filename), None);
+}
+
+#[rstest::rstest]
 #[case::absent_build("peryxpkg-1.0-py3-none-any.whl", "peryxpkg-1.0-0-py3-none-any.whl")]
 #[case::build_number("peryxpkg-1.0-1-py3-none-any.whl", "peryxpkg-1.0-2-py3-none-any.whl")]
 #[case::build_suffix("peryxpkg-1.0-1A-py3-none-any.whl", "peryxpkg-1.0-1a-py3-none-any.whl")]

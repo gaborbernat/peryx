@@ -214,6 +214,12 @@ async fn test_manifest_head_by_digest_returns_upstream_headers_without_storage()
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
     let (status, headers, got) = send(&app, Method::HEAD, &format!("/v2/hub/app/manifests/{digest}")).await;
@@ -225,8 +231,54 @@ async fn test_manifest_head_by_digest_returns_upstream_headers_without_storage()
         "application/vnd.oci.image.manifest.v1+json; charset=utf-8"
     );
     assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
+    assert_eq!(headers[header::ETAG], format!("\"{digest}\""));
     assert!(got.is_empty());
     assert!(!store::manifest_is_member(&state.serving.meta, "hub", "app", &digest).unwrap());
+}
+
+#[rstest]
+#[case::non_ok_success(206, MANIFEST_TYPE)]
+#[case::malformed_type(200, "application")]
+#[case::wildcard_type(200, "*/*")]
+#[case::wildcard_subtype(200, "application/*")]
+#[tokio::test]
+async fn test_manifest_head_rejects_invalid_metadata_without_a_get(#[case] upstream: u16, #[case] media_type: &str) {
+    let server = MockServer::start().await;
+    let digest = oci_digest(b"manifest");
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(upstream)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", media_type)
+                .insert_header("content-length", "8"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, body) = send(&app, Method::HEAD, "/v2/hub/app/manifests/latest").await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/json");
+    assert_eq!(headers.get("docker-content-digest"), None);
+    assert_eq!(headers.get(header::ETAG), None);
+    assert!(body.is_empty(), "{body:?}");
+    assert_eq!(
+        (
+            store::get_tag(&state.serving.meta, "hub", "app", "latest").unwrap(),
+            store::get_manifest(&state.serving.meta, &digest).unwrap(),
+        ),
+        (None, None)
+    );
 }
 
 #[tokio::test]

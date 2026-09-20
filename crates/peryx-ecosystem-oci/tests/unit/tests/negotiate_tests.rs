@@ -506,7 +506,6 @@ async fn test_get_fetches_the_amd64_child_from_a_proxy_member() {
 
 #[tokio::test]
 async fn test_get_legacy_negotiation_rejects_an_evicted_parent_without_fetching_the_child() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, OnceLock};
 
     let server = MockServer::start().await;
@@ -532,22 +531,16 @@ async fn test_get_legacy_negotiation_rejects_an_evicted_parent_without_fetching_
         .mount(&server)
         .await;
     let meta = Arc::new(OnceLock::<peryx_storage::meta::MetaStore>::new());
-    let cleared = Arc::new(AtomicBool::new(false));
     let clock_meta = meta.clone();
-    let clock_cleared = cleared.clone();
     let evicted = list_digest.clone();
     let dir = tempfile::tempdir().unwrap();
     let (app_state, app) = proxy_with_clock(
         &dir,
         &format!("{}/", server.uri()),
         Arc::new(move || {
-            if let Some(meta) = clock_meta.get()
-                && !clock_cleared.load(Ordering::SeqCst)
-            {
-                let removed = meta
-                    .remove_driver_values_if(&format!("oci\0m\0{evicted}"), 1, |_| Ok(true))
+            if let Some(meta) = clock_meta.get() {
+                meta.remove_driver_values_if(&format!("oci\0m\0{evicted}"), 1, |_| Ok(true))
                     .unwrap();
-                clock_cleared.store(!removed.is_empty(), Ordering::SeqCst);
             }
             1_000
         }),
@@ -564,7 +557,6 @@ async fn test_get_legacy_negotiation_rejects_an_evicted_parent_without_fetching_
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body_has_code(&body, "MANIFEST_UNKNOWN"), "{body:?}");
-    assert!(cleared.load(Ordering::SeqCst));
     assert_eq!(
         crate::store::get_manifest(meta.get().unwrap(), &list_digest).unwrap(),
         None

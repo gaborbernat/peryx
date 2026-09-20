@@ -243,11 +243,7 @@ impl Upstream {
             )
             .await?;
         if response.status() != StatusCode::OK {
-            return Err(if response.status().is_success() {
-                UpstreamError::InvalidManifestHead
-            } else {
-                UpstreamError::Status(response.status())
-            });
+            return Err(UpstreamError::InvalidManifestHead);
         }
         let digest = unique_header(response.headers(), "docker-content-digest")
             .filter(|digest| valid_sha256_digest(digest))
@@ -575,19 +571,7 @@ fn valid_sha256_digest(value: &str) -> bool {
 }
 
 fn concrete_media_type(value: &str) -> bool {
-    if MediaType::parse(value).is_err() {
-        return false;
-    }
-    let base = value.split(';').next().unwrap_or_default().trim();
-    let Some((kind, sub)) = base.split_once('/') else {
-        return false;
-    };
-    !kind.is_empty()
-        && !sub.is_empty()
-        && kind != "*"
-        && sub != "*"
-        && kind.bytes().all(is_token)
-        && sub.bytes().all(is_token)
+    MediaType::parse(value).is_ok_and(|media_type| media_type.ty != "*" && media_type.subty != "*")
 }
 
 /// How many redirects a token realm may take before the exchange gives up. A token endpoint answers

@@ -97,6 +97,7 @@ fn test_manifest_head_requires_a_lowercase_sha256_digest(#[case] digest: &str, #
 #[case::plain("application/vnd.oci.image.manifest.v1+json", true)]
 #[case::parameters("application/vnd.oci.image.manifest.v1+json; charset=utf-8", true)]
 #[case::wildcard("application/*", false)]
+#[case::wildcard_type("*/json", false)]
 #[case::missing_subtype("application", false)]
 #[case::multiple_slashes("application/vnd/oci", false)]
 #[case::invalid_parameter("application/vnd.oci.image.manifest.v1+json; charset", false)]

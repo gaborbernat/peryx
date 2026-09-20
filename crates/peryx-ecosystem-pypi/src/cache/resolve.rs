@@ -264,20 +264,8 @@ async fn virtual_candidates(
     )
     .await;
     let mut candidates = Vec::new();
-    let mut offline_missing = None;
-    let mut rate_limited = None;
-    for (pos, outcome) in consulted.into_iter().zip(resolved) {
-        match outcome {
-            Ok(found) => candidates.extend(found),
-            Err(err @ CacheError::OfflineMissing(_)) => offline_missing = Some(err),
-            Err(err @ (CacheError::RateLimited { .. } | CacheError::UpstreamRateLimited { .. })) => {
-                rate_limited = Some(err);
-            }
-            Err(err @ CacheError::VirtualIndexCycle(_)) => return Err(err),
-            Err(err) => {
-                tracing::warn!(layer = %state.index_at(pos).name, error = ?err, "virtual-index layer unavailable, skipping");
-            }
-        }
+    for outcome in resolved {
+        candidates.extend(outcome?);
     }
     if selection.select(&state.indexes, &mut candidates, |page| !page.detail.files.is_empty()) {
         record_collision(state, index, layers, project);
@@ -288,12 +276,6 @@ async fn virtual_candidates(
         }
         if mode == FallbackMode::NoFallback && context.deny_no_fallback_miss {
             return Err(no_fallback_denial(state, index, layers, project).into());
-        }
-        if let Some(err) = rate_limited {
-            return Err(err);
-        }
-        if let Some(err) = offline_missing {
-            return Err(err);
         }
         return Ok(Vec::new());
     }

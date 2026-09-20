@@ -109,16 +109,22 @@ async fn test_private_first_uses_upstream_when_hosted_project_is_missing() {
 }
 
 #[tokio::test]
-async fn test_no_fallback_serves_hosted_without_calling_upstream() {
+async fn test_no_fallback_does_not_consult_a_failing_cached_member_after_hosted() {
     let harness = fallback_harness(FallbackMode::NoFallback, false).await;
     put_hosted(&harness);
-    mount_upstream(&harness).await;
+    Mock::given(method("GET"))
+        .and(path("/simple/acme-pkg/"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&harness.server)
+        .await;
 
     let (status, _, body) = get(&harness.state, "/root/pypi/simple/acme-pkg/", Some("application/json")).await;
 
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(HOSTED_FILE));
     assert_eq!(upstream_request_count(&harness).await, 0);
+    harness.server.verify().await;
 }
 
 #[tokio::test]

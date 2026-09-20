@@ -703,7 +703,7 @@ async fn test_request_returns_429_when_upstream_cap_saturated() {
 
 // paused-clock-safe: the saturated cap answers 429 before any upstream call, so the mock server records no request
 #[tokio::test(start_paused = true)]
-async fn test_virtual_index_surfaces_429_when_only_layer_is_rate_limited() {
+async fn test_virtual_index_surfaces_429_when_a_hosted_member_is_available() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
@@ -727,12 +727,20 @@ async fn test_virtual_index_surfaces_429_when_only_layer_is_rate_limited() {
                 acl: IndexAcl::default(),
             },
             Index {
+                name: "hosted".to_owned(),
+                route: "hosted".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Hosted { volatile: true },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
                 name: "root".to_owned(),
                 route: "root".to_owned(),
                 ecosystem: crate::ECOSYSTEM,
                 kind: IndexKind::Virtual {
-                    layers: vec![0],
-                    write_target: None,
+                    layers: vec![1, 0],
+                    write_target: Some(1),
                 },
                 policy: Policy::default(),
                 acl: IndexAcl::default(),
@@ -742,6 +750,7 @@ async fn test_virtual_index_surfaces_429_when_only_layer_is_rate_limited() {
         RateLimitConfig::default(),
         [("pypi".to_owned(), 1)],
     ));
+    crate::tests::http::put_local_project(&state, "flask", "flask-1.0-py3-none-any.whl", b"wheel", "1.0");
 
     let held = state.serving.upstream_limits.acquire("pypi").await.unwrap();
 

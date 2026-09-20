@@ -266,13 +266,20 @@ pub(super) fn authorize_read(
 }
 
 pub(super) fn authorize_catalog(state: &ServingState, headers: &HeaderMap) -> Result<(), super::RequestRejection> {
-    if let Some(token) = authorization(headers).and_then(|header| strip_auth_scheme(header, "Bearer"))
-        && let Some(signer) = &state.signer
+    if let Some(signer) = &state.signer
+        && let Some(credential) = bearer_credential(headers)
     {
-        return match signer.verify(token) {
-            Ok((_, grants)) => authorize_grants(&grants, ResourceMatch::Exact(CATALOG_GRANT), Action::Read)
-                .map_err(|denial| access_challenge(state, headers, CATALOG_SCOPE, denial, false).into()),
-            Err(_) => Err(access_challenge(state, headers, CATALOG_SCOPE, Denial::Forbidden, true).into()),
+        return match credential {
+            BearerCredential::Token(token) => signer
+                .verify(token)
+                .map_err(|_| access_challenge(state, headers, CATALOG_SCOPE, Denial::Forbidden, true).into())
+                .and_then(|(_, grants)| {
+                    authorize_grants(&grants, ResourceMatch::Exact(CATALOG_GRANT), Action::Read)
+                        .map_err(|denial| access_challenge(state, headers, CATALOG_SCOPE, denial, false).into())
+                }),
+            BearerCredential::Invalid => {
+                Err(access_challenge(state, headers, CATALOG_SCOPE, Denial::Forbidden, true).into())
+            }
         };
     }
     let requester = authorization(headers)
@@ -307,18 +314,27 @@ fn authorize_catalog_requester(state: &ServingState, requester: &TokenRequester<
 
 pub(super) fn identify(state: &ServingState, acl: &IndexAcl, headers: &HeaderMap) -> PresentedIdentity {
     let header = authorization(headers);
-    if let Some(token) = header.and_then(|header| strip_auth_scheme(header, "Bearer"))
-        && let Some(signer) = &state.signer
+    if let Some(signer) = &state.signer
+        && let Some(credential) = bearer_credential(headers)
     {
-        return match signer.verify(token) {
-            Ok((principal, grants)) => PresentedIdentity {
-                identity: Identity {
-                    principal,
-                    presented_user: None,
+        return match credential {
+            BearerCredential::Token(token) => match signer.verify(token) {
+                Ok((principal, grants)) => PresentedIdentity {
+                    identity: Identity {
+                        principal,
+                        presented_user: None,
+                    },
+                    authorization: PresentedAuthorization::Bearer(grants),
                 },
-                authorization: PresentedAuthorization::Bearer(grants),
+                Err(_) => PresentedIdentity {
+                    identity: Identity {
+                        principal: Principal::Anonymous,
+                        presented_user: None,
+                    },
+                    authorization: PresentedAuthorization::InvalidBearer,
+                },
             },
-            Err(_) => PresentedIdentity {
+            BearerCredential::Invalid => PresentedIdentity {
                 identity: Identity {
                     principal: Principal::Anonymous,
                     presented_user: None,
@@ -331,6 +347,20 @@ pub(super) fn identify(state: &ServingState, acl: &IndexAcl, headers: &HeaderMap
         identity: acl.identify(header, (state.clock)()),
         authorization: PresentedAuthorization::Acl,
     }
+}
+
+enum BearerCredential<'a> {
+    Token(&'a str),
+    Invalid,
+}
+
+fn bearer_credential(headers: &HeaderMap) -> Option<BearerCredential<'_>> {
+    let header = authorization(headers)?;
+    header
+        .split_ascii_whitespace()
+        .next()
+        .filter(|scheme| scheme.eq_ignore_ascii_case("Bearer"))?;
+    Some(strip_auth_scheme(header, "Bearer").map_or(BearerCredential::Invalid, BearerCredential::Token))
 }
 
 pub(super) struct PresentedIdentity {
@@ -354,7 +384,8 @@ impl PresentedIdentity {
     ) -> Result<(), Denial> {
         match &self.authorization {
             PresentedAuthorization::Bearer(grants) => authorize_grants(grants, ResourceMatch::Exact(resource), action),
-            PresentedAuthorization::Acl | PresentedAuthorization::InvalidBearer => authorize(
+            PresentedAuthorization::InvalidBearer => Err(Denial::Forbidden),
+            PresentedAuthorization::Acl => authorize(
                 &self.identity.principal,
                 acl,
                 ResourceMatch::Pattern(repository),

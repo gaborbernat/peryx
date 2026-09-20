@@ -254,6 +254,14 @@ async fn test_token_mint_uses_an_independent_authentication_limit() {
     Some("Bearer forged"),
     "Bearer realm=\"/v2/token\",service=\"peryx\",scope=\"registry:catalog:*\",error=\"invalid_token\""
 )]
+#[case::empty_bearer(
+    Some("Bearer"),
+    "Bearer realm=\"/v2/token\",service=\"peryx\",scope=\"registry:catalog:*\",error=\"invalid_token\""
+)]
+#[case::malformed_bearer(
+    Some("Bearer   "),
+    "Bearer realm=\"/v2/token\",service=\"peryx\",scope=\"registry:catalog:*\",error=\"invalid_token\""
+)]
 #[tokio::test]
 async fn test_catalog_rejects_unverified_credentials(
     #[case] authorization: Option<&str>,
@@ -609,6 +617,57 @@ async fn test_an_invalid_bearer_is_named_invalid_token() {
     assert_eq!(
         headers[header::WWW_AUTHENTICATE],
         "Bearer realm=\"/v2/token\",service=\"peryx\",scope=\"repository:store/team/app:pull\",error=\"invalid_token\""
+    );
+}
+
+#[rstest]
+#[case::anonymous(None, StatusCode::NOT_FOUND)]
+#[case::invalid_bearer(Some("Bearer forged"), StatusCode::UNAUTHORIZED)]
+#[case::empty_bearer(Some("Bearer"), StatusCode::UNAUTHORIZED)]
+#[case::malformed_bearer(Some("Bearer   "), StatusCode::UNAUTHORIZED)]
+#[tokio::test]
+async fn test_a_public_resource_rejects_an_invalid_bearer(
+    #[case] authorization: Option<&str>,
+    #[case] expected: StatusCode,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = realm_app(&dir, vec![writable_index("store", "store", true, SECRET)]);
+    let headers = authorization.map_or_else(Vec::new, |value| vec![("authorization", value)]);
+
+    let (status, response_headers, _) = send_with(&app, Method::GET, "/v2/store/app/manifests/latest", &headers).await;
+
+    assert_eq!(status, expected);
+    if authorization.is_some() {
+        assert_eq!(
+            response_headers[header::WWW_AUTHENTICATE],
+            "Bearer realm=\"/v2/token\",service=\"peryx\",scope=\"repository:store/app:pull\",error=\"invalid_token\""
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_a_public_resource_rejects_an_expired_bearer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = realm_app(&dir, vec![writable_index("store", "store", true, SECRET)]);
+    let token = state
+        .serving
+        .signer
+        .as_ref()
+        .unwrap()
+        .mint(&Principal::Anonymous, &[], current_unix_time() - 301, 300);
+
+    let (status, headers, _) = send_with(
+        &app,
+        Method::GET,
+        "/v2/store/app/manifests/latest",
+        &[("authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        headers[header::WWW_AUTHENTICATE],
+        "Bearer realm=\"/v2/token\",service=\"peryx\",scope=\"repository:store/app:pull\",error=\"invalid_token\""
     );
 }
 

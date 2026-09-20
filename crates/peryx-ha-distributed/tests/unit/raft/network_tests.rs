@@ -310,6 +310,21 @@ async fn test_send_maps_a_truncated_body_to_unreachable() {
 
 const PEER_ARRIVAL: Duration = Duration::from_secs(30);
 
+async fn await_request_headers(mut connection: tokio::net::TcpStream) -> tokio::net::TcpStream {
+    let mut buffer = [0; 1024];
+    let mut request = Vec::new();
+    tokio::time::timeout(PEER_ARRIVAL, async {
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = connection.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0, "the request ended before its headers");
+            request.extend_from_slice(&buffer[..read]);
+        }
+    })
+    .await
+    .expect("the transport writes request headers");
+    connection
+}
+
 /// The clock is paused only once the request has landed, so the elapsed span is the deadline the call was
 /// handed and a client-wide bound would show up as an unrelated number rather than as a slow test.
 #[rstest]
@@ -325,7 +340,7 @@ async fn test_send_gives_up_on_a_silent_peer_at_the_deadline_it_was_handed(#[cas
     let (error, _connection) = tokio::join!(
         client.send::<_, Pong>(RaftRpc::AppendEntries, &Ping { n: 1 }, deadline),
         async {
-            let connection = peer.accept(PEER_ARRIVAL).await;
+            let connection = await_request_headers(peer.accept(PEER_ARRIVAL).await).await;
             ControlledPeer::advance_to(start + deadline).await;
             connection
         }
@@ -409,7 +424,7 @@ mod adapter {
     use openraft::storage::SnapshotMeta;
     use serde::Serialize;
 
-    use super::{PEER_ARRIVAL, TOKEN, TestServer};
+    use super::{PEER_ARRIVAL, TOKEN, TestServer, await_request_headers};
     use crate::DatacenterId;
     use crate::raft::network::{PeerRaftNetwork, PeerRaftNetworkFactory, RaftRpc, RaftRpcHandler, RaftRpcRejection};
     use crate::raft::{PeryxNode, TypeConfig};
@@ -538,7 +553,7 @@ mod adapter {
         let start = tokio::time::Instant::now();
 
         let (error, _connection) = tokio::join!(network.vote(vote_req(), option), async {
-            let connection = peer.accept(PEER_ARRIVAL).await;
+            let connection = await_request_headers(peer.accept(PEER_ARRIVAL).await).await;
             ControlledPeer::advance_to(start + deadline).await;
             connection
         });
@@ -567,7 +582,7 @@ mod adapter {
         let start = tokio::time::Instant::now();
 
         let (error, _connection) = tokio::join!(network.append_entries(append_req(), option), async {
-            let connection = peer.accept(PEER_ARRIVAL).await;
+            let connection = await_request_headers(peer.accept(PEER_ARRIVAL).await).await;
             ControlledPeer::advance_to(start + deadline).await;
             connection
         });
@@ -598,7 +613,7 @@ mod adapter {
         let start = tokio::time::Instant::now();
 
         let (error, _connection) = tokio::join!(network.install_snapshot(snapshot_req(), option), async {
-            let connection = peer.accept(PEER_ARRIVAL).await;
+            let connection = await_request_headers(peer.accept(PEER_ARRIVAL).await).await;
             ControlledPeer::advance_to(start + deadline).await;
             connection
         });

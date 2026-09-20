@@ -19,7 +19,7 @@ pub use parse::absolutize;
 #[cfg(feature = "serving")]
 pub use parse::parse_project_status;
 pub use parse::{
-    DetailSink, ParsedDetail, ProjectDetail, ProjectList, ProjectListEntry, StreamedDetail, parse_detail, parse_index,
-    parse_meta, stream_detail_json, to_json,
+    DetailSink, ParsedDetail, ProjectDetail, ProjectList, ProjectListEntry, StreamDetailError, StreamedDetail,
+    parse_detail, parse_index, parse_meta, stream_detail_json, to_json,
 };
 pub use render::{render_detail_html, render_index_html};

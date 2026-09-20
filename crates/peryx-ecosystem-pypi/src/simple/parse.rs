@@ -114,6 +114,46 @@ pub trait DetailSink {
     fn file(&mut self, file: File) -> Result<(), Self::Error>;
 }
 
+/// An error while streaming a project detail.
+#[derive(Debug)]
+pub enum StreamDetailError<E> {
+    Simple(SimpleError),
+    Reader(std::io::Error),
+    Sink(E),
+}
+
+impl<E: fmt::Display> fmt::Display for StreamDetailError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Simple(error) => error.fmt(formatter),
+            Self::Reader(error) => error.fmt(formatter),
+            Self::Sink(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: fmt::Debug + fmt::Display> std::error::Error for StreamDetailError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Simple(error) => Some(error),
+            Self::Reader(error) => Some(error),
+            Self::Sink(_) => None,
+        }
+    }
+}
+
+impl<E> From<SimpleError> for StreamDetailError<E> {
+    fn from(error: SimpleError) -> Self {
+        Self::Simple(error)
+    }
+}
+
+impl<E> From<std::io::Error> for StreamDetailError<E> {
+    fn from(error: std::io::Error) -> Self {
+        Self::Reader(error)
+    }
+}
+
 /// The header fields a streamed detail carries alongside its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamedDetail {
@@ -126,17 +166,34 @@ pub struct StreamedDetail {
 /// to `sink` as it is decoded. The header (`meta`, `name`, `versions`) returns once the files drain.
 ///
 /// # Errors
-/// Returns [`SimpleError`] when the body is not a valid PEP 691 detail, advertises an unsupported
-/// Simple API version, omits a PEP 700 field the declared version promises, or the sink rejects a
-/// file.
+/// Returns [`StreamDetailError::Simple`] when the body is not a valid PEP 691 detail, advertises an
+/// unsupported Simple API version, or omits a PEP 700 field the declared version promises;
+/// [`StreamDetailError::Reader`] when the input fails; or [`StreamDetailError::Sink`] when `sink`
+/// rejects a file.
 pub fn stream_detail_json<S: DetailSink>(
     reader: impl Read,
     base: &Url,
     sink: &mut S,
-) -> Result<StreamedDetail, SimpleError> {
-    let mut deserializer = serde_json::Deserializer::from_reader(reader);
-    let header = DetailSeed { base, sink }.deserialize(&mut deserializer)?;
-    deserializer.end()?;
+) -> Result<StreamedDetail, StreamDetailError<S::Error>> {
+    let mut reader = CapturingReader::new(reader);
+    let mut sink_error = None;
+    let parsed = {
+        let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
+        DetailSeed {
+            base,
+            sink,
+            error: &mut sink_error,
+        }
+        .deserialize(&mut deserializer)
+        .and_then(|header| deserializer.end().map(|()| header))
+    };
+    if let Some(error) = reader.error {
+        return Err(StreamDetailError::Reader(error));
+    }
+    if let Some(error) = sink_error {
+        return Err(StreamDetailError::Sink(error));
+    }
+    let header = parsed.map_err(SimpleError::from)?;
     let meta = header.meta.into_detail_meta(header.project_status)?;
     check_pep700(&meta, header.versions.as_deref(), header.sizeless.as_deref())?;
     Ok(StreamedDetail {
@@ -144,6 +201,30 @@ pub fn stream_detail_json<S: DetailSink>(
         name: header.name,
         versions: header.versions.unwrap_or_default(),
     })
+}
+
+struct CapturingReader<Reader> {
+    reader: Reader,
+    error: Option<std::io::Error>,
+}
+
+impl<Reader> CapturingReader<Reader> {
+    const fn new(reader: Reader) -> Self {
+        Self { reader, error: None }
+    }
+}
+
+impl<Reader: Read> Read for CapturingReader<Reader> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self.reader.read(buffer) {
+            Ok(read) => Ok(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Err(error),
+            Err(error) => {
+                self.error = Some(error);
+                Err(std::io::Error::other("project detail reader failed"))
+            }
+        }
+    }
 }
 
 struct IncomingStreamedDetail {
@@ -158,6 +239,7 @@ struct IncomingStreamedDetail {
 struct DetailSeed<'a, S: DetailSink> {
     base: &'a Url,
     sink: &'a mut S,
+    error: &'a mut Option<S::Error>,
 }
 
 impl<'de, S: DetailSink> DeserializeSeed<'de> for DetailSeed<'_, S> {
@@ -167,6 +249,7 @@ impl<'de, S: DetailSink> DeserializeSeed<'de> for DetailSeed<'_, S> {
         deserializer.deserialize_map(DetailVisitor {
             base: self.base,
             sink: self.sink,
+            error: self.error,
         })
     }
 }
@@ -174,6 +257,7 @@ impl<'de, S: DetailSink> DeserializeSeed<'de> for DetailSeed<'_, S> {
 struct DetailVisitor<'a, S: DetailSink> {
     base: &'a Url,
     sink: &'a mut S,
+    error: &'a mut Option<S::Error>,
 }
 
 impl<'de, S: DetailSink> Visitor<'de> for DetailVisitor<'_, S> {
@@ -200,6 +284,7 @@ impl<'de, S: DetailSink> Visitor<'de> for DetailVisitor<'_, S> {
                     map.next_value_seed(FilesSeed {
                         base: self.base,
                         sink: self.sink,
+                        error: self.error,
                         sizeless: &mut sizeless,
                     })?;
                     files = true;
@@ -225,6 +310,7 @@ impl<'de, S: DetailSink> Visitor<'de> for DetailVisitor<'_, S> {
 struct FilesSeed<'a, S: DetailSink> {
     base: &'a Url,
     sink: &'a mut S,
+    error: &'a mut Option<S::Error>,
     sizeless: &'a mut Option<String>,
 }
 
@@ -235,6 +321,7 @@ impl<'de, S: DetailSink> DeserializeSeed<'de> for FilesSeed<'_, S> {
         deserializer.deserialize_seq(FilesVisitor {
             base: self.base,
             sink: self.sink,
+            error: self.error,
             sizeless: self.sizeless,
         })
     }
@@ -243,6 +330,7 @@ impl<'de, S: DetailSink> DeserializeSeed<'de> for FilesSeed<'_, S> {
 struct FilesVisitor<'a, S: DetailSink> {
     base: &'a Url,
     sink: &'a mut S,
+    error: &'a mut Option<S::Error>,
     sizeless: &'a mut Option<String>,
 }
 
@@ -260,7 +348,10 @@ impl<'de, S: DetailSink> Visitor<'de> for FilesVisitor<'_, S> {
             if file.size.is_none() && self.sizeless.is_none() {
                 *self.sizeless = Some(file.filename.clone());
             }
-            self.sink.file(file).map_err(serde::de::Error::custom)?;
+            if let Err(error) = self.sink.file(file) {
+                *self.error = Some(error);
+                return Err(serde::de::Error::custom("project detail sink rejected a file"));
+            }
         }
         Ok(())
     }

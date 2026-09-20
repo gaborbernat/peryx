@@ -13,12 +13,13 @@ use peryx_index::{Index, IndexKind};
 use peryx_policy::Policy;
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::{JobKind, JobState, MetaError, MetaStore};
+use peryx_test_support::fault;
 use peryx_upstream::{NamedUpstream, UpstreamClient, UpstreamRouter};
 use rstest::rstest;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::oneshot;
 use wiremock::matchers::{header, method, path, path_regex};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request as WiremockRequest, Respond, ResponseTemplate};
 
 use super::{
     CatalogSyncFactory, CatalogSyncParameters, DEFAULT_CATALOG_CONCURRENCY, DEFAULT_CATALOG_PROJECTS,
@@ -76,6 +77,14 @@ fn app_with_routes(
     (dir, Arc::new(app))
 }
 
+fn app_with_store(meta: MetaStore, indexes: Vec<Index>) -> (tempfile::TempDir, Arc<AppState>) {
+    let dir = tempfile::tempdir().unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+    let mut app = AppState::with_clock(meta, blobs, 60, indexes, Arc::new(|| 1_000));
+    crate::tests::install(&mut app);
+    (dir, Arc::new(app))
+}
+
 async fn run(app: &Arc<AppState>, parameters: CatalogSyncParameters) -> Result<JobReport, String> {
     let scheduler = JobScheduler::new(app.serving.clone(), JobLimits::node_local());
     let job = scheduled_job(app, &catalog_sync(parameters)).unwrap();
@@ -112,6 +121,18 @@ async fn mount_project(server: &MockServer, project: &str, expected: u64) {
         .await;
 }
 
+struct ArmStoreFault {
+    fault: Arc<fault::Fault>,
+    response: ResponseTemplate,
+}
+
+impl Respond for ArmStoreFault {
+    fn respond(&self, _request: &WiremockRequest) -> ResponseTemplate {
+        self.fault.arm(0);
+        self.response.clone()
+    }
+}
+
 struct StalledUpstream {
     client: UpstreamClient,
     entered: oneshot::Receiver<()>,
@@ -119,7 +140,7 @@ struct StalledUpstream {
     server: tokio::task::JoinHandle<()>,
 }
 
-async fn stalled_upstream(stalled_path: &'static str, root_body: Option<&'static str>) -> StalledUpstream {
+async fn stalled_upstream(stalled_path: &'static str, responses: Vec<(&'static str, &'static str)>) -> StalledUpstream {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (entered_sender, entered) = oneshot::channel();
@@ -146,7 +167,11 @@ async fn stalled_upstream(stalled_path: &'static str, root_body: Option<&'static
                 release_receiver.take().unwrap().await.ok();
                 return;
             }
-            let body = root_body.expect("only the root request may precede the stalled request");
+            let body = responses
+                .iter()
+                .find(|(candidate, _)| *candidate == path)
+                .map(|(_, body)| *body)
+                .expect("the request has a configured response");
             socket
                 .write_all(
                     format!(
@@ -756,9 +781,6 @@ async fn test_public_job_records_no_change_for_a_revalidated_root() {
     server.verify().await;
 }
 
-/// What the job records is the point of the change. A refresh that fails must not be counted as a
-/// processed project: each run makes its own request, so neither can report a clean run off the
-/// generation row the other one failed to replace.
 #[tokio::test]
 async fn test_concurrent_public_jobs_both_report_a_failed_project_refresh() {
     let server = MockServer::start().await;
@@ -787,6 +809,142 @@ async fn test_concurrent_public_jobs_both_report_a_failed_project_refresh() {
 
     assert!(first.unwrap().unwrap_err().contains("flask"));
     assert!(second.unwrap().unwrap_err().contains("flask"));
+}
+
+#[rstest]
+#[case::serial(1)]
+#[case::parallel(2)]
+#[tokio::test]
+async fn test_public_job_continues_after_a_project_failure(#[case] concurrency: usize) {
+    let server = MockServer::start().await;
+    mount_root(&server, &["Broken", "Healthy"]).await;
+    Mock::given(method("GET"))
+        .and(path("/simple/broken/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("invalid", JSON))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_project(&server, "healthy", 1).await;
+    let client = UpstreamClient::new(&format!("{}/simple/", server.uri())).unwrap();
+    let (_dir, app) = app(vec![index(
+        "continue-after-failure",
+        crate::ECOSYSTEM,
+        IndexKind::Cached { client, offline: false },
+    )]);
+
+    let error = run(&app, parameters("continue-after-failure", 2, concurrency))
+        .await
+        .unwrap_err();
+
+    assert!(error.starts_with("project_sync: 1 project sync failures; project \"broken\":"));
+    assert!(
+        crate::store::active_project_generation(&app.serving.meta, "continue-after-failure", "healthy")
+            .unwrap()
+            .is_some()
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn test_public_job_aborts_on_a_store_error_before_requesting_later_project() {
+    let server = MockServer::start().await;
+    mount_root(&server, &["Broken", "Later"]).await;
+    let (backend, fault) = fault::backend();
+    let meta = MetaStore::open_backend(fault::faulted(&backend, &fault)).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/simple/broken/"))
+        .respond_with(ArmStoreFault {
+            fault: fault.clone(),
+            response: ResponseTemplate::new(200).set_body_raw(
+                r#"{"meta":{"api-version":"1.4"},"versions":[],"name":"broken","files":[]}"#,
+                JSON,
+            ),
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_project(&server, "later", 0).await;
+    let client = UpstreamClient::new(&format!("{}/simple/", server.uri())).unwrap();
+    let (_dir, app) = app_with_store(
+        meta,
+        vec![index(
+            "stop-on-store-error",
+            crate::ECOSYSTEM,
+            IndexKind::Cached { client, offline: false },
+        )],
+    );
+
+    let error = run(&app, parameters("stop-on-store-error", 2, 1)).await.unwrap_err();
+
+    assert!(fault.triggered());
+    assert!(error.contains("Previous I/O error"));
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn test_public_job_orders_failures_by_catalog_position() {
+    let server = MockServer::start().await;
+    mount_root(&server, &["Zulu", "Alpha"]).await;
+    Mock::given(method("GET"))
+        .and(path("/simple/alpha/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw("invalid alpha", JSON)
+                .set_delay(Duration::from_millis(50)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/simple/zulu/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("invalid zulu", JSON))
+        .mount(&server)
+        .await;
+    let client = UpstreamClient::new(&format!("{}/simple/", server.uri())).unwrap();
+    let (_dir, app) = app(vec![index(
+        "ordered-failures",
+        crate::ECOSYSTEM,
+        IndexKind::Cached { client, offline: false },
+    )]);
+
+    let error = run(&app, parameters("ordered-failures", 2, 2)).await.unwrap_err();
+
+    assert!(error.find("project \"alpha\"").unwrap() < error.find("project \"zulu\"").unwrap());
+}
+
+#[tokio::test]
+async fn test_public_job_bounds_failure_diagnostics() {
+    let server = MockServer::start().await;
+    mount_root(&server, &["Alpha", "Bravo", "Charlie", "Delta"]).await;
+    let invalid_version = "é".repeat(1_000);
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/simple/(alpha|bravo|charlie|delta)/$"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!(r#"{{"meta":{{"api-version":"{invalid_version}"}},"name":"package","files":[]}}"#),
+            JSON,
+        ))
+        .expect(4)
+        .mount(&server)
+        .await;
+    let client = UpstreamClient::new(&format!("{}/simple/", server.uri())).unwrap();
+    let (_dir, app) = app(vec![index(
+        "bounded-failures",
+        crate::ECOSYSTEM,
+        IndexKind::Cached { client, offline: false },
+    )]);
+
+    let error = run(&app, parameters("bounded-failures", 4, 4)).await.unwrap_err();
+    let (_, summary) = error.split_once(": ").unwrap();
+    let diagnostics = summary.split("; ").skip(1).collect::<Vec<_>>();
+
+    assert!(summary.starts_with("4 project sync failures"));
+    assert!(error.len() < 2_048);
+    assert_eq!(diagnostics.len(), 3);
+    assert!(diagnostics.iter().all(|diagnostic| diagnostic.len() <= 512));
+    assert!(error.contains("project \"alpha\""));
+    assert!(error.contains("project \"bravo\""));
+    assert!(error.contains("project \"charlie\""));
+    assert!(!error.contains("project \"delta\""));
+    server.verify().await;
 }
 
 #[tokio::test]
@@ -916,7 +1074,10 @@ async fn test_catalog_job_uses_the_public_factory_and_scheduler_completion() {
 async fn test_cancellation_drops_an_inflight_project_without_partial_publication() {
     let mut upstream = stalled_upstream(
         "/simple/flask/",
-        Some(r#"{"meta":{"api-version":"1.4"},"projects":[{"name":"Flask"}]}"#),
+        vec![(
+            "/simple/",
+            r#"{"meta":{"api-version":"1.4"},"projects":[{"name":"Flask"}]}"#,
+        )],
     )
     .await;
     let (_dir, app) = app(vec![index(
@@ -966,7 +1127,7 @@ async fn test_cancellation_drops_an_inflight_project_without_partial_publication
 
 #[tokio::test]
 async fn test_cancellation_drops_an_inflight_root_without_publication() {
-    let mut upstream = stalled_upstream("/simple/", None).await;
+    let mut upstream = stalled_upstream("/simple/", Vec::new()).await;
     let (_dir, app) = app(vec![index(
         "cancel-root",
         crate::ECOSYSTEM,
@@ -999,6 +1160,52 @@ async fn test_cancellation_drops_an_inflight_root_without_publication() {
             .unwrap()
             .active
             .is_none()
+    );
+    release_stalled_request(upstream).await;
+}
+
+#[tokio::test]
+async fn test_cancellation_wins_after_a_project_success_and_failure() {
+    let mut upstream = stalled_upstream(
+        "/simple/stalled/",
+        vec![
+            (
+                "/simple/",
+                r#"{"meta":{"api-version":"1.4"},"projects":[{"name":"Broken"},{"name":"Healthy"},{"name":"Stalled"}]}"#,
+            ),
+            ("/simple/broken/", "invalid"),
+            (
+                "/simple/healthy/",
+                r#"{"meta":{"api-version":"1.4"},"versions":[],"name":"healthy","files":[]}"#,
+            ),
+        ],
+    )
+    .await;
+    let (_dir, app) = app(vec![index(
+        "cancel-after-results",
+        crate::ECOSYSTEM,
+        IndexKind::Cached {
+            client: upstream.client.clone(),
+            offline: false,
+        },
+    )]);
+    let scheduler = Arc::new(JobScheduler::new(app.serving.clone(), JobLimits::node_local()));
+    let job = scheduled_job(&app, &catalog_sync(parameters("cancel-after-results", 3, 1))).unwrap();
+    let running = tokio::spawn({
+        let scheduler = scheduler.clone();
+        async move { scheduler.run(job).await }
+    });
+    await_stalled_request(&mut upstream).await;
+
+    scheduler.shutdown().await;
+
+    assert_eq!(
+        running.await.unwrap().unwrap(),
+        JobRunOutcome::cancelled(JobReport {
+            processed: 2,
+            changed: 2,
+            ..JobReport::default()
+        })
     );
     release_stalled_request(upstream).await;
 }
@@ -1044,7 +1251,7 @@ async fn test_public_job_reports_timeout_failure(
     #[case] stalled_for: Duration,
     #[case] expected: &str,
 ) {
-    let mut upstream = stalled_upstream("/simple/", None).await;
+    let mut upstream = stalled_upstream("/simple/", Vec::new()).await;
     let (_dir, app) = app(vec![index(
         "timeout",
         crate::ECOSYSTEM,

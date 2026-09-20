@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::catalog::redact_url;
 use crate::policy::PypiPolicy as _;
-use crate::simple::{DetailSink, File, absolutize, stream_detail_json};
+use crate::simple::{DetailSink, File, StreamDetailError, absolutize, stream_detail_json};
 use crate::store::PypiStore as _;
 use crate::store::{
     CachedIndex, ProjectGeneration, abort_project_generation, active_project_generation, begin_project_generation,
@@ -252,8 +252,7 @@ pub async fn refresh_stale_pages(state: &Arc<ServingState>) -> Result<RefreshSum
             let result = fetch_and_store(state, &key, &index.name, &project, client).await;
             release_then(state, &key, guard, || (current.body, result))
         };
-        summary.checked += 1;
-        match &result {
+        match result {
             Ok(Some(record)) => {
                 let changed = before != record.body;
                 if changed {
@@ -271,11 +270,27 @@ pub async fn refresh_stale_pages(state: &Arc<ServingState>) -> Result<RefreshSum
             Err(err) => {
                 let reason = err.user_message();
                 log_cache_sync(&index.route, &project, "failure", false, Some(&reason));
+                if !is_recoverable_refresh_error(&err) {
+                    return Err(err);
+                }
             }
         }
-        result?;
+        summary.checked += 1;
     }
     Ok(summary)
+}
+
+const fn is_recoverable_refresh_error(error: &CacheError) -> bool {
+    matches!(
+        error,
+        CacheError::Upstream(_)
+            | CacheError::Parse(_)
+            | CacheError::Simple(_)
+            | CacheError::Unavailable
+            | CacheError::OfflineMissing(_)
+            | CacheError::RateLimited { .. }
+            | CacheError::UpstreamRateLimited { .. }
+    )
 }
 
 fn log_cache_sync(index: &str, project: &str, result: &'static str, changed: bool, reason: Option<&str>) {
@@ -438,6 +453,16 @@ pub enum ProjectSyncError {
     TooLarge,
     #[error("upstream project detail exceeds the {MAX_PROJECT_FILES}-file limit")]
     TooManyFiles,
+}
+
+impl From<StreamDetailError<Self>> for ProjectSyncError {
+    fn from(error: StreamDetailError<Self>) -> Self {
+        match error {
+            StreamDetailError::Simple(error) => Self::Simple(error),
+            StreamDetailError::Reader(error) => Self::Io(error),
+            StreamDetailError::Sink(error) => error,
+        }
+    }
 }
 
 /// Fetch and atomically publish one project's remote file-metadata generation on `index`.

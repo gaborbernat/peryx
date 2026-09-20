@@ -178,8 +178,8 @@ pub use serial::{
 };
 pub use simple::{
     API_VERSION, API_VERSION_BASE, CoreMetadata, DetailSink, File, Meta, ParsedDetail, ProjectDetail, ProjectList,
-    ProjectListEntry, ProjectStatus, Provenance, SimpleError, StreamedDetail, Yanked, parse_detail, parse_index,
-    parse_meta, render_detail_html, render_index_html, stream_detail_json, to_json,
+    ProjectListEntry, ProjectStatus, Provenance, SimpleError, StreamDetailError, StreamedDetail, Yanked, parse_detail,
+    parse_index, parse_meta, render_detail_html, render_index_html, stream_detail_json, to_json,
 };
 pub use version::{Version, VersionSpecifiers, parse_version, parse_version_specifiers, sorted_desc, versions_match};
 

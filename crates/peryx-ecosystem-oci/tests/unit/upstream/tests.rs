@@ -84,6 +84,43 @@ fn test_upstream_error_display() {
     );
 }
 
+#[rstest]
+#[case::valid("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", true)]
+#[case::uppercase("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeF", false)]
+#[case::algorithm("sha512:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", false)]
+#[case::short("sha256:0123456789abcdef", false)]
+fn test_manifest_head_requires_a_lowercase_sha256_digest(#[case] digest: &str, #[case] valid: bool) {
+    assert_eq!(valid_sha256_digest(digest), valid);
+}
+
+#[rstest]
+#[case::plain("application/vnd.oci.image.manifest.v1+json", true)]
+#[case::parameters("application/vnd.oci.image.manifest.v1+json; charset=utf-8", true)]
+#[case::wildcard("application/*", false)]
+#[case::missing_subtype("application", false)]
+#[case::multiple_slashes("application/vnd/oci", false)]
+#[case::invalid_parameter("application/vnd.oci.image.manifest.v1+json; charset", false)]
+fn test_manifest_head_requires_a_concrete_media_type(#[case] media_type: &str, #[case] valid: bool) {
+    assert_eq!(concrete_media_type(media_type), valid);
+}
+
+#[rstest]
+#[case::single(&["7"], Some(7))]
+#[case::identical_duplicates(&["7", "7"], Some(7))]
+#[case::conflicting_duplicates(&["7", "9"], None)]
+#[case::signed(&["+7"], None)]
+#[case::overflow(&["18446744073709551616"], None)]
+fn test_manifest_head_uses_strict_duplicate_safe_content_length(
+    #[case] values: &[&str],
+    #[case] expected: Option<u64>,
+) {
+    let mut headers = HeaderMap::new();
+    for value in values {
+        headers.append(reqwest::header::CONTENT_LENGTH, header(value));
+    }
+    assert_eq!(content_length(&headers), expected);
+}
+
 fn basic(username: &str, password: &str) -> Auth {
     Auth::Basic {
         username: username.to_owned(),

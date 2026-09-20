@@ -5,10 +5,11 @@ use super::*;
 use crate::error::{ErrorCode, error_response};
 use crate::name::Reference;
 use crate::store::{self, Manifest};
-use crate::upstream::UpstreamError;
+use crate::upstream::{ManifestHead, UpstreamError};
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
+use mediatype::MediaType;
 use peryx_driver::ServingState;
 use peryx_events::metrics::Observation;
 use peryx_index::Index;
@@ -36,7 +37,10 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         }
         let members = policy_serving_members(state, index, repo);
         let response = match reference {
-            Reference::Digest(digest) => self.manifest_by_digest(state, &members, repo, digest, head).await?,
+            Reference::Digest(digest) => {
+                self.manifest_by_digest(state, &members, repo, digest, head, accept.as_deref())
+                    .await?
+            }
             Reference::Tag(tag) => {
                 // A tag is a mutable name→digest resolution, so on a replica it stays hidden until the
                 // search view catches the serial that published it; a by-digest read above is
@@ -50,7 +54,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     if store::tag_is_trashed(&state.meta, &member.name, repo, tag)? {
                         return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                     }
-                    served = self.member_tag(state, member, repo, tag, head).await?;
+                    served = self
+                        .member_tag(state, member, repo, tag, head, accept.as_deref())
+                        .await?;
                     if served.is_some() {
                         checked = position + 1;
                         break;
@@ -135,12 +141,96 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             .and_then(|value| value.to_str().ok())
             .expect("a served manifest carries its content digest")
             .to_owned();
-        let list = store::get_manifest(&state.meta, &digest)?.expect("a served manifest is stored under its digest");
-        let Some(child) = store::linux_amd64_child(&list.bytes) else {
+        let list = match store::get_manifest(&state.meta, &digest)? {
+            Some(list) => list.bytes,
+            None if head => match self.cold_docker_list(state, members, repo, &response).await? {
+                ColdDockerList::Bytes(list) => list,
+                ColdDockerList::Response(response) => return Ok(response),
+            },
+            None => return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown")),
+        };
+        let Some(child) = store::linux_amd64_child(&list) else {
             return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
         };
-        let served = self.manifest_by_digest(state, members, repo, &child, head).await?;
+        let served = self
+            .manifest_by_digest(state, members, repo, &child, head, Some(accept))
+            .await?;
         Ok(acceptable_manifest_response(served, accept))
+    }
+
+    async fn cold_docker_list(
+        &self,
+        state: &ServingState,
+        members: &[&Index],
+        repo: &str,
+        response: &Response,
+    ) -> Result<ColdDockerList, ServeError> {
+        let source = response
+            .extensions()
+            .get::<HeadSource>()
+            .expect("cold manifest HEAD keeps its source index")
+            .clone();
+        let (position, member) = members
+            .iter()
+            .enumerate()
+            .find(|(_, member)| member.name == source.index)
+            .map(|(position, member)| (position, *member))
+            .expect("cold manifest HEAD source remains a serving member");
+        let prefix = &members[..=position];
+        if parent_hidden(state, prefix, repo, &source)? {
+            return Ok(ColdDockerList::Response(error_response(
+                ErrorCode::ManifestUnknown,
+                "manifest unknown",
+            )));
+        }
+        let client = member
+            .proxy_client()
+            .expect("cold manifest HEAD source is a proxy member");
+        let response = self
+            .upstream
+            .manifest(
+                client,
+                &self.upstream_repo(&member.name, client, repo),
+                &source.head.digest,
+                &self.token_realms(&member.name),
+            )
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(UpstreamError::Status(status)) if absent_upstream(status) => {
+                return Ok(ColdDockerList::Response(error_response(
+                    ErrorCode::ManifestUnknown,
+                    "manifest unknown",
+                )));
+            }
+            Err(err) => return Ok(ColdDockerList::Response(upstream_manifest_error(&err))),
+        };
+        if response.status() != StatusCode::OK
+            || header_value(response.headers(), header::CONTENT_TYPE.as_str()).is_none_or(|media_type| {
+                MediaType::parse(&media_type).is_err()
+                    || !media_type_base(&media_type).eq_ignore_ascii_case(media_type_base(&source.head.media_type))
+            })
+            || header_value(response.headers(), DOCKER_CONTENT_DIGEST.as_str())
+                .is_none_or(|digest| digest != source.head.digest)
+        {
+            return Ok(ColdDockerList::Response(upstream_manifest_error(
+                &UpstreamError::InvalidManifestHead,
+            )));
+        }
+        let bytes = bounded_body(response, MAX_MANIFEST_BYTES).await?;
+        let canonical = format!("sha256:{}", Digest::of(&bytes).as_str());
+        if bytes.len() as u64 != source.head.bytes || canonical != source.head.digest {
+            return Ok(ColdDockerList::Response(upstream_manifest_error(
+                &UpstreamError::InvalidManifestHead,
+            )));
+        }
+        if parent_hidden(state, prefix, repo, &source)? {
+            return Ok(ColdDockerList::Response(error_response(
+                ErrorCode::ManifestUnknown,
+                "manifest unknown",
+            )));
+        }
+        Ok(ColdDockerList::Bytes(bytes.to_vec()))
     }
 
     /// Resolve one manifest by digest across the serving members, hosted-first.
@@ -157,6 +247,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         repo: &str,
         digest: &str,
         head: bool,
+        accept: Option<&str>,
     ) -> Result<Response, ServeError> {
         if digest_decision(state, digest)? == DigestDecision::Revoked {
             return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
@@ -175,7 +266,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 && let Some(client) = member.proxy_client()
             {
                 served = self
-                    .pull_manifest_by_digest(state, client, &member.name, repo, digest, head)
+                    .pull_manifest_by_digest(state, client, &member.name, repo, digest, head, accept)
                     .await?;
             }
             if served.is_some() {
@@ -205,6 +296,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         repo: &str,
         digest: &str,
         head: bool,
+        accept: Option<&str>,
     ) -> Result<Option<Response>, ServeError> {
         let gate_key = format!("oci\u{0}manifest\u{0}{digest}");
         let gate = flight_gate(state, &gate_key);
@@ -218,9 +310,13 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         {
             return Ok(Some(manifest_response(manifest, digest, head)));
         }
-        let fetched = self
-            .fetch_manifest_by_digest(state, client, index, repo, digest, head)
-            .await;
+        let fetched = if head {
+            self.head_manifest_by_digest(state, client, index, repo, digest, accept)
+                .await
+        } else {
+            self.fetch_manifest_by_digest(state, client, index, repo, digest, head)
+                .await
+        };
         state.cache.forget_flight(&gate_key);
         fetched
     }
@@ -260,6 +356,39 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         ))
     }
 
+    async fn head_manifest_by_digest(
+        &self,
+        state: &ServingState,
+        client: &UpstreamClient,
+        index: &str,
+        repo: &str,
+        digest: &str,
+        accept: Option<&str>,
+    ) -> Result<Option<Response>, ServeError> {
+        let head = match self
+            .upstream
+            .manifest_head(
+                client,
+                &self.upstream_repo(index, client, repo),
+                digest,
+                accept,
+                &self.token_realms(index),
+            )
+            .await
+        {
+            Ok(head) => head,
+            Err(UpstreamError::Status(status)) if absent_upstream(status) => return Ok(None),
+            Err(err) => return Ok(Some(upstream_manifest_error(&err))),
+        };
+        if head.digest != digest {
+            return Ok(Some(upstream_manifest_error(&UpstreamError::InvalidManifestHead)));
+        }
+        if digest_decision(state, digest)? == DigestDecision::Revoked {
+            return Ok(Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown")));
+        }
+        Ok(Some(upstream_manifest_head_response(head, index, None)))
+    }
+
     /// Try one member for a manifest by tag. A hosted member reads its cached tag; an online proxy
     /// serves the tag from cache while it is fresh and revalidates once the freshness window elapses.
     /// `None` means a miss, so the caller tries the next member.
@@ -270,6 +399,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         repo: &str,
         tag: &str,
         head: bool,
+        accept: Option<&str>,
     ) -> Result<Option<Response>, ServeError> {
         let Some(client) = member.proxy_client() else {
             return Ok(match store::get_tag(&state.meta, &member.name, repo, tag)? {
@@ -297,7 +427,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         if state.negative_fresh(&tag_miss_key(&member.name, repo, tag)) {
             return Ok(None);
         }
-        let fetched = self.revalidate_tag(state, client, &member.name, repo, tag, head).await;
+        let fetched = self
+            .revalidate_tag(state, client, &member.name, repo, tag, head, accept)
+            .await;
         state.cache.forget_flight(&gate_key);
         fetched
     }
@@ -310,7 +442,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         repo: &str,
         tag: &str,
         head: bool,
+        accept: Option<&str>,
     ) -> Result<Option<Response>, ServeError> {
+        if head {
+            return self.revalidate_tag_head(state, client, index, repo, tag, accept).await;
+        }
         let upstream = match self
             .upstream
             .manifest_digest(
@@ -355,6 +491,35 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             Err(err) => tag_lookup_failure(state, index, repo, tag, head, &err),
         }
     }
+
+    async fn revalidate_tag_head(
+        &self,
+        state: &ServingState,
+        client: &UpstreamClient,
+        index: &str,
+        repo: &str,
+        tag: &str,
+        accept: Option<&str>,
+    ) -> Result<Option<Response>, ServeError> {
+        let head = match self
+            .upstream
+            .manifest_head(
+                client,
+                &self.upstream_repo(index, client, repo),
+                tag,
+                accept,
+                &self.token_realms(index),
+            )
+            .await
+        {
+            Ok(head) => head,
+            Err(err) => return tag_lookup_failure(state, index, repo, tag, true, &err),
+        };
+        if digest_decision(state, &head.digest)? == DigestDecision::Revoked {
+            return Ok(Some(error_response(ErrorCode::ManifestUnknown, "manifest unknown")));
+        }
+        Ok(Some(upstream_manifest_head_response(head, index, Some(tag))))
+    }
 }
 
 /// How long a confirmed tag miss answers for before peryx asks the registry again. A deployment
@@ -387,6 +552,9 @@ fn tag_lookup_failure(
     head: bool,
     err: &UpstreamError,
 ) -> Result<Option<Response>, ServeError> {
+    if matches!(err, UpstreamError::InvalidManifestHead) {
+        return Ok(Some(upstream_manifest_error(err)));
+    }
     match err {
         UpstreamError::Status(StatusCode::NOT_FOUND) => {
             if store::delete_tag(&state.meta, index, repo, tag)? {
@@ -654,6 +822,63 @@ fn manifest_response(manifest: Manifest, digest: &str, head: bool) -> Response {
     builder
         .body(body)
         .expect("manifest response builds from validated header parts")
+}
+
+enum ColdDockerList {
+    Bytes(Vec<u8>),
+    Response(Response),
+}
+
+#[derive(Clone)]
+struct HeadSource {
+    index: String,
+    tag: Option<String>,
+    head: ManifestHead,
+}
+
+fn upstream_manifest_head_response(head: ManifestHead, index: &str, tag: Option<&str>) -> Response {
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, &head.media_type)
+        .header(DOCKER_CONTENT_DIGEST, &head.digest)
+        .header(header::ETAG, digest_etag(&head.digest))
+        .header(header::CONTENT_LENGTH, head.bytes)
+        .body(Body::empty())
+        .expect("upstream manifest HEAD carries validated headers");
+    response.extensions_mut().insert(HeadSource {
+        index: index.to_owned(),
+        tag: tag.map(str::to_owned),
+        head,
+    });
+    response
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?.to_owned();
+    values.next().is_none().then_some(value)
+}
+
+fn parent_hidden(
+    state: &ServingState,
+    members: &[&Index],
+    repo: &str,
+    source: &HeadSource,
+) -> Result<bool, ServeError> {
+    if digest_decision(state, &source.head.digest)? == DigestDecision::Revoked
+        || manifest_trashed_in(state, members, repo, &source.head.digest)?
+    {
+        return Ok(true);
+    }
+    let Some(tag) = source.tag.as_deref() else {
+        return Ok(false);
+    };
+    for member in members {
+        if store::tag_is_trashed(&state.meta, &member.name, repo, tag)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Serve a proxy tag from cache while its recorded fetch is still within the freshness window, or

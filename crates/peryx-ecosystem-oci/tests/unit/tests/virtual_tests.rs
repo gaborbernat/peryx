@@ -110,6 +110,45 @@ async fn test_virtual_manifest_trash_blocks_proxy_fallback_and_tag_discovery() {
     assert!(!std::str::from_utf8(&body).unwrap().contains("latest"));
 }
 
+#[tokio::test]
+async fn test_virtual_manifest_head_trash_blocks_proxy_fallback() {
+    let server = MockServer::start().await;
+    let manifest = manifest("shared");
+    let digest = oci_digest(&manifest);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", MANIFEST_TYPE)
+                .insert_header("content-length", manifest.len().to_string().as_str()),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+    push_to_virtual(&app, "latest", &manifest).await;
+    assert_eq!(
+        send(&app, Method::HEAD, "/v2/reg/app/manifests/latest").await.0,
+        StatusCode::OK
+    );
+    let (status, _, _) = send_body(
+        &app,
+        Method::DELETE,
+        &format!("/v2/reg/app/manifests/{digest}"),
+        &[("authorization", &auth(TOKEN))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    assert_eq!(
+        send(&app, Method::HEAD, "/v2/reg/app/manifests/latest").await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_virtual_digest_delete_wins_an_inflight_proxy_pull() {
     let server = MockServer::start().await;

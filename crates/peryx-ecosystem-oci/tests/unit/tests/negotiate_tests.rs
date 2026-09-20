@@ -1,14 +1,17 @@
 use std::sync::LazyLock;
 
 use axum::http::{Method, StatusCode, header};
+use peryx_index::IndexKind;
+use peryx_upstream::UpstreamClient;
 use rstest::rstest;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{
-    auth, body_has_code, hosted_writable, image_manifest, mount_head_without_digest, oci_digest, proxy, seed_config,
-    send_body, send_with,
+    app_with_indexes, auth, body_has_code, hosted_writable, image_manifest, mount_head_without_digest, oci_digest,
+    oci_index, proxy, seed_config, send_body, send_with,
 };
+use crate::registry::MAX_MANIFEST_BYTES;
 
 const TOKEN: &str = "s3cret";
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -499,4 +502,564 @@ async fn test_get_fetches_the_amd64_child_from_a_proxy_member() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["docker-content-digest"], child_digest);
     assert_eq!(body, *DOCKER_CHILD);
+}
+
+#[tokio::test]
+async fn test_cold_head_negotiates_a_docker_list_with_one_parent_get_and_child_head() {
+    let server = MockServer::start().await;
+    let child_digest = oci_digest(&DOCKER_CHILD);
+    let list = amd64_docker_list(&child_digest);
+    let list_digest = oci_digest(&list);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{list_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(
+                    list.clone(),
+                    "Application/Vnd.Docker.Distribution.Manifest.List.V2+Json; charset=utf-8",
+                ),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/app/manifests/{child_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", child_digest.as_str())
+                .insert_header("content-type", IMAGE_ACCEPT)
+                .insert_header("content-length", DOCKER_CHILD.len().to_string().as_str()),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, body) = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/hub/library/app/manifests/latest",
+        &[("accept", IMAGE_ACCEPT)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["docker-content-digest"], child_digest);
+    assert_eq!(headers[header::CONTENT_TYPE], IMAGE_ACCEPT);
+    assert_eq!(headers[header::CONTENT_LENGTH], DOCKER_CHILD.len().to_string());
+    assert_eq!(headers[header::ETAG], format!("\"{child_digest}\""));
+    assert!(body.is_empty());
+    let conditional = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/hub/library/app/manifests/latest",
+        &[
+            ("accept", IMAGE_ACCEPT),
+            ("if-none-match", &format!("\"{child_digest}\"")),
+        ],
+    )
+    .await;
+    assert_eq!(conditional.0, StatusCode::NOT_MODIFIED);
+    assert_eq!(conditional.1[header::ETAG], format!("\"{child_digest}\""));
+    assert!(conditional.2.is_empty());
+    assert_eq!(
+        (
+            crate::store::get_manifest(&state.serving.meta, &list_digest).unwrap(),
+            crate::store::get_tag(&state.serving.meta, "hub", "library/app", "latest").unwrap(),
+            crate::store::tag_freshness(&state.serving.meta, "hub", "library/app", "latest").unwrap(),
+            crate::store::manifest_is_member(&state.serving.meta, "hub", "library/app", &child_digest).unwrap(),
+            state.serving.meta.get_artifact_placement(&list_digest).unwrap(),
+            state.serving.meta.get_artifact_placement(&child_digest).unwrap(),
+        ),
+        (None, None, None, false, None, None)
+    );
+}
+
+#[tokio::test]
+async fn test_cold_head_rejects_an_unacceptable_oci_index_without_a_get() {
+    let server = MockServer::start().await;
+    let digest = oci_digest(b"index");
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", INDEX_TYPE)
+                .insert_header("content-length", "5"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, _, response) = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/hub/library/app/manifests/latest",
+        &[("accept", IMAGE_ACCEPT)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body_has_code(&response, "MANIFEST_UNKNOWN"), "{response:?}");
+}
+
+#[tokio::test]
+async fn test_cold_head_rejects_a_docker_list_body_with_the_wrong_digest() {
+    let server = MockServer::start().await;
+    let child_digest = oci_digest(&DOCKER_CHILD);
+    let list = amd64_docker_list(&child_digest);
+    let advertised = oci_digest(b"other list");
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", advertised.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{advertised}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", advertised.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list, LIST_TYPE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/app/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send_with(
+            &app,
+            Method::HEAD,
+            "/v2/hub/library/app/manifests/latest",
+            &[("accept", IMAGE_ACCEPT)],
+        )
+        .await
+        .0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[rstest]
+#[case::unauthorized(401, StatusCode::UNAUTHORIZED, None)]
+#[case::forbidden(403, StatusCode::NOT_FOUND, None)]
+#[case::missing(404, StatusCode::NOT_FOUND, None)]
+#[case::rate_limited(429, StatusCode::TOO_MANY_REQUESTS, Some("7"))]
+#[tokio::test]
+async fn test_cold_docker_list_preserves_the_parent_get_failure(
+    #[case] upstream: u16,
+    #[case] expected: StatusCode,
+    #[case] retry_after: Option<&str>,
+) {
+    let server = MockServer::start().await;
+    let digest = oci_digest(b"list");
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", "4"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut response = ResponseTemplate::new(upstream);
+    if let Some(retry_after) = retry_after {
+        response = response.insert_header("retry-after", retry_after);
+    }
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{digest}")))
+        .respond_with(response)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/hub/library/app/manifests/latest",
+        &[("accept", IMAGE_ACCEPT)],
+    )
+    .await;
+
+    assert_eq!(status, expected);
+    assert_eq!(
+        headers.get(header::RETRY_AFTER).and_then(|value| value.to_str().ok()),
+        retry_after
+    );
+}
+
+#[tokio::test]
+async fn test_cold_docker_list_rejects_an_oversized_parent_without_a_child_head() {
+    let server = MockServer::start().await;
+    let oversized = vec![b'x'; MAX_MANIFEST_BYTES + 1];
+    let digest = oci_digest(&oversized);
+    let child = format!("sha256:{}", "a".repeat(64));
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", oversized.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", digest.as_str())
+                .insert_header("content-length", oversized.len().to_string().as_str())
+                .set_body_raw(oversized, LIST_TYPE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/app/manifests/{child}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send_with(
+            &app,
+            Method::HEAD,
+            "/v2/hub/library/app/manifests/latest",
+            &[("accept", IMAGE_ACCEPT)],
+        )
+        .await
+        .0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn test_cold_docker_list_preserves_a_missing_selected_child() {
+    let server = MockServer::start().await;
+    let child_digest = oci_digest(&DOCKER_CHILD);
+    let list = amd64_docker_list(&child_digest);
+    let list_digest = oci_digest(&list);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{list_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list, LIST_TYPE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/app/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send_with(
+            &app,
+            Method::HEAD,
+            "/v2/hub/library/app/manifests/latest",
+            &[("accept", IMAGE_ACCEPT)],
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn test_cold_docker_list_rejects_a_partial_parent_response() {
+    let server = MockServer::start().await;
+    let child_digest = oci_digest(&DOCKER_CHILD);
+    let list = amd64_docker_list(&child_digest);
+    let list_digest = oci_digest(&list);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/manifests/{list_digest}")))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list, LIST_TYPE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/library/app/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send_with(
+            &app,
+            Method::HEAD,
+            "/v2/hub/library/app/manifests/latest",
+            &[("accept", IMAGE_ACCEPT)],
+        )
+        .await
+        .0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn test_cold_docker_list_gets_the_parent_from_the_selected_virtual_proxy() {
+    let first = MockServer::start().await;
+    let selected = MockServer::start().await;
+    let child_digest = oci_digest(&DOCKER_CHILD);
+    let list = amd64_docker_list(&child_digest);
+    let list_digest = oci_digest(&list);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&first)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&first)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&selected)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list, LIST_TYPE),
+        )
+        .expect(1)
+        .mount(&selected)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v2/app/manifests/{child_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", child_digest.as_str())
+                .insert_header("content-type", IMAGE_ACCEPT)
+                .insert_header("content-length", DOCKER_CHILD.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&selected)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = app_with_indexes(
+        &dir,
+        vec![
+            oci_index(
+                "first",
+                "first",
+                IndexKind::Cached {
+                    client: UpstreamClient::new(&format!("{}/", first.uri())).unwrap(),
+                    offline: false,
+                },
+            ),
+            oci_index(
+                "selected",
+                "selected",
+                IndexKind::Cached {
+                    client: UpstreamClient::new(&format!("{}/", selected.uri())).unwrap(),
+                    offline: false,
+                },
+            ),
+            oci_index(
+                "reg",
+                "reg",
+                IndexKind::Virtual {
+                    layers: vec![0, 1],
+                    write_target: None,
+                },
+            ),
+        ],
+    );
+
+    let (status, headers, body) = send_with(
+        &app,
+        Method::HEAD,
+        "/v2/reg/app/manifests/latest",
+        &[("accept", IMAGE_ACCEPT)],
+    )
+    .await;
+
+    assert_eq!(
+        (status, headers["docker-content-digest"].as_bytes(), body.is_empty()),
+        (StatusCode::OK, child_digest.as_bytes(), true)
+    );
+}
+
+#[tokio::test]
+async fn test_selected_virtual_proxy_parent_list_miss_does_not_fall_through() {
+    let selected = MockServer::start().await;
+    let later = MockServer::start().await;
+    let child_digest = oci_digest(&DOCKER_CHILD);
+    let list = amd64_docker_list(&child_digest);
+    let list_digest = oci_digest(&list);
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(1)
+        .mount(&selected)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&selected)
+        .await;
+    Mock::given(method("HEAD"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-type", LIST_TYPE)
+                .insert_header("content-length", list.len().to_string().as_str()),
+        )
+        .expect(0)
+        .mount(&later)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/manifests/{list_digest}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", list_digest.as_str())
+                .insert_header("content-length", list.len().to_string().as_str())
+                .set_body_raw(list, LIST_TYPE),
+        )
+        .expect(0)
+        .mount(&later)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = app_with_indexes(
+        &dir,
+        vec![
+            oci_index(
+                "selected",
+                "selected",
+                IndexKind::Cached {
+                    client: UpstreamClient::new(&format!("{}/", selected.uri())).unwrap(),
+                    offline: false,
+                },
+            ),
+            oci_index(
+                "later",
+                "later",
+                IndexKind::Cached {
+                    client: UpstreamClient::new(&format!("{}/", later.uri())).unwrap(),
+                    offline: false,
+                },
+            ),
+            oci_index(
+                "reg",
+                "reg",
+                IndexKind::Virtual {
+                    layers: vec![0, 1],
+                    write_target: None,
+                },
+            ),
+        ],
+    );
+
+    assert_eq!(
+        send_with(
+            &app,
+            Method::HEAD,
+            "/v2/reg/app/manifests/latest",
+            &[("accept", IMAGE_ACCEPT)],
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
 }

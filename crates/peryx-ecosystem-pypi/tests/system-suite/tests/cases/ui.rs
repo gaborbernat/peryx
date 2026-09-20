@@ -348,7 +348,7 @@ fn put_cached_file(state: &peryx_driver::AppState, filename: &str, digest: &Dige
         "files": [{
             "filename": filename,
             "size": 12,
-            "url": url.clone(),
+            "url": url,
             "hashes": {"sha256": digest.as_str()},
             "provenance": "https://upstream.example/veloxdemo.provenance",
         }],
@@ -613,9 +613,11 @@ async fn test_ui_nested_browse_keeps_the_selected_collision_owner(
         CoreMetadata::Absent,
         Provenance::Url("https://hosted.example/veloxdemo.provenance".to_owned()),
     );
-    let cached = same_digest
-        .then(|| hosted.clone())
-        .unwrap_or_else(|| Digest::of(b"cached wheel"));
+    let cached = if same_digest {
+        hosted.clone()
+    } else {
+        Digest::of(b"cached wheel")
+    };
     ArtifactPlacementStore::insert_artifact_placement(
         &state.serving.meta,
         hosted.as_str(),
@@ -811,7 +813,7 @@ fn rendered_file_rows(body: &str) -> Vec<serde_json::Value> {
         .filter_map(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
         .find_map(|resource| {
             resource["Ok"]["sections"].as_array()?.iter().find_map(|section| {
-                (section["heading"] == "Files").then(|| section["rows"].as_array().unwrap().iter().cloned().collect())
+                (section["heading"] == "Files").then(|| section["rows"].as_array().unwrap().clone())
             })
         })
         .unwrap()

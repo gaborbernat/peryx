@@ -160,7 +160,8 @@ fn test_commit_driver_cache_txn_rolls_back_a_removal_after_a_prefix_scan() {
         txn.scan_prefix("page/", |key, _| {
             first = Some(key.to_owned());
             Ok::<_, MetaError>(std::ops::ControlFlow::Break(()))
-        })?;
+        })
+        .unwrap();
         txn.remove_local(first.as_deref().unwrap())?;
         Err::<(), _>(decode_error())
     });
@@ -261,7 +262,8 @@ fn test_driver_txn_scan_prefix_break_visits_one_matching_row() {
             txn.scan_prefix("scope/", |_, _| {
                 visits += 1;
                 Ok::<_, MetaError>(std::ops::ControlFlow::Break(()))
-            })?;
+            })
+            .unwrap();
             Ok::<_, MetaError>(visits)
         })
         .unwrap();
@@ -284,7 +286,8 @@ fn test_driver_txn_scan_prefix_reads_staged_rows() {
             txn.scan_prefix("scope/", |key, value| {
                 entries.push((key.to_owned(), value.to_vec()));
                 Ok::<_, MetaError>(std::ops::ControlFlow::Continue(()))
-            })?;
+            })
+            .unwrap();
             Ok::<_, MetaError>((entries, Vec::new()))
         })
         .unwrap();
@@ -310,8 +313,8 @@ fn test_driver_txn_scan_prefix_visitor_error_rolls_back_staged_rows() {
         txn.scan_prefix("scope/", |_, _| {
             visits += 1;
             Err::<std::ops::ControlFlow<()>, _>(decode_error())
-        })
-        .map(|()| ((), Vec::new()))
+        })?;
+        Ok::<_, MetaError>(((), Vec::new()))
     });
 
     assert!(matches!(result, Err(MetaError::Decode(_))));

@@ -981,7 +981,7 @@ async fn test_proxy_tag_list_rejects_an_unmarked_clamped_page() {
 }
 
 #[tokio::test]
-async fn test_idle_tag_page_sweep_tolerates_a_metadata_scan_failure() {
+async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_scan_failure() {
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -989,6 +989,22 @@ async fn test_idle_tag_page_sweep_tolerates_a_metadata_scan_failure() {
     let (pages, fault) = peryx_test_support::fault::backend();
     let meta =
         peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    for query in ["n=1&last=a", "n=1&last=b"] {
+        store::set_tag_page(
+            &meta,
+            "hub",
+            "app",
+            query,
+            600,
+            None,
+            br#"{"name":"app","tags":["tag"]}"#,
+        )
+        .unwrap();
+    }
+    let rows = meta.driver_prefix_keys("oci\0tp\0").unwrap();
+    drop(meta);
+    let meta =
+        peryx_storage::meta::MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
     let mut state = peryx_driver::AppState::with_clock(
         meta,
         peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
@@ -1005,9 +1021,16 @@ async fn test_idle_tag_page_sweep_tolerates_a_metadata_scan_failure() {
         .1
         .clone();
 
-    fault.arm(0);
+    fault.arm(6);
     assert_eq!(reclaimer.reclaim_idle(state.serving.clone()).await, 0);
     assert!(fault.triggered());
+    fault.disable();
+    drop(reclaimer);
+    drop(state);
+
+    let meta =
+        peryx_storage::meta::MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    assert_eq!(meta.driver_prefix_keys("oci\0tp\0").unwrap(), rows);
 }
 
 async fn reclaim_idle(state: &std::sync::Arc<peryx_driver::AppState>) -> usize {

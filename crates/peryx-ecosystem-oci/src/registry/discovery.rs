@@ -982,16 +982,7 @@ fn cached_next(link: Option<&str>, pagination: &Pagination) -> Result<Option<Pag
         }
         None => None,
     };
-    Ok(next).and_then(|next| {
-        if next
-            .as_ref()
-            .is_some_and(|next| next.limit == Some(0) || next.last.is_none())
-        {
-            Err("invalid cached continuation")
-        } else {
-            Ok(next)
-        }
-    })
+    Ok(next)
 }
 
 fn tag_page_cache_timestamp(key: &str, value: &[u8]) -> Option<i64> {

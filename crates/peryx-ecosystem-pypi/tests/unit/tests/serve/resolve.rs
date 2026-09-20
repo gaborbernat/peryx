@@ -59,6 +59,21 @@ async fn test_resolve_detail_rejects_a_persisted_virtual_cycle() {
 }
 
 #[tokio::test]
+async fn test_resolve_detail_returns_none_for_a_missing_hosted_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = custom_state(&dir, "https://example.invalid/simple/", |_client| {
+        vec![runtime_index("hosted", IndexKind::Hosted { volatile: true })]
+    });
+
+    assert!(
+        cache::resolve_detail(&state.serving, state.serving.index_at(0), "flask", "hosted")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn test_resolve_detail_allows_a_shared_virtual_descendant() {
     let dir = tempfile::tempdir().unwrap();
     let state = custom_state(&dir, "https://example.invalid/simple/", |_client| {

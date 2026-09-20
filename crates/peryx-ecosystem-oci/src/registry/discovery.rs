@@ -13,6 +13,7 @@ const OCI_INDEX_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 
 struct ProxyTagPage {
     response: Response,
+    tags: Vec<String>,
     stale_error: Option<crate::upstream::UpstreamError>,
 }
 
@@ -23,7 +24,7 @@ enum TagTarget {
 }
 
 enum TagFilter {
-    Visible(std::collections::BTreeSet<String>),
+    Visible(Vec<String>),
     Unresolved(Response),
 }
 
@@ -56,8 +57,9 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             return if active {
                 self.filter_proxy_tag_page(state, name, &member.name, client, repo, page)
                     .await
+                    .map(|page| page.response)
             } else {
-                serve_proxy_tag_page(name, page.response).await
+                Ok(serve_proxy_tag_page(name, page))
             };
         }
         let tags = self.visible_tag_names(state, name, repo, active, &members).await?;
@@ -127,23 +129,34 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         query: &str,
     ) -> Result<ProxyTagPage, ServeError> {
         let now = (state.clock)();
-        let cached = store::tag_page(&state.meta, index, repo, query)?;
-        if let Some((fetched_at, link, body)) = &cached
+        let upstream_repo = self.upstream_repo(index, client, repo);
+        let cached = match store::tag_page(&state.meta, index, repo, query)? {
+            store::TagPageRead::Page(page) => {
+                if let Ok(tags) = validate_tag_page(&page.2, &upstream_repo) {
+                    Some((page, tags))
+                } else {
+                    store::delete_tag_page(&state.meta, index, repo, query)?;
+                    None
+                }
+            }
+            store::TagPageRead::Invalid => {
+                store::delete_tag_page(&state.meta, index, repo, query)?;
+                None
+            }
+            store::TagPageRead::Missing => None,
+        };
+        if let Some(((fetched_at, link, body), tags)) = &cached
             && now.saturating_sub(*fetched_at) < state.ttl_secs
         {
             return Ok(ProxyTagPage {
                 response: tag_page_response(name, link.as_deref(), body.clone()),
+                tags: tags.clone(),
                 stale_error: None,
             });
         }
         match self
             .upstream
-            .tags(
-                client,
-                &self.upstream_repo(index, client, repo),
-                query,
-                &self.token_realms(index),
-            )
+            .tags(client, &upstream_repo, query, &self.token_realms(index))
             .await
         {
             Ok(response) => {
@@ -153,19 +166,23 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_owned);
                 let body = bounded_body(response, MAX_TAGS_BYTES).await?;
+                let tags = validate_tag_page(&body, &upstream_repo)?;
                 store::set_tag_page(&state.meta, index, repo, query, now, link.as_deref(), &body)?;
                 Ok(ProxyTagPage {
                     response: tag_page_response(name, link.as_deref(), body.to_vec()),
+                    tags,
                     stale_error: None,
                 })
             }
             Err(err) => match cached {
-                Some((fetched_at, link, body)) if within_stale_bound(state, fetched_at) => Ok(ProxyTagPage {
+                Some(((fetched_at, link, body), tags)) if within_stale_bound(state, fetched_at) => Ok(ProxyTagPage {
                     response: tag_page_response(name, link.as_deref(), body),
+                    tags,
                     stale_error: Some(err),
                 }),
                 _ => Ok(ProxyTagPage {
                     response: upstream_error_response(&err, "tags"),
+                    tags: Vec::new(),
                     stale_error: None,
                 }),
             },
@@ -190,25 +207,18 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             // Each page is cached under its own query, so a virtual index that unions several proxies
             // no longer re-walks every upstream's pagination on every request.
             let fetched = self.proxy_tags(state, name, index, client, repo, &query).await?;
-            let response = if active {
+            let tag_page = if active {
                 self.filter_proxy_tag_page(state, name, index, client, repo, fetched)
                     .await?
             } else {
-                fetched.response
+                fetched
             };
-            let (parts, body) = response.into_parts();
+            let (parts, _) = tag_page.response.into_parts();
             if !parts.status.is_success() {
                 return Ok(None);
             }
             let next = parts.headers.get(header::LINK).and_then(next_page_query_of);
-            let bytes = axum::body::to_bytes(body, MAX_TAGS_BYTES)
-                .await
-                .expect("proxy tag pages are bounded before caching");
-            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                return Ok(None);
-            };
-            let tags = parsed["tags"].as_array().into_iter().flatten();
-            names.extend(tags.filter_map(|tag| tag.as_str().map(str::to_owned)));
+            names.extend(tag_page.tags);
             page += 1;
             match next {
                 Some(next) if page < MAX_TAG_PAGES => query = next,
@@ -226,36 +236,42 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         client: &UpstreamClient,
         repo: &str,
         page: ProxyTagPage,
-    ) -> Result<Response, ServeError> {
-        let ProxyTagPage { response, stale_error } = page;
+    ) -> Result<ProxyTagPage, ServeError> {
+        let ProxyTagPage {
+            response,
+            tags,
+            stale_error,
+        } = page;
         if !response.status().is_success() {
-            return Ok(response);
+            return Ok(ProxyTagPage {
+                response,
+                tags,
+                stale_error,
+            });
         }
-        let (parts, body) = response.into_parts();
-        let body = axum::body::to_bytes(body, MAX_TAGS_BYTES)
-            .await
-            .expect("proxy tag pages are bounded before filtering");
-        let document = serde_json::from_slice::<serde_json::Value>(&body)
-            .map_err(|err| ServeError::Transport(format!("upstream tag list is invalid: {err}")))?;
-        let tags = match &document["tags"] {
-            serde_json::Value::Array(tags) => tags.iter().filter_map(|tag| tag.as_str().map(str::to_owned)).collect(),
-            serde_json::Value::Null => Vec::new(),
-            _ => return Err(ServeError::Transport("upstream tag list is invalid".to_owned())),
-        };
+        let (parts, _) = response.into_parts();
         let tags = match self
             .visible_proxy_tags(state, index, client, repo, tags, stale_error.as_ref())
             .await?
         {
             TagFilter::Visible(tags) => tags,
-            TagFilter::Unresolved(response) => return Ok(response),
+            TagFilter::Unresolved(response) => {
+                return Ok(ProxyTagPage {
+                    response,
+                    tags: Vec::new(),
+                    stale_error: None,
+                });
+            }
         };
-        Ok(tag_page_response(
-            name,
-            parts.headers.get(header::LINK).and_then(|value| value.to_str().ok()),
-            serde_json::json!({ "name": name, "tags": tags })
-                .to_string()
-                .into_bytes(),
-        ))
+        Ok(ProxyTagPage {
+            response: tag_page_response(
+                name,
+                parts.headers.get(header::LINK).and_then(|value| value.to_str().ok()),
+                tag_page_body(name, &tags),
+            ),
+            tags,
+            stale_error: None,
+        })
     }
 
     async fn visible_proxy_tags(
@@ -267,14 +283,14 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         tags: Vec<String>,
         stale_error: Option<&crate::upstream::UpstreamError>,
     ) -> Result<TagFilter, ServeError> {
-        let mut visible = std::collections::BTreeSet::new();
+        let mut visible = Vec::new();
         if let Some(error) = stale_error {
             for tag in tags {
                 let Some(digest) = stale_tag_digest(state, index, repo, &tag)? else {
                     return Ok(TagFilter::Unresolved(upstream_error_response(error, "tags")));
                 };
                 if digest_decision(state, &digest)? == DigestDecision::Clear {
-                    visible.insert(tag);
+                    visible.push(tag);
                 }
             }
             return Ok(TagFilter::Visible(visible));
@@ -289,7 +305,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 },
             };
             if digest_decision(state, &digest)? == DigestDecision::Clear {
-                visible.insert(tag);
+                visible.push(tag);
             }
         }
         Ok(TagFilter::Visible(visible))
@@ -717,12 +733,12 @@ pub(super) fn serve_catalog(state: &ServingState, query: &str) -> Result<Respons
         .expect("catalog response builds from validated parts"))
 }
 
-/// A tag-list page as this registry answers it: the upstream body, and a `Link` to the next page
-/// rewritten to this registry's client-facing name. The upstream's `Link` names the upstream
+/// A tag-list page as this registry answers it: the validated upstream body, and a `Link` to the next
+/// page rewritten to this registry's client-facing name. The upstream's `Link` names the upstream
 /// repository (`/v2/library/nginx/...`, no index route), which a client would resolve back against
 /// peryx and 404; only its query carries over. The body's `name` is the upstream repository too and is
-/// rewritten by [`serve_proxy_tag_page`] on the client-facing path; the aggregation path reads only the
-/// `tags` and ignores it.
+/// rewritten by [`serve_proxy_tag_page`] on the client-facing path; the aggregation path carries the
+/// validated tags separately.
 fn tag_page_response(name: &str, upstream_link: Option<&str>, body: Vec<u8>) -> Response {
     let mut response = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     if let Some(query) = upstream_link.and_then(next_page_query)
@@ -733,44 +749,54 @@ fn tag_page_response(name: &str, upstream_link: Option<&str>, body: Vec<u8>) -> 
     response
 }
 
-/// Rewrite a served proxy tag page's body `name` to the client-facing repository. `proxy_tags` caches
-/// and forwards the upstream body verbatim, whose `name` is the upstream repository (`library/nginx`) a
-/// client cannot address and which the cached, filtered, and virtual paths never emit; the single
-/// online-proxy serve path swaps it here. Tag order and count carry over, the already-rewritten `Link`
-/// stays, and an upstream error passes through untouched. A success body that is not a tag list is a
-/// gateway fault, not a listing.
-async fn serve_proxy_tag_page(name: &str, response: Response) -> Result<Response, ServeError> {
+/// Serialize a validated proxy tag page with its client-facing repository name. Tag order and count
+/// carry over, the already-rewritten `Link` stays, and an upstream error passes through untouched.
+fn serve_proxy_tag_page(name: &str, page: ProxyTagPage) -> Response {
+    let ProxyTagPage { response, tags, .. } = page;
     if !response.status().is_success() {
-        return Ok(response);
+        return response;
     }
-    let (mut parts, body) = response.into_parts();
-    let body = axum::body::to_bytes(body, MAX_TAGS_BYTES)
-        .await
-        .expect("proxy tag pages are bounded before serving");
-    let body = rewrite_tag_page_name(name, &body)?;
+    let (mut parts, _) = response.into_parts();
     parts.headers.remove(header::CONTENT_LENGTH);
-    Ok(Response::from_parts(parts, Body::from(body)))
+    Response::from_parts(parts, Body::from(tag_page_body(name, &tags)))
 }
 
-/// Rewrite a proxied tag-list body's `name` to the client-facing repository, preserving tag order and
-/// count. Upstream answers under its own repository name, so forwarding it unchanged leaks a name the
-/// client cannot address. A body that is not a tag-list object with a string-array (or absent) `tags`
-/// is rejected rather than served as one.
-fn rewrite_tag_page_name(name: &str, body: &[u8]) -> Result<Vec<u8>, ServeError> {
-    let invalid = || ServeError::Transport("upstream tag list is invalid".to_owned());
-    let document = serde_json::from_slice::<serde_json::Value>(body)
-        .map_err(|err| ServeError::Transport(format!("upstream tag list is invalid: {err}")))?;
-    let serde_json::Value::Object(fields) = &document else {
-        return Err(invalid());
-    };
-    let tags = match fields.get("tags") {
-        Some(serde_json::Value::Array(tags)) if tags.iter().all(serde_json::Value::is_string) => tags.clone(),
-        None | Some(serde_json::Value::Null) => Vec::new(),
-        Some(_) => return Err(invalid()),
-    };
-    Ok(serde_json::json!({ "name": name, "tags": tags })
+fn tag_page_body(name: &str, tags: &[String]) -> Vec<u8> {
+    serde_json::json!({ "name": name, "tags": tags })
         .to_string()
-        .into_bytes())
+        .into_bytes()
+}
+
+fn validate_tag_page(body: &[u8], expected_name: &str) -> Result<Vec<String>, ServeError> {
+    let document: serde_json::Value = serde_json::from_slice(body).map_err(invalid_tag_page)?;
+    let Some(fields) = document.as_object() else {
+        return Err(invalid_tag_page("tag page is not an object"));
+    };
+    if fields.get("name").and_then(serde_json::Value::as_str) != Some(expected_name) {
+        return Err(invalid_tag_page("tag page names another repository"));
+    }
+    let Some(tags) = fields
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|tags| tags.iter().map(serde_json::Value::as_str).collect::<Option<Vec<_>>>())
+    else {
+        return Err(invalid_tag_page("tag page has no string tag array"));
+    };
+    if !tags_are_ordered(&tags) {
+        return Err(invalid_tag_page("tag page tags are not ordered"));
+    }
+    Ok(tags.into_iter().map(str::to_owned).collect())
+}
+
+fn tags_are_ordered(tags: &[&str]) -> bool {
+    tags.windows(2).all(|pair| pair[0] <= pair[1])
+        || tags
+            .windows(2)
+            .all(|pair| pair[0].to_ascii_lowercase() <= pair[1].to_ascii_lowercase())
+}
+
+fn invalid_tag_page(error: impl std::fmt::Display) -> ServeError {
+    ServeError::Transport(format!("upstream tag list is invalid: {error}"))
 }
 
 fn next_page_query_of(value: &HeaderValue) -> Option<String> {

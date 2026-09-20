@@ -476,10 +476,6 @@ async fn observe_tag_list(server: &wiremock::MockServer, repository: &str) -> to
 
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let sender = Mutex::new(Some(sender));
-    let response = ResponseTemplate::new(200).set_body_json(serde_json::json!({
-        "name": repository,
-        "tags": [],
-    }));
     Mock::given(method("GET"))
         .and(path_regex(format!(r"^/v2/(library/)?{repository}/tags/list$")))
         .respond_with(move |request: &wiremock::Request| {
@@ -490,7 +486,14 @@ async fn observe_tag_list(server: &wiremock::MockServer, repository: &str) -> to
                 .unwrap()
                 .send(request.url.path().to_owned())
                 .unwrap();
-            response.clone()
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": request
+                    .url
+                    .path()
+                    .trim_start_matches("/v2/")
+                    .trim_end_matches("/tags/list"),
+                "tags": [],
+            }))
         })
         .mount(server)
         .await;

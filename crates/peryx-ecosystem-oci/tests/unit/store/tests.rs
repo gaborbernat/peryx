@@ -9,30 +9,38 @@ fn store() -> (tempfile::TempDir, MetaStore) {
 #[test]
 fn test_tag_page_round_trips_with_and_without_a_link() {
     let (_dir, meta) = store();
+    assert_eq!(
+        tag_page(&meta, "hub", "library/nginx", "").unwrap(),
+        TagPageRead::Missing
+    );
     set_tag_page(&meta, "hub", "library/nginx", "", 42, Some("</v2/x?n=1>"), b"{}").unwrap();
     assert_eq!(
         tag_page(&meta, "hub", "library/nginx", "").unwrap(),
-        Some((42, Some("</v2/x?n=1>".to_owned()), b"{}".to_vec()))
+        TagPageRead::Page((42, Some("</v2/x?n=1>".to_owned()), b"{}".to_vec()))
     );
 
     set_tag_page(&meta, "hub", "library/nginx", "n=1", 7, None, b"[]").unwrap();
     assert_eq!(
         tag_page(&meta, "hub", "library/nginx", "n=1").unwrap(),
-        Some((7, None, b"[]".to_vec()))
+        TagPageRead::Page((7, None, b"[]".to_vec()))
     );
 }
 
 #[test]
-fn test_a_truncated_tag_page_record_reads_as_absent() {
+fn test_a_truncated_tag_page_record_reads_as_invalid() {
     let (_dir, meta) = store();
-    // Corrupt pages read as absent to force a clean refetch.
+    // Corrupt pages force cache repair.
     for raw in [
         vec![0u8; 4],
         vec![0u8; 10],
         [&0i64.to_be_bytes()[..], &99u32.to_be_bytes()[..], b"x"].concat(),
     ] {
         meta.put_driver_value(&tag_page_key("hub", "repo", ""), &raw).unwrap();
-        assert_eq!(tag_page(&meta, "hub", "repo", "").unwrap(), None, "{raw:?}");
+        assert_eq!(
+            tag_page(&meta, "hub", "repo", "").unwrap(),
+            TagPageRead::Invalid,
+            "{raw:?}"
+        );
     }
 }
 
@@ -715,6 +723,6 @@ fn test_a_page_whose_link_fills_the_record_reads_back() {
 
     assert_eq!(
         tag_page(&meta, "hub", "app", "").unwrap(),
-        Some((42, Some("</v2/x?n=1>".to_owned()), Vec::new()))
+        TagPageRead::Page((42, Some("</v2/x?n=1>".to_owned()), Vec::new()))
     );
 }

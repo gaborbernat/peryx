@@ -402,17 +402,20 @@ fn matching_sha256(subject: &str, distribution: &str) -> bool {
 }
 
 fn matching_filenames(subject: &str, distribution: &str) -> bool {
-    let (Ok(subject), Ok(distribution)) = (
+    let (Ok(subject_filename), Ok(distribution_filename)) = (
         parse_distribution_filename(subject),
         parse_distribution_filename(distribution),
     ) else {
         return false;
     };
-    subject.kind == distribution.kind
-        && subject.normalized_name == distribution.normalized_name
-        && subject.version == distribution.version
-        && matching_build_tags(subject.build_tag.as_deref(), distribution.build_tag.as_deref())
-        && normalized_wheel_tags(&subject) == normalized_wheel_tags(&distribution)
+    subject_filename.kind == distribution_filename.kind
+        && subject_filename.normalized_name == distribution_filename.normalized_name
+        && subject_filename.version == distribution_filename.version
+        && matching_build_tags(
+            wheel_tags(subject).and_then(|(build, _, _, _)| build),
+            wheel_tags(distribution).and_then(|(build, _, _, _)| build),
+        )
+        && normalized_wheel_tags(subject) == normalized_wheel_tags(distribution)
 }
 
 fn matching_build_tags(subject: Option<&str>, distribution: Option<&str>) -> bool {
@@ -427,16 +430,17 @@ fn normalized_build_tag(tag: &str) -> (&str, &str) {
     (if number.is_empty() { "0" } else { number }, &tag[prefix..])
 }
 
-fn normalized_wheel_tags(
-    filename: &crate::DistributionFilename,
-) -> Option<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
-    let (Some(python), Some(abi), Some(platform)) = (
-        filename.python_tag.as_deref(),
-        filename.abi_tag.as_deref(),
-        filename.platform_tag.as_deref(),
-    ) else {
-        return None;
-    };
+fn wheel_tags(filename: &str) -> Option<(Option<&str>, &str, &str, &str)> {
+    let parts: Vec<_> = filename.strip_suffix(".whl")?.split('-').collect();
+    match parts.as_slice() {
+        [_, _, python, abi, platform] => Some((None, python, abi, platform)),
+        [_, _, build, python, abi, platform] => Some((Some(build), python, abi, platform)),
+        _ => None,
+    }
+}
+
+fn normalized_wheel_tags(filename: &str) -> Option<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
+    let (_, python, abi, platform) = wheel_tags(filename)?;
     Some((normalized_tags(python), normalized_tags(abi), normalized_tags(platform)))
 }
 

@@ -23,9 +23,7 @@ pub struct DistributionFilename {
     pub name: String,
     pub normalized_name: String,
     pub version: Version,
-    pub build_tag: Option<String>,
     pub python_tag: Option<String>,
-    pub abi_tag: Option<String>,
     pub platform_tag: Option<String>,
 }
 
@@ -160,21 +158,9 @@ fn parse_wheel_filename(stem: &str) -> Result<DistributionFilename, Distribution
             return Err(DistributionFilenameError::InvalidWheelShape);
         };
         validate_build_tag(build)?;
-        return parsed(
-            name,
-            version,
-            Some(build),
-            &[*python, *abi, *platform],
-            DistributionKind::Wheel,
-        );
+        return parsed(name, version, &[*python, *abi, *platform], DistributionKind::Wheel);
     };
-    parsed(
-        name,
-        version,
-        None,
-        &[*python, *abi, *platform],
-        DistributionKind::Wheel,
-    )
+    parsed(name, version, &[*python, *abi, *platform], DistributionKind::Wheel)
 }
 
 // A legacy (pre-PEP 625) sdist name was not escaped, so the last `-` is only a heuristic for the
@@ -185,13 +171,12 @@ fn parse_sdist_filename(stem: &str, kind: DistributionKind) -> Result<Distributi
     let Some((name, version)) = stem.rsplit_once('-') else {
         return Err(DistributionFilenameError::InvalidSdistShape);
     };
-    parsed(name, version, None, &[], kind)
+    parsed(name, version, &[], kind)
 }
 
 fn parsed(
     name: &str,
     version: &str,
-    build_tag: Option<&str>,
     tags: &[&str],
     kind: DistributionKind,
 ) -> Result<DistributionFilename, DistributionFilenameError> {
@@ -209,9 +194,7 @@ fn parsed(
         name: name.to_owned(),
         normalized_name: normalize_name(name),
         version,
-        build_tag: build_tag.map(str::to_owned),
         python_tag: tags.first().map(|tag| (*tag).to_owned()),
-        abi_tag: tags.get(1).map(|tag| (*tag).to_owned()),
         platform_tag: tags.get(2).map(|tag| (*tag).to_owned()),
     })
 }

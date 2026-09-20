@@ -295,26 +295,34 @@ fn test_catalog_repositories_never_returns_a_partial_list_after_a_storage_fault(
     let (pages, fault) = peryx_test_support::fault::backend();
     let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
     put_tag(&meta, "store", "tagged", "latest", "sha256:tagged").unwrap();
-    record_manifest(&meta, "store", "digest-only", "sha256:digest", &image("{}")).unwrap();
+    record_manifest(&meta, "store", "readable", "sha256:readable", &image("{}")).unwrap();
+    record_manifest(&meta, "store", "trashed", "sha256:trashed", &image("{}")).unwrap();
+    trash_manifest(&meta, "store", "trashed", "sha256:trashed", &info(), false, None).unwrap();
+    for row in 0..1024 {
+        meta.put_driver_value(&format!("fixture-{row:04}"), b"x").unwrap();
+    }
     drop(meta);
 
-    let expected = ["digest-only".to_owned(), "tagged".to_owned()];
+    let expected = ["readable".to_owned(), "tagged".to_owned()];
     let mut failed = 0_u32;
+    let mut succeeded = 0_u32;
     for fail_after in 0..128 {
         let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
         fault.arm(fail_after);
         let listed = meta.read_driver_txn(|txn| list_catalog_repositories(txn, "store"));
         let faulted = fault.triggered();
         fault.disable();
-        match listed {
-            Ok(repositories) => assert_eq!(repositories, expected),
-            Err(_) => {
-                assert!(faulted);
-                failed += 1;
-            }
+        if let Ok(repositories) = listed {
+            assert!(!faulted);
+            assert_eq!(repositories, expected);
+            succeeded += 1;
+        } else {
+            assert!(faulted);
+            failed += 1;
         }
     }
     assert!(failed > 0);
+    assert!(succeeded > 0);
 }
 
 #[test]

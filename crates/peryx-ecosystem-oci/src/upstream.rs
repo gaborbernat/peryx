@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use peryx_identity::strip_auth_scheme;
 use peryx_upstream::{
     Auth, CredentialError, CredentialProvider, CredentialProviderId, CredentialSnapshot, UpstreamClient,
@@ -31,6 +31,20 @@ application/vnd.docker.distribution.manifest.list.v2+json, \
 application/vnd.oci.image.manifest.v1+json, \
 application/vnd.oci.image.index.v1+json, \
 */*";
+
+fn content_length(headers: &HeaderMap) -> Option<u64> {
+    let mut lengths = headers
+        .get_all(reqwest::header::CONTENT_LENGTH)
+        .iter()
+        .map(parse_content_length);
+    let length = lengths.next()??;
+    lengths.all(|value| value == Some(length)).then_some(length)
+}
+
+fn parse_content_length(value: &HeaderValue) -> Option<u64> {
+    let value = value.to_str().ok()?;
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())).then(|| value.parse().ok())?
+}
 
 /// A shared token cache for every configured OCI proxy. Callers pass the selected index's guarded client.
 ///
@@ -222,12 +236,7 @@ impl Upstream {
     ) -> Result<u64, UpstreamError> {
         let url = format!("{}v2/{repo}/blobs/{digest}", client.base_url());
         let response = self.send(Method::HEAD, client, &url, repo, None, realms).await?;
-        response
-            .headers()
-            .get(reqwest::header::CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok())
-            .ok_or(UpstreamError::InvalidContentLength)
+        content_length(response.headers()).ok_or(UpstreamError::InvalidContentLength)
     }
 
     /// # Errors

@@ -415,6 +415,9 @@ async fn test_proxy_blob_head_ignores_a_range_it_has_not_cached(#[case] extra: &
 #[rstest]
 #[case::missing(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n")]
 #[case::malformed(b"HTTP/1.1 200 OK\r\ncontent-length: nope\r\nconnection: close\r\n\r\n")]
+#[case::signed(b"HTTP/1.1 200 OK\r\ncontent-length: +7\r\nconnection: close\r\n\r\n")]
+#[case::conflicting(b"HTTP/1.1 200 OK\r\ncontent-length: 7\r\ncontent-length: 9\r\nconnection: close\r\n\r\n")]
+#[case::overflow(b"HTTP/1.1 200 OK\r\ncontent-length: 18446744073709551616\r\nconnection: close\r\n\r\n")]
 #[tokio::test]
 async fn test_proxy_blob_head_rejects_an_invalid_upstream_length(#[case] response: &'static [u8]) {
     use std::io::{Read as _, Write as _};
@@ -437,6 +440,32 @@ async fn test_proxy_blob_head_rejects_an_invalid_upstream_length(#[case] respons
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(body.is_empty());
     assert!(!crate::store::blob_is_member(&state.serving.meta, "hub", "library/nginx", &digest).unwrap());
+}
+
+#[tokio::test]
+async fn test_proxy_blob_head_normalizes_identical_upstream_lengths() {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let upstream = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = socket.read(&mut request).unwrap();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 7\r\ncontent-length: 7\r\nconnection: close\r\n\r\n")
+            .unwrap();
+    });
+    let digest = oci_digest(b"identical-length");
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &base, false);
+
+    let (status, headers, body) = send(&app, Method::HEAD, &format!("/v2/hub/library/nginx/blobs/{digest}")).await;
+    upstream.join().unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_LENGTH], "7");
+    assert!(body.is_empty());
+    assert!(crate::store::blob_is_member(&state.serving.meta, "hub", "library/nginx", &digest).unwrap());
 }
 
 #[tokio::test]

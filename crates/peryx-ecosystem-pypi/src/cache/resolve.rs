@@ -26,6 +26,71 @@ pub struct DetailPage {
     pub(crate) revoked_files_removed: bool,
 }
 
+pub struct ResolvedPage {
+    pub detail: ProjectDetail,
+    last_serial: Option<u64>,
+    pub(crate) owners: BTreeMap<String, ResolvedFileOwner>,
+}
+
+#[derive(Clone)]
+pub struct ResolvedFileOwner {
+    leaf: String,
+    kind: ResolvedFileKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedFileKind {
+    Hosted,
+    Cached,
+}
+
+impl ResolvedPage {
+    fn leaf(page: DetailPage, leaf: &str, kind: ResolvedFileKind) -> Self {
+        Self {
+            owners: page
+                .detail
+                .files
+                .iter()
+                .map(|file| {
+                    (
+                        file.filename.clone(),
+                        ResolvedFileOwner {
+                            leaf: leaf.to_owned(),
+                            kind,
+                        },
+                    )
+                })
+                .collect(),
+            detail: page.detail,
+            last_serial: page.last_serial,
+        }
+    }
+
+    fn prune_owners(&mut self) {
+        let filenames = self
+            .detail
+            .files
+            .iter()
+            .map(|file| file.filename.as_str())
+            .collect::<BTreeSet<_>>();
+        self.owners.retain(|filename, _| filenames.contains(filename.as_str()));
+    }
+
+    pub fn owner(&self, filename: &str) -> Option<&ResolvedFileOwner> {
+        self.owners.get(filename)
+    }
+}
+
+impl ResolvedFileOwner {
+    pub const fn is_hosted(&self) -> bool {
+        matches!(self.kind, ResolvedFileKind::Hosted)
+    }
+
+    pub fn leaf(&self) -> &str {
+        &self.leaf
+    }
+}
+
 /// # Errors
 /// Returns [`CacheError`] on a store, parse, or (with no cached fallback) upstream error.
 pub async fn resolve_detail(
@@ -40,8 +105,26 @@ pub async fn resolve_detail(
         return Ok(None);
     };
     filter_revoked_files(state, &mut page.detail)?;
+    page.prune_owners();
     rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     Ok(Some(page.detail))
+}
+
+pub async fn resolve_detail_for_ui(
+    state: &ServingState,
+    index: &Index,
+    project: &str,
+    serve_route: &str,
+) -> Result<Option<ResolvedPage>, CacheError> {
+    let Some(mut page) =
+        resolve_detail_page_with(state, index, project, serve_route, ResolutionContext::root(true)).await?
+    else {
+        return Ok(None);
+    };
+    filter_revoked_files(state, &mut page.detail)?;
+    page.prune_owners();
+    rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
+    Ok(Some(page))
 }
 
 pub(super) async fn resolve_detail_optional(
@@ -70,9 +153,14 @@ pub async fn resolve_detail_page(
     else {
         return Ok(None);
     };
-    page.revoked_files_removed = filter_revoked_files(state, &mut page.detail)?;
+    let revoked_files_removed = filter_revoked_files(state, &mut page.detail)?;
+    page.prune_owners();
     rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
-    Ok(Some(page))
+    Ok(Some(DetailPage {
+        detail: page.detail,
+        last_serial: page.last_serial,
+        revoked_files_removed,
+    }))
 }
 
 async fn resolve_detail_page_with(
@@ -81,7 +169,7 @@ async fn resolve_detail_page_with(
     project: &str,
     serve_route: &str,
     context: ResolutionContext<'_>,
-) -> Result<Option<DetailPage>, CacheError> {
+) -> Result<Option<ResolvedPage>, CacheError> {
     let traversal_path = extend_path(&context, index)?;
     let context = ResolutionContext {
         traversal_path: &traversal_path,
@@ -95,33 +183,33 @@ async fn resolve_detail_page_with(
                 return Ok(None);
             };
             rewrite_urls(&mut page.detail, serve_route);
-            Some(page)
+            Some(ResolvedPage::leaf(page, &index.name, ResolvedFileKind::Cached))
         }
         IndexKind::Hosted { .. } => {
             let Some(mut detail) = local_detail(state, &index.name, project)? else {
                 return Ok(None);
             };
             rewrite_urls(&mut detail, serve_route);
-            Some(DetailPage {
-                detail,
-                last_serial: Some(state.meta.current_serial()?),
-                revoked_files_removed: false,
-            })
+            Some(ResolvedPage::leaf(
+                DetailPage {
+                    detail,
+                    last_serial: Some(state.meta.current_serial()?),
+                    revoked_files_removed: false,
+                },
+                &index.name,
+                ResolvedFileKind::Hosted,
+            ))
         }
         IndexKind::Virtual { layers, write_target } => merge_candidates(
             project,
             virtual_candidates(state, index, layers, *write_target, project, serve_route, context).await?,
-        )
-        .map(|detail| DetailPage {
-            detail,
-            last_serial: None,
-            revoked_files_removed: false,
-        }),
+        ),
     };
     page.map(|mut page| {
         page.detail = index
             .policy
             .apply_detail(PolicyAction::Serve, project, page.detail, Some((state.clock)()))?;
+        page.prune_owners();
         Ok(page)
     })
     .transpose()
@@ -161,7 +249,7 @@ async fn virtual_candidates(
     project: &str,
     serve_route: &str,
     context: ResolutionContext<'_>,
-) -> Result<Vec<(usize, ProjectDetail)>, CacheError> {
+) -> Result<Vec<(usize, ResolvedPage)>, CacheError> {
     let selection = SourceSelection::new(index, project).under_cached_refusal(!context.consult_cached);
     let mode = selection.mode();
     let consulted = selection.members(&state.indexes, layers);
@@ -191,7 +279,7 @@ async fn virtual_candidates(
             }
         }
     }
-    if selection.select(&state.indexes, &mut candidates, |detail| !detail.files.is_empty()) {
+    if selection.select(&state.indexes, &mut candidates, |page| !page.detail.files.is_empty()) {
         record_collision(state, index, layers, project);
     }
     if candidates.is_empty() {
@@ -223,7 +311,7 @@ fn member_candidates<'a>(
     project: &'a str,
     serve_route: &'a str,
     context: ResolutionContext<'a>,
-) -> futures_util::future::BoxFuture<'a, Result<Vec<(usize, ProjectDetail)>, CacheError>> {
+) -> futures_util::future::BoxFuture<'a, Result<Vec<(usize, ResolvedPage)>, CacheError>> {
     use futures_util::FutureExt as _;
 
     let member = state.index_at(position);
@@ -231,7 +319,7 @@ fn member_candidates<'a>(
         let IndexKind::Virtual { layers, write_target } = &member.kind else {
             return Ok(resolve_detail_page_with(state, member, project, serve_route, context)
                 .await?
-                .map(|page| (position, page.detail))
+                .map(|page| (position, page))
                 .into_iter()
                 .collect());
         };
@@ -246,9 +334,12 @@ fn member_candidates<'a>(
         virtual_candidates(state, member, layers, *write_target, project, serve_route, context)
             .await?
             .into_iter()
-            .map(|(leaf, detail)| {
-                let detail = member.policy.apply_detail(PolicyAction::Serve, project, detail, now)?;
-                Ok((leaf, detail))
+            .map(|(leaf, mut page)| {
+                page.detail = member
+                    .policy
+                    .apply_detail(PolicyAction::Serve, project, page.detail, now)?;
+                page.prune_owners();
+                Ok((leaf, page))
             })
             .collect()
     }
@@ -257,7 +348,7 @@ fn member_candidates<'a>(
 
 /// Merge ranked candidates into the page a virtual repository serves, keeping the first candidate to
 /// claim a filename. `None` when no leaf contributed.
-fn merge_candidates(project: &str, candidates: Vec<(usize, ProjectDetail)>) -> Option<ProjectDetail> {
+fn merge_candidates(project: &str, candidates: Vec<(usize, ResolvedPage)>) -> Option<ResolvedPage> {
     if candidates.is_empty() {
         return None;
     }
@@ -265,21 +356,27 @@ fn merge_candidates(project: &str, candidates: Vec<(usize, ProjectDetail)>) -> O
     let mut seen = BTreeSet::new();
     let mut versions = BTreeSet::new();
     let mut meta = Meta::default();
-    for (_, detail) in candidates {
-        versions.extend(detail.versions);
+    let mut owners = BTreeMap::new();
+    for (_, mut page) in candidates {
+        versions.extend(page.detail.versions);
         // A virtual index guarantees only what its weakest layer does: a layer that cannot promise
         // PEP 700's `versions`/`size` caps the merged page at the base version too.
-        if detail.meta.api_version == crate::API_VERSION_BASE {
+        if page.detail.meta.api_version == crate::API_VERSION_BASE {
             meta.api_version = crate::API_VERSION_BASE;
         }
         // Mirror the api_version floor above: a virtual index inherits its most restrictive member, so a
         // member that quarantines a project keeps its files withheld even when a benign member serves them.
-        if detail.meta.status().severity() > meta.status().severity() {
-            meta.project_status = detail.meta.project_status;
-            meta.project_status_reason = detail.meta.project_status_reason;
+        if page.detail.meta.status().severity() > meta.status().severity() {
+            meta.project_status = page.detail.meta.project_status;
+            meta.project_status_reason = page.detail.meta.project_status_reason;
         }
-        for file in detail.files {
+        for file in page.detail.files {
             if seen.insert(file.filename.clone()) {
+                let owner = page
+                    .owners
+                    .remove(&file.filename)
+                    .expect("resolved files retain their leaf owner");
+                owners.insert(file.filename.clone(), owner);
                 files.push(file);
             }
         }
@@ -291,7 +388,11 @@ fn merge_candidates(project: &str, candidates: Vec<(usize, ProjectDetail)>) -> O
         files,
     };
     apply_project_status(&mut detail);
-    Some(detail)
+    Some(ResolvedPage {
+        detail,
+        last_serial: None,
+        owners,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -365,23 +466,24 @@ fn apply_overrides(
     state: &ServingState,
     hosted: &str,
     project: &str,
-    candidates: &mut [(usize, ProjectDetail)],
+    candidates: &mut [(usize, ResolvedPage)],
 ) -> Result<(), CacheError> {
     let overrides = state.meta.list_overrides(hosted, project)?;
     if overrides.is_empty() {
         return Ok(());
     }
-    for (_, detail) in candidates {
-        detail
+    for (_, page) in candidates {
+        page.detail
             .files
             .retain(|file| !overrides.get(&file.filename).is_some_and(|record| record.hidden));
-        for file in &mut detail.files {
+        for file in &mut page.detail.files {
             if let Some(record) = overrides.get(&file.filename)
                 && record.yanked != Yanked::No
             {
                 file.yanked = record.yanked.clone();
             }
         }
+        page.prune_owners();
     }
     Ok(())
 }

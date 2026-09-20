@@ -595,7 +595,7 @@ async fn test_project_page_reads_cached_and_remote_only_placements() {
 }
 
 #[tokio::test]
-async fn test_project_page_maps_each_placement_source_and_availability() {
+async fn test_project_page_distinguishes_cached_sources_from_byte_placement() {
     use peryx_storage::meta::ArtifactSource;
 
     let h = placement_harness().await;
@@ -632,7 +632,7 @@ async fn test_project_page_maps_each_placement_source_and_availability() {
 
     assert_eq!(
         file_source_and_availability(&page, "flask-1.0.tar.gz"),
-        ("generated", "local")
+        ("proxy", "local")
     );
     assert_eq!(
         file_source_and_availability(&page, "flask-1.0-py3-none-any.whl"),
@@ -640,7 +640,7 @@ async fn test_project_page_maps_each_placement_source_and_availability() {
     );
     assert_eq!(
         file_source_and_availability(&page, "flask-1.0-py2-none-any.whl"),
-        ("hosted", "unavailable")
+        ("proxy", "remote_only")
     );
 }
 

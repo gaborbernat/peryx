@@ -89,6 +89,39 @@ fn ui_config(dir: &tempfile::TempDir, cached_offline: bool) -> Config {
     }
 }
 
+fn nested_ui_config(dir: &tempfile::TempDir) -> Config {
+    let mut config = ui_config(dir, true);
+    config.indexes[2].kind = IndexKind::Virtual {
+        layers: vec!["nested".to_owned()],
+        write_target: Some("hosted".to_owned()),
+    };
+    config.indexes.push(IndexConfig {
+        name: "nested".to_owned(),
+        route: "nested".to_owned(),
+        policy: peryx_policy::PolicyConfig::default(),
+        ecosystem_policy: toml::Table::new(),
+        ecosystem_settings: toml::Table::new(),
+        webhooks: Vec::new(),
+        ecosystem: peryx_ecosystem_pypi::ECOSYSTEM,
+        anonymous_read: None,
+        tokens: Vec::new(),
+        kind: IndexKind::Virtual {
+            layers: vec!["hosted".to_owned(), "pypi".to_owned()],
+            write_target: Some("hosted".to_owned()),
+        },
+    });
+    config
+}
+
+fn nested_policy_ui_config(dir: &tempfile::TempDir) -> Config {
+    let mut config = nested_ui_config(dir);
+    config.indexes[1].ecosystem_policy.insert(
+        "block_wheel_pythons".to_owned(),
+        toml::Value::Array(vec![toml::Value::String("cp311".to_owned())]),
+    );
+    config
+}
+
 fn reader_authorization() -> String {
     format!("Basic {}", STANDARD.encode("_:read-secret"))
 }
@@ -264,6 +297,16 @@ async fn upload_file(router: &axum::Router, filename: &str, content: &[u8]) {
 }
 
 fn put_file(state: &peryx_driver::AppState, filename: &str, content: &[u8], core_metadata: CoreMetadata) -> Digest {
+    put_file_with_provenance(state, filename, content, core_metadata, Provenance::Absent)
+}
+
+fn put_file_with_provenance(
+    state: &peryx_driver::AppState,
+    filename: &str,
+    content: &[u8],
+    core_metadata: CoreMetadata,
+    provenance: Provenance,
+) -> Digest {
     let digest = Digest::of(content);
     state.serving.blobs.blocking().put_bytes_as(content, &digest).unwrap();
     let uploaded = Uploaded {
@@ -279,7 +322,7 @@ fn put_file(state: &peryx_driver::AppState, filename: &str, content: &[u8], core
             core_metadata,
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
-            provenance: Provenance::Absent,
+            provenance,
         },
         trashed: None,
     };
@@ -294,6 +337,54 @@ fn put_file(state: &peryx_driver::AppState, filename: &str, content: &[u8], core
         .put_project("hosted", "veloxdemo", "veloxdemo")
         .unwrap();
     digest
+}
+
+fn put_cached_file(state: &peryx_driver::AppState, filename: &str, digest: &Digest) {
+    let url = format!("https://files.example/{filename}");
+    let detail = serde_json::json!({
+        "meta": {"api-version": "1.4"},
+        "name": "veloxdemo",
+        "versions": ["1.0.0"],
+        "files": [{
+            "filename": filename,
+            "size": 12,
+            "url": url,
+            "hashes": {"sha256": digest.as_str()},
+            "provenance": "https://upstream.example/veloxdemo.provenance",
+        }],
+    });
+    state
+        .serving
+        .meta
+        .put_cached_page(CachedPageWrite {
+            key: "pypi/veloxdemo",
+            record: &CachedIndex {
+                source: None,
+                last_modified: None,
+                etag: None,
+                last_serial: None,
+                fetched_at_unix: 0,
+                content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
+                fresh_secs: None,
+                body: serde_json::to_vec(&detail).unwrap(),
+            },
+            index: "pypi",
+            normalized: "veloxdemo",
+            display: "veloxdemo",
+            source: "pypi",
+            upstream: Some("https://upstream.example/simple/veloxdemo/"),
+            project_status: None,
+            project_status_reason: None,
+            files: &[PublishedFileWrite {
+                sha256: digest.as_str().to_owned(),
+                filename: filename.to_owned(),
+                url,
+                size: Some(12),
+                metadata: None,
+            }],
+            attestations: &[],
+        })
+        .unwrap();
 }
 
 fn put_legacy_file(state: &peryx_driver::AppState, filename: &str, content: &[u8]) -> Digest {
@@ -504,7 +595,217 @@ async fn test_ui_project_page_shows_source_and_availability_cells() {
     );
 }
 
+#[rstest]
+#[case::same_digest(true, "local")]
+#[case::different_digest(false, "remote_only")]
+#[tokio::test]
+async fn test_ui_nested_browse_keeps_the_selected_collision_owner(
+    #[case] same_digest: bool,
+    #[case] cached_availability: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(&nested_ui_config(&dir)).unwrap();
+    let filename = "veloxdemo-1.0.0-py3-none-any.whl";
+    let hosted = put_file_with_provenance(
+        &state,
+        filename,
+        b"hosted wheel",
+        CoreMetadata::Absent,
+        Provenance::Url("https://hosted.example/veloxdemo.provenance".to_owned()),
+    );
+    let cached = if same_digest {
+        hosted.clone()
+    } else {
+        Digest::of(b"cached wheel")
+    };
+    ArtifactPlacementStore::insert_artifact_placement(
+        &state.serving.meta,
+        hosted.as_str(),
+        &ArtifactPlacement::record(ArtifactSource::Hosted, true),
+    )
+    .unwrap();
+    put_cached_file(&state, filename, &cached);
+    let router = router_for(state.clone(), axum::Router::new());
+    let uri = "/browse?index=root/pypi&project=veloxdemo";
+
+    let (status, body) = get(&router, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ui_file(&body, filename, "hosted", None, "local", "hosted provenance");
+
+    assert_eq!(
+        peryx_ecosystem_pypi::cache::remove_files(
+            &state.serving,
+            state.serving.index_at(2),
+            "hosted",
+            true,
+            "veloxdemo",
+            None,
+            peryx_ecosystem_pypi::cache::TrashContext {
+                deleted_at_unix: 0,
+                actor: None,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    let (status, body) = get(&router, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ui_file(
+        &body,
+        filename,
+        "proxy",
+        Some("https://upstream.example/simple/veloxdemo/"),
+        cached_availability,
+        "upstream provenance",
+    );
+
+    assert_eq!(
+        peryx_ecosystem_pypi::cache::restore_files(&state.serving, "hosted", "veloxdemo", None)
+            .await
+            .unwrap(),
+        1
+    );
+    let (status, body) = get(&router, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ui_file(&body, filename, "hosted", None, "local", "hosted provenance");
+}
+
+#[tokio::test]
+async fn test_ui_nested_browse_uses_cached_owner_after_hosted_policy_filters_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = build_state(&nested_policy_ui_config(&dir)).unwrap();
+    let hosted_filename = "veloxdemo-1.0.0-cp311-none-any.whl";
+    let cached_filename = "veloxdemo-1.0.0-py3-none-any.whl";
+    let digest = put_file_with_provenance(
+        &state,
+        hosted_filename,
+        b"shared wheel",
+        CoreMetadata::Absent,
+        Provenance::Url("https://hosted.example/veloxdemo.provenance".to_owned()),
+    );
+    ArtifactPlacementStore::insert_artifact_placement(
+        &state.serving.meta,
+        digest.as_str(),
+        &ArtifactPlacement::record(ArtifactSource::Hosted, true),
+    )
+    .unwrap();
+    put_cached_file(&state, cached_filename, &digest);
+    let router = router_for(state.clone(), axum::Router::new());
+    let uri = "/browse?index=root/pypi&project=veloxdemo";
+
+    let (status, body) = get(&router, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ui_file(
+        &body,
+        cached_filename,
+        "proxy",
+        Some("https://upstream.example/simple/veloxdemo/"),
+        "local",
+        "upstream provenance",
+    );
+
+    let request = Request::builder()
+        .uri("/root/pypi/simple/veloxdemo/")
+        .header(header::ACCEPT, "application/vnd.pypi.simple.v1+json")
+        .body(Body::empty())
+        .unwrap();
+    let (status, simple) = super::send(&router, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let simple = serde_json::from_str::<serde_json::Value>(&simple).unwrap();
+    assert_eq!(
+        simple
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["files", "meta", "name", "versions"])
+    );
+    assert_eq!(simple["files"][0]["filename"], cached_filename);
+    assert_eq!(
+        simple["files"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "core-metadata",
+            "filename",
+            "hashes",
+            "provenance",
+            "size",
+            "url",
+            "yanked",
+        ])
+    );
+    assert!(simple["owner"].is_null());
+    assert!(simple["owners"].is_null());
+    assert!(simple["files"][0]["owner"].is_null());
+    assert!(simple["files"][0]["owners"].is_null());
+
+    assert_eq!(
+        peryx_ecosystem_pypi::cache::remove_files(
+            &state.serving,
+            state.serving.index_at(2),
+            "hosted",
+            true,
+            "veloxdemo",
+            None,
+            peryx_ecosystem_pypi::cache::TrashContext {
+                deleted_at_unix: 0,
+                actor: None,
+                reason: None,
+            },
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    let (status, body) = get(&router, uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(rendered_file_rows(&body).is_empty());
+}
+
+fn assert_ui_file(
+    body: &str,
+    filename: &str,
+    source: &str,
+    upstream: Option<&str>,
+    availability: &str,
+    provenance: &str,
+) {
+    let row = rendered_file_rows(body).into_iter().next().unwrap();
+    assert_eq!(row["cells"][0]["text"], filename);
+    assert_eq!(row["cells"][4]["text"], source);
+    assert_eq!(row["cells"][4]["href"].as_str(), upstream);
+    assert_eq!(row["cells"][5]["text"], availability);
+    assert!(
+        row["badges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|badge| badge["label"] == provenance)
+    );
+}
+
 fn rendered_file_cells(body: &str) -> Vec<(String, String, String)> {
+    rendered_file_rows(body)
+        .iter()
+        .map(|row| {
+            let cells = row["cells"].as_array().unwrap();
+            (
+                cells[0]["text"].as_str().unwrap().to_owned(),
+                cells[4]["text"].as_str().unwrap().to_owned(),
+                cells[5]["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn rendered_file_rows(body: &str) -> Vec<serde_json::Value> {
     body.split("__RESOLVED_RESOURCES[")
         .filter_map(|resource| resource.split_once(" = ").map(|(_, assignment)| assignment))
         .filter_map(|assignment| assignment.split_once(';').map(|(value, _)| value))
@@ -512,21 +813,7 @@ fn rendered_file_cells(body: &str) -> Vec<(String, String, String)> {
         .filter_map(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
         .find_map(|resource| {
             resource["Ok"]["sections"].as_array()?.iter().find_map(|section| {
-                (section["heading"] == "Files").then(|| {
-                    section["rows"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|row| {
-                            let cells = row["cells"].as_array().unwrap();
-                            (
-                                cells[0]["text"].as_str().unwrap().to_owned(),
-                                cells[4]["text"].as_str().unwrap().to_owned(),
-                                cells[5]["text"].as_str().unwrap().to_owned(),
-                            )
-                        })
-                        .collect()
-                })
+                (section["heading"] == "Files").then(|| section["rows"].as_array().unwrap().clone())
             })
         })
         .unwrap()

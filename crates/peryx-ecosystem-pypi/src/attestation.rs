@@ -15,7 +15,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
-use crate::view::{AttestationView, SubjectMatch};
+use crate::{
+    parse_distribution_filename,
+    view::{AttestationView, SubjectMatch},
+};
 
 /// The media type PEP 740 assigns the served provenance object.
 pub const PROVENANCE_MEDIA_TYPE: &str = "application/vnd.pypi.integrity.v1+json";
@@ -40,6 +43,8 @@ const MAX_ATTESTATION_BYTES: usize = 256 * 1024;
 /// for a distribution names one artifact.
 const MAX_STATEMENT_BYTES: usize = 64 * 1024;
 
+const IN_TOTO_STATEMENT_V1: &str = "https://in-toto.io/Statement/v1";
+
 /// Every variant rejects the upload because attestations publish atomically with the distribution.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttestationError {
@@ -63,6 +68,8 @@ pub enum AttestationError {
     MalformedStatement(usize),
     /// A statement names no subject, so it binds to nothing.
     EmptySubject(usize),
+    /// A statement names more than one subject, so it does not bind to one distribution.
+    MultipleSubjects { index: usize, count: usize },
     /// No subject digest matches the distribution's SHA-256.
     SubjectDigestMismatch(usize),
     /// A subject matches the distribution digest but names a different file.
@@ -99,6 +106,9 @@ impl AttestationError {
                 format!("attestation {index} envelope statement is not a valid in-toto statement")
             }
             Self::EmptySubject(index) => format!("attestation {index} statement names no subject"),
+            Self::MultipleSubjects { index, count } => {
+                format!("attestation {index} statement names {count} subjects; exactly one is required")
+            }
             Self::SubjectDigestMismatch(index) => {
                 format!("attestation {index} subject digest does not match the uploaded distribution")
             }
@@ -228,9 +238,14 @@ fn subject_match(subjects: &[Subject], sha256: &str, filename: &str) -> SubjectM
     }
     subjects
         .iter()
-        .find(|subject| subject.digest.get("sha256").is_some_and(|digest| digest == sha256))
+        .find(|subject| {
+            subject
+                .digest
+                .get("sha256")
+                .is_some_and(|digest| matching_sha256(digest, sha256))
+        })
         .map_or(SubjectMatch::Mismatched, |subject| match &subject.name {
-            Some(name) if name != filename => SubjectMatch::Mismatched,
+            Some(name) if !matching_filenames(name, filename) => SubjectMatch::Mismatched,
             _ => SubjectMatch::Matched,
         })
 }
@@ -302,10 +317,10 @@ fn validate_attestation(
     }
     let statement = decode_statement(index, attestation)?;
     bind_subject(index, &statement, sha256, filename)?;
-    Ok(statement.predicate_type)
+    Ok(Some(statement.predicate_type))
 }
 
-fn decode_statement(index: usize, attestation: &Value) -> Result<Statement, AttestationError> {
+fn decode_statement(index: usize, attestation: &Value) -> Result<UploadStatement, AttestationError> {
     let encoded = attestation["envelope"]["statement"]
         .as_str()
         .ok_or(AttestationError::MissingStatement(index))?;
@@ -315,26 +330,122 @@ fn decode_statement(index: usize, attestation: &Value) -> Result<Statement, Atte
     if decoded.len() > MAX_STATEMENT_BYTES {
         return Err(AttestationError::MalformedStatement(index));
     }
-    serde_json::from_slice(&decoded).map_err(|_| AttestationError::MalformedStatement(index))
+    let value: Value = serde_json::from_slice(&decoded).map_err(|_| AttestationError::MalformedStatement(index))?;
+    if !value.is_object()
+        || value["subject"]
+            .as_array()
+            .is_none_or(|subjects| subjects.iter().any(|subject| !subject.is_object()))
+    {
+        return Err(AttestationError::MalformedStatement(index));
+    }
+    let statement: UploadStatement =
+        serde_json::from_value(value).map_err(|_| AttestationError::MalformedStatement(index))?;
+    (statement.statement_type == IN_TOTO_STATEMENT_V1)
+        .then_some(statement)
+        .ok_or(AttestationError::MalformedStatement(index))
 }
 
-fn bind_subject(index: usize, statement: &Statement, sha256: &str, filename: &str) -> Result<(), AttestationError> {
+fn bind_subject(
+    index: usize,
+    statement: &UploadStatement,
+    sha256: &str,
+    filename: &str,
+) -> Result<(), AttestationError> {
     if statement.subject.is_empty() {
         return Err(AttestationError::EmptySubject(index));
     }
-    let matched = statement
-        .subject
-        .iter()
-        .find(|subject| subject.digest.get("sha256").is_some_and(|digest| digest == sha256))
-        .ok_or(AttestationError::SubjectDigestMismatch(index))?;
-    match &matched.name {
-        Some(name) if name != filename => Err(AttestationError::SubjectNameMismatch {
+    if statement.subject.len() > 1 {
+        return Err(AttestationError::MultipleSubjects {
+            index,
+            count: statement.subject.len(),
+        });
+    }
+    let subject = &statement.subject[0];
+    if !subject
+        .digest
+        .get("sha256")
+        .is_some_and(|digest| matching_sha256(digest, sha256))
+    {
+        return Err(AttestationError::SubjectDigestMismatch(index));
+    }
+    if !matching_filenames(&subject.name, filename) {
+        return Err(AttestationError::SubjectNameMismatch {
             index,
             expected: filename.to_owned(),
-            actual: name.clone(),
-        }),
-        _ => Ok(()),
+            actual: subject.name.clone(),
+        });
     }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct UploadStatement {
+    #[serde(rename = "_type")]
+    statement_type: String,
+    subject: Vec<UploadSubject>,
+    #[serde(rename = "predicateType")]
+    predicate_type: String,
+}
+
+#[derive(serde::Deserialize)]
+struct UploadSubject {
+    name: String,
+    digest: BTreeMap<String, String>,
+}
+
+fn valid_sha256(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn matching_sha256(subject: &str, distribution: &str) -> bool {
+    valid_sha256(subject) && valid_sha256(distribution) && subject.eq_ignore_ascii_case(distribution)
+}
+
+fn matching_filenames(subject: &str, distribution: &str) -> bool {
+    let (Ok(subject_filename), Ok(distribution_filename)) = (
+        parse_distribution_filename(subject),
+        parse_distribution_filename(distribution),
+    ) else {
+        return false;
+    };
+    subject_filename.kind == distribution_filename.kind
+        && subject_filename.normalized_name == distribution_filename.normalized_name
+        && subject_filename.version == distribution_filename.version
+        && matching_build_tags(
+            wheel_tags(subject).and_then(|(build, _, _, _)| build),
+            wheel_tags(distribution).and_then(|(build, _, _, _)| build),
+        )
+        && normalized_wheel_tags(subject) == normalized_wheel_tags(distribution)
+}
+
+fn matching_build_tags(subject: Option<&str>, distribution: Option<&str>) -> bool {
+    subject.map(normalized_build_tag) == distribution.map(normalized_build_tag)
+}
+
+fn normalized_build_tag(tag: &str) -> (&str, &str) {
+    let prefix = tag
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(tag.len());
+    let number = tag[..prefix].trim_start_matches('0');
+    (if number.is_empty() { "0" } else { number }, &tag[prefix..])
+}
+
+fn wheel_tags(filename: &str) -> Option<(Option<&str>, &str, &str, &str)> {
+    let parts: Vec<_> = filename.strip_suffix(".whl")?.split('-').collect();
+    match parts.as_slice() {
+        [_, _, python, abi, platform] => Some((None, python, abi, platform)),
+        [_, _, build, python, abi, platform] => Some((Some(build), python, abi, platform)),
+        _ => None,
+    }
+}
+
+fn normalized_wheel_tags(filename: &str) -> Option<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
+    let (_, python, abi, platform) = wheel_tags(filename)?;
+    Some((normalized_tags(python), normalized_tags(abi), normalized_tags(platform)))
+}
+
+fn normalized_tags(tags: &str) -> BTreeSet<String> {
+    tags.split('.').map(str::to_ascii_lowercase).collect()
 }
 
 #[derive(serde::Deserialize)]

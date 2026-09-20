@@ -4,15 +4,16 @@ const SHA: &str = "1111111111111111111111111111111111111111111111111111111111111
 const FILENAME: &str = "peryxpkg-1.0-py3-none-any.whl";
 
 fn statement(name: &str, sha: &str) -> String {
-    STANDARD.encode(
-        json!({
-            "_type": "https://in-toto.io/Statement/v1",
-            "subject": [{"name": name, "digest": {"sha256": sha}}],
-            "predicateType": "https://docs.pypi.org/attestations/publish/v1",
-            "predicate": {},
-        })
-        .to_string(),
-    )
+    encode_statement(&json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{"name": name, "digest": {"sha256": sha}}],
+        "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+        "predicate": {},
+    }))
+}
+
+fn encode_statement(statement: &Value) -> String {
+    STANDARD.encode(statement.to_string())
 }
 
 fn attestation(name: &str, sha: &str) -> Value {
@@ -188,7 +189,11 @@ fn test_build_provenance_rejects_a_malformed_statement() {
 #[test]
 fn test_build_provenance_rejects_an_empty_subject() {
     let mut empty = attestation(FILENAME, SHA);
-    empty["envelope"]["statement"] = json!(STANDARD.encode(json!({"subject": []}).to_string()));
+    empty["envelope"]["statement"] = json!(encode_statement(&json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [],
+        "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+    })));
     let raw = field(&[empty]);
 
     assert_eq!(
@@ -208,6 +213,59 @@ fn test_build_provenance_rejects_a_subject_digest_mismatch() {
     );
 }
 
+#[rstest::rstest]
+#[case::short(63, 'a')]
+#[case::long(65, 'a')]
+#[case::non_hex(64, 'g')]
+fn test_build_provenance_rejects_an_invalid_subject_digest(#[case] length: usize, #[case] character: char) {
+    let digest = character.to_string().repeat(length);
+    let raw = field(&[attestation(FILENAME, &digest)]);
+
+    assert_eq!(
+        build_provenance(&raw, &digest, FILENAME).unwrap_err(),
+        AttestationError::SubjectDigestMismatch(0)
+    );
+    assert_eq!(
+        summarize_provenance(
+            &provenance_document(&[attestation(FILENAME, &digest)]),
+            &digest,
+            FILENAME
+        )
+        .unwrap()[0]
+            .subject,
+        SubjectMatch::Mismatched
+    );
+    assert!(
+        stored_predicate_types(
+            &provenance_document(&[attestation(FILENAME, &digest)]),
+            &digest,
+            FILENAME
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn test_build_provenance_and_stored_provenance_match_mixed_case_digests() {
+    let digest = "aB".repeat(32);
+    let document = build_provenance(
+        &field(&[attestation(FILENAME, &digest)]),
+        &digest.to_ascii_uppercase(),
+        FILENAME,
+    )
+    .unwrap()
+    .document;
+
+    assert_eq!(
+        summarize_provenance(&document, &digest.to_ascii_uppercase(), FILENAME).unwrap()[0].subject,
+        SubjectMatch::Matched
+    );
+    assert_eq!(
+        stored_predicate_types(&document, &digest.to_ascii_uppercase(), FILENAME),
+        BTreeSet::from(["https://docs.pypi.org/attestations/publish/v1".to_owned()])
+    );
+}
+
 #[test]
 fn test_build_provenance_rejects_a_subject_name_mismatch() {
     let raw = field(&[attestation("other-1.0-py3-none-any.whl", SHA)]);
@@ -223,13 +281,161 @@ fn test_build_provenance_rejects_a_subject_name_mismatch() {
 }
 
 #[test]
-fn test_build_provenance_accepts_a_subject_without_a_name() {
+fn test_build_provenance_rejects_an_invalid_subject_filename() {
+    let raw = field(&[attestation("peryxpkg-1.0.exe", SHA)]);
+
+    assert_eq!(
+        build_provenance(&raw, SHA, FILENAME).unwrap_err(),
+        AttestationError::SubjectNameMismatch {
+            index: 0,
+            expected: FILENAME.to_owned(),
+            actual: "peryxpkg-1.0.exe".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn test_build_provenance_rejects_a_subject_without_a_name() {
     let mut anonymous = attestation(FILENAME, SHA);
-    anonymous["envelope"]["statement"] =
-        json!(STANDARD.encode(json!({"subject": [{"digest": {"sha256": SHA}}]}).to_string()));
+    anonymous["envelope"]["statement"] = json!(encode_statement(&json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{"digest": {"sha256": SHA}}],
+        "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+    })));
     let raw = field(&[anonymous]);
 
-    assert!(build_provenance(&raw, SHA, FILENAME).is_ok());
+    assert_eq!(
+        build_provenance(&raw, SHA, FILENAME).unwrap_err(),
+        AttestationError::MalformedStatement(0)
+    );
+}
+
+#[rstest::rstest]
+#[case::statement(json!([
+    "https://in-toto.io/Statement/v1",
+    [{"name": FILENAME, "digest": {"sha256": SHA}}],
+    "https://docs.pypi.org/attestations/publish/v1",
+]))]
+#[case::subject(json!({
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [[FILENAME, {"sha256": SHA}]],
+    "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+}))]
+fn test_build_provenance_rejects_positional_statements(#[case] statement: Value) {
+    let mut attestation = attestation(FILENAME, SHA);
+    attestation["envelope"]["statement"] = json!(encode_statement(&statement));
+
+    assert_eq!(
+        build_provenance(&field(&[attestation]), SHA, FILENAME).unwrap_err(),
+        AttestationError::MalformedStatement(0)
+    );
+}
+
+#[test]
+fn test_build_provenance_rejects_extra_subjects() {
+    let mut extra = attestation(FILENAME, SHA);
+    extra["envelope"]["statement"] = json!(encode_statement(&json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+            {"name": FILENAME, "digest": {"sha256": SHA}},
+            {"name": FILENAME, "digest": {"sha256": SHA}},
+        ],
+        "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+    })));
+
+    assert_eq!(
+        build_provenance(&field(&[extra]), SHA, FILENAME).unwrap_err(),
+        AttestationError::MultipleSubjects { index: 0, count: 2 }
+    );
+}
+
+#[rstest::rstest]
+#[case::missing_type(json!({
+    "subject": [{"name": FILENAME, "digest": {"sha256": SHA}}],
+    "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+}))]
+#[case::wrong_type(json!({
+    "_type": "https://in-toto.io/Statement/v0",
+    "subject": [{"name": FILENAME, "digest": {"sha256": SHA}}],
+    "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+}))]
+#[case::missing_predicate_type(json!({
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [{"name": FILENAME, "digest": {"sha256": SHA}}],
+}))]
+fn test_build_provenance_requires_in_toto_v1_fields(#[case] statement: Value) {
+    let mut attestation = attestation(FILENAME, SHA);
+    attestation["envelope"]["statement"] = json!(encode_statement(&statement));
+
+    assert_eq!(
+        build_provenance(&field(&[attestation]), SHA, FILENAME).unwrap_err(),
+        AttestationError::MalformedStatement(0)
+    );
+}
+
+#[test]
+fn test_build_provenance_accepts_an_omitted_predicate() {
+    let mut attestation = attestation(FILENAME, SHA);
+    attestation["envelope"]["statement"] = json!(encode_statement(&json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{"name": FILENAME, "digest": {"sha256": SHA}}],
+        "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+    })));
+
+    assert!(build_provenance(&field(&[attestation]), SHA, FILENAME).is_ok());
+}
+
+#[rstest::rstest]
+#[case::wheel("peryx.pkg-1.0-py3-none-any.whl", "peryx_pkg-1.0.0-py3-none-any.whl")]
+#[case::sdist("peryx.pkg-1.0.tar.gz", "peryx-pkg-1.0.0.tar.gz")]
+fn test_build_provenance_accepts_a_normalized_filename(#[case] filename: &str, #[case] subject: &str) {
+    let raw = field(&[attestation(subject, SHA)]);
+
+    assert!(build_provenance(&raw, SHA, filename).is_ok());
+}
+
+#[rstest::rstest]
+#[case::build_number("peryxpkg-1.0-1-py3-none-any.whl", "peryxpkg-1.0-01-py3-none-any.whl")]
+#[case::compatibility_tags("peryxpkg-1.0-py2.py3-none-any.whl", "peryxpkg-1.0-PY3.PY2-NONE-ANY.any.whl")]
+fn test_build_provenance_accepts_an_equivalent_wheel_identity(#[case] filename: &str, #[case] subject: &str) {
+    assert!(build_provenance(&field(&[attestation(subject, SHA)]), SHA, filename).is_ok());
+}
+
+#[test]
+fn test_build_provenance_accepts_many_repeated_compatibility_tags() {
+    let python = vec!["py3"; 3_000].join(".");
+    let abi = vec!["none"; 3_000].join(".");
+    let platform = vec!["any"; 3_000].join(".");
+    let filename = format!("peryxpkg-1.0-{python}-{abi}-{platform}.whl");
+
+    assert!(build_provenance(&field(&[attestation(&filename, SHA)]), SHA, &filename).is_ok());
+}
+
+#[rstest::rstest]
+#[case::missing_platform("peryxpkg-1.0-py3-none.whl")]
+#[case::extra_component("peryxpkg-1.0-build-py3-none-any-extra.whl")]
+fn test_wheel_tags_reject_invalid_shapes(#[case] filename: &str) {
+    assert_eq!(wheel_tags(filename), None);
+}
+
+#[rstest::rstest]
+#[case::absent_build("peryxpkg-1.0-py3-none-any.whl", "peryxpkg-1.0-0-py3-none-any.whl")]
+#[case::build_number("peryxpkg-1.0-1-py3-none-any.whl", "peryxpkg-1.0-2-py3-none-any.whl")]
+#[case::build_suffix("peryxpkg-1.0-1A-py3-none-any.whl", "peryxpkg-1.0-1a-py3-none-any.whl")]
+#[case::python_tag_set("peryxpkg-1.0-py2.py3-none-any.whl", "peryxpkg-1.0-py2.py4-none-any.whl")]
+#[case::abi_tag("peryxpkg-1.0-py3-none-any.whl", "peryxpkg-1.0-py3-cp311-any.whl")]
+#[case::platform_tag("peryxpkg-1.0-py3-none-any.whl", "peryxpkg-1.0-py3-none-win_amd64.whl")]
+fn test_build_provenance_rejects_a_different_wheel_identity(#[case] filename: &str, #[case] subject: &str) {
+    let raw = field(&[attestation(subject, SHA)]);
+
+    assert_eq!(
+        build_provenance(&raw, SHA, filename).unwrap_err(),
+        AttestationError::SubjectNameMismatch {
+            index: 0,
+            expected: filename.to_owned(),
+            actual: subject.to_owned(),
+        }
+    );
 }
 
 #[test]
@@ -286,6 +492,16 @@ fn test_summarize_provenance_reads_a_bound_attestation() {
             subject: SubjectMatch::Matched,
         }]
     );
+}
+
+#[test]
+fn test_summarize_provenance_reads_a_normalized_filename() {
+    let filename = "peryx.pkg-1.0-py3-none-any.whl";
+    let document = provenance_document(&[attestation("peryx_pkg-1.0.0-py3-none-any.whl", SHA)]);
+
+    let summaries = summarize_provenance(&document, SHA, filename).unwrap();
+
+    assert_eq!(summaries[0].subject, SubjectMatch::Matched);
 }
 
 #[test]
@@ -412,6 +628,10 @@ fn test_message_names_the_reason_for_every_variant() {
         (AttestationError::InvalidStatementEncoding(0), "not valid base64"),
         (AttestationError::MalformedStatement(0), "not a valid in-toto statement"),
         (AttestationError::EmptySubject(0), "names no subject"),
+        (
+            AttestationError::MultipleSubjects { index: 0, count: 2 },
+            "names 2 subjects",
+        ),
         (
             AttestationError::SubjectDigestMismatch(3),
             "attestation 3 subject digest",

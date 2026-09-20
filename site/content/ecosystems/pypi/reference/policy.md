@@ -38,6 +38,9 @@ attestation_mode = "enforce"
 query an immediate cached member. `fallback` preserves filename-level merging. `protected_names` takes precedence over
 all three modes.
 
+A failure from any consulted member aborts the project request. Successful results, including confirmed misses and
+empty pages, follow the configured fallback policy.
+
 ## Project isolation
 
 The default `fallback` mode keeps the first occurrence of each filename and merges the remaining filenames. If a hosted

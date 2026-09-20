@@ -352,6 +352,38 @@ async fn test_malformed_upstream_tag_list_does_not_replace_a_stale_page() {
 }
 
 #[tokio::test]
+async fn test_stale_clamped_tag_page_without_a_continuation_is_evicted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy_with_clock(&dir, &format!("{}/", server.uri()), std::sync::Arc::new(|| 1_300));
+    let tags = (0..1_000).map(|number| format!("tag-{number:04}")).collect::<Vec<_>>();
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "n=1000",
+        1_000,
+        None,
+        serde_json::json!({"name": "app", "tags": tags}).to_string().as_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list?n=1001").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "n=1000").unwrap(),
+        store::TagPageRead::Missing
+    );
+}
+
+#[tokio::test]
 async fn test_truncated_cached_tag_list_is_replaced_before_serving() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

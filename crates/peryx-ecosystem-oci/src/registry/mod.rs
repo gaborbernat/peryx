@@ -183,6 +183,8 @@ pub struct OciRegistryWithHasher<S> {
     /// Serializes the read-modify-write of one upload session's durable stage, so two concurrent chunk
     /// writes to the same session cannot interleave on disk. Different sessions never contend.
     session_gate: SessionGate,
+    /// Keeps a tag-page insertion and its namespace budget sweep atomic without delaying upstream I/O.
+    tag_page_gate: tokio::sync::Mutex<()>,
     /// Present only when distributed availability needs mutation replay.
     journal_outbox: crate::outbox::Outbox,
 }
@@ -535,13 +537,21 @@ mod maintenance_contract_tests;
 impl<S: BuildHasher + Default + Send + Sync + 'static> IdleReclaimer for OciRegistryWithHasher<S> {
     async fn reclaim_idle(&self, state: Arc<ServingState>) -> usize {
         let cutoff = (state.clock)().saturating_sub(UPLOAD_SESSION_TTL_SECS);
-        let expired = state
-            .meta
-            .expired_uploads(cutoff, UPLOAD_RECLAIM_BATCH)
-            .unwrap_or_default();
+        let expired = match state.meta.expired_uploads(cutoff, UPLOAD_RECLAIM_BATCH) {
+            Ok(expired) => expired,
+            Err(error) => {
+                tracing::warn!(?error, "OCI upload-session cache sweep failed");
+                Vec::new()
+            }
+        };
         let mut reclaimed = 0;
         for session in &expired {
             reclaimed += usize::from(self.reclaim_session(&state, session, cutoff).await);
+        }
+        let _guard = self.tag_page_gate.lock().await;
+        match discovery::reclaim_tag_pages(&state) {
+            Ok(tag_pages) => reclaimed += tag_pages,
+            Err(error) => tracing::warn!(?error, "OCI tag-page cache sweep failed"),
         }
         reclaimed
     }

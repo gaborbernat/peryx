@@ -774,6 +774,7 @@ fn tag_page_key(index: &str, repo: &str, query: &str) -> String {
 
 /// # Errors
 /// Returns a store error if the write fails.
+#[cfg(test)]
 pub fn set_tag_page(
     meta: &MetaStore,
     index: &str,
@@ -783,13 +784,29 @@ pub fn set_tag_page(
     link: Option<&str>,
     body: &[u8],
 ) -> Result<(), MetaError> {
+    meta.put_driver_value(&tag_page_key(index, repo, query), &tag_page_value(at, link, body))
+}
+
+pub fn set_tag_page_txn(
+    txn: &mut DriverTxn,
+    index: &str,
+    repo: &str,
+    query: &str,
+    at: i64,
+    link: Option<&str>,
+    body: &[u8],
+) -> Result<(), MetaError> {
+    txn.put_local(&tag_page_key(index, repo, query), &tag_page_value(at, link, body))
+}
+
+fn tag_page_value(at: i64, link: Option<&str>, body: &[u8]) -> Vec<u8> {
     let link = link.unwrap_or_default().as_bytes();
     let length = u32::try_from(link.len()).unwrap_or(u32::MAX);
     let mut value = at.to_be_bytes().to_vec();
     value.extend_from_slice(&length.to_be_bytes());
     value.extend_from_slice(link);
     value.extend_from_slice(body);
-    meta.put_driver_value(&tag_page_key(index, repo, query), &value)
+    value
 }
 
 /// # Errors
@@ -827,7 +844,10 @@ pub fn tag_page(meta: &MetaStore, index: &str, repo: &str, query: &str) -> Resul
         return Ok(TagPageRead::Invalid);
     }
     let (link, body) = rest.split_at(length);
-    let link = (!link.is_empty()).then(|| String::from_utf8_lossy(link).into_owned());
+    let link = (!link.is_empty()).then(|| String::from_utf8(link.to_vec())).transpose();
+    let Ok(link) = link else {
+        return Ok(TagPageRead::Invalid);
+    };
     Ok(TagPageRead::Page((i64::from_be_bytes(*at), link, body.to_vec())))
 }
 

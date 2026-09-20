@@ -150,6 +150,32 @@ fn test_commit_driver_cache_txn_rolls_back_when_the_body_errors() {
 }
 
 #[test]
+fn test_commit_driver_cache_txn_rolls_back_a_removal_after_a_prefix_scan() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("page/first", b"first").unwrap();
+    store.put_driver_value("page/second", b"second").unwrap();
+
+    let result = store.commit_driver_cache_txn(|txn| {
+        let mut first = None;
+        txn.scan_prefix("page/", |key, _| {
+            first = Some(key.to_owned());
+            Ok::<_, MetaError>(std::ops::ControlFlow::Break(()))
+        })?;
+        txn.remove_local(first.as_deref().unwrap())?;
+        Err::<(), _>(decode_error())
+    });
+
+    assert!(result.is_err());
+    assert_eq!(
+        store.read_driver_txn(|txn| txn.prefix("page/")).unwrap(),
+        vec![
+            ("page/first".to_owned(), b"first".to_vec()),
+            ("page/second".to_owned(), b"second".to_vec()),
+        ]
+    );
+}
+
+#[test]
 fn test_commit_driver_txn_rolls_back_when_the_body_errors() {
     let (_dir, store) = super::store();
 

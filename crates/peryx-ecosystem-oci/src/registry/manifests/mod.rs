@@ -411,7 +411,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     .map(|manifest| manifest_response(manifest, &digest, head)),
                 None => None,
             });
-        };
+        }
         if let Some(response) = fresh_tag(state, &member.name, repo, tag, head)? {
             return Ok(Some(response));
         }

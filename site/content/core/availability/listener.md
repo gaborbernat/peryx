@@ -152,8 +152,8 @@ roster intact. A replacement that has entered Raft joint consensus can instead l
 datacenters as voters. That state needs a majority from each voter set for reads and writes.
 
 Peryx does not roll the replacement back or retry it in the background. Restore quorum, then retry the same
-`replace_voter` command through this listener. The retry completes the uniform roster with the incoming datacenter as
-its only voter; it does not add a second replacement.
+`replace_voter` command through this listener. The retry completes the intended uniform roster, replacing the outgoing
+voter with the incoming voter and retaining the other voters.
 
 ```
 POST /availability/v1/commands

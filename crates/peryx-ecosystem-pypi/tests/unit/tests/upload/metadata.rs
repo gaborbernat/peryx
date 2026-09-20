@@ -837,10 +837,16 @@ fn test_prepare_rejects_invalid_requires_python_and_clock() {
     "class",
     "must be a dotted sequence of Python identifiers"
 )]
-#[case::normalized_hard_keyword(
-    "Import-Name: ｃｌａｓｓ\n",
+#[case::circled_import_name(
+    "Import-Name: ⓐ\n",
     "Import-Name",
-    "ｃｌａｓｓ",
+    "ⓐ",
+    "must be a dotted sequence of Python identifiers"
+)]
+#[case::circled_import_namespace(
+    "Import-Namespace: ⓐ\n",
+    "Import-Namespace",
+    "ⓐ",
     "must be a dotted sequence of Python identifiers"
 )]
 #[case::empty_component(
@@ -928,14 +934,14 @@ fn test_prepare_rejects_import_name_before_metadata_2_5() {
 #[test]
 fn test_prepare_accepts_valid_import_names_and_namespaces() {
     let metadata = "Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\nRequires-Python: >=3.8\n\
-          Import-Name: flask\nImport-Name: cafe\u{301}.cli; private\nImport-Namespace: shared.plugins\nImport-Namespace: match\n";
+          Import-Name: flask\nImport-Name: cafe\u{301}.cli; private\nImport-Name: ｃｌａｓｓ\nImport-Namespace: shared.plugins\nImport-Namespace: match\n";
     let bytes = wheel_metadata_bytes(metadata.as_bytes());
     let (_dir, staged) = staged_upload(&bytes);
     let prepared = prepare(staged_form(&bytes), staged, "root/hosted", 1000).unwrap();
 
     let doc = crate::parse_metadata(std::str::from_utf8(&prepared.metadata).unwrap()).unwrap();
     assert_eq!(prepared.metadata.as_slice(), metadata.as_bytes());
-    assert_eq!(doc.import_names, ["flask", "cafe\u{301}.cli; private"]);
+    assert_eq!(doc.import_names, ["flask", "cafe\u{301}.cli; private", "ｃｌａｓｓ"]);
     assert_eq!(doc.import_namespaces, ["shared.plugins", "match"]);
 }
 

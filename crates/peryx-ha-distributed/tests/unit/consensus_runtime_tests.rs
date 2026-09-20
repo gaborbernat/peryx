@@ -1815,7 +1815,12 @@ async fn test_a_forwarded_claim_is_unavailable_when_the_leader_listener_closes()
     east.raft().shutdown().await.unwrap();
     west_served.abort();
     assert!(west_served.await.unwrap_err().is_cancelled());
-    assert!(matches!(result, Err(OwnershipError::Unavailable(_))), "{result:?}");
+    assert_eq!(
+        result,
+        Err(OwnershipError::Unavailable(
+            "peer unreachable before the rpc completed".to_owned()
+        ))
+    );
 }
 
 /// Delaying the learner's router keeps replication at zero, so serving it is the only event that clears the barrier.

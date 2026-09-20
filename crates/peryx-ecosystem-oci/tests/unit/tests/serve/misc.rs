@@ -171,3 +171,81 @@ async fn test_catalog_lists_oci_repositories_with_pagination() {
             .contains("_catalog?n=1&last=bare")
     );
 }
+
+#[tokio::test]
+async fn test_catalog_reports_a_storage_failure() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta =
+        peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    let mut state = peryx_driver::AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        vec![writable_index("store", "store", true, "s3cret")],
+        Arc::new(|| 1000),
+    );
+    super::super::install_oci(&mut state, HashMap::new(), false);
+    let app = peryx_http::router(Arc::new(state));
+
+    fault.arm(0);
+    assert_eq!(send(&app, Method::GET, "/v2/_catalog").await.0, StatusCode::BAD_GATEWAY);
+    assert!(fault.triggered());
+}
+
+#[tokio::test]
+async fn test_catalog_keeps_digest_only_manifests_until_they_are_trashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = crate::tests::hosted_writable(&dir, "s3cret");
+    let manifest = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#;
+    let digest = oci_digest(manifest);
+    let uri = format!("/v2/store/digest-only/manifests/{digest}");
+    let (status, _, body) = crate::tests::send_body(
+        &app,
+        Method::PUT,
+        &uri,
+        &[
+            ("authorization", &crate::tests::auth("s3cret")),
+            ("content-type", "application/vnd.oci.image.index.v1+json"),
+        ],
+        manifest.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body:?}");
+    assert_eq!(send(&app, Method::GET, &uri).await.0, StatusCode::OK);
+
+    assert_eq!(
+        catalog_repositories(&app).await,
+        serde_json::json!(["store/digest-only"])
+    );
+
+    store::put_tag(&state.serving.meta, "store", "digest-only", "latest", &digest).unwrap();
+    store::delete_tag(&state.serving.meta, "store", "digest-only", "latest").unwrap();
+    assert_eq!(
+        catalog_repositories(&app).await,
+        serde_json::json!(["store/digest-only"])
+    );
+
+    let info = peryx_core::TrashInfo {
+        deleted_at_unix: 100,
+        actor: None,
+        reason: None,
+    };
+    store::trash_manifest(&state.serving.meta, "store", "digest-only", &digest, &info, false, None).unwrap();
+    assert_eq!(catalog_repositories(&app).await, serde_json::json!([]));
+
+    store::restore_manifest(&state.serving.meta, "store", "digest-only", &digest, false, None).unwrap();
+    assert_eq!(
+        catalog_repositories(&app).await,
+        serde_json::json!(["store/digest-only"])
+    );
+}
+
+async fn catalog_repositories(app: &axum::Router) -> serde_json::Value {
+    let (status, _, body) = send(app, Method::GET, "/v2/_catalog").await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["repositories"].clone()
+}

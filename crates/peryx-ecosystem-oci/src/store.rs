@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 pub use peryx_core::TrashInfo;
 use peryx_core::TrashRecord;
 use peryx_ha::{ArtifactOrigin, ArtifactPlacement, ArtifactSource};
-use peryx_storage::meta::{DriverTxn, MetaError, MetaStore};
+use peryx_storage::meta::{DriverReadTxn, DriverTxn, MetaError, MetaStore};
 use serde::{Deserialize, Serialize};
 
 use crate::outbox::{self, OciMutation};
@@ -495,6 +495,47 @@ pub fn list_repositories(meta: &MetaStore, index: &str) -> Result<Vec<String>, M
             repos.insert(repo.to_owned());
         }
     }
+    Ok(repos.into_iter().collect())
+}
+
+/// List every repository that has a live tag or a readable manifest membership under `index`,
+/// distinct and sorted.
+///
+/// # Errors
+/// Returns a store error if a read or scan fails.
+pub fn list_catalog_repositories(txn: &DriverReadTxn, index: &str) -> Result<Vec<String>, MetaError> {
+    let tag_prefix = format!("{TAG_PREFIX}{index}\u{0}");
+    let mut repos = BTreeSet::new();
+    txn.scan_prefix(&tag_prefix, |key, _| {
+        if let Some((repo, _tag)) = key
+            .strip_prefix(tag_prefix.as_str())
+            .and_then(|rest| rest.rsplit_once('\u{0}'))
+        {
+            repos.insert(repo.to_owned());
+        }
+        Ok::<_, MetaError>(std::ops::ControlFlow::Continue(()))
+    })?;
+
+    let membership_prefix = format!("{MEMBERSHIP_PREFIX}{index}\u{0}");
+    txn.scan_prefix(&membership_prefix, |key, _| {
+        let Some((repo, digest)) = key
+            .strip_prefix(membership_prefix.as_str())
+            .and_then(|rest| rest.rsplit_once('\u{0}'))
+            .filter(|(repo, digest)| !repo.is_empty() && !repo.contains('\u{0}') && !digest.is_empty())
+        else {
+            return Ok::<_, MetaError>(std::ops::ControlFlow::Continue(()));
+        };
+        if repos.contains(repo) || txn.get(&manifest_trash_key(index, repo, digest))?.is_some() {
+            return Ok::<_, MetaError>(std::ops::ControlFlow::Continue(()));
+        }
+        if txn
+            .get(&manifest_key(digest))?
+            .is_some_and(|raw| Manifest::decode(&raw).is_some())
+        {
+            repos.insert(repo.to_owned());
+        }
+        Ok::<_, MetaError>(std::ops::ControlFlow::Continue(()))
+    })?;
     Ok(repos.into_iter().collect())
 }
 

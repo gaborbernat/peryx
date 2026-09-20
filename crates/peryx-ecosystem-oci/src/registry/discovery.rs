@@ -702,22 +702,25 @@ fn tag_list_response(name: &str, tags: &std::collections::BTreeSet<String>, quer
 }
 
 pub(super) fn serve_catalog(state: &ServingState, query: &str) -> Result<Response, ServeError> {
-    let mut repositories = std::collections::BTreeSet::new();
-    for index in &state.indexes {
-        if index.ecosystem != crate::ECOSYSTEM {
-            continue;
-        }
-        for repo in store::list_repositories(&state.meta, &index.name)? {
-            if policy_blocks(index, PolicyAction::Serve, &repo) {
+    let repositories = state.meta.read_driver_txn(|txn| {
+        let mut repositories = std::collections::BTreeSet::new();
+        for index in &state.indexes {
+            if index.ecosystem != crate::ECOSYSTEM {
                 continue;
             }
-            repositories.insert(if index.route.is_empty() {
-                repo
-            } else {
-                format!("{}/{repo}", index.route)
-            });
+            for repo in store::list_catalog_repositories(txn, &index.name)? {
+                if policy_blocks(index, PolicyAction::Serve, &repo) {
+                    continue;
+                }
+                repositories.insert(if index.route.is_empty() {
+                    repo
+                } else {
+                    format!("{}/{repo}", index.route)
+                });
+            }
         }
-    }
+        Ok::<_, peryx_storage::meta::MetaError>(repositories)
+    })?;
     let (page, next) = paginate(&repositories, query);
     let mut builder = Response::builder()
         .status(StatusCode::OK)

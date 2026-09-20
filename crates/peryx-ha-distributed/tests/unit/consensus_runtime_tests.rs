@@ -1777,6 +1777,47 @@ async fn test_promoting_a_caught_up_learner_seats_it_as_a_voter() {
     stop_mounted(&west, west_served).await;
 }
 
+#[tokio::test]
+async fn test_a_forwarded_claim_is_unavailable_when_the_leader_listener_closes() {
+    let east_dir = tempfile::tempdir().unwrap();
+    let west_dir = tempfile::tempdir().unwrap();
+    let (east, _, east_served) = mounted_leader(&east_dir).await;
+    let (west, west_endpoint, west_served) = mounted_node(&west_dir, "west").await;
+    let east_group = OwnershipGroup::new(east.clone(), DatacenterId("east".to_owned()));
+    east_group
+        .submit(
+            None,
+            ControlCommand::AddLearner {
+                datacenter: "west".to_owned(),
+                address: west_endpoint,
+            },
+        )
+        .await
+        .unwrap();
+    east_group.submit(None, promote("west")).await.unwrap();
+    drop(east_group);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        west.metrics()
+            .wait_for(|metrics| metrics.current_leader == Some(voter_id("east"))),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let west_group = OwnershipGroup::new(west.clone(), DatacenterId("west".to_owned())).with_peer_forwarding(TOKEN);
+    west.raft().runtime_config().elect(false);
+    east_served.abort();
+    assert!(east_served.await.unwrap_err().is_cancelled());
+
+    let result = west_group.claim_home("proj").await;
+
+    west.raft().shutdown().await.unwrap();
+    east.raft().shutdown().await.unwrap();
+    west_served.abort();
+    assert!(west_served.await.unwrap_err().is_cancelled());
+    assert!(matches!(result, Err(OwnershipError::Unavailable(_))), "{result:?}");
+}
+
 /// Delaying the learner's router keeps replication at zero, so serving it is the only event that clears the barrier.
 #[tokio::test]
 async fn test_a_learner_with_a_replication_backlog_is_promoted_only_once_it_catches_up() {

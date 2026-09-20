@@ -249,6 +249,80 @@ fn test_driver_txn_prefix_stops_at_the_first_key_outside_the_prefix() {
 }
 
 #[test]
+fn test_driver_txn_scan_prefix_break_visits_one_matching_row() {
+    let (_dir, store) = super::store();
+    for key in ["scope/a", "scope/b", "scope/c"] {
+        store.put_driver_value(key, b"value").unwrap();
+    }
+
+    let visits = store
+        .commit_driver_cache_txn(|txn| {
+            let mut visits = 0;
+            txn.scan_prefix("scope/", |_, _| {
+                visits += 1;
+                Ok::<_, MetaError>(std::ops::ControlFlow::Break(()))
+            })?;
+            Ok::<_, MetaError>(visits)
+        })
+        .unwrap();
+
+    assert_eq!(visits, 1);
+}
+
+#[test]
+fn test_driver_txn_scan_prefix_reads_staged_rows() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/removed", b"old").unwrap();
+    store.put_driver_value("scope/updated", b"old").unwrap();
+
+    let entries = store
+        .commit_driver_txn(|txn| {
+            txn.put("scope/inserted", b"new")?;
+            txn.put("scope/updated", b"new")?;
+            txn.remove("scope/removed")?;
+            let mut entries = Vec::new();
+            txn.scan_prefix("scope/", |key, value| {
+                entries.push((key.to_owned(), value.to_vec()));
+                Ok::<_, MetaError>(std::ops::ControlFlow::Continue(()))
+            })?;
+            Ok::<_, MetaError>((entries, Vec::new()))
+        })
+        .unwrap();
+
+    assert_eq!(
+        entries,
+        vec![
+            ("scope/inserted".to_owned(), b"new".to_vec()),
+            ("scope/updated".to_owned(), b"new".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn test_driver_txn_scan_prefix_visitor_error_rolls_back_staged_rows() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/removed", b"old").unwrap();
+    let mut visits = 0;
+
+    let result = store.commit_driver_txn(|txn| {
+        txn.put("scope/inserted", b"new")?;
+        txn.remove("scope/removed")?;
+        txn.scan_prefix("scope/", |_, _| {
+            visits += 1;
+            Err::<std::ops::ControlFlow<()>, _>(decode_error())
+        })?;
+        Ok::<_, MetaError>(((), Vec::new()))
+    });
+
+    assert!(matches!(result, Err(MetaError::Decode(_))));
+    assert_eq!(visits, 1);
+    assert_eq!(
+        store.read_driver_txn(|txn| txn.prefix("scope/")).unwrap(),
+        vec![("scope/removed".to_owned(), b"old".to_vec())]
+    );
+}
+
+#[test]
 fn test_driver_value_update_and_delete_report_prior_state() {
     let (_dir, store) = super::store();
     assert_eq!(

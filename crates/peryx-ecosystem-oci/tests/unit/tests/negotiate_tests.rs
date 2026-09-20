@@ -580,7 +580,11 @@ async fn test_cold_head_negotiates_a_docker_list_without_storage(#[case] referen
     let child_digest = oci_digest(&DOCKER_CHILD);
     let list = amd64_docker_list(&child_digest);
     let list_digest = oci_digest(&list);
-    let reference = reference.replace("{list_digest}", &list_digest);
+    let reference = if reference == "latest" {
+        "latest".to_owned()
+    } else {
+        list_digest.clone()
+    };
     Mock::given(method("HEAD"))
         .and(path(format!("/v2/library/app/manifests/{reference}")))
         .respond_with(

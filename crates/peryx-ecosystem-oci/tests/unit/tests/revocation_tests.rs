@@ -381,7 +381,11 @@ async fn test_cold_manifest_head_drops_an_upstream_digest_revoked_during_the_req
     let server = MockServer::start().await;
     let body = br#"{"schemaVersion":2}"#;
     let digest = oci_digest(body);
-    let reference = reference.replace("{digest}", &digest);
+    let reference = if reference == "latest" {
+        "latest".to_owned()
+    } else {
+        digest.clone()
+    };
     let dir = tempfile::tempdir().unwrap();
     let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
     let revoking = state.clone();
@@ -620,7 +624,7 @@ async fn test_cold_docker_list_head_rechecks_a_revocation_committed_after_upstre
                 .insert_header("content-length", list.len().to_string().as_str())
                 .set_body_raw(list.clone(), LIST_TYPE),
         )
-        .expect(if revoke_parent { 0 } else { 1 })
+        .expect(u64::from(!revoke_parent))
         .mount(&server)
         .await;
     Mock::given(method("HEAD"))
@@ -631,7 +635,7 @@ async fn test_cold_docker_list_head_rechecks_a_revocation_committed_after_upstre
                 .insert_header("content-type", LEGACY_ACCEPT)
                 .insert_header("content-length", child.len().to_string().as_str()),
         )
-        .expect(if revoke_parent { 0 } else { 1 })
+        .expect(u64::from(!revoke_parent))
         .mount(&server)
         .await;
 

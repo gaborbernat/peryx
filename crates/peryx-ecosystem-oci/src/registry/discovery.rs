@@ -972,10 +972,7 @@ fn cached_next(link: Option<&str>, pagination: &Pagination) -> Result<Option<Pag
         }
         Some(link) => {
             let next = Pagination::parse(link)?;
-            if next.limit == Some(0) {
-                return Err("invalid cached continuation");
-            }
-            if next.last.is_none() {
+            if next.limit == Some(0) || next.last.is_none() {
                 return Err("invalid cached continuation");
             }
             Some(next_controls(next, pagination))

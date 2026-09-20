@@ -330,6 +330,7 @@ async fn test_invalid_cached_tag_list_is_replaced_before_serving(#[case] body: &
 #[rstest]
 #[case::zero_limit("n=0&last=a")]
 #[case::missing_cursor("n=1")]
+#[case::unknown_parameter("ignored=x")]
 #[tokio::test]
 async fn test_invalid_cached_tag_list_continuation_is_replaced_before_serving(#[case] link: &str) {
     let server = MockServer::start().await;

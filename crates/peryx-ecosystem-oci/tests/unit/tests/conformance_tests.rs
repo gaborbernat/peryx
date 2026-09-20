@@ -981,7 +981,7 @@ async fn test_proxy_tag_list_rejects_an_unmarked_clamped_page() {
 }
 
 #[tokio::test]
-async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_scan_failure() {
+async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_commit_failure() {
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -989,7 +989,7 @@ async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_scan_failure() {
     let (pages, fault) = peryx_test_support::fault::backend();
     let meta =
         peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
-    for query in ["n=1&last=a", "n=1&last=b"] {
+    for query in ["n=0&last=a", "n=0&last=b"] {
         store::set_tag_page(
             &meta,
             "hub",
@@ -1021,7 +1021,8 @@ async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_scan_failure() {
         .1
         .clone();
 
-    fault.arm(6);
+    // The sweep makes 21 backend calls; the final call commits the staged removals.
+    fault.arm(20);
     assert_eq!(reclaimer.reclaim_idle(state.serving.clone()).await, 0);
     assert!(fault.triggered());
     fault.disable();
@@ -1031,6 +1032,18 @@ async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_scan_failure() {
     let meta =
         peryx_storage::meta::MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
     assert_eq!(meta.driver_prefix_keys("oci\0tp\0").unwrap(), rows);
+    let mut state = peryx_driver::AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs-after-rollback")),
+        60,
+        vec![super::writable_index("store", "store", true, TOKEN)],
+        Arc::new(|| 1_000),
+    );
+    super::install_oci(&mut state, HashMap::new(), false);
+    let state = Arc::new(state);
+
+    assert_eq!(reclaim_idle(&state).await, 2);
+    assert!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().is_empty());
 }
 
 async fn reclaim_idle(state: &std::sync::Arc<peryx_driver::AppState>) -> usize {
@@ -1041,6 +1054,32 @@ async fn reclaim_idle(state: &std::sync::Arc<peryx_driver::AppState>) -> usize {
         .1
         .clone();
     reclaimer.reclaim_idle(state.serving.clone()).await
+}
+
+#[rstest]
+#[case::zero_limit("n=0&last=a")]
+#[case::missing_cursor("n=1")]
+#[case::unknown_parameter("ignored=x")]
+#[tokio::test]
+async fn test_idle_tag_page_sweep_drops_invalid_cached_continuations(#[case] link: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "",
+        1_000,
+        Some(link),
+        br#"{"name":"app","tags":[]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 1);
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Missing
+    );
 }
 
 #[tokio::test]
@@ -1096,10 +1135,13 @@ async fn test_idle_tag_page_sweep_drops_invalid_and_oversized_rows() {
     store::set_tag_page(&state.serving.meta, "hub", "app", "n=1", 1_000, Some(&link), body).unwrap();
     store::set_tag_page(&state.serving.meta, "hub", "app", "n=1&last=kept", 1_000, None, body).unwrap();
 
-    assert_eq!(reclaim_idle(&state).await, 4);
+    assert_eq!(reclaim_idle(&state).await, 3);
     assert_eq!(
         state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(),
-        vec!["oci\0tp\0hub\0app\0n=1&last=kept".to_owned()]
+        vec![
+            "oci\0tp\0hub\0app\0n=0".to_owned(),
+            "oci\0tp\0hub\0app\0n=1&last=kept".to_owned(),
+        ]
     );
 }
 

@@ -272,7 +272,7 @@ fn test_driver_txn_scan_prefix_break_visits_one_matching_row() {
 }
 
 #[test]
-fn test_driver_txn_scan_prefix_reads_staged_rows() {
+fn test_driver_txn_prefix_reads_staged_rows() {
     let (_dir, store) = super::store();
     store.put_driver_value("scope/removed", b"old").unwrap();
     store.put_driver_value("scope/updated", b"old").unwrap();
@@ -282,12 +282,7 @@ fn test_driver_txn_scan_prefix_reads_staged_rows() {
             txn.put("scope/inserted", b"new")?;
             txn.put("scope/updated", b"new")?;
             txn.remove("scope/removed")?;
-            let mut entries = Vec::new();
-            txn.scan_prefix("scope/", |key, value| {
-                entries.push((key.to_owned(), value.to_vec()));
-                Ok::<_, MetaError>(std::ops::ControlFlow::Continue(()))
-            })
-            .unwrap();
+            let entries = txn.prefix("scope/")?;
             Ok::<_, MetaError>((entries, Vec::new()))
         })
         .unwrap();

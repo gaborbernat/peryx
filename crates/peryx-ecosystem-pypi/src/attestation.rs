@@ -238,7 +238,12 @@ fn subject_match(subjects: &[Subject], sha256: &str, filename: &str) -> SubjectM
     }
     subjects
         .iter()
-        .find(|subject| subject.digest.get("sha256").is_some_and(|digest| digest == sha256))
+        .find(|subject| {
+            subject
+                .digest
+                .get("sha256")
+                .is_some_and(|digest| matching_sha256(digest, sha256))
+        })
         .map_or(SubjectMatch::Mismatched, |subject| match &subject.name {
             Some(name) if !matching_filenames(name, filename) => SubjectMatch::Mismatched,
             _ => SubjectMatch::Matched,
@@ -325,8 +330,16 @@ fn decode_statement(index: usize, attestation: &Value) -> Result<UploadStatement
     if decoded.len() > MAX_STATEMENT_BYTES {
         return Err(AttestationError::MalformedStatement(index));
     }
+    let value: Value = serde_json::from_slice(&decoded).map_err(|_| AttestationError::MalformedStatement(index))?;
+    if !value.is_object()
+        || value["subject"]
+            .as_array()
+            .is_none_or(|subjects| subjects.iter().any(|subject| !subject.is_object()))
+    {
+        return Err(AttestationError::MalformedStatement(index));
+    }
     let statement: UploadStatement =
-        serde_json::from_slice(&decoded).map_err(|_| AttestationError::MalformedStatement(index))?;
+        serde_json::from_value(value).map_err(|_| AttestationError::MalformedStatement(index))?;
     (statement.statement_type == IN_TOTO_STATEMENT_V1)
         .then_some(statement)
         .ok_or(AttestationError::MalformedStatement(index))
@@ -351,7 +364,7 @@ fn bind_subject(
     if !subject
         .digest
         .get("sha256")
-        .is_some_and(|digest| valid_sha256(digest) && digest.eq_ignore_ascii_case(sha256))
+        .is_some_and(|digest| matching_sha256(digest, sha256))
     {
         return Err(AttestationError::SubjectDigestMismatch(index));
     }
@@ -384,6 +397,10 @@ fn valid_sha256(digest: &str) -> bool {
     digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn matching_sha256(subject: &str, distribution: &str) -> bool {
+    valid_sha256(subject) && valid_sha256(distribution) && subject.eq_ignore_ascii_case(distribution)
+}
+
 fn matching_filenames(subject: &str, distribution: &str) -> bool {
     let (Ok(subject), Ok(distribution)) = (
         parse_distribution_filename(subject),
@@ -394,10 +411,37 @@ fn matching_filenames(subject: &str, distribution: &str) -> bool {
     subject.kind == distribution.kind
         && subject.normalized_name == distribution.normalized_name
         && subject.version == distribution.version
-        && subject.build_tag == distribution.build_tag
-        && subject.python_tag == distribution.python_tag
-        && subject.abi_tag == distribution.abi_tag
-        && subject.platform_tag == distribution.platform_tag
+        && matching_build_tags(subject.build_tag.as_deref(), distribution.build_tag.as_deref())
+        && normalized_wheel_tags(&subject) == normalized_wheel_tags(&distribution)
+}
+
+fn matching_build_tags(subject: Option<&str>, distribution: Option<&str>) -> bool {
+    subject.map(normalized_build_tag) == distribution.map(normalized_build_tag)
+}
+
+fn normalized_build_tag(tag: &str) -> (&str, &str) {
+    let prefix = tag
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(tag.len());
+    let number = tag[..prefix].trim_start_matches('0');
+    (if number.is_empty() { "0" } else { number }, &tag[prefix..])
+}
+
+fn normalized_wheel_tags(
+    filename: &crate::DistributionFilename,
+) -> Option<(BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)> {
+    let (Some(python), Some(abi), Some(platform)) = (
+        filename.python_tag.as_deref(),
+        filename.abi_tag.as_deref(),
+        filename.platform_tag.as_deref(),
+    ) else {
+        return None;
+    };
+    Some((normalized_tags(python), normalized_tags(abi), normalized_tags(platform)))
+}
+
+fn normalized_tags(tags: &str) -> BTreeSet<String> {
+    tags.split('.').map(str::to_ascii_lowercase).collect()
 }
 
 #[derive(serde::Deserialize)]

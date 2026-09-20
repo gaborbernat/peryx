@@ -213,13 +213,56 @@ fn test_build_provenance_rejects_a_subject_digest_mismatch() {
     );
 }
 
-#[test]
-fn test_build_provenance_rejects_an_invalid_subject_digest() {
-    let raw = field(&[attestation(FILENAME, &"a".repeat(63))]);
+#[rstest::rstest]
+#[case::short(63, 'a')]
+#[case::long(65, 'a')]
+#[case::non_hex(64, 'g')]
+fn test_build_provenance_rejects_an_invalid_subject_digest(#[case] length: usize, #[case] character: char) {
+    let digest = character.to_string().repeat(length);
+    let raw = field(&[attestation(FILENAME, &digest)]);
 
     assert_eq!(
-        build_provenance(&raw, SHA, FILENAME).unwrap_err(),
+        build_provenance(&raw, &digest, FILENAME).unwrap_err(),
         AttestationError::SubjectDigestMismatch(0)
+    );
+    assert_eq!(
+        summarize_provenance(
+            &provenance_document(&[attestation(FILENAME, &digest)]),
+            &digest,
+            FILENAME
+        )
+        .unwrap()[0]
+            .subject,
+        SubjectMatch::Mismatched
+    );
+    assert!(
+        stored_predicate_types(
+            &provenance_document(&[attestation(FILENAME, &digest)]),
+            &digest,
+            FILENAME
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn test_build_provenance_and_stored_provenance_match_mixed_case_digests() {
+    let digest = "aB".repeat(32);
+    let document = build_provenance(
+        &field(&[attestation(FILENAME, &digest)]),
+        &digest.to_ascii_uppercase(),
+        FILENAME,
+    )
+    .unwrap()
+    .document;
+
+    assert_eq!(
+        summarize_provenance(&document, &digest.to_ascii_uppercase(), FILENAME).unwrap()[0].subject,
+        SubjectMatch::Matched
+    );
+    assert_eq!(
+        stored_predicate_types(&document, &digest.to_ascii_uppercase(), FILENAME),
+        BTreeSet::from(["https://docs.pypi.org/attestations/publish/v1".to_owned()])
     );
 }
 
@@ -263,6 +306,27 @@ fn test_build_provenance_rejects_a_subject_without_a_name() {
 
     assert_eq!(
         build_provenance(&raw, SHA, FILENAME).unwrap_err(),
+        AttestationError::MalformedStatement(0)
+    );
+}
+
+#[rstest::rstest]
+#[case::statement(json!([
+    "https://in-toto.io/Statement/v1",
+    [{"name": FILENAME, "digest": {"sha256": SHA}}],
+    "https://docs.pypi.org/attestations/publish/v1",
+]))]
+#[case::subject(json!({
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [[FILENAME, {"sha256": SHA}]],
+    "predicateType": "https://docs.pypi.org/attestations/publish/v1",
+}))]
+fn test_build_provenance_rejects_positional_statements(#[case] statement: Value) {
+    let mut attestation = attestation(FILENAME, SHA);
+    attestation["envelope"]["statement"] = json!(encode_statement(&statement));
+
+    assert_eq!(
+        build_provenance(&field(&[attestation]), SHA, FILENAME).unwrap_err(),
         AttestationError::MalformedStatement(0)
     );
 }
@@ -331,16 +395,37 @@ fn test_build_provenance_accepts_a_normalized_filename(#[case] filename: &str, #
 }
 
 #[rstest::rstest]
-#[case::build_tag("peryxpkg-1.0-1-py3-none-any.whl")]
-#[case::abi_tag("peryxpkg-1.0-py3-cp311-any.whl")]
-fn test_build_provenance_rejects_a_different_wheel_identity(#[case] subject: &str) {
+#[case::build_number("peryxpkg-1.0-1-py3-none-any.whl", "peryxpkg-1.0-01-py3-none-any.whl")]
+#[case::compatibility_tags("peryxpkg-1.0-py2.py3-none-any.whl", "peryxpkg-1.0-PY3.PY2-NONE-ANY.any.whl")]
+fn test_build_provenance_accepts_an_equivalent_wheel_identity(#[case] filename: &str, #[case] subject: &str) {
+    assert!(build_provenance(&field(&[attestation(subject, SHA)]), SHA, filename).is_ok());
+}
+
+#[test]
+fn test_build_provenance_accepts_many_repeated_compatibility_tags() {
+    let python = vec!["py3"; 3_000].join(".");
+    let abi = vec!["none"; 3_000].join(".");
+    let platform = vec!["any"; 3_000].join(".");
+    let filename = format!("peryxpkg-1.0-{python}-{abi}-{platform}.whl");
+
+    assert!(build_provenance(&field(&[attestation(&filename, SHA)]), SHA, &filename).is_ok());
+}
+
+#[rstest::rstest]
+#[case::absent_build("peryxpkg-1.0-py3-none-any.whl", "peryxpkg-1.0-0-py3-none-any.whl")]
+#[case::build_number("peryxpkg-1.0-1-py3-none-any.whl", "peryxpkg-1.0-2-py3-none-any.whl")]
+#[case::build_suffix("peryxpkg-1.0-1A-py3-none-any.whl", "peryxpkg-1.0-1a-py3-none-any.whl")]
+#[case::python_tag_set("peryxpkg-1.0-py2.py3-none-any.whl", "peryxpkg-1.0-py2.py4-none-any.whl")]
+#[case::abi_tag("peryxpkg-1.0-py3-none-any.whl", "peryxpkg-1.0-py3-cp311-any.whl")]
+#[case::platform_tag("peryxpkg-1.0-py3-none-any.whl", "peryxpkg-1.0-py3-none-win_amd64.whl")]
+fn test_build_provenance_rejects_a_different_wheel_identity(#[case] filename: &str, #[case] subject: &str) {
     let raw = field(&[attestation(subject, SHA)]);
 
     assert_eq!(
-        build_provenance(&raw, SHA, FILENAME).unwrap_err(),
+        build_provenance(&raw, SHA, filename).unwrap_err(),
         AttestationError::SubjectNameMismatch {
             index: 0,
-            expected: FILENAME.to_owned(),
+            expected: filename.to_owned(),
             actual: subject.to_owned(),
         }
     );

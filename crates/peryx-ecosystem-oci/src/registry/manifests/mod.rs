@@ -143,10 +143,17 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             .to_owned();
         let list = match store::get_manifest(&state.meta, &digest)? {
             Some(list) => list.bytes,
-            None if head => match self.cold_docker_list(state, members, repo, &response).await? {
-                ColdDockerList::Bytes(list) => list,
-                ColdDockerList::Response(response) => return Ok(response),
-            },
+            None if head => {
+                let source = response
+                    .extensions()
+                    .get::<HeadSource>()
+                    .expect("cold manifest HEAD keeps its source index")
+                    .clone();
+                match self.cold_docker_list(state, members, repo, source).await? {
+                    ColdDockerList::Bytes(list) => list,
+                    ColdDockerList::Response(response) => return Ok(response),
+                }
+            }
             None => return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown")),
         };
         let Some(child) = store::linux_amd64_child(&list) else {
@@ -163,13 +170,8 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         state: &ServingState,
         members: &[&Index],
         repo: &str,
-        response: &Response,
+        source: HeadSource,
     ) -> Result<ColdDockerList, ServeError> {
-        let source = response
-            .extensions()
-            .get::<HeadSource>()
-            .expect("cold manifest HEAD keeps its source index")
-            .clone();
         let (position, member) = members
             .iter()
             .enumerate()

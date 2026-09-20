@@ -6,6 +6,11 @@ fn store() -> (tempfile::TempDir, MetaStore) {
     (dir, meta)
 }
 
+fn catalog_repositories(meta: &MetaStore, index: &str) -> Vec<String> {
+    meta.read_driver_txn(|txn| list_catalog_repositories(txn, index))
+        .unwrap()
+}
+
 #[test]
 fn test_tag_page_round_trips_with_and_without_a_link() {
     let (_dir, meta) = store();
@@ -209,6 +214,80 @@ fn test_tags_scope_to_index_and_repo_and_sort() {
             ("latest".to_owned(), "sha256:1".to_owned()),
         ]
     );
+}
+
+#[test]
+fn test_catalog_repositories_union_tags_and_manifest_memberships() {
+    let (_dir, meta) = store();
+    put_tag(&meta, "store", "tagged", "latest", "not-a-manifest").unwrap();
+    record_manifest(&meta, "store", "digest-only", "sha256:digest", &image("{}")).unwrap();
+    record_manifest(&meta, "other", "isolated", "sha256:other", &image("{}")).unwrap();
+
+    assert_eq!(list_repositories(&meta, "store").unwrap(), vec!["tagged"]);
+    assert_eq!(catalog_repositories(&meta, "store"), vec!["digest-only", "tagged"]);
+    assert_eq!(catalog_repositories(&meta, "other"), vec!["isolated"]);
+}
+
+#[test]
+fn test_catalog_repositories_require_readable_manifest_memberships() {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&membership_key("store", "missing", "sha256:missing"), &[])
+        .unwrap();
+    meta.put_driver_value(&membership_key("store", "corrupt", "sha256:corrupt"), &[])
+        .unwrap();
+    meta.put_driver_value(&manifest_key("sha256:corrupt"), &[0]).unwrap();
+    meta.put_driver_value(&manifest_key("sha256:global-only"), &image("{}").encode().unwrap())
+        .unwrap();
+    record_blob_membership(&meta, "store", "blob-only", "sha256:blob").unwrap();
+    put_referrers(&meta, &[("store", "referrer-only", "sha256:referrer", b"{}")]);
+    for key in [
+        format!("{MEMBERSHIP_PREFIX}store\0extra\0separator\0sha256:readable"),
+        format!("{MEMBERSHIP_PREFIX}store\0sha256:readable"),
+        format!("{MEMBERSHIP_PREFIX}store\0\0sha256:readable"),
+        format!("{MEMBERSHIP_PREFIX}store\0empty-digest\0"),
+    ] {
+        meta.put_driver_value(&key, &[]).unwrap();
+    }
+    meta.put_driver_value(&manifest_key("sha256:readable"), &image("{}").encode().unwrap())
+        .unwrap();
+    meta.put_driver_value(&manifest_key(""), &image("{}").encode().unwrap())
+        .unwrap();
+
+    let child = "sha256:child";
+    record_manifest(&meta, "store", "child-only", "sha256:index", &index_of(child)).unwrap();
+    meta.commit_driver_txn(|txn| {
+        txn.remove(&membership_key("store", "child-only", "sha256:index"))?;
+        Ok::<_, MetaError>(((), Vec::new()))
+    })
+    .unwrap();
+
+    assert!(catalog_repositories(&meta, "store").is_empty());
+
+    record_manifest(&meta, "other", "owner", child, &image("{}")).unwrap();
+
+    assert_eq!(catalog_repositories(&meta, "store"), vec!["child-only"]);
+}
+
+#[test]
+fn test_catalog_repositories_honor_repository_manifest_trash() {
+    let (_dir, meta) = store();
+    record_manifest(&meta, "store", "alone", "sha256:alone", &image("{}")).unwrap();
+    record_manifest(&meta, "store", "shared-a", "sha256:shared", &image("{}")).unwrap();
+    meta.put_driver_value(&membership_key("store", "shared-b", "sha256:shared"), &[])
+        .unwrap();
+
+    trash_manifest(&meta, "store", "alone", "sha256:alone", &info(), false, None).unwrap();
+    trash_manifest(&meta, "store", "shared-a", "sha256:shared", &info(), false, None).unwrap();
+
+    assert_eq!(catalog_repositories(&meta, "store"), vec!["shared-b"]);
+
+    trash_manifest(&meta, "store", "shared-b", "sha256:shared", &info(), false, None).unwrap();
+
+    assert!(catalog_repositories(&meta, "store").is_empty());
+
+    restore_manifest(&meta, "store", "shared-b", "sha256:shared", false, None).unwrap();
+
+    assert_eq!(catalog_repositories(&meta, "store"), vec!["shared-b"]);
 }
 
 #[test]

@@ -66,6 +66,9 @@ struct ReadGateState {
 
 impl ReadGate {
     /// Arms the next successful backend read.
+    ///
+    /// # Panics
+    /// Panics if a caller arms an armed or completed gate, or if its mutex is poisoned.
     pub fn arm(&self) {
         let mut state = self.state.lock().expect("read gate is never poisoned");
         assert!(!state.armed && !state.arrived, "read gate is single-use");
@@ -73,6 +76,9 @@ impl ReadGate {
     }
 
     /// Returns whether one delegated backend read reaches its controlled boundary before `timeout`.
+    ///
+    /// # Panics
+    /// Panics if the gate mutex is poisoned.
     #[must_use]
     pub fn wait_for_arrival(&self, timeout: Duration) -> bool {
         let state = self.state.lock().expect("read gate is never poisoned");
@@ -80,7 +86,9 @@ impl ReadGate {
             .arrived
             .wait_timeout_while(state, timeout, |state| !state.arrived && !state.released)
             .expect("read gate is never poisoned");
-        state.arrived
+        let arrived = state.arrived;
+        drop(state);
+        arrived
     }
 
     fn wait(&self) {
@@ -91,16 +99,18 @@ impl ReadGate {
         state.armed = false;
         state.arrived = true;
         self.arrived.notify_all();
-        let _state = self
+        let state = self
             .released
             .wait_while(state, |state| !state.released)
             .expect("read gate is never poisoned");
+        drop(state);
     }
 
     fn release(&self) {
         let mut state = self.state.lock().expect("read gate is never poisoned");
         state.released = true;
         state.armed = false;
+        drop(state);
         self.arrived.notify_all();
         self.released.notify_all();
     }
@@ -216,7 +226,6 @@ pub fn faulted(inner: &Arc<InMemoryBackend>, fault: &Arc<Fault>) -> FaultBackend
 }
 
 /// Wraps one in-memory backend with a disarmed read gate and its RAII release.
-#[must_use]
 pub fn gated_reads(inner: &Arc<InMemoryBackend>) -> (ReadGateBackend, Arc<ReadGate>, ReadRelease) {
     let gate = Arc::new(ReadGate::default());
     (
@@ -225,7 +234,7 @@ pub fn gated_reads(inner: &Arc<InMemoryBackend>) -> (ReadGateBackend, Arc<ReadGa
             gate: gate.clone(),
         },
         gate.clone(),
-        ReadRelease(gate.clone()),
+        ReadRelease(gate),
     )
 }
 

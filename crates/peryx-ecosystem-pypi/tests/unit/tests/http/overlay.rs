@@ -3,22 +3,6 @@ use crate::policy::FallbackMode;
 use peryx_identity::IndexAcl;
 use peryx_test_support::fault::{backend, faulted};
 
-async fn publish_peryxpkg(harness: &Harness) {
-    upload_wheel(&harness.state, "peryxpkg-1.0-py3-none-any.whl", &fixture_wheel()).await;
-}
-
-async fn mount_upstream_peryxpkg(server: &MockServer) {
-    Mock::given(method("GET"))
-        .and(path("/simple/peryxpkg/"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            b"{\"meta\":{\"api-version\":\"1.1\"},\"name\":\"peryxpkg\",\"versions\":[\"1.0\"],\"files\":[{\"filename\":\"peryxpkg-1.0-py3-none-any.whl\",\"size\":11,\"url\":\"https://upstream.invalid/peryxpkg-1.0-py3-none-any.whl\",\"hashes\":{\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}]}".to_vec(),
-            "application/vnd.pypi.simple.v1+json",
-        ))
-        .expect(1)
-        .mount(server)
-        .await;
-}
-
 #[tokio::test]
 async fn test_overlay_serves_buffered_when_mirror_layer_policy_is_active() {
     let mirror_policy = policy(|neutral, _pypi| {
@@ -96,13 +80,12 @@ async fn test_overlay_rejects_an_unavailable_layer_with_a_hosted_candidate() {
 }
 
 #[rstest]
-#[case::unauthorized(401, StatusCode::BAD_GATEWAY, "application/json")]
-#[case::forbidden(403, StatusCode::BAD_GATEWAY, "text/html")]
-#[case::server_error(500, StatusCode::BAD_GATEWAY, "application/json")]
+#[case::unauthorized(401, "application/json")]
+#[case::forbidden(403, "text/html")]
+#[case::server_error(500, "application/json")]
 #[tokio::test]
 async fn test_overlay_surfaces_an_upstream_failure_with_a_hosted_candidate(
     #[case] upstream_status: u16,
-    #[case] expected_status: StatusCode,
     #[case] accept: &str,
 ) {
     let harness = harness().await;
@@ -111,11 +94,11 @@ async fn test_overlay_surfaces_an_upstream_failure_with_a_hosted_candidate(
         .respond_with(ResponseTemplate::new(upstream_status))
         .mount(&harness.server)
         .await;
-    publish_peryxpkg(&harness).await;
+    upload_wheel(&harness.state, "peryxpkg-1.0-py3-none-any.whl", &fixture_wheel()).await;
 
     let (status, _, body) = get(&harness.state, "/root/pypi/simple/peryxpkg/", Some(accept)).await;
 
-    assert_eq!(status, expected_status);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(
         body.contains("upstream is unavailable and no cached page exists"),
         "{body}"
@@ -130,7 +113,7 @@ async fn test_overlay_surfaces_a_malformed_simple_page_with_a_hosted_candidate()
         .respond_with(ResponseTemplate::new(200).set_body_raw(b"not a simple page".to_vec(), "text/plain"))
         .mount(&harness.server)
         .await;
-    publish_peryxpkg(&harness).await;
+    upload_wheel(&harness.state, "peryxpkg-1.0-py3-none-any.whl", &fixture_wheel()).await;
 
     let (status, _, body) = get(&harness.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
 
@@ -141,7 +124,7 @@ async fn test_overlay_surfaces_a_malformed_simple_page_with_a_hosted_candidate()
 #[tokio::test]
 async fn test_overlay_surfaces_an_offline_miss_with_a_hosted_candidate() {
     let harness = offline_harness(Policy::default()).await;
-    publish_peryxpkg(&harness).await;
+    upload_wheel(&harness.state, "peryxpkg-1.0-py3-none-any.whl", &fixture_wheel()).await;
 
     let (status, _, body) = get(&harness.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
 
@@ -157,7 +140,7 @@ async fn test_overlay_forwards_upstream_retry_after_with_a_hosted_candidate() {
         .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "120"))
         .mount(&harness.server)
         .await;
-    publish_peryxpkg(&harness).await;
+    upload_wheel(&harness.state, "peryxpkg-1.0-py3-none-any.whl", &fixture_wheel()).await;
 
     let (status, headers, body) = get(&harness.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
 
@@ -174,7 +157,7 @@ async fn test_overlay_surfaces_a_nested_cached_member_failure() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&harness.server)
         .await;
-    publish_peryxpkg(&harness).await;
+    upload_wheel(&harness.state, "peryxpkg-1.0-py3-none-any.whl", &fixture_wheel()).await;
 
     let (status, _, body) = get(&harness.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
 
@@ -193,7 +176,7 @@ async fn test_resolve_detail_surfaces_a_member_failure_with_a_hosted_candidate()
         .respond_with(ResponseTemplate::new(500))
         .mount(&harness.server)
         .await;
-    publish_peryxpkg(&harness).await;
+    upload_wheel(&harness.state, "peryxpkg-1.0-py3-none-any.whl", &fixture_wheel()).await;
 
     let error = cache::resolve_detail(
         &harness.state.serving,
@@ -208,7 +191,7 @@ async fn test_resolve_detail_surfaces_a_member_failure_with_a_hosted_candidate()
 }
 
 #[tokio::test]
-async fn test_overlay_surfaces_corrupt_hosted_metadata_before_a_cached_collision() {
+async fn test_overlay_rejects_a_hosted_parse_error_after_reading_cached_collision() {
     let harness = harness().await;
     mount_upstream_peryxpkg(&harness.server).await;
     harness
@@ -221,10 +204,71 @@ async fn test_overlay_surfaces_corrupt_hosted_metadata_before_a_cached_collision
     let (status, _, body) = get(&harness.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
 
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    harness.server.verify().await;
 }
 
 #[tokio::test]
-async fn test_private_first_nested_overlay_surfaces_corrupt_hosted_metadata_before_a_cached_collision() {
+async fn test_resolve_detail_rejects_a_hosted_meta_error_before_a_cached_collision() {
+    let (inner, fault) = backend();
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let meta = MetaStore::open_backend(faulted(&inner, &fault)).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+    let upstream = UpstreamClient::new(&format!("{}/simple/", server.uri())).unwrap();
+    let state = crate::tests::wired(AppState::new(
+        meta,
+        blobs,
+        60,
+        vec![
+            Index {
+                name: "pypi".to_owned(),
+                route: "pypi".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Cached {
+                    client: upstream,
+                    offline: false,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "hosted".to_owned(),
+                route: "hosted".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Hosted { volatile: true },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+            Index {
+                name: "root".to_owned(),
+                route: "root".to_owned(),
+                ecosystem: crate::ECOSYSTEM,
+                kind: IndexKind::Virtual {
+                    layers: vec![1, 0],
+                    write_target: None,
+                },
+                policy: Policy::default(),
+                acl: IndexAcl::default(),
+            },
+        ],
+    ));
+    mount_upstream_peryxpkg(&server).await;
+    let (status, _, _) = get(&state, "/pypi/simple/peryxpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    put_local_project(&state, "peryxpkg", "peryxpkg-1.0-py3-none-any.whl", b"wheel", "1.0");
+
+    fault.arm_once(0);
+    let error = cache::resolve_detail(&state.serving, state.serving.index_at(2), "peryxpkg", "root")
+        .await
+        .unwrap_err();
+
+    assert!(fault.triggered());
+    assert!(matches!(error, cache::CacheError::Meta(_)));
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn test_private_first_nested_overlay_surfaces_a_hosted_parse_error_before_a_cached_collision() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
     let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
@@ -308,54 +352,6 @@ async fn test_overlay_treats_an_empty_upstream_page_as_a_successful_member() {
         serde_json::from_str::<serde_json::Value>(&body).unwrap()["files"],
         serde_json::json!([])
     );
-}
-
-#[tokio::test]
-async fn test_resolve_detail_surfaces_a_faulted_hosted_metadata_read() {
-    let (inner, fault) = backend();
-    let meta = MetaStore::open_backend(faulted(&inner, &fault)).unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let state = crate::tests::wired(AppState::new(
-        meta,
-        BlobStorage::filesystem(dir.path().join("blobs")),
-        60,
-        vec![
-            Index {
-                name: "hosted".to_owned(),
-                route: "hosted".to_owned(),
-                ecosystem: crate::ECOSYSTEM,
-                kind: IndexKind::Hosted { volatile: true },
-                policy: Policy::default(),
-                acl: IndexAcl::default(),
-            },
-            Index {
-                name: "root".to_owned(),
-                route: "root".to_owned(),
-                ecosystem: crate::ECOSYSTEM,
-                kind: IndexKind::Virtual {
-                    layers: vec![0],
-                    write_target: None,
-                },
-                policy: Policy::default(),
-                acl: IndexAcl::default(),
-            },
-        ],
-    ));
-    put_local_project(&state, "peryxpkg", "peryxpkg-1.0-py3-none-any.whl", b"wheel", "1.0");
-
-    assert!(
-        cache::resolve_detail(&state.serving, state.serving.index_at(1), "peryxpkg", "root")
-            .await
-            .unwrap()
-            .is_some()
-    );
-    fault.arm(0);
-    let error = cache::resolve_detail(&state.serving, state.serving.index_at(1), "peryxpkg", "root")
-        .await
-        .unwrap_err();
-
-    assert!(fault.triggered());
-    assert!(matches!(error, cache::CacheError::Meta(_)));
 }
 
 #[tokio::test]
@@ -448,4 +444,16 @@ async fn test_overlay_without_upload_layer_serves_merged_page() {
     let (status, _, body) = get(&state, "/ov/simple/flask/", Some("application/json")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("flask-1.0-py3-none-any.whl"));
+}
+
+async fn mount_upstream_peryxpkg(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/simple/peryxpkg/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            b"{\"meta\":{\"api-version\":\"1.1\"},\"name\":\"peryxpkg\",\"versions\":[\"1.0\"],\"files\":[{\"filename\":\"peryxpkg-1.0-py3-none-any.whl\",\"size\":11,\"url\":\"https://upstream.invalid/peryxpkg-1.0-py3-none-any.whl\",\"hashes\":{\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}]}".to_vec(),
+            "application/vnd.pypi.simple.v1+json",
+        ))
+        .expect(1)
+        .mount(server)
+        .await;
 }

@@ -1,13 +1,12 @@
 //! Deterministic redb fault injection for metadata-store tests.
 //!
-//! A [`Fault`] counts backend operations and fails every one after its budget, so a test in any
-//! crate can make a store's reads fail at a chosen point without sleeping, racing, or faking the
-//! store itself. Pair [`faulted`] with a store constructor that accepts a redb backend, such as
-//! `MetaStore::open_backend`.
+//! A [`Fault`] counts backend operations and can fail a chosen operation without sleeping, racing,
+//! or faking the store. Pair [`faulted`] with a store constructor that accepts a redb backend, such
+//! as `MetaStore::open_backend`.
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use redb::backends::InMemoryBackend;
 
@@ -41,40 +40,61 @@ impl redb::StorageBackend for FaultBackend {
 }
 
 #[derive(Debug)]
-pub struct Fault(AtomicUsize);
+pub struct Fault {
+    remaining: AtomicUsize,
+    triggered: AtomicBool,
+}
 
 impl Fault {
     const DISABLED: usize = usize::MAX;
     const INJECTED: usize = Self::DISABLED - 1;
+    const ONCE: usize = 1 << (usize::BITS - 1);
 
     const fn disabled() -> Self {
-        Self(AtomicUsize::new(Self::DISABLED))
+        Self {
+            remaining: AtomicUsize::new(Self::DISABLED),
+            triggered: AtomicBool::new(false),
+        }
     }
 
     /// Fails every backend operation after the next `after` of them succeed.
     pub fn arm(&self, after: usize) {
-        self.0.store(after, Ordering::SeqCst);
+        self.arm_with(after);
+    }
+
+    /// Fails one backend operation after the next `after` of them succeed.
+    pub fn arm_once(&self, after: usize) {
+        self.arm_with(Self::ONCE | after);
     }
 
     pub fn disable(&self) {
-        self.0.store(Self::DISABLED, Ordering::SeqCst);
+        self.remaining.store(Self::DISABLED, Ordering::SeqCst);
+        self.triggered.store(false, Ordering::SeqCst);
     }
 
     #[must_use]
     pub fn triggered(&self) -> bool {
-        self.0.load(Ordering::SeqCst) == Self::INJECTED
+        self.triggered.load(Ordering::SeqCst)
+    }
+
+    fn arm_with(&self, after: usize) {
+        self.triggered.store(false, Ordering::SeqCst);
+        self.remaining.store(after, Ordering::SeqCst);
     }
 
     fn pass(&self) -> io::Result<()> {
         let previous = self
-            .0
+            .remaining
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| match remaining {
                 Self::DISABLED | Self::INJECTED => None,
+                Self::ONCE => Some(Self::DISABLED),
+                remaining if remaining & Self::ONCE != 0 => Some(remaining - 1),
                 0 => Some(Self::INJECTED),
                 _ => Some(remaining - 1),
             })
             .unwrap_or_else(|state| state);
-        if matches!(previous, 0 | Self::INJECTED) {
+        if matches!(previous, 0 | Self::ONCE | Self::INJECTED) {
+            self.triggered.store(true, Ordering::SeqCst);
             Err(io::Error::other("injected storage failure"))
         } else {
             Ok(())

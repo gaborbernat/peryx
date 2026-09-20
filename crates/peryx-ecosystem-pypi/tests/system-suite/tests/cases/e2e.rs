@@ -682,7 +682,7 @@ fn e2e_client_respects_virtual_fallback_modes(#[case] client: Client) {
 
 #[test]
 fn e2e_twine_upload_then_install() {
-    let peryx = Peryx::start_against("http://127.0.0.1:9/simple/");
+    let (_upstream, peryx) = hermetic();
     let (_dir, wheel) = wheel_on_disk("peryxtwine");
     let mut cmd = Command::new("twine");
     cmd.args([
@@ -703,7 +703,7 @@ fn e2e_twine_upload_then_install() {
 
 #[test]
 fn e2e_uv_publish_then_install() {
-    let peryx = Peryx::start_against("http://127.0.0.1:9/simple/");
+    let (_upstream, peryx) = hermetic();
     let (_dir, wheel) = wheel_on_disk("peryxpublish");
     uv_publish(&peryx, &wheel);
 
@@ -714,7 +714,7 @@ fn e2e_uv_publish_then_install() {
 
 #[test]
 fn e2e_yank_and_delete_round_trip() {
-    let peryx = Peryx::start_against("http://127.0.0.1:9/simple/");
+    let (_upstream, peryx) = hermetic();
     let (_dir, wheel) = wheel_on_disk("peryxremove");
     uv_publish(&peryx, &wheel);
 
@@ -733,7 +733,7 @@ fn e2e_yank_and_delete_round_trip() {
 
 #[test]
 fn e2e_published_project_is_visible_through_the_virtual_index() {
-    let peryx = Peryx::start_against("http://127.0.0.1:9/simple/");
+    let (_upstream, peryx) = hermetic();
     let (_dir, wheel) = wheel_on_disk("peryxremove");
     uv_publish(&peryx, &wheel);
 
@@ -832,7 +832,7 @@ fn e2e_upstream_yank_hide_restore_round_trip() {
 
 #[test]
 fn e2e_inspect_uploaded_wheel() {
-    let peryx = Peryx::start_against("http://127.0.0.1:9/simple/");
+    let (_upstream, peryx) = hermetic();
     let (_dir, wheel) = wheel_on_disk("peryxinspect");
     uv_publish(&peryx, &wheel);
 

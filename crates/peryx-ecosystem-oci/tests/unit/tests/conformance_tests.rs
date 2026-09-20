@@ -1,4 +1,4 @@
-use axum::http::{Method, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use rstest::rstest;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -549,6 +549,8 @@ async fn test_listing_pagination_rejects_invalid_parameters() {
         "n=",
         "n=100000000000000000000000000000000000000",
         "last=",
+        "last=%",
+        "last=%0G",
         "last=%GG",
         "last=%FF",
         "n=1&%6e=2",
@@ -584,6 +586,61 @@ async fn test_listing_pagination_ignores_malformed_unknown_parameters() {
             assert_eq!(send(&app, Method::GET, &path).await.0, StatusCode::OK, "{path}");
         }
     }
+}
+
+#[tokio::test]
+async fn test_listing_pagination_ignores_a_malformed_unknown_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = hosted_writable(&dir, TOKEN);
+    seed_config(&app, "store/app", &auth(TOKEN)).await;
+    assert_eq!(
+        send_body(
+            &app,
+            Method::PUT,
+            "/v2/store/app/manifests/only",
+            &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+            image_manifest(MANIFEST_TYPE, ""),
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+
+    let expected = send(&app, Method::GET, "/v2/store/app/tags/list?n=1").await.2;
+    let (status, _, body) = send(&app, Method::GET, "/v2/store/app/tags/list?%GG=x&n=1").await;
+
+    assert_eq!((status, body), (StatusCode::OK, expected));
+}
+
+#[tokio::test]
+async fn test_catalog_zero_limit_avoids_the_metadata_store() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta =
+        peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    let mut state = peryx_driver::AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        vec![super::writable_index("store", "store", true, TOKEN)],
+        Arc::new(|| 1_000),
+    );
+    super::install_oci(&mut state, HashMap::new(), false);
+    let app = peryx_http::router(Arc::new(state));
+
+    fault.arm(0);
+    let (status, headers, body) = send(&app, Method::GET, "/v2/_catalog?n=0").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"repositories": []})
+    );
+    assert!(!headers.contains_key(header::LINK));
+    assert!(!fault.triggered());
 }
 
 #[tokio::test]
@@ -788,14 +845,51 @@ async fn test_proxy_tag_list_ignores_empty_link_members() {
     );
 }
 
+#[rstest]
+#[case::junk("junk")]
+#[case::missing_separator("</v2/app/tags/list?last=a> rel=next")]
+#[case::missing_query("</v2/app/tags/list>; rel=next")]
+#[case::zero_limit("</v2/app/tags/list?n=0&last=a>; rel=next")]
+#[case::missing_cursor("</v2/app/tags/list?n=1>; rel=next")]
+#[case::unterminated_target("</v2/app/tags/list?n=1&last=a; rel=next")]
+#[case::unterminated_quote("</v2/app/tags/list?n=1&last=a>; rel=\"next")]
+#[case::quote_in_target("</v2/app/tags/list?n=1&last=a>; title=<\"x>; rel=next")]
+#[case::quoted_relation_suffix("</v2/app/tags/list?n=1&last=a>; rel=\"next\"junk")]
+#[case::split_quoted_relation("</v2/app/tags/list?n=1&last=a>; rel=\"ne\"\"xt\"")]
 #[tokio::test]
-async fn test_proxy_tag_list_rejects_a_malformed_next_link() {
+async fn test_proxy_tag_list_rejects_invalid_next_links(#[case] link: &str) {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v2/app/tags/list"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("link", "</v2/app/tags/list>; rel=next")
+                .insert_header("link", link)
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Missing
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_rejects_a_non_utf8_next_link() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", HeaderValue::from_bytes(b"\xff").unwrap())
                 .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
         )
         .expect(1)
@@ -807,6 +901,34 @@ async fn test_proxy_tag_list_rejects_a_malformed_next_link() {
     assert_eq!(
         send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
         StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_accepts_escaped_next_link_parameters() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "link",
+                    "</v2/app/tags/list?n=1&last=a>; rel=\"n\\ext\"; title=\"a\\\";b,c\"",
+                )
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::LINK],
+        "</v2/hub/app/tags/list?n=1&last=a>; rel=\"next\""
     );
 }
 
@@ -925,6 +1047,36 @@ async fn test_idle_tag_page_sweep_drops_expired_and_legacy_rows() {
             .get_driver_value("oci\0tp\0hub\0app\0n=1&ignored=legacy")
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_drops_invalid_and_oversized_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let body = br#"{"name":"app","tags":[]}"#;
+    store::set_tag_page(&state.serving.meta, "hub", "app", "n=0", 1_000, Some("last=a"), body).unwrap();
+    state.serving.meta.put_driver_value("oci\0tp\0hub", &[]).unwrap();
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "n=1&last=body",
+        1_000,
+        None,
+        serde_json::json!({"name": "app", "tags": [], "pad": "x".repeat(4 * 1024 * 1024)})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let link = format!("n=1&last={}", "x".repeat(64 << 20));
+    store::set_tag_page(&state.serving.meta, "hub", "app", "n=1", 1_000, Some(&link), body).unwrap();
+    store::set_tag_page(&state.serving.meta, "hub", "app", "n=1&last=kept", 1_000, None, body).unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 4);
+    assert_eq!(
+        state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(),
+        vec!["oci\0tp\0hub\0app\0n=1&last=kept".to_owned()]
     );
 }
 

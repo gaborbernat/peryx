@@ -310,8 +310,8 @@ fn test_driver_txn_scan_prefix_visitor_error_rolls_back_staged_rows() {
         txn.scan_prefix("scope/", |_, _| {
             visits += 1;
             Err::<std::ops::ControlFlow<()>, _>(decode_error())
-        })?;
-        Ok::<_, MetaError>(((), Vec::new()))
+        })
+        .map(|()| ((), Vec::new()))
     });
 
     assert!(matches!(result, Err(MetaError::Decode(_))));

@@ -1029,9 +1029,6 @@ fn reclaim_tag_page_rows(txn: &mut peryx_storage::meta::DriverTxn, state: &Servi
     let mut remove = Vec::new();
     let mut bytes: usize = 0;
     txn.scan_prefix(TAG_PAGE_CACHE_PREFIX, |key, value| {
-        if remove.len() == TAG_PAGE_DELETE_BATCH {
-            return Ok(std::ops::ControlFlow::Break(()));
-        }
         if let Some(fetched_at) = tag_page_cache_timestamp(key, value)
             && (state.max_stale_secs == 0 || within_stale_bound(state, fetched_at))
         {
@@ -1255,9 +1252,6 @@ fn quoted_link_value(value: &str) -> Result<String, ServeError> {
         } else {
             decoded.push(character);
         }
-    }
-    if escaped {
-        return Err(invalid_tag_page("malformed Link parameter"));
     }
     Ok(decoded)
 }

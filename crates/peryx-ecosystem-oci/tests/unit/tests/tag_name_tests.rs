@@ -170,20 +170,23 @@ async fn test_virtual_tag_list_names_the_client_repository() {
     assert!(json["tags"].as_array().unwrap().iter().any(|tag| tag == "latest"));
 }
 
-/// A page whose `last` cursor always advances, so each page is cached under its own query and a
-/// revisited one cannot masquerade as fresh.
-struct EndlessNextPage;
+struct NextPage {
+    terminal: bool,
+}
 
-impl wiremock::Respond for EndlessNextPage {
+impl wiremock::Respond for NextPage {
     fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
         let last: u64 = request
             .url
             .query_pairs()
             .find_map(|(key, value)| (key == "last").then(|| value.parse().ok()).flatten())
             .unwrap_or(0);
-        ResponseTemplate::new(200)
-            .insert_header("link", format!("</v2/app/tags/list?last={}>; rel=\"next\"", last + 1))
-            .set_body_raw(br#"{"name":"app","tags":[]}"#.to_vec(), "application/json")
+        let page = ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":[]}"#.to_vec(), "application/json");
+        if self.terminal && last == 99 {
+            page
+        } else {
+            page.insert_header("link", format!("</v2/app/tags/list?last={}>; rel=\"next\"", last + 1))
+        }
     }
 }
 
@@ -220,22 +223,78 @@ async fn test_virtual_tag_union_follows_the_exact_next_page_query() {
     assert_eq!(json["tags"], serde_json::json!(["a", "b"]));
 }
 
-/// An upstream that never stops linking a next page cannot make a virtual tag union walk forever: the
-/// scan stops after exactly `MAX_TAG_PAGES` fetches.
+#[rstest]
+#[case::next_link(false, StatusCode::BAD_GATEWAY)]
+#[case::terminal(true, StatusCode::OK)]
 #[tokio::test]
-async fn test_virtual_tag_union_pagination_stops_exactly_at_the_page_cap() {
+async fn test_virtual_tag_union_handles_the_page_cap(#[case] terminal: bool, #[case] expected: StatusCode) {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v2/app/tags/list"))
-        .respond_with(EndlessNextPage)
+        .respond_with(NextPage { terminal })
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
 
-    let (status, ..) = send(&app, Method::GET, "/v2/reg/app/tags/list").await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(send(&app, Method::GET, "/v2/reg/app/tags/list").await.0, expected);
     assert_eq!(server.received_requests().await.unwrap().len(), 100);
+}
+
+#[tokio::test]
+async fn test_virtual_tag_union_rejects_normalized_cached_cycles_and_recovers() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param_is_missing("last"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", "</v2/app/tags/list?last=a&n=2>; rel=\"next\"")
+                .set_body_raw(br#"{"name":"app","tags":["first"]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param("n", "2"))
+        .and(query_param("last", "a"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", "</v2/app/tags/list?n=2&last=a>; rel=\"next\"")
+                .set_body_raw(br#"{"name":"app","tags":["second"]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = virtual_stack(&dir, &format!("{}/", server.uri()));
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/reg/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        send(&app, Method::GET, "/v2/reg/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "n=2&last=a",
+        1_000,
+        None,
+        br#"{"name":"app","tags":["second"]}"#,
+    )
+    .unwrap();
+    server.reset().await;
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/reg/app/tags/list").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["tags"],
+        serde_json::json!(["first", "second"])
+    );
 }
 
 #[rstest]

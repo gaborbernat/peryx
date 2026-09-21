@@ -344,6 +344,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
     ) -> Result<Option<Vec<String>>, ServeError> {
         let mut names = Vec::new();
         let mut pagination = Pagination::default();
+        let mut seen = std::collections::HashSet::from([pagination.clone()]);
         let mut page = 0;
         loop {
             // Each page is cached under its own query, so a virtual index that unions several proxies
@@ -358,13 +359,18 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             if !tag_page.response.status().is_success() {
                 return Ok(None);
             }
-            let next = tag_page.next;
             names.extend(tag_page.tags);
             page += 1;
-            match next {
-                Some(next) if page < MAX_TAG_PAGES => pagination = next,
-                _ => break,
+            let Some(next) = tag_page.next else {
+                break;
+            };
+            if !seen.insert(next.clone()) {
+                return Err(invalid_tag_page("upstream tag pagination cycles"));
             }
+            if page == MAX_TAG_PAGES {
+                return Err(invalid_tag_page("upstream tag pagination exceeds its page budget"));
+            }
+            pagination = next;
         }
         Ok(Some(names))
     }

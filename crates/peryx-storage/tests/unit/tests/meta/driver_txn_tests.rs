@@ -150,6 +150,33 @@ fn test_commit_driver_cache_txn_rolls_back_when_the_body_errors() {
 }
 
 #[test]
+fn test_commit_driver_cache_txn_rolls_back_a_removal_after_a_prefix_scan() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("page/first", b"first").unwrap();
+    store.put_driver_value("page/second", b"second").unwrap();
+
+    let result = store.commit_driver_cache_txn(|txn| {
+        let mut first = None;
+        txn.scan_prefix("page/", |key, _| {
+            first = Some(key.to_owned());
+            Ok::<_, MetaError>(std::ops::ControlFlow::Break(()))
+        })
+        .unwrap();
+        txn.remove_local(first.as_deref().unwrap())?;
+        Err::<(), _>(decode_error())
+    });
+
+    assert!(result.is_err());
+    assert_eq!(
+        store.read_driver_txn(|txn| txn.prefix("page/")).unwrap(),
+        vec![
+            ("page/first".to_owned(), b"first".to_vec()),
+            ("page/second".to_owned(), b"second".to_vec()),
+        ]
+    );
+}
+
+#[test]
 fn test_commit_driver_txn_rolls_back_when_the_body_errors() {
     let (_dir, store) = super::store();
 
@@ -219,6 +246,95 @@ fn test_driver_txn_prefix_stops_at_the_first_key_outside_the_prefix() {
     assert_eq!(
         store.get_driver_value("appz").unwrap().as_deref(),
         Some(b"3".as_slice())
+    );
+}
+
+#[test]
+fn test_driver_txn_scan_prefix_break_visits_one_matching_row() {
+    let (_dir, store) = super::store();
+    for key in ["scope/a", "scope/b", "scope/c"] {
+        store.put_driver_value(key, b"value").unwrap();
+    }
+
+    let visits = store
+        .commit_driver_cache_txn(|txn| {
+            let mut visits = 0;
+            txn.scan_prefix("scope/", |_, _| {
+                visits += 1;
+                Ok::<_, MetaError>(std::ops::ControlFlow::Break(()))
+            })
+            .unwrap();
+            Ok::<_, MetaError>(visits)
+        })
+        .unwrap();
+
+    assert_eq!(visits, 1);
+}
+
+#[test]
+fn test_driver_txn_prefix_reads_staged_rows() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/removed", b"old").unwrap();
+    store.put_driver_value("scope/updated", b"old").unwrap();
+
+    let entries = store
+        .commit_driver_txn(|txn| {
+            txn.put("scope/inserted", b"new")?;
+            txn.put("scope/updated", b"new")?;
+            txn.remove("scope/removed")?;
+            let entries = txn.prefix("scope/")?;
+            Ok::<_, MetaError>((entries, Vec::new()))
+        })
+        .unwrap();
+
+    assert_eq!(
+        entries,
+        vec![
+            ("scope/inserted".to_owned(), b"new".to_vec()),
+            ("scope/updated".to_owned(), b"new".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn test_driver_txn_prefix_surfaces_a_storage_scan_failure() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/key", b"value").unwrap();
+    store.fail_driver_prefix_scan_after(0);
+    let mut prefix_failed = None;
+    let transaction_failed = store
+        .commit_driver_cache_txn(|txn| {
+            let result = txn.prefix("scope/");
+            prefix_failed = Some(result.is_err());
+            result
+        })
+        .is_err();
+
+    assert_eq!(prefix_failed, Some(true));
+    assert!(transaction_failed);
+}
+
+#[test]
+fn test_driver_txn_scan_prefix_visitor_error_rolls_back_staged_rows() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/removed", b"old").unwrap();
+    let mut visits = 0;
+
+    let result = store.commit_driver_txn(|txn| {
+        txn.put("scope/inserted", b"new")?;
+        txn.remove("scope/removed")?;
+        txn.scan_prefix("scope/", |_, _| {
+            visits += 1;
+            Err::<std::ops::ControlFlow<()>, _>(decode_error())
+        })
+        .and(Ok(((), Vec::new())))
+    });
+
+    assert!(matches!(result, Err(MetaError::Decode(_))));
+    assert_eq!(visits, 1);
+    assert_eq!(
+        store.read_driver_txn(|txn| txn.prefix("scope/")).unwrap(),
+        vec![("scope/removed".to_owned(), b"old".to_vec())]
     );
 }
 

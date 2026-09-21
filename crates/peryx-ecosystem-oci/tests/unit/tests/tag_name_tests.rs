@@ -327,6 +327,86 @@ async fn test_invalid_cached_tag_list_is_replaced_before_serving(#[case] body: &
     );
 }
 
+#[rstest]
+#[case::zero_limit("n=0&last=a")]
+#[case::missing_cursor("n=1")]
+#[case::unknown_parameter("ignored=x")]
+#[tokio::test]
+async fn test_invalid_cached_tag_list_continuation_is_replaced_before_serving(#[case] link: &str) {
+    let server = MockServer::start().await;
+    let fresh = br#"{"name":"app","tags":["fresh"]}"#;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(fresh.to_vec(), "application/json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "",
+        1_000,
+        Some(link),
+        br#"{"name":"app","tags":["cached"]}"#,
+    )
+    .unwrap();
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"name": "hub/app", "tags": ["fresh"]})
+    );
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Page((1_000, None, fresh.to_vec()))
+    );
+}
+
+#[tokio::test]
+async fn test_cached_tag_list_with_an_invalid_link_encoding_is_replaced_before_serving() {
+    let server = MockServer::start().await;
+    let fresh = br#"{"name":"app","tags":["fresh"]}"#;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(fresh.to_vec(), "application/json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    state
+        .serving
+        .meta
+        .put_driver_value(
+            "oci\0tp\0hub\0app\0",
+            &[
+                &1_000i64.to_be_bytes()[..],
+                &1u32.to_be_bytes()[..],
+                &[0xff],
+                br#"{"name":"app","tags":["cached"]}"#,
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+    let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"name": "hub/app", "tags": ["fresh"]})
+    );
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Page((1_000, None, fresh.to_vec()))
+    );
+}
+
 #[tokio::test]
 async fn test_malformed_upstream_tag_list_does_not_replace_a_stale_page() {
     let server = MockServer::start().await;
@@ -348,6 +428,38 @@ async fn test_malformed_upstream_tag_list_does_not_replace_a_stale_page() {
     assert_eq!(
         store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
         store::TagPageRead::Page((1_000, Some(link.to_owned()), body.to_vec()))
+    );
+}
+
+#[tokio::test]
+async fn test_stale_clamped_tag_page_without_a_continuation_is_evicted() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy_with_clock(&dir, &format!("{}/", server.uri()), std::sync::Arc::new(|| 1_300));
+    let tags = (0..1_000).map(|number| format!("tag-{number:04}")).collect::<Vec<_>>();
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "n=1000",
+        1_000,
+        None,
+        serde_json::json!({"name": "app", "tags": tags}).to_string().as_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list?n=1001").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "n=1000").unwrap(),
+        store::TagPageRead::Missing
     );
 }
 

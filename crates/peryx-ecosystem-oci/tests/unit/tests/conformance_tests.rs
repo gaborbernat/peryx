@@ -1,10 +1,12 @@
-use axum::http::{Method, StatusCode, header};
-use wiremock::matchers::{method, path};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use rstest::rstest;
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::{
     CONFIG_BLOB, auth, hosted_writable, image_manifest, oci_digest, proxy, seed_config, send, send_body, send_with,
 };
+use crate::store;
 
 const TOKEN: &str = "s3cret";
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -537,6 +539,111 @@ async fn test_tag_list_pagination() {
 }
 
 #[tokio::test]
+async fn test_listing_pagination_rejects_invalid_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = hosted_writable(&dir, TOKEN);
+    seed_config(&app, "store/app", &auth(TOKEN)).await;
+
+    for query in [
+        "n=-1",
+        "n=",
+        "n=100000000000000000000000000000000000000",
+        "last=",
+        "last=%",
+        "last=%0G",
+        "last=%GG",
+        "last=%FF",
+        "n=1&%6e=2",
+        "last=a&%6Cast=b",
+        "n=%GG",
+    ] {
+        assert_eq!(
+            send(&app, Method::GET, &format!("/v2/store/app/tags/list?{query}"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+        assert_eq!(
+            send(&app, Method::GET, &format!("/v2/_catalog?{query}")).await.0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_listing_pagination_ignores_malformed_unknown_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = hosted_writable(&dir, TOKEN);
+    seed_config(&app, "store/app", &auth(TOKEN)).await;
+
+    for query in ["unknown=%GG", "unknown=%FF"] {
+        for path in [
+            format!("/v2/store/app/tags/list?{query}"),
+            format!("/v2/_catalog?{query}"),
+        ] {
+            assert_eq!(send(&app, Method::GET, &path).await.0, StatusCode::OK, "{path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_listing_pagination_ignores_a_malformed_unknown_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = hosted_writable(&dir, TOKEN);
+    seed_config(&app, "store/app", &auth(TOKEN)).await;
+    assert_eq!(
+        send_body(
+            &app,
+            Method::PUT,
+            "/v2/store/app/manifests/only",
+            &[("authorization", &auth(TOKEN)), ("content-type", MANIFEST_TYPE)],
+            image_manifest(MANIFEST_TYPE, ""),
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+
+    let expected = send(&app, Method::GET, "/v2/store/app/tags/list?n=1").await.2;
+    let (status, _, body) = send(&app, Method::GET, "/v2/store/app/tags/list?%GG=x&n=1").await;
+
+    assert_eq!((status, body), (StatusCode::OK, expected));
+}
+
+#[tokio::test]
+async fn test_catalog_zero_limit_avoids_the_metadata_store() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta =
+        peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    let mut state = peryx_driver::AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        vec![super::writable_index("store", "store", true, TOKEN)],
+        Arc::new(|| 1_000),
+    );
+    super::install_oci(&mut state, HashMap::new(), false);
+    let app = peryx_http::router(Arc::new(state));
+
+    fault.arm(0);
+    let (status, headers, body) = send(&app, Method::GET, "/v2/_catalog?n=0").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"repositories": []})
+    );
+    assert!(!headers.contains_key(header::LINK));
+    assert!(!fault.triggered());
+}
+
+#[tokio::test]
 async fn test_proxy_tag_list_forwards_the_pagination_query() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -551,6 +658,630 @@ async fn test_proxy_tag_list_forwards_the_pagination_query() {
     let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list?n=5&last=x").await;
     assert_eq!(status, StatusCode::OK);
     assert!(std::str::from_utf8(&body).unwrap().contains("\"only\""));
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_canonicalizes_the_cache_query() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param("n", "1000"))
+        .and(query_param("last", "a+b"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param("n", "1000"))
+        .and(query_param("last", "a b"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":["space"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    for query in ["ignored=x&last=a%2Bb&n=1001", "n=1001&last=a%2Bb"] {
+        assert_eq!(
+            send(&app, Method::GET, &format!("/v2/hub/app/tags/list?{query}"))
+                .await
+                .0,
+            StatusCode::OK,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list?n=1001&last=a+b").await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_with_zero_limit_skips_upstream() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, "http://127.0.0.1:1/", false);
+
+    let (status, headers, body) = send(&app, Method::GET, "/v2/hub/app/tags/list?n=0").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"name": "hub/app", "tags": []})
+    );
+    assert!(!headers.contains_key(header::LINK));
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_rejects_conflicting_next_links() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("link", "</v2/app/tags/list?n=1&last=a>; rel=next")
+                .append_header("link", "</v2/app/tags/list?n=1&last=b>; rel=next")
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_accepts_quoted_equal_next_links() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header(
+                    "link",
+                    "</v2/app/tags/list?last=a&n=1>; title=\"a,b\"; REL=\"PREV NEXT\"",
+                )
+                .append_header("link", "</v2/app/tags/list?n=1&last=a>; rel=next")
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list?n=1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::LINK],
+        "</v2/hub/app/tags/list?n=1&last=a>; rel=\"next\""
+    );
+}
+
+#[rstest]
+#[case::later_relation("</v2/app/tags/list?n=1&last=a>; rel=prev; rel=next")]
+#[case::anchor_context("</v2/app/tags/list?n=1&last=a>; rel=next; anchor=\"/v2/other/tags/list\"")]
+#[tokio::test]
+async fn test_proxy_tag_list_discards_an_inapplicable_next_link(#[case] link: &str) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", link)
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key(header::LINK));
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_accepts_ows_and_valueless_link_parameters() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "link",
+                    "</v2/app/tags/list?n=1&last=a> \t; title \t; rel \t= \t\"next\"",
+                )
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list?n=1").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::LINK],
+        "</v2/hub/app/tags/list?n=1&last=a>; rel=\"next\""
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_ignores_empty_link_members() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", " ,\t, </v2/app/tags/list?n=1&last=a>; rel=next, ")
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list?n=1").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::LINK],
+        "</v2/hub/app/tags/list?n=1&last=a>; rel=\"next\""
+    );
+}
+
+#[rstest]
+#[case::junk("junk")]
+#[case::missing_separator("</v2/app/tags/list?last=a> rel=next")]
+#[case::missing_query("</v2/app/tags/list>; rel=next")]
+#[case::zero_limit("</v2/app/tags/list?n=0&last=a>; rel=next")]
+#[case::missing_cursor("</v2/app/tags/list?n=1>; rel=next")]
+#[case::unterminated_target("</v2/app/tags/list?n=1&last=a; rel=next")]
+#[case::unterminated_quote("</v2/app/tags/list?n=1&last=a>; rel=\"next")]
+#[case::quote_in_target("</v2/app/tags/list?n=1&last=a>; title=<\"x>; rel=next")]
+#[case::quoted_relation_suffix("</v2/app/tags/list?n=1&last=a>; rel=\"next\"junk")]
+#[case::split_quoted_relation("</v2/app/tags/list?n=1&last=a>; rel=\"ne\"\"xt\"")]
+#[tokio::test]
+async fn test_proxy_tag_list_rejects_invalid_next_links(#[case] link: &str) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", link)
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Missing
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_rejects_a_non_utf8_next_link() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", HeaderValue::from_bytes(b"\xff").unwrap())
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_accepts_escaped_next_link_parameters() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(
+                    "link",
+                    "</v2/app/tags/list?n=1&last=a>; rel=\"n\\ext\"; title=\"a\\\";b,c\"",
+                )
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::LINK],
+        "</v2/hub/app/tags/list?n=1&last=a>; rel=\"next\""
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_rejects_a_page_larger_than_n() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            br#"{"name":"app","tags":["first","second"]}"#.to_vec(),
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list?n=1").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_rejects_an_unmarked_clamped_page() {
+    let server = MockServer::start().await;
+    let tags = (0..1_000).map(|number| format!("tag-{number:04}")).collect::<Vec<_>>();
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param("n", "1000"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                serde_json::json!({"name": "app", "tags": tags})
+                    .to_string()
+                    .into_bytes(),
+                "application/json",
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list?n=1001").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_commit_failure() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (pages, fault) = peryx_test_support::fault::backend();
+    let meta =
+        peryx_storage::meta::MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    for query in ["n=0&last=a", "n=0&last=b"] {
+        store::set_tag_page(
+            &meta,
+            "hub",
+            "app",
+            query,
+            600,
+            None,
+            br#"{"name":"app","tags":["tag"]}"#,
+        )
+        .unwrap();
+    }
+    let rows = meta.driver_prefix_keys("oci\0tp\0").unwrap();
+    drop(meta);
+    let meta =
+        peryx_storage::meta::MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    let mut state = peryx_driver::AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs")),
+        60,
+        vec![super::writable_index("store", "store", true, TOKEN)],
+        Arc::new(|| 1_000),
+    );
+    super::install_oci(&mut state, HashMap::new(), false);
+    let state = Arc::new(state);
+    let reclaimer = state
+        .idle_reclaimers()
+        .next()
+        .expect("the OCI driver registers a reclaimer")
+        .1
+        .clone();
+
+    // The sweep makes 21 backend calls; the final call commits the staged removals.
+    fault.arm(20);
+    assert_eq!(reclaimer.reclaim_idle(state.serving.clone()).await, 0);
+    assert!(fault.triggered());
+    fault.disable();
+    drop(reclaimer);
+    drop(state);
+
+    let meta =
+        peryx_storage::meta::MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+    assert_eq!(meta.driver_prefix_keys("oci\0tp\0").unwrap(), rows);
+    let mut state = peryx_driver::AppState::with_clock(
+        meta,
+        peryx_storage::blob::BlobStore::new(dir.path().join("blobs-after-rollback")),
+        60,
+        vec![super::writable_index("store", "store", true, TOKEN)],
+        Arc::new(|| 1_000),
+    );
+    super::install_oci(&mut state, HashMap::new(), false);
+    let state = Arc::new(state);
+
+    assert_eq!(reclaim_idle(&state).await, 2);
+    assert!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_rolls_back_every_tag_page_storage_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    for query in ["n=1&last=a", "n=1&last=b"] {
+        store::set_tag_page(
+            &state.serving.meta,
+            "hub",
+            "app",
+            query,
+            600,
+            None,
+            br#"{"name":"app","tags":["tag"]}"#,
+        )
+        .unwrap();
+    }
+    let rows = state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap();
+
+    state.serving.meta.fail_driver_prefix_scan_after(1);
+    assert_eq!(reclaim_idle(&state).await, 0);
+    assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(), rows);
+}
+
+async fn reclaim_idle(state: &std::sync::Arc<peryx_driver::AppState>) -> usize {
+    let reclaimer = state
+        .idle_reclaimers()
+        .next()
+        .expect("the OCI driver registers a reclaimer")
+        .1
+        .clone();
+    reclaimer.reclaim_idle(state.serving.clone()).await
+}
+
+#[rstest]
+#[case::zero_limit("n=0&last=a")]
+#[case::missing_cursor("n=1")]
+#[case::unknown_parameter("ignored=x")]
+#[tokio::test]
+async fn test_idle_tag_page_sweep_drops_invalid_cached_continuations(#[case] link: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "",
+        1_000,
+        Some(link),
+        br#"{"name":"app","tags":[]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 1);
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Missing
+    );
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_drops_expired_and_legacy_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let body = br#"{"name":"app","tags":[]}"#;
+    store::set_tag_page(&state.serving.meta, "hub", "app", "n=1", 600, None, body).unwrap();
+    state
+        .serving
+        .meta
+        .put_driver_value(
+            "oci\0tp\0hub\0app\0n=1&ignored=legacy",
+            &[&1_000i64.to_be_bytes()[..], &0u32.to_be_bytes()[..], body].concat(),
+        )
+        .unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 2);
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "n=1").unwrap(),
+        store::TagPageRead::Missing
+    );
+    assert!(
+        state
+            .serving
+            .meta
+            .get_driver_value("oci\0tp\0hub\0app\0n=1&ignored=legacy")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_drops_invalid_and_oversized_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let body = br#"{"name":"app","tags":[]}"#;
+    store::set_tag_page(&state.serving.meta, "hub", "app", "n=0", 1_000, Some("last=a"), body).unwrap();
+    state.serving.meta.put_driver_value("oci\0tp\0hub", &[]).unwrap();
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "n=1&last=body",
+        1_000,
+        None,
+        serde_json::json!({"name": "app", "tags": [], "pad": "x".repeat(4 * 1024 * 1024)})
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    let link = format!("n=1&last={}", "x".repeat(64 << 20));
+    store::set_tag_page(&state.serving.meta, "hub", "app", "n=1", 1_000, Some(&link), body).unwrap();
+    store::set_tag_page(&state.serving.meta, "hub", "app", "n=1&last=kept", 1_000, None, body).unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 3);
+    assert_eq!(
+        state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(),
+        vec![
+            "oci\0tp\0hub\0app\0n=0".to_owned(),
+            "oci\0tp\0hub\0app\0n=1&last=kept".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_enforces_the_row_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let body = br#"{"name":"app","tags":[]}"#;
+    for cursor in 0..=2_048 {
+        store::set_tag_page(
+            &state.serving.meta,
+            "hub",
+            "app",
+            &format!("n=1&last={cursor}"),
+            1_000,
+            None,
+            body,
+        )
+        .unwrap();
+    }
+
+    assert_eq!(reclaim_idle(&state).await, 1_024);
+    assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().len(), 1_025);
+    assert_eq!(reclaim_idle(&state).await, 1);
+    assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().len(), 1_024);
+}
+
+#[tokio::test]
+async fn test_parallel_tag_page_requests_enforce_the_row_cap() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":[]}"#.to_vec(), "application/json"),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let paths = (0..=1_024)
+        .map(|cursor| format!("/v2/hub/app/tags/list?n=1&last={cursor}"))
+        .collect::<Vec<_>>();
+    let requests = paths.iter().map(|path| send(&app, Method::GET, path));
+    for (status, _, _) in futures_util::future::join_all(requests).await {
+        assert_eq!(status, StatusCode::OK);
+    }
+    assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().len(), 1_024);
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_enforces_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let body = serde_json::json!({
+        "name": "app",
+        "tags": ["x".repeat(4 * 1024 * 1024 - 1_024)],
+    })
+    .to_string();
+    for cursor in 0..=16 {
+        store::set_tag_page(
+            &state.serving.meta,
+            "hub",
+            "app",
+            &format!("n=1&last={cursor}"),
+            1_000,
+            None,
+            body.as_bytes(),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(reclaim_idle(&state).await, 1);
+    assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().len(), 16);
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_bounds_a_1023_plus_two_byte_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let body = serde_json::json!({
+        "name": "app",
+        "tags": [],
+        "pad": "x".repeat(65_400),
+    })
+    .to_string();
+    for cursor in 0..2_047 {
+        store::set_tag_page(
+            &state.serving.meta,
+            "hub",
+            "app",
+            &format!("n=1&last={cursor:04}"),
+            999,
+            None,
+            body.as_bytes(),
+        )
+        .unwrap();
+    }
+    let body = serde_json::json!({
+        "name": "app",
+        "tags": [],
+        "pad": "x".repeat(130_800),
+    })
+    .to_string();
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "n=1&last=zzzz",
+        1_000,
+        None,
+        body.as_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 1_024);
+    assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().len(), 1_024);
 }
 
 #[tokio::test]
@@ -570,7 +1301,7 @@ async fn test_proxy_tag_list_rewrites_the_next_link_to_the_client_facing_name() 
     let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list?n=1").await;
     assert_eq!(status, StatusCode::OK);
     let link = headers[header::LINK].to_str().unwrap();
-    assert!(link.contains("</v2/hub/app/tags/list?last=z&n=1>"), "{link}");
+    assert!(link.contains("</v2/hub/app/tags/list?n=1&last=z>"), "{link}");
     assert!(link.contains("rel=\"next\""), "{link}");
 }
 
@@ -599,7 +1330,7 @@ async fn test_proxy_tag_list_skips_a_prev_member_to_rewrite_the_next_link() {
 }
 
 #[tokio::test]
-async fn test_proxy_tag_list_keeps_a_comma_in_the_next_cursor() {
+async fn test_proxy_tag_list_discards_unknown_next_parameters() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v2/app/tags/list"))
@@ -615,6 +1346,6 @@ async fn test_proxy_tag_list_keeps_a_comma_in_the_next_cursor() {
     let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
     assert_eq!(status, StatusCode::OK);
     let link = headers[header::LINK].to_str().unwrap();
-    assert!(link.contains("</v2/hub/app/tags/list?last=z&token=a,b>"), "{link}");
+    assert!(link.contains("</v2/hub/app/tags/list?last=z>"), "{link}");
     assert!(link.contains("rel=\"next\""), "{link}");
 }

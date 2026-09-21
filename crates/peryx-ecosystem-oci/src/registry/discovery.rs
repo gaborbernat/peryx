@@ -10,10 +10,112 @@ use peryx_upstream::UpstreamClient;
 
 const TAG_RESOLUTION_CONCURRENCY: usize = 8;
 const OCI_INDEX_TYPE: &str = "application/vnd.oci.image.index.v1+json";
+const MAX_PAGE_SIZE: usize = 1_000;
+const TAG_PAGE_CACHE_PREFIX: &str = "oci\0tp\0";
+const MAX_TAG_PAGE_CACHE_ROWS: usize = 1_024;
+const MAX_TAG_PAGE_CACHE_BYTES: usize = 64 << 20;
+const TAG_PAGE_DELETE_BATCH: usize = 1_024;
+
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+struct Pagination {
+    limit: Option<usize>,
+    last: Option<String>,
+    clamped: bool,
+}
+
+impl Pagination {
+    fn parse(query: &str) -> Result<Self, &'static str> {
+        let mut limit = None;
+        let mut last = None;
+        let mut clamped = false;
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let Ok(key) = percent_decode(key) else {
+                continue;
+            };
+            match key.as_str() {
+                "n" if limit.is_some() => return Err("duplicate n query parameter"),
+                "n" => {
+                    let value = percent_decode(value)?;
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err("invalid n query parameter");
+                    }
+                    let limit_value = value.parse::<usize>().map_err(|_| "invalid n query parameter")?;
+                    limit = Some(limit_value.min(MAX_PAGE_SIZE));
+                    clamped = limit_value > MAX_PAGE_SIZE;
+                }
+                "last" if last.is_some() => return Err("duplicate last query parameter"),
+                "last" => {
+                    let value = percent_decode(value)?;
+                    if value.is_empty() {
+                        return Err("invalid last query parameter");
+                    }
+                    last = Some(value);
+                }
+                _ => {}
+            }
+        }
+        Ok(Self { limit, last, clamped })
+    }
+
+    fn query(&self) -> String {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(limit) = self.limit {
+            query.append_pair("n", &limit.to_string());
+        }
+        if let Some(last) = &self.last {
+            query.append_pair("last", last);
+        }
+        query.finish()
+    }
+
+    const fn next(&self, last: String) -> Self {
+        Self {
+            limit: self.limit,
+            last: Some(last),
+            clamped: self.clamped,
+        }
+    }
+}
+
+fn percent_decode(value: &str) -> Result<String, &'static str> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let Some((&high, &low)) = bytes.get(index + 1).zip(bytes.get(index + 2)) else {
+                return Err("invalid percent encoding");
+            };
+            let hex = |byte| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            let Some(high) = hex(high) else {
+                return Err("invalid percent encoding");
+            };
+            let Some(low) = hex(low) else {
+                return Err("invalid percent encoding");
+            };
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else if bytes[index] == b'+' {
+            decoded.push(b' ');
+            index += 1;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| "query parameter is not UTF-8")
+}
 
 struct ProxyTagPage {
     response: Response,
     tags: Vec<String>,
+    next: Option<Pagination>,
     stale_error: Option<crate::upstream::UpstreamError>,
 }
 
@@ -48,12 +150,21 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         if holds_below_readable_frontier(state, index, hosted_last_serial(state, index)?) {
             return Ok(error_response(ErrorCode::NameUnknown, "repository name unknown"));
         }
+        let pagination = match Pagination::parse(query) {
+            Ok(pagination) => pagination,
+            Err(message) => return Ok(error_response(ErrorCode::NameInvalid, message)),
+        };
+        if pagination.limit == Some(0) {
+            return Ok(tag_list_response(name, &std::collections::BTreeSet::new(), &pagination));
+        }
         let active = state.revocations.has_active()?;
         let members = policy_serving_members(state, index, repo);
         if let [member] = members.as_slice()
             && let Some(client) = member.proxy_client()
         {
-            let page = self.proxy_tags(state, name, &member.name, client, repo, query).await?;
+            let page = self
+                .proxy_tags(state, name, &member.name, client, repo, &pagination)
+                .await?;
             return if active {
                 self.filter_proxy_tag_page(state, name, &member.name, client, repo, page)
                     .await
@@ -63,7 +174,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             };
         }
         let tags = self.visible_tag_names(state, name, repo, active, &members).await?;
-        Ok(tag_list_response(name, &tags, query))
+        Ok(tag_list_response(name, &tags, &pagination))
     }
 
     /// Collect tag names in member-shadowing order, with tombstones masking only their own or lower
@@ -126,67 +237,98 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         index: &str,
         client: &UpstreamClient,
         repo: &str,
-        query: &str,
+        pagination: &Pagination,
     ) -> Result<ProxyTagPage, ServeError> {
         let now = (state.clock)();
         let upstream_repo = self.upstream_repo(index, client, repo);
-        let cached = match store::tag_page(&state.meta, index, repo, query)? {
+        let query = pagination.query();
+        let cached = match store::tag_page(&state.meta, index, repo, &query)? {
             store::TagPageRead::Page(page) => {
-                if let Ok(tags) = validate_tag_page(&page.2, &upstream_repo) {
-                    Some((page, tags))
+                if let (Ok(tags), Ok(next)) = (
+                    validate_tag_page(&page.2, &upstream_repo),
+                    cached_next(page.1.as_deref(), pagination),
+                ) && valid_tag_page(tags.len(), next.as_ref(), pagination)
+                {
+                    Some((page, tags, next))
                 } else {
-                    store::delete_tag_page(&state.meta, index, repo, query)?;
+                    self.delete_tag_page(state, index, repo, &query).await?;
                     None
                 }
             }
             store::TagPageRead::Invalid => {
-                store::delete_tag_page(&state.meta, index, repo, query)?;
+                self.delete_tag_page(state, index, repo, &query).await?;
                 None
             }
             store::TagPageRead::Missing => None,
         };
-        if let Some(((fetched_at, link, body), tags)) = &cached
+        let cached = match cached {
+            Some(page) if state.max_stale_secs != 0 && !within_stale_bound(state, page.0.0) => {
+                self.delete_tag_page(state, index, repo, &query).await?;
+                None
+            }
+            cached => cached,
+        };
+        if let Some(((fetched_at, _, body), tags, next)) = &cached
             && now.saturating_sub(*fetched_at) < state.ttl_secs
         {
             return Ok(ProxyTagPage {
-                response: tag_page_response(name, link.as_deref(), body.clone()),
+                response: tag_page_response(name, next.as_ref(), body.clone()),
                 tags: tags.clone(),
+                next: next.clone(),
                 stale_error: None,
             });
         }
         match self
             .upstream
-            .tags(client, &upstream_repo, query, &self.token_realms(index))
+            .tags(client, &upstream_repo, &query, &self.token_realms(index))
             .await
         {
             Ok(response) => {
-                let link = response
-                    .headers()
-                    .get(reqwest::header::LINK)
-                    .and_then(|value| value.to_str().ok())
-                    .map(str::to_owned);
+                let next = next_page(response.headers(), pagination)?;
                 let body = bounded_body(response, MAX_TAGS_BYTES).await?;
                 let tags = validate_tag_page(&body, &upstream_repo)?;
-                store::set_tag_page(&state.meta, index, repo, query, now, link.as_deref(), &body)?;
+                if !valid_tag_page(tags.len(), next.as_ref(), pagination) {
+                    return Err(invalid_tag_page("upstream tag page exceeds its effective limit"));
+                }
+                let link = next.as_ref().map(Pagination::query);
+                let _guard = self.tag_page_gate.lock().await;
+                store_tag_page(state, index, repo, &query, now, link.as_deref(), &body)?;
                 Ok(ProxyTagPage {
-                    response: tag_page_response(name, link.as_deref(), body.to_vec()),
+                    response: tag_page_response(name, next.as_ref(), body.to_vec()),
                     tags,
+                    next,
                     stale_error: None,
                 })
             }
             Err(err) => match cached {
-                Some(((fetched_at, link, body), tags)) if within_stale_bound(state, fetched_at) => Ok(ProxyTagPage {
-                    response: tag_page_response(name, link.as_deref(), body),
-                    tags,
-                    stale_error: Some(err),
-                }),
+                Some(((fetched_at, _, body), tags, next)) if within_stale_bound(state, fetched_at) => {
+                    Ok(ProxyTagPage {
+                        response: tag_page_response(name, next.as_ref(), body),
+                        tags,
+                        next,
+                        stale_error: Some(err),
+                    })
+                }
                 _ => Ok(ProxyTagPage {
                     response: upstream_error_response(&err, "tags"),
                     tags: Vec::new(),
+                    next: None,
                     stale_error: None,
                 }),
             },
         }
+    }
+
+    async fn delete_tag_page(
+        &self,
+        state: &ServingState,
+        index: &str,
+        repo: &str,
+        query: &str,
+    ) -> Result<(), ServeError> {
+        let _guard = self.tag_page_gate.lock().await;
+        store::delete_tag_page(&state.meta, index, repo, query)?;
+        Ok(())
     }
 
     /// Fetch a proxy member's tag names for aggregation, or `None` on any upstream failure so one
@@ -201,27 +343,26 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         active: bool,
     ) -> Result<Option<Vec<String>>, ServeError> {
         let mut names = Vec::new();
-        let mut query = String::new();
+        let mut pagination = Pagination::default();
         let mut page = 0;
         loop {
             // Each page is cached under its own query, so a virtual index that unions several proxies
             // no longer re-walks every upstream's pagination on every request.
-            let fetched = self.proxy_tags(state, name, index, client, repo, &query).await?;
+            let fetched = self.proxy_tags(state, name, index, client, repo, &pagination).await?;
             let tag_page = if active {
                 self.filter_proxy_tag_page(state, name, index, client, repo, fetched)
                     .await?
             } else {
                 fetched
             };
-            let (parts, _) = tag_page.response.into_parts();
-            if !parts.status.is_success() {
+            if !tag_page.response.status().is_success() {
                 return Ok(None);
             }
-            let next = parts.headers.get(header::LINK).and_then(next_page_query_of);
+            let next = tag_page.next;
             names.extend(tag_page.tags);
             page += 1;
             match next {
-                Some(next) if page < MAX_TAG_PAGES => query = next,
+                Some(next) if page < MAX_TAG_PAGES => pagination = next,
                 _ => break,
             }
         }
@@ -240,16 +381,18 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
         let ProxyTagPage {
             response,
             tags,
+            next,
             stale_error,
         } = page;
         if !response.status().is_success() {
             return Ok(ProxyTagPage {
                 response,
                 tags,
+                next,
                 stale_error,
             });
         }
-        let (parts, _) = response.into_parts();
+        drop(response);
         let tags = match self
             .visible_proxy_tags(state, index, client, repo, tags, stale_error.as_ref())
             .await?
@@ -259,17 +402,15 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                 return Ok(ProxyTagPage {
                     response,
                     tags: Vec::new(),
+                    next: None,
                     stale_error: None,
                 });
             }
         };
         Ok(ProxyTagPage {
-            response: tag_page_response(
-                name,
-                parts.headers.get(header::LINK).and_then(|value| value.to_str().ok()),
-                tag_page_body(name, &tags),
-            ),
+            response: tag_page_response(name, next.as_ref(), tag_page_body(name, &tags)),
             tags,
+            next,
             stale_error: None,
         })
     }
@@ -655,10 +796,9 @@ fn referrers_response(manifests: &[serde_json::Value], filter: Option<&str>) -> 
 
 /// Apply distribution-spec `n`/`last` pagination to a sorted set: the page after `last`, truncated to
 /// `n`, and the `(n, last-of-page)` cursor for a `Link` when more remains.
-fn paginate(items: &std::collections::BTreeSet<String>, query: &str) -> (Vec<String>, Option<(usize, String)>) {
-    let params = query_params(query);
-    let last = params.get("last").map_or("", String::as_str);
-    let limit = params.get("n").and_then(|value| value.parse::<usize>().ok());
+fn paginate(items: &std::collections::BTreeSet<String>, pagination: &Pagination) -> (Vec<String>, Option<Pagination>) {
+    let last = pagination.last.as_deref().unwrap_or_default();
+    let limit = pagination.limit;
     // The spec requires `n=0` to return an empty list with no `Link`; without this special case
     // truncate(0) empties the page while `page.len() > 0` still asks for a next cursor, so the marker
     // falls back to `""` and the self-referencing `Link` loops a following client forever.
@@ -672,7 +812,10 @@ fn paginate(items: &std::collections::BTreeSet<String>, query: &str) -> (Vec<Str
         return (rest.cloned().collect(), None);
     };
     let page: Vec<String> = rest.by_ref().take(n).cloned().collect();
-    let next = rest.next().and_then(|_| page.last()).map(|marker| (n, marker.clone()));
+    let next = rest
+        .next()
+        .and_then(|_| page.last())
+        .map(|marker| pagination.next(marker.clone()));
     (page, next)
 }
 
@@ -683,15 +826,15 @@ fn stale_tag_digest(state: &ServingState, index: &str, repo: &str, tag: &str) ->
     Ok(within_stale_bound(state, fetched_at).then_some(digest))
 }
 
-fn tag_list_response(name: &str, tags: &std::collections::BTreeSet<String>, query: &str) -> Response {
-    let (page, next) = paginate(tags, query);
+fn tag_list_response(name: &str, tags: &std::collections::BTreeSet<String>, pagination: &Pagination) -> Response {
+    let (page, next) = paginate(tags, pagination);
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");
-    if let Some((n, marker)) = next {
+    if let Some(next) = next {
         builder = builder.header(
             header::LINK,
-            format!("</v2/{name}/tags/list?n={n}&last={marker}>; rel=\"next\""),
+            format!("</v2/{name}/tags/list?{}>; rel=\"next\"", next.query()),
         );
     }
     builder
@@ -702,6 +845,13 @@ fn tag_list_response(name: &str, tags: &std::collections::BTreeSet<String>, quer
 }
 
 pub(super) fn serve_catalog(state: &ServingState, query: &str) -> Result<Response, ServeError> {
+    let pagination = match Pagination::parse(query) {
+        Ok(pagination) => pagination,
+        Err(message) => return Ok(error_response(ErrorCode::NameInvalid, message)),
+    };
+    if pagination.limit == Some(0) {
+        return Ok(catalog_response(&std::collections::BTreeSet::new(), &pagination));
+    }
     let repositories = state.meta.read_driver_txn(|txn| {
         let mut repositories = std::collections::BTreeSet::new();
         for index in &state.indexes {
@@ -721,19 +871,20 @@ pub(super) fn serve_catalog(state: &ServingState, query: &str) -> Result<Respons
         }
         Ok::<_, peryx_storage::meta::MetaError>(repositories)
     })?;
-    let (page, next) = paginate(&repositories, query);
+    Ok(catalog_response(&repositories, &pagination))
+}
+
+fn catalog_response(repositories: &std::collections::BTreeSet<String>, pagination: &Pagination) -> Response {
+    let (page, next) = paginate(repositories, pagination);
     let mut builder = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");
-    if let Some((n, marker)) = next {
-        builder = builder.header(
-            header::LINK,
-            format!("</v2/_catalog?n={n}&last={marker}>; rel=\"next\""),
-        );
+    if let Some(next) = next {
+        builder = builder.header(header::LINK, format!("</v2/_catalog?{}>; rel=\"next\"", next.query()));
     }
-    Ok(builder
+    builder
         .body(Body::from(serde_json::json!({ "repositories": page }).to_string()))
-        .expect("catalog response builds from validated parts"))
+        .expect("catalog response builds from validated parts")
 }
 
 /// A tag-list page as this registry answers it: the validated upstream body, and a `Link` to the next
@@ -742,10 +893,10 @@ pub(super) fn serve_catalog(state: &ServingState, query: &str) -> Result<Respons
 /// peryx and 404; only its query carries over. The body's `name` is the upstream repository too and is
 /// rewritten by [`serve_proxy_tag_page`] on the client-facing path; the aggregation path carries the
 /// validated tags separately.
-fn tag_page_response(name: &str, upstream_link: Option<&str>, body: Vec<u8>) -> Response {
+fn tag_page_response(name: &str, next: Option<&Pagination>, body: Vec<u8>) -> Response {
     let mut response = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
-    if let Some(query) = upstream_link.and_then(next_page_query)
-        && let Ok(value) = HeaderValue::from_str(&format!("</v2/{name}/tags/list?{query}>; rel=\"next\""))
+    if let Some(next) = next
+        && let Ok(value) = HeaderValue::from_str(&format!("</v2/{name}/tags/list?{}>; rel=\"next\"", next.query()))
     {
         response.headers_mut().insert(header::LINK, value);
     }
@@ -798,45 +949,297 @@ fn tags_are_ordered(tags: &[&str]) -> bool {
             .all(|pair| pair[0].to_ascii_lowercase() <= pair[1].to_ascii_lowercase())
 }
 
+fn page_within_limit(tag_count: usize, pagination: &Pagination) -> bool {
+    pagination.limit.is_none_or(|limit| tag_count <= limit)
+}
+
+fn valid_tag_page(tag_count: usize, next: Option<&Pagination>, pagination: &Pagination) -> bool {
+    page_within_limit(tag_count, pagination)
+        && (!pagination.clamped || tag_count < pagination.limit.unwrap_or_default() || next.is_some())
+}
+
 fn invalid_tag_page(error: impl std::fmt::Display) -> ServeError {
     ServeError::Transport(format!("upstream tag list is invalid: {error}"))
 }
 
-fn next_page_query_of(value: &HeaderValue) -> Option<String> {
-    next_page_query(value.to_str().ok()?)
+fn cached_next(link: Option<&str>, pagination: &Pagination) -> Result<Option<Pagination>, &'static str> {
+    let next = match link {
+        Some(link) if link.starts_with('<') => {
+            let value = HeaderValue::from_str(link).map_err(|_| "invalid cached continuation")?;
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.append(reqwest::header::LINK, value);
+            next_page(&headers, pagination).map_err(|_| "invalid cached continuation")?
+        }
+        Some(link) => {
+            let next = Pagination::parse(link)?;
+            if next.limit == Some(0) || next.last.is_none() {
+                return Err("invalid cached continuation");
+            }
+            Some(next_controls(next, pagination))
+        }
+        None => None,
+    };
+    Ok(next)
 }
 
-/// The query string of the `rel="next"` link in an RFC 8288 `Link` header. A header may carry several
-/// comma-separated link-values (`rel="prev"`, `rel="next"`, …); the `next` one drives pagination, so
-/// picking the first `<...>` blindly can walk backwards.
-fn next_page_query(link: &str) -> Option<String> {
-    let target = link_values(link)
-        .into_iter()
-        .find(|value| value.contains("rel=\"next\""))?;
-    let start = target.find('<')? + 1;
-    let end = target[start..].find('>')? + start;
-    target[start..end].split_once('?').map(|(_, query)| query.to_owned())
+fn tag_page_cache_timestamp(key: &str, value: &[u8]) -> Option<i64> {
+    let key = key.strip_prefix(TAG_PAGE_CACHE_PREFIX)?;
+    let mut fields = key.split('\0');
+    let (Some(index), Some(repo), Some(query), None) = (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return None;
+    };
+    if index.is_empty() || repo.is_empty() || Pagination::parse(query).ok()?.query() != *query {
+        return None;
+    }
+    let (timestamp, rest) = value.split_first_chunk::<8>()?;
+    let (length, rest) = rest.split_first_chunk::<4>()?;
+    let length = u32::from_be_bytes(*length) as usize;
+    let (link, body) = rest.split_at_checked(length)?;
+    let link = (!link.is_empty()).then(|| std::str::from_utf8(link)).transpose().ok()?;
+    let pagination = Pagination::parse(query).ok()?;
+    let next = cached_next(link, &pagination).ok()?;
+    if body.len() > MAX_TAGS_BYTES {
+        return None;
+    }
+    let document: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let fields = document.as_object()?;
+    fields.get("name")?.as_str()?;
+    let tags = fields.get("tags")?.as_array()?;
+    let tags = tags.iter().map(serde_json::Value::as_str).collect::<Option<Vec<_>>>()?;
+    tags_are_ordered(&tags).then_some(())?;
+    valid_tag_page(tags.len(), next.as_ref(), &pagination).then_some(())?;
+    Some(i64::from_be_bytes(*timestamp))
+}
+
+fn reclaim_tag_page_rows(txn: &mut peryx_storage::meta::DriverTxn, state: &ServingState) -> Result<usize, ServeError> {
+    let mut retained = std::collections::BTreeSet::new();
+    let mut remove = Vec::new();
+    let mut bytes: usize = 0;
+    txn.scan_prefix(TAG_PAGE_CACHE_PREFIX, |key, value| {
+        if let Some(fetched_at) = tag_page_cache_timestamp(key, value)
+            && (state.max_stale_secs == 0 || within_stale_bound(state, fetched_at))
+        {
+            let row_bytes = key.len().saturating_add(value.len());
+            if row_bytes > MAX_TAG_PAGE_CACHE_BYTES {
+                remove.push(key.to_owned());
+            } else {
+                let row = (fetched_at, std::cmp::Reverse(key.to_owned()), row_bytes);
+                let mut retain = true;
+                while retain
+                    && (retained.len() == MAX_TAG_PAGE_CACHE_ROWS
+                        || bytes.saturating_add(row_bytes) > MAX_TAG_PAGE_CACHE_BYTES)
+                {
+                    if remove.len() == TAG_PAGE_DELETE_BATCH {
+                        return Ok(std::ops::ControlFlow::Break(()));
+                    }
+                    if &row <= retained.first().expect("retained tag page exists") {
+                        remove.push(key.to_owned());
+                        retain = false;
+                    } else {
+                        let (_, old_key, old_bytes) = retained.pop_first().expect("retained tag page exists");
+                        bytes -= old_bytes;
+                        remove.push(old_key.0);
+                    }
+                }
+                if retain {
+                    retained.insert(row);
+                    bytes += row_bytes;
+                }
+            }
+        } else {
+            remove.push(key.to_owned());
+        }
+        Ok::<_, ServeError>(if remove.len() < TAG_PAGE_DELETE_BATCH {
+            std::ops::ControlFlow::Continue(())
+        } else {
+            std::ops::ControlFlow::Break(())
+        })
+    })?;
+    for key in &remove {
+        txn.remove_local(key)?;
+    }
+    Ok(remove.len())
+}
+
+pub(super) fn reclaim_tag_pages(state: &ServingState) -> Result<usize, ServeError> {
+    state
+        .meta
+        .commit_driver_cache_txn(|txn| reclaim_tag_page_rows(txn, state))
+}
+
+fn store_tag_page(
+    state: &ServingState,
+    index: &str,
+    repo: &str,
+    query: &str,
+    now: i64,
+    link: Option<&str>,
+    body: &[u8],
+) -> Result<(), ServeError> {
+    state.meta.commit_driver_cache_txn(|txn| {
+        store::set_tag_page_txn(txn, index, repo, query, now, link, body)?;
+        reclaim_tag_page_rows(txn, state)?;
+        Ok(())
+    })
+}
+
+fn next_page(headers: &reqwest::header::HeaderMap, pagination: &Pagination) -> Result<Option<Pagination>, ServeError> {
+    let mut next = None;
+    for value in headers.get_all(reqwest::header::LINK) {
+        let link = value.to_str().map_err(|_| invalid_tag_page("invalid Link header"))?;
+        for value in link_values(link)? {
+            let value = trim_ows(value);
+            if value.is_empty() {
+                continue;
+            }
+            let Some(target) = value.strip_prefix('<').and_then(|value| value.split_once('>')) else {
+                return Err(invalid_tag_page("malformed Link header"));
+            };
+            let (target, parameters) = target;
+            let parameters = trim_ows(parameters);
+            if !parameters.is_empty() && !parameters.starts_with(';') {
+                return Err(invalid_tag_page("malformed Link header"));
+            }
+            if !link_is_next(parameters)? {
+                continue;
+            }
+            let target = target.split_once('#').map_or(target, |(target, _)| target);
+            let Some((_, query)) = target.split_once('?') else {
+                return Err(invalid_tag_page("next Link has no query"));
+            };
+            let parsed = Pagination::parse(query).map_err(invalid_tag_page)?;
+            if parsed.limit == Some(0) || parsed.last.is_none() {
+                return Err(invalid_tag_page("invalid next Link"));
+            }
+            let pagination = next_controls(parsed, pagination);
+            if next
+                .replace(pagination.clone())
+                .is_some_and(|existing| existing.query() != pagination.query())
+            {
+                return Err(invalid_tag_page("conflicting next Link headers"));
+            }
+        }
+    }
+    Ok(next)
+}
+
+fn next_controls(parsed: Pagination, requested: &Pagination) -> Pagination {
+    if parsed.limit.is_none() {
+        requested.next(parsed.last.expect("next Link has a last cursor"))
+    } else {
+        parsed
+    }
 }
 
 /// Split an RFC 8288 `Link` header into its link-values. A comma separates link-values, but is also a
 /// legal unencoded query sub-delimiter (RFC 3986) inside the angle-bracketed target, so a comma within
 /// `<…>` belongs to that target rather than ending it. Splitting on every comma would break a cursor
 /// that carries one, drop the `next` link-value, and silently truncate the listing.
-fn link_values(link: &str) -> Vec<&str> {
+fn link_values(link: &str) -> Result<Vec<&str>, ServeError> {
     let mut values = Vec::new();
     let mut start = 0;
     let mut in_target = false;
+    let mut in_quote = false;
+    let mut escaped = false;
     for (index, byte) in link.bytes().enumerate() {
-        match byte {
-            b'<' => in_target = true,
-            b'>' => in_target = false,
-            b',' if !in_target => {
-                values.push(&link[start..index]);
-                start = index + 1;
+        if escaped {
+            escaped = false;
+        } else if in_quote && byte == b'\\' {
+            escaped = true;
+        } else if !in_target && byte == b'"' {
+            in_quote = !in_quote;
+        } else if !in_quote && byte == b'<' {
+            in_target = true;
+        } else if in_target && byte == b'>' {
+            in_target = false;
+        } else if !in_target && !in_quote && byte == b',' {
+            values.push(&link[start..index]);
+            start = index + 1;
+        }
+    }
+    if in_target || in_quote || escaped {
+        return Err(invalid_tag_page("malformed Link header"));
+    }
+    values.push(&link[start..]);
+    Ok(values)
+}
+
+fn link_is_next(parameters: &str) -> Result<bool, ServeError> {
+    let mut relation = None;
+    for parameter in link_parameters(parameters)? {
+        let parameter = trim_ows(parameter);
+        if parameter.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = parameter.split_once('=') else {
+            continue;
+        };
+        match trim_ows(name) {
+            name if name.eq_ignore_ascii_case("anchor") => return Ok(false),
+            name if name.eq_ignore_ascii_case("rel") && relation.is_none() => {
+                let value = trim_ows(value);
+                relation = Some(if value.starts_with('"') {
+                    quoted_link_value(value)?
+                } else {
+                    value.to_owned()
+                });
             }
             _ => {}
         }
     }
-    values.push(&link[start..]);
-    values
+    Ok(relation.is_some_and(|relation| {
+        relation
+            .split_ascii_whitespace()
+            .any(|relation| relation.eq_ignore_ascii_case("next"))
+    }))
+}
+
+fn trim_ows(value: &str) -> &str {
+    value.trim_matches([' ', '\t'])
+}
+
+fn link_parameters(parameters: &str) -> Result<Vec<&str>, ServeError> {
+    let mut values = Vec::new();
+    let mut start = 0;
+    let mut in_quote = false;
+    let mut escaped = false;
+    for (index, byte) in parameters.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if in_quote && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            in_quote = !in_quote;
+        } else if !in_quote && byte == b';' {
+            values.push(&parameters[start..index]);
+            start = index + 1;
+        }
+    }
+    if in_quote || escaped {
+        return Err(invalid_tag_page("malformed Link parameter"));
+    }
+    values.push(&parameters[start..]);
+    Ok(values)
+}
+
+fn quoted_link_value(value: &str) -> Result<String, ServeError> {
+    if value.len() < 2 || !value.ends_with('"') {
+        return Err(invalid_tag_page("malformed Link parameter"));
+    }
+    let mut decoded = String::new();
+    let mut escaped = false;
+    for character in value[1..value.len() - 1].chars() {
+        if escaped {
+            decoded.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return Err(invalid_tag_page("malformed Link parameter"));
+        } else {
+            decoded.push(character);
+        }
+    }
+    Ok(decoded)
 }

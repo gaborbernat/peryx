@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use peryx_ha::{ArtifactPlacement, ArtifactPlacementStore};
 use peryx_storage::meta::{ArtifactOrigin, ArtifactSource, MetaError, MetaScanError, MetaStore};
@@ -176,13 +176,17 @@ pub fn get_metadata_digests<'a>(
     meta: &MetaStore,
     artifact_sha256s: impl IntoIterator<Item = &'a str>,
 ) -> Result<BTreeMap<String, String>, MetaError> {
-    let mut metadata = BTreeMap::new();
-    for artifact_sha256 in artifact_sha256s {
-        if let Some(metadata_sha256) = get_metadata_digest(meta, artifact_sha256)? {
-            metadata.insert(artifact_sha256.to_owned(), metadata_sha256);
+    meta.read_driver_txn(|txn| {
+        let artifact_sha256s = artifact_sha256s.into_iter().collect::<BTreeSet<_>>();
+        let mut metadata = BTreeMap::new();
+        for artifact_sha256 in artifact_sha256s {
+            let key = metadata_key(artifact_sha256);
+            if let Some(metadata_sha256) = txn.get(&key)? {
+                metadata.insert(artifact_sha256.to_owned(), record_str(&key, metadata_sha256)?);
+            }
         }
-    }
-    Ok(metadata)
+        Ok(metadata)
+    })
 }
 
 /// The PEP 658 sidecar one cached index advertised for one file, with the credentials that reach it.

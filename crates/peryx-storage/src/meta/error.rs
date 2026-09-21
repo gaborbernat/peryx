@@ -17,6 +17,8 @@ pub enum MetaError {
     Decode(#[from] serde_json::Error),
     #[error("replica serial conflict: expected {expected}, found {actual}")]
     ReplicaSerialConflict { expected: u64, actual: u64 },
+    #[error("replica incarnation counter overflowed")]
+    ReplicaIncarnationOverflow,
     #[error("driver precondition failed: {0}")]
     DriverPrecondition(String),
     #[error("driver record {key:?} is not UTF-8")]

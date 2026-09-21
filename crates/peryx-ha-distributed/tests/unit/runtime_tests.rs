@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -1660,6 +1661,32 @@ async fn replica_runtime_builds_rostered_services_and_beacon() {
     lifecycle.activate();
     let runtime = runtime.prepare_worker_runtime().unwrap();
     assert!(runtime.start_with_lifecycle(lifecycle).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn replica_beacon_increments_across_same_second_and_backward_restarts() {
+    let (dir, mut state) = state();
+    let ticks = Arc::new(AtomicI64::new(100));
+    let clock = ticks.clone();
+    Arc::get_mut(&mut Arc::get_mut(&mut state).unwrap().serving)
+        .unwrap()
+        .clock = Arc::new(move || clock.load(Ordering::SeqCst));
+    let tracker = Arc::new(crate::LivenessTracker::new(
+        ["replica".to_owned()],
+        Duration::from_secs(10),
+        Duration::from_secs(30),
+    ));
+    let server = TestServer::start(crate::liveness_router(TOKEN, tracker.clone()).unwrap()).await;
+    let mut config = replica_config(&dir, &server.url);
+    config.node_identity = Some("replica".to_owned());
+
+    for now in [100, 100, 99] {
+        ticks.store(now, Ordering::SeqCst);
+        runtime(&config, &state).unwrap().beacon.unwrap().beat(1).await.unwrap();
+    }
+
+    let peer = tracker.summary(std::time::Instant::now()).pop().unwrap();
+    assert_eq!((peer.incarnation, peer.sequence), (Some(102), Some(1)));
 }
 
 /// `PreparedDistributedRuntime::shutdown` must delegate to the replica's `AvailabilityRuntime::shutdown`

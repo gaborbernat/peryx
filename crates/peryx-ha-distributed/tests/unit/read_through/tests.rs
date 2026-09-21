@@ -93,7 +93,7 @@ fn peer(content: Bytes, fail_first: usize, error: TransportError, corruption: Co
 }
 
 /// A peer whose answers follow `schedule`, one entry per fetch, and which answers once it runs out.
-fn peer_answering(content: Bytes, schedule: &[bool], error: TransportError, corruption: Corruption) -> DcTransport {
+fn peer_answering(content: Bytes, schedule: &[bool], error: TransportError, corruption: Corruption) -> Arc<Peer> {
     Arc::new(Peer {
         contents: HashMap::from([(Digest::of(&content), content)]),
         schedule: Mutex::new(schedule.iter().copied().collect()),
@@ -334,23 +334,35 @@ async fn test_falls_through_to_a_second_source_when_the_first_loses() {
     let digest = Digest::of(&content);
     seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
     seed_verified(&meta, &digest, "west", "filesystem", "west/a", content.len() as u64);
-    let down = peer(
+    let down = peer_answering(
         content.clone(),
-        usize::MAX,
+        &[true, false],
         TransportError::Disconnected,
         Corruption::None,
     );
+    let limits = ReadThroughLimits {
+        circuit: CircuitConfig {
+            trip_after: 1,
+            ..DEFAULT_CIRCUIT
+        },
+        ..DEFAULT_READ_THROUGH_LIMITS
+    };
     let reader = reader(
         &meta,
         &blobs,
         "home",
-        delegates([("east", down), ("west", serving(&content))]),
-        DEFAULT_READ_THROUGH_LIMITS,
+        delegates([("east", Arc::clone(&down) as DcTransport), ("west", serving(&content))]),
+        limits,
     );
 
     let outcome = reader.read_through(&digest).await.unwrap();
 
     assert!(matches!(outcome, ReadThroughOutcome::Served(_)));
+    assert!(matches!(
+        reader.read_through(&digest).await.unwrap(),
+        ReadThroughOutcome::Served(_)
+    ));
+    assert_eq!(down.schedule.lock().unwrap().len(), 1);
     assert!(blobs.head(&digest).await.unwrap().is_some());
 }
 
@@ -899,16 +911,16 @@ fn test_the_default_read_through_limits_bound_a_fetch_and_its_buffer() {
     );
 }
 
-/// A source that never recovers has to run out of attempts. The retry that lands on the second try
-/// never reads the counter, because one failure gives up or serves whatever the counter says; only
-/// exhaustion depends on it climbing.
+/// An isolated timeout must still retry when the last isolated pass only finds corruption.
 #[tokio::test(start_paused = true)]
-async fn test_a_source_that_never_recovers_runs_out_of_attempts() {
+async fn test_an_isolated_timeout_retries_after_a_final_digest_mismatch() {
     let (_dir, meta, blobs) = stores();
     let content = Bytes::from_static(b"never lands");
     let digest = Digest::of(&content);
     seed_verified(&meta, &digest, "east", "filesystem", "east/a", content.len() as u64);
-    let refusing = peer(content.clone(), usize::MAX, TransportError::Timeout, Corruption::None);
+    seed_verified(&meta, &digest, "west", "filesystem", "west/a", content.len() as u64);
+    let flaky = peer(content.clone(), 2, TransportError::Timeout, Corruption::None);
+    let corrupt = peer(content.clone(), 0, TransportError::Disconnected, Corruption::Content);
     let limits = ReadThroughLimits {
         circuit: CircuitConfig {
             trip_after: 99,
@@ -922,11 +934,17 @@ async fn test_a_source_that_never_recovers_runs_out_of_attempts() {
         ),
         ..DEFAULT_READ_THROUGH_LIMITS
     };
-    let reader = reader(&meta, &blobs, "home", delegates([("east", refusing)]), limits);
+    let reader = reader(
+        &meta,
+        &blobs,
+        "home",
+        delegates([("east", flaky), ("west", corrupt)]),
+        limits,
+    );
 
     let outcome = reader.read_through(&digest).await.unwrap();
 
-    assert!(matches!(outcome, ReadThroughOutcome::Unavailable));
+    assert!(matches!(outcome, ReadThroughOutcome::Served(_)));
 }
 
 /// A source that answered is a source that works, so the failure that preceded it stops counting

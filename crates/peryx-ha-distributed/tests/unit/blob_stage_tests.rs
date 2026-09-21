@@ -321,19 +321,29 @@ async fn test_pull_blob_staged_publishes_nothing_when_a_range_is_unserved() {
 }
 
 #[tokio::test]
-async fn test_pull_blob_staged_retries_a_digest_mismatch_under_a_rotated_assignment() {
+async fn test_pull_blob_staged_isolates_past_an_unserved_source() {
     let (_dir, blobs) = stores();
     let digest = Digest::of(SIXTEEN);
     let log = log();
-    let corrupt = peer(0, b"cccccccccccccccc", &log);
-    let healthy = peer(1, SIXTEEN, &log);
+    let sources = [
+        broken(0, Serves::Fail(TransportError::Timeout), &log),
+        peer(1, b"cccccccccccccccc", &log),
+        peer(2, SIXTEEN, &log),
+    ];
 
-    pull_blob_staged(&blobs, &[&corrupt, &healthy], &digest, 16, None, budget(16, 4, 64))
-        .await
-        .unwrap();
+    let pull = crate::blob_stage::pull_blob_staged_reported(
+        &blobs,
+        &[&sources[0], &sources[1], &sources[2]],
+        &digest,
+        16,
+        None,
+        budget(16, 4, 64),
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(served(&log), vec![(0, range(0, 16)), (1, range(0, 16))]);
-    assert!(blobs.verify(&digest).await.unwrap());
+    assert_eq!(pull.1.contributors, [2].into());
+    assert_eq!(pull.1.failures, [0].into());
 }
 
 #[tokio::test]
@@ -348,7 +358,7 @@ async fn test_pull_blob_staged_exhausts_every_assignment_without_naming_a_source
         .await
         .unwrap_err();
 
-    assert!(matches!(error, StagedPullError::DigestMismatch { attempts: 2 }));
+    assert!(matches!(error, StagedPullError::DigestMismatch { attempts: 3, .. }));
 }
 
 #[tokio::test]

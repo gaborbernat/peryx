@@ -578,20 +578,24 @@ fn replica_beacon(
     upstream: &str,
     token: &str,
     metrics: Arc<AvailabilityMetrics>,
-) -> Option<BeaconSender> {
-    let node = config.node_identity.as_deref()?;
-    Some(
-        BeaconSender::new(
-            upstream,
-            token,
-            node,
-            u64::try_from((context.clock)()).unwrap_or(0),
-            context.meta.clone(),
-            DEFAULT_BEACON_INTERVAL,
-        )
-        .expect("the validated upstream and token also build the frontier beacon")
-        .with_metrics(metrics),
+) -> anyhow::Result<Option<BeaconSender>> {
+    let Some(node) = config.node_identity.as_deref() else {
+        return Ok(None);
+    };
+    let incarnation = context
+        .meta
+        .next_replica_incarnation(u64::try_from((context.clock)()).unwrap_or(0))
+        .context("allocate the replica beacon incarnation")?;
+    BeaconSender::new(
+        upstream,
+        token,
+        node,
+        incarnation,
+        context.meta.clone(),
+        DEFAULT_BEACON_INTERVAL,
     )
+    .context("build the frontier beacon")
+    .map(|beacon| Some(beacon.with_metrics(metrics)))
 }
 
 fn primary_liveness(config: &RuntimeConfig) -> Option<Arc<LivenessTracker>> {
@@ -785,7 +789,7 @@ impl DistributedRuntime {
                     .context("build the follower change-feed routes")?;
                 let monitor = Arc::new(ReplicaMonitor::new(resume));
                 let metrics = Arc::new(AvailabilityMetrics::default());
-                let beacon = replica_beacon(config, context, upstream, token, metrics.clone());
+                let beacon = replica_beacon(config, context, upstream, token, metrics.clone())?;
                 let workers = Arc::new(WorkerShared::for_replica());
                 let node = AvailabilityNode {
                     meta: context.meta.clone(),

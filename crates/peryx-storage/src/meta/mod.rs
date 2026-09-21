@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use peryx_core::Clock;
-use redb::{Database, ReadOnlyDatabase, ReadableDatabase as _, TableDefinition};
+use redb::{Database, ReadOnlyDatabase, ReadableDatabase as _, ReadableTable as _, TableDefinition};
 
 mod analytics;
 mod blob_chunk_digest;
@@ -127,6 +127,8 @@ pub use webhook::{
 };
 
 const SERIAL: TableDefinition<&str, u64> = TableDefinition::new("serial");
+const REPLICA_INCARNATION: TableDefinition<&str, u64> = TableDefinition::new("replica_incarnation");
+const REPLICA_INCARNATION_KEY: &str = "next";
 /// Advances on every driver-row write, including one that appends no journal entry, so a reference
 /// inventory scanned across several driver reads can prove nothing changed underneath it.
 const REFERENCE_REVISION: TableDefinition<&str, u64> = TableDefinition::new("reference_revision");
@@ -435,6 +437,28 @@ impl MetaStore {
         Ok(())
     }
 
+    /// # Errors
+    ///
+    /// Returns a store error if the incarnation cannot commit or its counter overflows.
+    pub fn next_replica_incarnation(&self, now: u64) -> Result<u64, MetaError> {
+        let txn = self.db.begin_write()?;
+        let incarnation = {
+            let mut table = txn.open_table(REPLICA_INCARNATION)?;
+            let incarnation = match table.get(REPLICA_INCARNATION_KEY)? {
+                Some(value) => value
+                    .value()
+                    .checked_add(1)
+                    .ok_or(MetaError::ReplicaIncarnationOverflow)?
+                    .max(now),
+                None => now,
+            };
+            table.insert(REPLICA_INCARNATION_KEY, incarnation)?;
+            incarnation
+        };
+        txn.commit()?;
+        Ok(incarnation)
+    }
+
     /// Rebuilds user records and their name index after Unicode canonicalization data changes.
     ///
     /// # Errors
@@ -480,6 +504,10 @@ impl MetaStore {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/meta/replica_fault_tests.rs"]
+mod replica_fault_tests;
 
 /// A zeroed page cache sends every read through the backend instead of a cached page, which is what
 /// makes an injected backend failure observable.

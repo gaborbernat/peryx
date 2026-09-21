@@ -46,9 +46,24 @@ fn test_delay_saturates_to_the_cap_on_multiply_overflow() {
 
 #[test]
 fn test_base_above_the_cap_yields_the_cap() {
-    let policy = policy(5000, 2, 1000, 3);
+    let policy = policy(1700, 3, 1000, 4);
 
-    assert_eq!(policy.delay_for(1), Duration::from_secs(1));
+    assert_eq!(
+        (
+            policy.delay_for(1),
+            policy.base(),
+            policy.multiplier().get(),
+            policy.max_delay(),
+            policy.max_attempts()
+        ),
+        (
+            Duration::from_secs(1),
+            Duration::from_millis(1700),
+            3,
+            Duration::from_secs(1),
+            4
+        )
+    );
 }
 
 #[test]

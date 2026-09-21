@@ -60,10 +60,9 @@ A backup is one coherent recovery point, and the manifest names which one. `meta
 store's control-plane serial at the instant the copy was taken: the store advances it on every committed write, so the
 number is the recovery point's identity. `placements` records how many artifacts the store projects a local or remote
 availability for, sizing the availability state the metadata carries. For `dc` and `ha`, `writer_identity` records the
-writer claim associated with the recovery point. `mode` records whether the node ran in `none`, `dc`, or `ha`, and when
-a static datacenter roster is configured, `membership` records its group and every member's node, datacenter, address,
-and role. The configuration snapshot omits that roster, so the manifest is the backup's only durable record of the
-topology the recovery point belongs to.
+writer claim associated with the recovery point. `mode` records whether the node ran in `none`, `dc`, or `ha`.
+`config.toml` preserves portable membership and roster settings, while omitting node-local identity and listener state.
+The manifest guards that snapshot against a mismatched recovery point.
 
 `backup create` reads the frontier and placement count from the quiesced metadata store whose bytes it copies, so both
 describe exactly the bytes the backup holds rather than a moving target. That is what makes the recovery point coherent:

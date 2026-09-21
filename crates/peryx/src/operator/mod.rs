@@ -58,10 +58,8 @@ struct BackupManifest {
 /// The metadata copy is a single snapshot; `metadata_frontier` names it with the store's control-plane
 /// serial and `placements` sizes its artifact-availability projection, so a verifier re-derives both
 /// from the copied store and rejects a metadata file swapped for one taken at a different point. `mode`
-/// and `membership` carry the datacenter roster the configuration snapshot omits, making the manifest
-/// the backup's sole record of the topology the recovery point belongs to. `writer_identity` is the
-/// node the recovery point belongs to, so a restore refuses to adopt one node's state under another
-/// node's identity. An older backup that never recorded it restores without the identity guard.
+/// and `membership` guard the portable roster the configuration snapshot preserves; it omits node-local identity
+/// and listener state. `writer_identity` lets a restore reject another node's state.
 #[derive(Debug, Serialize, Deserialize)]
 struct ManifestAvailability {
     mode: String,
@@ -202,8 +200,7 @@ fn backup_member_path(path: &str) -> anyhow::Result<&Path> {
 
 /// The availability mode and datacenter roster a manifest records from the effective configuration.
 ///
-/// The configuration snapshot carries the mode but omits the static roster, so the manifest is the
-/// backup's only durable record of it.
+/// The configuration snapshot preserves the portable roster; the manifest guards its recovery point.
 fn config_availability(config: &Config) -> (String, Option<ManifestMembership>) {
     (
         config.availability.mode().as_str().to_owned(),

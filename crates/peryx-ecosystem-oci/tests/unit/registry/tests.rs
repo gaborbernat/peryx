@@ -16,6 +16,10 @@ fn test_serve_error_maps_every_fault_to_a_gateway_error() {
         StatusCode::BAD_GATEWAY
     );
     assert_eq!(
+        ServeError::Timeout.into_response().status(),
+        StatusCode::GATEWAY_TIMEOUT
+    );
+    assert_eq!(
         ServeError::Fenced.into_response().status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
@@ -48,6 +52,7 @@ fn test_serve_error_message_describes_every_fault() {
             .message()
             .contains("upstream transfer failed")
     );
+    assert_eq!(ServeError::Timeout.message(), crate::error::TIMEOUT_MESSAGE);
     assert_eq!(ServeError::Fenced.message(), "repository authority moved");
 }
 
@@ -95,6 +100,7 @@ fn test_serve_error_converts_to_its_message_string() {
         String::from(ServeError::Transport("reset".to_owned())),
         "upstream transfer failed: reset"
     );
+    assert_eq!(String::from(ServeError::Timeout), crate::error::TIMEOUT_MESSAGE);
 }
 
 #[tokio::test]

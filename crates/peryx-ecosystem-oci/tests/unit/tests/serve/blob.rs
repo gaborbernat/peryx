@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use super::support::*;
-use crate::tests::observe_pending;
+use crate::tests::{observe_pending, wait_for_staged_bytes};
+use tokio::io::AsyncWriteExt as _;
 
 #[rstest]
 #[case::lower("bearer")]
@@ -118,6 +121,65 @@ async fn test_upstream_gateway_failure_is_a_gateway_error(#[case] suffix: String
     let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
     let (status, _, _) = send(&app, Method::GET, &format!("/v2/hub/app/{suffix}")).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
+}
+
+#[rstest]
+#[case::blob_headers(format!("blobs/sha256:{}", "3".repeat(64)), false)]
+#[case::blob_body(format!("blobs/sha256:{}", "4".repeat(64)), true)]
+#[case::manifest_body("manifests/stalled".to_owned(), true)]
+#[case::tags_body("tags/list".to_owned(), true)]
+#[tokio::test]
+async fn test_stalled_upstream_returns_the_safe_gateway_timeout(#[case] suffix: String, #[case] body: bool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("http://{}/", listener.local_addr().unwrap()), false);
+    let response = stalled_upstream_response(&app, &listener, &format!("/v2/hub/app/{suffix}"), body).await;
+    assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        response.2.as_ref(),
+        br#"{"errors":[{"code":"UNKNOWN","message":"upstream request timed out"}]}"#
+    );
+}
+
+#[tokio::test]
+async fn test_stalled_token_body_returns_the_safe_gateway_timeout() {
+    let server = MockServer::start().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let realm = format!("http://{}/token", listener.local_addr().unwrap());
+    Mock::given(pull("/v2/app/manifests/stalled"))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "www-authenticate",
+            format!(r#"Bearer realm="{realm}",service="reg",scope="repository:app:pull""#),
+        ))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+    let request = tokio::spawn(async move { send(&app, Method::GET, "/v2/hub/app/manifests/stalled").await });
+    let (mut token, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("token peer did not connect")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), read_upstream_path(&mut token))
+        .await
+        .expect("token peer did not send headers");
+    token
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1\r\n\r\n")
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(40), request)
+        .await
+        .expect("stalled token request did not time out")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), token.shutdown())
+        .await
+        .expect("token peer did not close")
+        .unwrap();
+    assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        response.2.as_ref(),
+        br#"{"errors":[{"code":"UNKNOWN","message":"upstream request timed out"}]}"#
+    );
 }
 #[tokio::test]
 async fn test_blob_pulls_through_then_serves_a_range() {
@@ -240,6 +302,186 @@ async fn test_concurrent_blob_misses_share_one_upstream_fetch() {
     assert_eq!(first.2, &blob[..]);
     assert_eq!(second.2, &blob[..]);
 }
+
+#[rstest]
+#[case::before_headers(false)]
+#[case::during_body(true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cancelled_blob_miss_releases_the_digest_flight(#[case] during_body: bool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let blob = vec![b'a'; 2 * 1024 * 1024 + 1];
+    let prefix = &blob[..2 * 1024 * 1024];
+    let digest = oci_digest(&blob);
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("http://{}/", listener.local_addr().unwrap()), false);
+    let uri = format!("/v2/hub/library/alpine/blobs/{digest}");
+    let first = tokio::spawn({
+        let app = app.clone();
+        let uri = uri.clone();
+        async move { send(&app, Method::GET, &uri).await }
+    });
+    let (mut stalled, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("cancelled blob peer did not connect")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), read_upstream_path(&mut stalled))
+        .await
+        .expect("cancelled blob peer did not send headers");
+    if during_body {
+        stalled
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        stalled
+            .write_all(format!("{:x}\r\n", prefix.len()).as_bytes())
+            .await
+            .unwrap();
+        stalled.write_all(prefix).await.unwrap();
+        stalled.write_all(b"\r\n").await.unwrap();
+        wait_for_staged_bytes(&dir).await;
+    }
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        state
+            .serving
+            .blobs
+            .head(&peryx_storage::blob::Digest::of(&blob))
+            .await
+            .unwrap(),
+        None
+    );
+    drop(stalled);
+
+    let recovery = tokio::spawn({
+        let app = app.clone();
+        let uri = uri.clone();
+        async move { send(&app, Method::GET, &uri).await }
+    });
+    let (mut healthy, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("blob recovery peer did not connect")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), read_upstream_path(&mut healthy))
+        .await
+        .expect("blob recovery peer did not send headers");
+    healthy
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                blob.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    healthy.write_all(&blob).await.unwrap();
+    let recovery = tokio::time::timeout(Duration::from_secs(5), recovery)
+        .await
+        .expect("blob recovery did not complete")
+        .unwrap();
+    assert_eq!(recovery.0, StatusCode::OK);
+    assert_eq!(recovery.2, &blob[..]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_idle_blob_timeout_releases_a_same_digest_waiter_after_cleanup() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let blob = vec![b'a'; 2 * 1024 * 1024 + 1];
+    let prefix = &blob[..2 * 1024 * 1024];
+    let digest = oci_digest(&blob);
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = proxy(&dir, &format!("http://{}/", listener.local_addr().unwrap()), false);
+    let uri = format!("/v2/hub/library/alpine/blobs/{digest}");
+    let first = tokio::spawn({
+        let app = app.clone();
+        let uri = uri.clone();
+        async move { send(&app, Method::GET, &uri).await }
+    });
+    let (mut stalled, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("stalled blob peer did not connect")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), read_upstream_path(&mut stalled))
+        .await
+        .expect("stalled blob peer did not send headers");
+    stalled
+        .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+        .await
+        .unwrap();
+    stalled
+        .write_all(format!("{:x}\r\n", prefix.len()).as_bytes())
+        .await
+        .unwrap();
+    stalled.write_all(prefix).await.unwrap();
+    stalled.write_all(b"\r\n").await.unwrap();
+    wait_for_staged_bytes(&dir).await;
+    let waiter = tokio::spawn({
+        let app = app.clone();
+        let uri = uri.clone();
+        async move { send(&app, Method::GET, &uri).await }
+    });
+    let first = tokio::time::timeout(Duration::from_secs(40), first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.0, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        first.2.as_ref(),
+        br#"{"errors":[{"code":"UNKNOWN","message":"upstream request timed out"}]}"#
+    );
+    assert_eq!(
+        state
+            .serving
+            .blobs
+            .head(&peryx_storage::blob::Digest::of(&blob))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        state
+            .serving
+            .blobs
+            .head(&peryx_storage::blob::Digest::of(prefix))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(staged_usage(&dir), (0, 0));
+    drop(stalled);
+    let (mut healthy, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), read_upstream_path(&mut healthy))
+        .await
+        .expect("healthy blob peer did not send headers");
+    healthy
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                blob.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    healthy.write_all(&blob).await.unwrap();
+    let waiter = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(waiter.0, StatusCode::OK);
+    assert_eq!(waiter.2, &blob[..]);
+    let cached = tokio::time::timeout(Duration::from_secs(5), send(&app, Method::GET, &uri))
+        .await
+        .unwrap();
+    assert_eq!(cached.0, StatusCode::OK);
+    assert_eq!(cached.2, &blob[..]);
+    assert_eq!(staged_usage(&dir), (0, 0));
+}
+
 #[tokio::test]
 async fn test_blob_head_and_unsatisfiable_range() {
     let dir = tempfile::tempdir().unwrap();

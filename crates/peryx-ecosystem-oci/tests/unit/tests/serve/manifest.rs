@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use super::support::*;
 use crate::store::MAX_MEDIA_TYPE_BYTES;
 use crate::tests::observe_pending;
+use tokio::io::AsyncWriteExt as _;
 
 #[tokio::test]
 async fn test_manifest_by_tag_pulls_through_with_the_token_flow() {
@@ -1102,6 +1105,69 @@ async fn test_referrers_preserve_upstream_status(
             headers.get(header::RETRY_AFTER).and_then(|value| value.to_str().ok()),
         ),
         (expected_status, true, expected_retry_after)
+    );
+}
+
+#[rstest]
+#[case::native(false)]
+#[case::fallback(true)]
+#[tokio::test]
+async fn test_stalled_referrer_body_returns_the_safe_gateway_timeout(#[case] fallback: bool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let subject = format!("sha256:{}", "a".repeat(64));
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("http://{}/", listener.local_addr().unwrap()), false);
+    let response = if fallback {
+        let app = app.clone();
+        let uri = format!("/v2/hub/app/referrers/{subject}");
+        let request = tokio::spawn(async move { send(&app, Method::GET, &uri).await });
+        let mut stalled = None;
+        for _ in 0..3 {
+            let (mut peer, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .expect("fallback peer did not connect")
+                .unwrap();
+            let path = tokio::time::timeout(Duration::from_secs(5), read_upstream_path(&mut peer))
+                .await
+                .expect("fallback peer did not send headers");
+            if path.contains("/referrers/") {
+                peer.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(5), peer.shutdown())
+                    .await
+                    .expect("fallback referrer peer did not close")
+                    .unwrap();
+            } else if path.contains("/manifests/sha256-") {
+                stalled = Some(peer);
+            } else {
+                panic!("unexpected fallback request path: {path}");
+            }
+            if stalled.is_some() {
+                break;
+            }
+        }
+        let mut stalled = stalled.expect("fallback manifest request was not observed");
+        stalled
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/vnd.oci.image.index.v1+json\r\ncontent-length: 1\r\n\r\n")
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(40), request)
+            .await
+            .expect("stalled fallback referrer request did not time out")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stalled.shutdown())
+            .await
+            .expect("stalled fallback peer did not close")
+            .unwrap();
+        response
+    } else {
+        stalled_upstream_response(&app, &listener, &format!("/v2/hub/app/referrers/{subject}"), true).await
+    };
+    assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        response.2.as_ref(),
+        br#"{"errors":[{"code":"UNKNOWN","message":"upstream request timed out"}]}"#
     );
 }
 

@@ -5,6 +5,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
+pub const TIMEOUT_MESSAGE: &str = "upstream request timed out";
+
 /// A distribution-spec error code (the uppercase wire value).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
@@ -91,6 +93,17 @@ pub fn gateway_error(message: &str) -> Response {
     let body = json!({ "errors": [{ "code": "UNKNOWN", "message": message }] }).to_string();
     (
         StatusCode::BAD_GATEWAY,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
+#[must_use]
+pub fn gateway_timeout() -> Response {
+    let body = json!({ "errors": [{ "code": "UNKNOWN", "message": TIMEOUT_MESSAGE }] }).to_string();
+    (
+        StatusCode::GATEWAY_TIMEOUT,
         [(header::CONTENT_TYPE, "application/json")],
         body,
     )

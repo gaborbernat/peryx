@@ -11,14 +11,16 @@ use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use mediatype::MediaType;
+use parking_lot::Mutex;
 use peryx_identity::strip_auth_scheme;
 use peryx_upstream::{
     Auth, CredentialError, CredentialProvider, CredentialProviderId, CredentialSnapshot, UpstreamClient,
 };
 use reqwest::Response;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 use tokio::time::{Instant, timeout_at};
 
+use crate::error::TIMEOUT_MESSAGE;
 use crate::realm::TokenRealms;
 use crate::token_cache::{DeclaredLifetime, TokenCache, TokenCacheKey, expires_at};
 
@@ -78,9 +80,22 @@ struct TokenExchange<'a> {
     realms: &'a TokenRealms,
 }
 
+struct TokenFlight<'a> {
+    cache_key: &'a TokenCacheKey,
+    inflight: &'a Mutex<HashMap<TokenCacheKey, broadcast::Sender<String>>>,
+}
+
+impl Drop for TokenFlight<'_> {
+    fn drop(&mut self) {
+        self.inflight.lock().remove(self.cache_key);
+    }
+}
+
 /// Why an upstream pull did not yield bytes to serve.
 #[derive(Debug)]
 pub enum UpstreamError {
+    /// The upstream exceeded its configured deadline.
+    Timeout,
     /// The registry answered, but with a non-success status (forwarded to the client's error).
     Status(StatusCode),
     /// The registry throttled the pull (`429`), carrying its `Retry-After` when it sent one. Kept
@@ -97,6 +112,7 @@ pub enum UpstreamError {
 impl std::fmt::Display for UpstreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Timeout => f.write_str(TIMEOUT_MESSAGE),
             Self::Status(status) => write!(f, "upstream returned {status}"),
             Self::RateLimited(_) => write!(f, "upstream rate limit reached"),
             Self::InvalidContentLength => write!(f, "upstream blob HEAD has invalid content-length"),
@@ -108,6 +124,9 @@ impl std::fmt::Display for UpstreamError {
 
 impl From<reqwest::Error> for UpstreamError {
     fn from(err: reqwest::Error) -> Self {
+        if err.is_timeout() {
+            return Self::Timeout;
+        }
         // reqwest's display text omits the custom redirect cause that identifies the blocked address.
         let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&err);
         while let Some(error) = source {
@@ -133,7 +152,7 @@ async fn wait_for_flight(
     deadline: Instant,
 ) -> Result<Option<String>, UpstreamError> {
     match timeout_at(deadline, receiver.recv()).await {
-        Err(_) => Err(UpstreamError::Transport("token exchange wait timed out".to_owned())),
+        Err(_) => Err(UpstreamError::Timeout),
         Ok(Err(_)) => Ok(None),
         Ok(Ok(token)) => Ok(Some(token)),
     }
@@ -347,7 +366,7 @@ impl Upstream {
         let credentials = client.auth();
         let credential = credentials.credential().await?;
         let cache_key = token_cache_key(client.base_url(), &scope, credential.identity().provider());
-        let cached = self.cached_token(&cache_key, &credential).await;
+        let cached = self.cached_token(&cache_key, &credential);
         let response = self.attempt(client, &method, url, accept, cached.as_deref()).await?;
         if response.status() != StatusCode::UNAUTHORIZED {
             return finish(response);
@@ -360,6 +379,7 @@ impl Upstream {
         else {
             return finish(response);
         };
+        drop(response);
         let exchange = TokenExchange {
             challenge: &challenge,
             credentials,
@@ -385,43 +405,59 @@ impl Upstream {
     ) -> Result<String, UpstreamError> {
         let deadline = Instant::now() + self.token_flight_timeout;
         loop {
-            let waiter = {
-                let mut inflight = self.inflight.lock().await;
-                if let Some(sender) = inflight.get(cache_key) {
-                    sender.subscribe()
-                } else {
-                    if let Some(token) = self
-                        .cached_token(cache_key, exchange.credential)
-                        .await
-                        .filter(|token| Some(token.as_str()) != rejected_token)
-                    {
-                        return Ok(token);
-                    }
-                    let (sender, _) = broadcast::channel(1);
-                    inflight.insert(cache_key.clone(), sender.clone());
-                    drop(inflight);
+            match self.elect_token_flight(cache_key, exchange.credential, rejected_token) {
+                Ok((flight, sender)) => {
                     let result = timeout_at(deadline, self.exchange(client, &cache_key.scope, exchange))
                         .await
-                        .map_err(|_| UpstreamError::Transport("token exchange timed out".to_owned()))
+                        .map_err(|_| UpstreamError::Timeout)
                         .and_then(|result| result);
-                    self.inflight.lock().await.remove(cache_key);
+                    drop(flight);
                     if let Ok(token) = &result {
                         let _ = sender.send(token.clone());
                     }
                     return result;
                 }
-            };
-            if let Some(token) = wait_for_flight(waiter, deadline).await? {
-                return Ok(token);
+                Err(waiter) => {
+                    if let Some(token) = wait_for_flight(waiter, deadline).await? {
+                        return Ok(token);
+                    }
+                }
             }
         }
     }
 
-    async fn cached_token(&self, cache_key: &TokenCacheKey, credential: &CredentialSnapshot) -> Option<String> {
-        self.tokens
-            .lock()
-            .await
-            .get(cache_key, credential.identity(), (self.clock)())
+    fn elect_token_flight<'a>(
+        &'a self,
+        cache_key: &'a TokenCacheKey,
+        credential: &CredentialSnapshot,
+        rejected_token: Option<&str>,
+    ) -> Result<(TokenFlight<'a>, broadcast::Sender<String>), broadcast::Receiver<String>> {
+        let mut inflight = self.inflight.lock();
+        if let Some(sender) = inflight.get(cache_key) {
+            return Err(sender.subscribe());
+        }
+        if let Some(token) = self
+            .cached_token(cache_key, credential)
+            .filter(|token| Some(token.as_str()) != rejected_token)
+        {
+            let (sender, receiver) = broadcast::channel(1);
+            let _ = sender.send(token);
+            return Err(receiver);
+        }
+        let (sender, _) = broadcast::channel(1);
+        inflight.insert(cache_key.clone(), sender.clone());
+        drop(inflight);
+        Ok((
+            TokenFlight {
+                cache_key,
+                inflight: &self.inflight,
+            },
+            sender,
+        ))
+    }
+
+    fn cached_token(&self, cache_key: &TokenCacheKey, credential: &CredentialSnapshot) -> Option<String> {
+        self.tokens.lock().get(cache_key, credential.identity(), (self.clock)())
     }
 
     /// Trade the bearer challenge for a token and cache it, refreshing the source credential once if
@@ -454,7 +490,7 @@ impl Upstream {
         // A lifetime peryx cannot honour is not a reason to fail the pull: the token serves the
         // request it was fetched for, and nothing is retained for the next one.
         if let Some(expires_at) = expires_at(issued.lifetime, issued.issued_at, now) {
-            self.tokens.lock().await.insert(
+            self.tokens.lock().insert(
                 token_cache_key(client.base_url(), scope, credential.identity().provider()),
                 credential.identity(),
                 issued.value.clone(),

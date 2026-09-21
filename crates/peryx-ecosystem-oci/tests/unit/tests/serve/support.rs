@@ -7,7 +7,7 @@ pub(super) use crate::store::{self, Manifest};
 pub(super) use crate::tests::{
     app_with_indexes, app_with_setup, body_has_code, gated_response, hosted, install_test_distributed,
     mount_head_without_digest, oci_digest, oci_index, proxy, proxy_pair, proxy_with_auth, proxy_with_settings, pull,
-    send, send_with,
+    read_upstream_path, send, send_with, staged_usage, stalled_upstream_response,
 };
 
 pub(super) const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";

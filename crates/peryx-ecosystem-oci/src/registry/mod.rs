@@ -9,7 +9,7 @@
 //!
 //! Store and blob-io faults propagate through [`ServeError`] so the serving methods read as the happy
 //! path, and a single conversion turns a fault into a `502`.
-use crate::error::{ErrorCode, error_response, gateway_error};
+use crate::error::{ErrorCode, TIMEOUT_MESSAGE, error_response, gateway_error, gateway_timeout};
 use crate::name::{OciRoute, Reference, classify, valid_manifest_digest};
 use crate::settings::IndexSettings;
 use crate::store::ManifestWriteError;
@@ -83,6 +83,7 @@ const MAX_TAG_PAGES: usize = 100;
 /// Client-visible outcomes (unknown manifest, invalid digest) are ordinary responses, not this.
 #[derive(Debug)]
 pub enum ServeError {
+    Timeout,
     Store(MetaError),
     Io(std::io::Error),
     Transport(String),
@@ -130,6 +131,9 @@ impl From<peryx_storage::blob::BlobError> for ServeError {
 }
 impl From<reqwest::Error> for ServeError {
     fn from(err: reqwest::Error) -> Self {
+        if err.is_timeout() {
+            return Self::Timeout;
+        }
         Self::Transport(err.to_string())
     }
 }
@@ -143,6 +147,7 @@ impl ServeError {
     /// message rather than a `/v2/` response.
     fn message(&self) -> String {
         match self {
+            Self::Timeout => TIMEOUT_MESSAGE.to_owned(),
             Self::Store(err) => format!("metadata store error: {err}"),
             Self::Io(err) => format!("blob io error: {err}"),
             Self::Transport(err) => format!("upstream transfer failed: {err}"),
@@ -152,6 +157,7 @@ impl ServeError {
 
     fn into_response(self) -> Response {
         match self {
+            Self::Timeout => gateway_timeout(),
             Self::Store(err) => gateway_error(&format!("metadata store error: {err}")),
             Self::Io(err) => gateway_error(&format!("blob io error: {err}")),
             Self::Transport(err) => gateway_error(&format!("upstream transfer failed: {err}")),
@@ -1253,6 +1259,7 @@ pub async fn bounded_body(response: reqwest::Response, max: usize) -> Result<byt
 /// else is a `502`, a fault between peryx and its upstream.
 fn upstream_error_response(err: &UpstreamError, what: &str) -> Response {
     match err {
+        UpstreamError::Timeout => gateway_timeout(),
         UpstreamError::RateLimited(retry_after) => {
             let mut response = error_response(ErrorCode::TooManyRequests, "upstream rate limit reached; retry later");
             if let Some(value) = retry_after

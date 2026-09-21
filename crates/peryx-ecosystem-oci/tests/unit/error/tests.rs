@@ -1,4 +1,4 @@
-use super::{ErrorCode, error_response};
+use super::{ErrorCode, error_response, gateway_timeout};
 use axum::http::StatusCode;
 
 #[test]
@@ -41,4 +41,14 @@ fn test_every_code_pairs_its_wire_string_with_its_canonical_status() {
         assert_eq!(code.status(), status);
         assert_eq!(error_response(code, "x").status(), status);
     }
+}
+
+#[tokio::test]
+async fn test_gateway_timeout_has_the_fixed_distribution_error() {
+    let response = gateway_timeout();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+        r#"{"errors":[{"code":"UNKNOWN","message":"upstream request timed out"}]}"#
+    );
 }

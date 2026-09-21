@@ -10,6 +10,10 @@ fn test_download_error_maps_mismatch_to_client_and_the_rest_to_gateway() {
         download_error_response(DownloadError::Stream("reset".to_owned())).status(),
         StatusCode::BAD_GATEWAY
     );
+    assert_eq!(
+        download_error_response(DownloadError::Timeout).status(),
+        StatusCode::GATEWAY_TIMEOUT
+    );
 }
 
 #[test]
@@ -28,6 +32,12 @@ fn test_download_stream_error_has_no_source() {
     use std::error::Error as _;
 
     assert!(DownloadError::Stream("reset".to_owned()).source().is_none());
+    assert!(DownloadError::Timeout.source().is_none());
+}
+
+#[test]
+fn test_download_timeout_has_the_fixed_message() {
+    assert_eq!(DownloadError::Timeout.to_string(), crate::error::TIMEOUT_MESSAGE);
 }
 
 #[test]
@@ -55,7 +65,7 @@ async fn test_ingest_blob_reports_a_stream_error() {
     let dir = tempfile::tempdir().unwrap();
     let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
     let storage = Digest::of(b"x");
-    let stream = futures_util::stream::iter(vec![Err("boom".to_owned())]);
+    let stream = futures_util::stream::iter(vec![Err(DownloadError::Stream("boom".to_owned()))]);
     let err = ingest_blob(&blobs, &storage, Box::pin(stream)).await.unwrap_err();
     assert!(matches!(err, DownloadError::Stream(message) if message == "boom"));
 }
@@ -70,7 +80,7 @@ async fn test_ingest_blob_reports_a_cleanup_error() {
         let stage = std::fs::read_dir(&root).unwrap().next().unwrap().unwrap().path();
         std::fs::remove_file(&stage).unwrap();
         std::fs::create_dir(&stage).unwrap();
-        Err("boom".to_owned())
+        Err(DownloadError::Stream("boom".to_owned()))
     });
     let err = ingest_blob(&blobs, &storage, Box::pin(stream)).await.unwrap_err();
     assert!(matches!(err, DownloadError::Blob(_)));

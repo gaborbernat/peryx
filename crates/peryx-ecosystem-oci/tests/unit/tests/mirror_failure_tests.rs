@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rstest::rstest;
 use tokio::io::AsyncWriteExt as _;
@@ -11,7 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::mirror_concurrency_tests::read_path;
 use super::mirror_tests::{INDEX_TYPE, MANIFEST_TYPE, image_manifest_with_layers, index_over};
-use super::{oci_digest, proxy};
+use super::{oci_digest, proxy, wait_for_staged_bytes};
 use crate::mirror::{MirrorMode, MirrorRow, mirror};
 use crate::registry::MAX_MANIFEST_BYTES;
 use crate::settings::IndexSettings;
@@ -24,6 +25,8 @@ struct Answer {
     content_type: &'static str,
     declared: usize,
     body: Vec<u8>,
+    stalled: Option<(bool, Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Notify>)>,
+    challenge: bool,
 }
 
 impl Answer {
@@ -32,6 +35,8 @@ impl Answer {
             content_type,
             declared: body.len(),
             body,
+            stalled: None,
+            challenge: false,
         }
     }
 
@@ -40,6 +45,32 @@ impl Answer {
             content_type,
             declared: body.len() + 1,
             body,
+            stalled: None,
+            challenge: false,
+        }
+    }
+
+    fn stalled(content_type: &'static str, body: bool) -> Self {
+        Self {
+            content_type,
+            declared: 1,
+            body: vec![b'x'],
+            stalled: Some((
+                body,
+                Arc::new(tokio::sync::Semaphore::new(0)),
+                Arc::new(tokio::sync::Notify::new()),
+            )),
+            challenge: false,
+        }
+    }
+
+    fn token_challenge() -> Self {
+        Self {
+            content_type: BLOB_TYPE,
+            declared: 0,
+            body: Vec::new(),
+            stalled: None,
+            challenge: true,
         }
     }
 }
@@ -50,26 +81,61 @@ type Content = Arc<HashMap<String, Answer>>;
 /// requests interleave.
 async fn answer(content: Content, mut connection: TcpStream) {
     let path = read_path(&mut connection).await;
-    let reply = &content[&path];
+    let path = path.split('?').next().unwrap();
+    let reply = &content[path];
+    if reply.challenge {
+        let head = format!(
+            "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm=\"http://{}/token\",service=\"reg\",scope=\"repository:library/refused:pull\"\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            connection.local_addr().unwrap()
+        );
+        let _ = connection.write_all(head.as_bytes()).await;
+        return;
+    }
     let head = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         reply.content_type, reply.declared
     );
-    // peryx drops a body it will not finish reading, so the write ends in a closed pipe by design.
-    let _ = connection.write_all(head.as_bytes()).await;
-    let _ = connection.write_all(&reply.body).await;
+    if let Some((body, entered, release)) = &reply.stalled {
+        if *body {
+            let _ = connection.write_all(head.as_bytes()).await;
+        }
+        entered.add_permits(1);
+        release.notified().await;
+    } else {
+        // peryx drops a body it will not finish reading, so the write ends in a closed pipe by design.
+        let _ = connection.write_all(head.as_bytes()).await;
+        let _ = connection.write_all(&reply.body).await;
+    }
 }
 
 /// Serves `listener` for as long as `run` needs it, so the fixture leaves no accept loop behind.
-async fn serve_until_done<T>(listener: TcpListener, content: &Content, run: impl Future<Output = T>) -> T {
+async fn serve_until_done<T>(
+    listener: TcpListener,
+    content: Content,
+    peers: &mut tokio::task::JoinSet<()>,
+    run: impl Future<Output = T>,
+) -> T {
     let mut run = Box::pin(run);
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                tokio::spawn(answer(Arc::clone(content), accepted.unwrap().0));
+                peers.spawn(answer(Arc::clone(&content), accepted.unwrap().0));
             }
             outcome = &mut run => return outcome,
         }
+    }
+}
+
+async fn finish_peers(peers: &mut tokio::task::JoinSet<()>) {
+    peers.abort_all();
+    while let Some(result) = tokio::time::timeout(Duration::from_secs(5), peers.join_next())
+        .await
+        .expect("mirror peer did not stop")
+    {
+        assert!(matches!(
+            result.as_ref().map_err(tokio::task::JoinError::is_cancelled),
+            Ok(()) | Err(true)
+        ));
     }
 }
 
@@ -85,9 +151,18 @@ async fn synced_against(content: HashMap<String, Answer>, refs: &[String]) -> Ve
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let (state, _app) = proxy(&dir, &format!("http://{}/", listener.local_addr().unwrap()), false);
-    serve_until_done(
+    let content = Arc::new(content);
+    let stalled = content.values().find_map(|answer| {
+        answer
+            .stalled
+            .as_ref()
+            .map(|(_, entered, release)| (Arc::clone(entered), Arc::clone(release)))
+    });
+    let mut peers = tokio::task::JoinSet::new();
+    let run = serve_until_done(
         listener,
-        &Arc::new(content),
+        Arc::clone(&content),
+        &mut peers,
         mirror(
             &state.serving,
             &state.serving.indexes[0],
@@ -95,9 +170,24 @@ async fn synced_against(content: HashMap<String, Answer>, refs: &[String]) -> Ve
             refs,
             MirrorMode::Sync,
         ),
-    )
-    .await
-    .unwrap()
+    );
+    if let Some((entered, release)) = stalled {
+        let mut run = Box::pin(run);
+        let (permit, outcome) = tokio::time::timeout(Duration::from_secs(40), async {
+            tokio::join!(entered.acquire(), &mut run)
+        })
+        .await
+        .expect("stalled mirror run did not time out");
+        permit.unwrap().forget();
+        drop(run);
+        release.notify_waiters();
+        finish_peers(&mut peers).await;
+        outcome.unwrap()
+    } else {
+        let outcome = run.await;
+        finish_peers(&mut peers).await;
+        outcome.unwrap()
+    }
 }
 
 /// A body of exactly the manifest ceiling is a legitimate manifest, not an abusive one: the bound
@@ -116,6 +206,102 @@ async fn test_mirror_accepts_a_manifest_body_at_exactly_the_ceiling() {
     assert_eq!(rows[0].status, "synced");
 }
 
+#[rstest]
+#[case::before_headers(false)]
+#[case::during_blob_body(true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_cancelled_mirror_retries_a_blob_with_the_same_state(#[case] during_body: bool) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = vec![b'c'; 2 * 1024 * 1024 + 1];
+    let layer = vec![b'l'; 2 * 1024 * 1024 + 1];
+    let manifest = image_manifest_with_layers(&config, &[&layer]);
+    let content = Arc::new(HashMap::from([
+        (
+            manifest_path("library/app", "latest"),
+            Answer::whole(MANIFEST_TYPE, manifest),
+        ),
+        (
+            blob_path("library/app", &oci_digest(&config)),
+            Answer::whole(BLOB_TYPE, config.clone()),
+        ),
+        (
+            blob_path("library/app", &oci_digest(&layer)),
+            Answer::whole(BLOB_TYPE, layer.clone()),
+        ),
+    ]));
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _app) = proxy(&dir, &format!("http://{}/", listener.local_addr().unwrap()), false);
+    let mirror_app = |state: Arc<peryx_driver::AppState>| async move {
+        mirror(
+            &state.serving,
+            &state.serving.indexes[0],
+            IndexSettings::default(),
+            &["library/app:latest".to_owned()],
+            MirrorMode::Sync,
+        )
+        .await
+    };
+    let cancelled = tokio::spawn(mirror_app(Arc::clone(&state)));
+    let (manifest_connection, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("mirror manifest peer did not connect")
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        answer(Arc::clone(&content), manifest_connection),
+    )
+    .await
+    .expect("mirror manifest peer did not complete");
+    let (mut stalled, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("cancelled mirror blob peer did not connect")
+        .unwrap();
+    let path = tokio::time::timeout(Duration::from_secs(5), read_path(&mut stalled))
+        .await
+        .expect("cancelled mirror blob peer did not send headers");
+    let body = &content[&path].body;
+    if during_body {
+        stalled
+            .write_all(
+                format!("HTTP/1.1 200 OK\r\ncontent-type: {BLOB_TYPE}\r\ntransfer-encoding: chunked\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let prefix = &body[..2 * 1024 * 1024];
+        stalled
+            .write_all(format!("{:x}\r\n", prefix.len()).as_bytes())
+            .await
+            .unwrap();
+        stalled.write_all(prefix).await.unwrap();
+        stalled.write_all(b"\r\n").await.unwrap();
+        wait_for_staged_bytes(&dir).await;
+    }
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        state
+            .serving
+            .blobs
+            .head(&peryx_storage::blob::Digest::of(body))
+            .await
+            .unwrap(),
+        None
+    );
+    drop(stalled);
+
+    let mut peers = tokio::task::JoinSet::new();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(40),
+        serve_until_done(listener, Arc::clone(&content), &mut peers, mirror_app(state)),
+    )
+    .await;
+    finish_peers(&mut peers).await;
+    let rows = outcome.expect("mirror recovery did not complete").unwrap();
+
+    assert_eq!(rows.last().unwrap().reason, "3 synced, 0 cached, 0 errors");
+}
+
 /// Both failures land after the response head, which is where the run used to abort with nothing
 /// mirrored and no summary: the image selected behind the bad one was never even requested.
 #[rstest]
@@ -127,6 +313,8 @@ async fn test_mirror_accepts_a_manifest_body_at_exactly_the_ceiling() {
     Answer::truncated(MANIFEST_TYPE, br#"{"schemaVersion":2}"#.to_vec()),
     "upstream transfer failed: "
 )]
+#[case::before_headers(Answer::stalled(MANIFEST_TYPE, false), "upstream request timed out")]
+#[case::during_body(Answer::stalled(MANIFEST_TYPE, true), "upstream request timed out")]
 #[tokio::test]
 async fn test_mirror_reports_a_manifest_body_failure_and_mirrors_the_image_behind_it(
     #[case] refused: Answer,
@@ -171,7 +359,77 @@ async fn test_mirror_reports_a_manifest_body_failure_and_mirrors_the_image_behin
     );
     assert_eq!(rows.last().unwrap().reason, "3 synced, 0 cached, 1 errors");
     let reason = &rows[0].reason;
-    assert!(reason.starts_with(expected), "{reason}");
+    if expected == "upstream request timed out" {
+        assert_eq!(reason, expected);
+    } else {
+        assert!(reason.starts_with(expected), "{reason}");
+    }
+}
+
+#[rstest]
+#[case::blob_body(false, "5 synced, 0 cached, 1 errors")]
+#[case::token(true, "3 synced, 0 cached, 1 errors")]
+#[tokio::test]
+async fn test_mirror_reports_a_stalled_transfer_and_mirrors_the_image_behind_it(
+    #[case] token: bool,
+    #[case] summary: &str,
+) {
+    let config = br#"{"architecture":"amd64","os":"linux"}"#;
+    let layer = b"healthy-layer";
+    let healthy = image_manifest_with_layers(config, &[layer]);
+    let mut content = HashMap::from([
+        (
+            manifest_path("library/app", "latest"),
+            Answer::whole(MANIFEST_TYPE, healthy),
+        ),
+        (
+            blob_path("library/app", &oci_digest(config)),
+            Answer::whole(BLOB_TYPE, config.to_vec()),
+        ),
+        (
+            blob_path("library/app", &oci_digest(layer)),
+            Answer::whole(BLOB_TYPE, layer.to_vec()),
+        ),
+    ]);
+    if token {
+        content.insert(manifest_path("library/refused", "latest"), Answer::token_challenge());
+        content.insert("/token".to_owned(), Answer::stalled("application/json", true));
+    } else {
+        let refused_config = br#"{"architecture":"arm64","os":"linux"}"#;
+        let stalled = b"stalled-layer";
+        let refused = image_manifest_with_layers(refused_config, &[stalled]);
+        content.insert(
+            manifest_path("library/refused", "latest"),
+            Answer::whole(MANIFEST_TYPE, refused),
+        );
+        content.insert(
+            blob_path("library/refused", &oci_digest(refused_config)),
+            Answer::whole(BLOB_TYPE, refused_config.to_vec()),
+        );
+        content.insert(
+            blob_path("library/refused", &oci_digest(stalled)),
+            Answer::stalled(BLOB_TYPE, true),
+        );
+    }
+
+    let rows = synced_against(
+        content,
+        &["library/refused:latest".to_owned(), "library/app:latest".to_owned()],
+    )
+    .await;
+
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.repo == "library/refused" && row.status == "error")
+            .unwrap()
+            .reason,
+        "upstream request timed out"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.repo == "library/app" && row.status == "synced")
+    );
+    assert_eq!(rows.last().unwrap().reason, summary);
 }
 
 /// A child manifest whose body stops mid-stream is one error row of its level. The sibling the same

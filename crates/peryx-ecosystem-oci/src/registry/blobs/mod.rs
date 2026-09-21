@@ -8,7 +8,7 @@ use peryx_driver::range::unsatisfiable_range;
 
 use super::uploads::created;
 use super::*;
-use crate::error::{ErrorCode, error_response, gateway_error};
+use crate::error::{ErrorCode, TIMEOUT_MESSAGE, error_response, gateway_error, gateway_timeout};
 use crate::registry::acknowledge::{BlobAck, acknowledge_blob};
 use crate::registry::admission;
 use crate::registry::authority::{EpochCommit, claim_repository_home, commit_epoch};
@@ -395,6 +395,7 @@ enum BlobFetch {
 /// A failed blob ingest: the store rejected it (digest mismatch or io) or the transfer errored.
 #[derive(Debug)]
 pub enum DownloadError {
+    Timeout,
     Blob(BlobError),
     Stream(String),
 }
@@ -402,6 +403,7 @@ pub enum DownloadError {
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Timeout => formatter.write_str(TIMEOUT_MESSAGE),
             Self::Blob(err) => write!(formatter, "blob store error: {err}"),
             Self::Stream(err) => write!(formatter, "blob body read failed: {err}"),
         }
@@ -411,8 +413,8 @@ impl std::fmt::Display for DownloadError {
 impl std::error::Error for DownloadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Timeout | Self::Stream(_) => None,
             Self::Blob(err) => Some(err),
-            Self::Stream(_) => None,
         }
     }
 }
@@ -420,6 +422,16 @@ impl std::error::Error for DownloadError {
 impl From<BlobError> for DownloadError {
     fn from(err: BlobError) -> Self {
         Self::Blob(err)
+    }
+}
+
+impl From<reqwest::Error> for DownloadError {
+    fn from(err: reqwest::Error) -> Self {
+        if err.is_timeout() {
+            Self::Timeout
+        } else {
+            Self::Stream(err.to_string())
+        }
     }
 }
 
@@ -438,7 +450,7 @@ pub async fn download_blob(
     storage: &Digest,
     response: reqwest::Response,
 ) -> Result<u64, DownloadError> {
-    let stream = response.bytes_stream().map_err(|err| err.to_string());
+    let stream = response.bytes_stream().map_err(DownloadError::from);
     let bytes = ingest_blob(blobs, storage, Box::pin(stream)).await?;
     // Both callers reach here by pulling a blob this node did not host, so the projection records the
     // one thing a later read wants to know without probing the content store: the bytes are here and
@@ -447,12 +459,11 @@ pub async fn download_blob(
     Ok(bytes)
 }
 
-/// Drain a byte stream into a staged blob and commit it under `storage`. Takes the transfer error
-/// pre-stringified so this stays one instantiation a test can drive with a plain-string failure.
+/// Drain a byte stream into a staged blob and commit it under `storage`.
 async fn ingest_blob(
     blobs: &BlobStorage,
     storage: &Digest,
-    mut stream: std::pin::Pin<Box<dyn Stream<Item = Result<bytes::Bytes, String>> + Send>>,
+    mut stream: std::pin::Pin<Box<dyn Stream<Item = Result<bytes::Bytes, DownloadError>> + Send>>,
 ) -> Result<u64, DownloadError> {
     let mut pending = blobs.begin().await?;
     let mut bytes = 0u64;
@@ -460,8 +471,9 @@ async fn ingest_blob(
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(error) => {
+                drop(stream);
                 return Err(match pending.abort().await {
-                    Ok(()) => DownloadError::Stream(error),
+                    Ok(()) => error,
                     Err(cleanup) => DownloadError::Blob(cleanup),
                 });
             }
@@ -476,6 +488,7 @@ async fn ingest_blob(
 /// Map a failed ingest to a client response: a digest mismatch is the client's fault, the rest ours.
 fn download_error_response(err: DownloadError) -> Response {
     match err {
+        DownloadError::Timeout => gateway_timeout(),
         DownloadError::Blob(err) if err.kind() == BlobErrorKind::DigestMismatch => {
             let (expected, actual) = err.mismatch().expect("digest mismatch carries both digests");
             error_response(

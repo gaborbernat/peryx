@@ -708,7 +708,10 @@ async fn referrer_manifests(
     }
     let bytes = bounded_body(response, MAX_MANIFEST_BYTES)
         .await
-        .map_err(|error| invalid_referrers(&error.message()))?;
+        .map_err(|error| match error {
+            ServeError::Timeout => crate::upstream::UpstreamError::Timeout,
+            error => invalid_referrers(&error.message()),
+        })?;
     let document = serde_json::from_slice::<serde_json::Value>(&bytes)
         .map_err(|error| invalid_referrers(&format!("body is not valid JSON: {error}")))?;
     let Some(fields) = document.as_object() else {

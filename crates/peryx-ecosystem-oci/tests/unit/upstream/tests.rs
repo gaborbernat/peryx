@@ -1,9 +1,10 @@
+use std::io::Read as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use peryx_upstream::{CredentialFailure, CredentialProvider, CredentialRefresh, UpstreamClient, UpstreamTls};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Barrier;
 
 use super::*;
@@ -73,6 +74,7 @@ fn test_parse_bearer_ignores_unknown_parameters() {
 
 #[test]
 fn test_upstream_error_display() {
+    assert_eq!(UpstreamError::Timeout.to_string(), crate::error::TIMEOUT_MESSAGE);
     assert_eq!(
         UpstreamError::Status(StatusCode::NOT_FOUND).to_string(),
         "upstream returned 404 Not Found"
@@ -212,7 +214,7 @@ use base64::Engine as _;
 use wiremock::matchers::{header as match_header, method, path, query_param};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
-use crate::tests::{ResponseGate, gated_response, response_gate};
+use crate::tests::{ResponseGate, gated_response, observe_pending, response_gate};
 
 /// The matcher leaves the authenticated retry for the success mock.
 struct Unauthenticated;
@@ -579,19 +581,30 @@ async fn test_manifest_blocks_redirects_to_private_destinations(#[case] location
     assert!(error.to_string().contains(reason), "{error}");
 }
 
+#[rstest]
+#[case::silent(false)]
+#[case::trickled(true)]
 #[tokio::test]
-async fn test_manifest_has_the_shared_read_deadline() {
+async fn test_manifest_has_the_shared_read_deadline(#[case] trickle: bool) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/", listener.local_addr().unwrap());
     let client = upstream_client(&base, credentials(Auth::None));
     let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (trickle_tx, trickle_rx) = tokio::sync::oneshot::channel();
+    let (trickled_tx, trickled_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut connection, _) = listener.accept().await.unwrap();
         let mut request_bytes = [0; 4_096];
         let received = connection.read(&mut request_bytes).await.unwrap();
         assert!(request_bytes[..received].starts_with(b"GET /v2/library/nginx/manifests/latest"));
         request_seen_tx.send(()).unwrap();
+        if trickle_rx.await.is_ok() {
+            connection.write_all(b"HTTP/1.1 200 OK\r\n").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            connection.write_all(b"content-length: 1\r\n").await.unwrap();
+            trickled_tx.send(()).unwrap();
+        }
         let _ = release_rx.await;
     });
     let request = tokio::spawn(async move {
@@ -601,12 +614,270 @@ async fn test_manifest_has_the_shared_read_deadline() {
     });
     request_seen_rx.await.unwrap();
     tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    if trickle {
+        tokio::time::resume();
+        trickle_tx.send(()).unwrap();
+        trickled_rx.await.unwrap();
+        tokio::time::pause();
+    } else {
+        drop(trickle_tx);
+    }
     assert!(!request.is_finished());
-    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::advance((started + Duration::from_secs(30)).saturating_duration_since(tokio::time::Instant::now()))
+        .await;
 
-    assert!(matches!(request.await.unwrap(), Err(UpstreamError::Transport(_))));
+    assert!(matches!(request.await.unwrap(), Err(UpstreamError::Timeout)));
+    assert!(
+        (Duration::from_secs(30)..=Duration::from_secs(30) + Duration::from_millis(2))
+            .contains(&(tokio::time::Instant::now() - started))
+    );
     release_tx.send(()).unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_manifest_tls_handshake_has_the_shared_connect_deadline() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("https://{}/", listener.local_addr().unwrap());
+    let client = upstream_client(&base, credentials(Auth::None));
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.unwrap();
+        let mut hello = [0; 1];
+        connection.read_exact(&mut hello).await.unwrap();
+        accepted_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+    });
+    let request = tokio::spawn(async move {
+        Upstream::new()
+            .manifest(&client, "library/nginx", "latest", &TokenRealms::default())
+            .await
+    });
+    accepted_rx.await.unwrap();
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    tokio::time::advance(Duration::from_secs(11)).await;
+
+    assert!(matches!(request.await.unwrap(), Err(UpstreamError::Timeout)));
+    assert_eq!(tokio::time::Instant::now() - started, Duration::from_secs(11));
+    release_tx.send(()).unwrap();
+    server.await.unwrap();
+}
+
+const PROXY_CONNECT_TIMEOUT_CHILD: &str = "PERYX_OCI_PROXY_CONNECT_TIMEOUT_CHILD";
+
+#[tokio::test]
+async fn test_manifest_proxy_connect_has_the_shared_connect_deadline() {
+    if std::env::var_os(PROXY_CONNECT_TIMEOUT_CHILD).is_some() {
+        let client = upstream_client("https://registry.example/", credentials(Auth::None));
+        let request = tokio::spawn(async move {
+            Upstream::new()
+                .manifest(&client, "library/nginx", "latest", &TokenRealms::default())
+                .await
+        });
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(|| std::io::stdin().read_exact(&mut [0])),
+        )
+        .await
+        .expect("proxy parent did not acknowledge the child")
+        .unwrap()
+        .unwrap();
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        tokio::time::advance(Duration::from_secs(10)).await;
+
+        assert!(matches!(request.await.unwrap(), Err(UpstreamError::Timeout)));
+        assert!(
+            (Duration::from_secs(10)..=Duration::from_secs(10) + Duration::from_millis(2))
+                .contains(&(tokio::time::Instant::now() - started))
+        );
+        return;
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "upstream::tests::test_manifest_proxy_connect_has_the_shared_connect_deadline",
+            "--nocapture",
+        ])
+        .env(PROXY_CONNECT_TIMEOUT_CHILD, "1")
+        .env("HTTPS_PROXY", &proxy)
+        .env("https_proxy", &proxy)
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = command.spawn().unwrap();
+    let (mut connection, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("proxy child did not connect")
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(5), read_request(&mut connection))
+        .await
+        .expect("proxy child did not send CONNECT");
+    assert!(request.starts_with(b"CONNECT registry.example:443 HTTP/1.1\r\n"));
+    tokio::time::timeout(Duration::from_secs(5), child.stdin.as_mut().unwrap().write_all(&[1]))
+        .await
+        .expect("proxy parent did not acknowledge the child")
+        .unwrap();
+
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[tokio::test]
+async fn test_blob_progress_resets_the_shared_read_deadline() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let client = upstream_client(&base, credentials(Auth::None));
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let (chunks_tx, mut chunks_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, tokio::sync::oneshot::Receiver<()>)>(1);
+    let peer = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.unwrap();
+        let _ = read_request(&mut connection).await;
+        request_tx.send(()).unwrap();
+        connection
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        while let Some((chunk, consumed)) = chunks_rx.recv().await {
+            connection
+                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .await
+                .unwrap();
+            connection.write_all(&chunk).await.unwrap();
+            connection.write_all(b"\r\n").await.unwrap();
+            consumed.await.unwrap();
+        }
+        connection.write_all(b"0\r\n\r\n").await.unwrap();
+    });
+    let pull = tokio::spawn(async move {
+        Upstream::new()
+            .blob(
+                &client,
+                "library/nginx",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                &TokenRealms::default(),
+            )
+            .await
+            .unwrap()
+    });
+    request_rx.await.unwrap();
+    let mut response = pull.await.unwrap();
+    let mut bytes = Vec::new();
+    for chunk in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
+        let (consumer, pending) = observe_pending(async move {
+            let received = response.chunk().await;
+            (response, received)
+        });
+        pending.await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::time::resume();
+        let (consumed_tx, consumed_rx) = tokio::sync::oneshot::channel();
+        chunks_tx.send((chunk.to_vec(), consumed_rx)).await.unwrap();
+        let (next_response, received) = consumer.await.unwrap();
+        response = next_response;
+        bytes.extend_from_slice(&received.unwrap().unwrap());
+        consumed_tx.send(()).unwrap();
+    }
+
+    assert_eq!(bytes, b"onetwothree");
+    drop(chunks_tx);
+    assert_eq!(response.chunk().await.unwrap(), None);
+    tokio::time::timeout(Duration::from_secs(5), peer)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_blob_chunk_times_out_after_an_idle_interval() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let client = upstream_client(&base, credentials(Auth::None));
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, tokio::sync::oneshot::Receiver<()>)>(1);
+    let peer = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.unwrap();
+        let _ = read_request(&mut connection).await;
+        request_tx.send(()).unwrap();
+        connection
+            .write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        let (chunk, consumed) = chunk_rx.recv().await.unwrap();
+        connection
+            .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+            .await
+            .unwrap();
+        connection.write_all(&chunk).await.unwrap();
+        connection.write_all(b"\r\n").await.unwrap();
+        consumed.await.unwrap();
+        let _ = release_rx.await;
+    });
+    let pull = tokio::spawn(async move {
+        Upstream::new()
+            .blob(
+                &client,
+                "library/nginx",
+                "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                &TokenRealms::default(),
+            )
+            .await
+            .unwrap()
+    });
+    request_rx.await.unwrap();
+    let mut response = pull.await.unwrap();
+    let (consumer, pending) = observe_pending(async move {
+        let received = response.chunk().await;
+        (response, received)
+    });
+    pending.await.unwrap();
+    let (consumed_tx, consumed_rx) = tokio::sync::oneshot::channel();
+    chunk_tx.send((b"one".to_vec(), consumed_rx)).await.unwrap();
+    let (next_response, received) = consumer.await.unwrap();
+    response = next_response;
+    assert_eq!(received.unwrap().unwrap().as_ref(), b"one");
+    consumed_tx.send(()).unwrap();
+
+    let (consumer, pending) = observe_pending(async move {
+        let received = response.chunk().await;
+        (response, received)
+    });
+    pending.await.unwrap();
+    tokio::time::pause();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let (response, received) = consumer.await.unwrap();
+
+    assert!(received.unwrap_err().is_timeout());
+    assert!(tokio::time::Instant::now() >= deadline);
+    assert!(tokio::time::Instant::now() <= deadline + Duration::from_millis(1));
+    tokio::time::resume();
+    drop(response);
+    drop(chunk_tx);
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peer)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 /// A realm the operator did not name receives the token request but not the secret.
@@ -1269,7 +1540,7 @@ async fn test_token_flight_wait_has_a_deadline() {
 
     assert_eq!(
         wait_for_flight(receiver, Instant::now()).await.unwrap_err().to_string(),
-        "token exchange wait timed out"
+        "upstream request timed out"
     );
 }
 
@@ -1285,18 +1556,18 @@ async fn test_token_flight_retries_when_the_sender_closes() {
         credential.identity().provider(),
     );
     let (sender, _) = broadcast::channel(1);
-    upstream.inflight.lock().await.insert(cache_key.clone(), sender.clone());
+    upstream.inflight.lock().insert(cache_key.clone(), sender.clone());
     let close = async {
         tokio::task::yield_now().await;
         assert_eq!(sender.receiver_count(), 1);
-        upstream.tokens.lock().await.insert(
+        upstream.tokens.lock().insert(
             cache_key.clone(),
             credential.identity(),
             "retried".to_owned(),
             i64::MAX,
             0,
         );
-        upstream.inflight.lock().await.remove(&cache_key);
+        upstream.inflight.lock().remove(&cache_key);
         drop(sender);
     };
     let challenge = Bearer {
@@ -1333,7 +1604,7 @@ async fn test_token_flight_waiter_returns_the_leader_token() {
         credential.identity().provider(),
     );
     let (sender, _) = broadcast::channel(1);
-    upstream.inflight.lock().await.insert(cache_key.clone(), sender.clone());
+    upstream.inflight.lock().insert(cache_key.clone(), sender.clone());
     let challenge = Bearer {
         realm: "unreachable".to_owned(),
         service: None,
@@ -1365,7 +1636,7 @@ async fn test_token_flight_reuses_a_token_cached_after_the_registry_request() {
     let client = upstream_client(base, credentials.clone());
     let scope = "repository:library/nginx:pull";
     let cache_key = token_cache_key(base, scope, credential.identity().provider());
-    upstream.tokens.lock().await.insert(
+    upstream.tokens.lock().insert(
         cache_key.clone(),
         credential.identity(),
         "cached".to_owned(),
@@ -1418,7 +1689,303 @@ async fn test_token_exchange_has_a_deadline() {
     });
     let _connection = token_listener.accept().await.unwrap();
 
-    assert_eq!(manifest.await.unwrap(), "token exchange timed out");
+    assert_eq!(manifest.await.unwrap(), "upstream request timed out");
+}
+
+async fn recover_default_token_manifest(
+    upstream: Arc<Upstream>,
+    client: UpstreamClient,
+    listener: &tokio::net::TcpListener,
+) -> reqwest::Response {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let retry = tokio::spawn(async move {
+            upstream
+                .manifest(&client, "library/nginx", "latest", &TokenRealms::default())
+                .await
+        });
+        let (mut token, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("healthy token peer did not connect")
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), read_request(&mut token))
+            .await
+            .expect("healthy token peer did not send headers");
+        token
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\n\r\n{\"token\":\"tok\"}")
+            .await
+            .unwrap();
+        retry.await.unwrap().unwrap()
+    })
+    .await
+    .expect("healthy token recovery did not complete")
+}
+
+#[tokio::test]
+async fn test_token_exchange_deadline_does_not_reset_for_progress() {
+    let server = MockServer::start().await;
+    let base = format!("{}/", server.uri());
+    let token_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_base = format!("http://{}/", token_listener.local_addr().unwrap());
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .and(Unauthenticated)
+        .respond_with(challenge(&token_base))
+        .mount(&server)
+        .await;
+    let upstream = Arc::new(Upstream::new());
+    let client = upstream_client(&base, credentials(basic("alice", "pw")));
+    let started = tokio::time::Instant::now();
+    let timed_out = tokio::spawn({
+        let upstream = Arc::clone(&upstream);
+        let client = client.clone();
+        async move {
+            upstream
+                .manifest(&client, "library/nginx", "latest", &TokenRealms::default())
+                .await
+        }
+    });
+    let (token, _) = tokio::time::timeout(Duration::from_secs(5), token_listener.accept())
+        .await
+        .expect("token peer did not connect")
+        .unwrap();
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let (script_tx, mut script_rx) = tokio::sync::mpsc::channel::<(Vec<u8>, tokio::sync::oneshot::Sender<()>)>(1);
+    let peer = tokio::spawn(async move {
+        let mut token = token;
+        let _ = read_request(&mut token).await;
+        request_tx.send(()).unwrap();
+        while let Some((response, written)) = script_rx.recv().await {
+            token.write_all(&response).await.unwrap();
+            written.send(()).unwrap();
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), request_rx)
+        .await
+        .expect("token peer did not receive the request")
+        .unwrap();
+    let token_requested = tokio::time::Instant::now();
+    let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+    script_tx
+        .send((
+            b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\n\r\n{\"token\":\"a".to_vec(),
+            written_tx,
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), written_rx)
+        .await
+        .expect("token peer did not write the first progress")
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+    script_tx.send((b"b".to_vec(), written_tx)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), written_rx)
+        .await
+        .expect("token peer did not write the second progress")
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout_at(token_requested + Duration::from_secs(35), timed_out)
+            .await
+            .expect("token exchange did not time out")
+            .unwrap(),
+        Err(UpstreamError::Timeout)
+    ));
+    let finished = tokio::time::Instant::now();
+    assert!((started + Duration::from_secs(30)..token_requested + Duration::from_secs(50)).contains(&finished));
+    drop(script_tx);
+    tokio::time::timeout(Duration::from_secs(5), peer)
+        .await
+        .unwrap()
+        .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .and(match_header("authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let response = recover_default_token_manifest(Arc::clone(&upstream), client.clone(), &token_listener).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+async fn redirect_then_refresh_token(
+    listener: &tokio::net::TcpListener,
+    old: &str,
+    new: &str,
+) -> (tokio::net::TcpStream, tokio::time::Instant) {
+    let (mut initial, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("initial token peer did not connect")
+        .unwrap();
+    let request = String::from_utf8(
+        tokio::time::timeout(Duration::from_secs(5), read_request(&mut initial))
+            .await
+            .expect("initial token peer did not receive the request"),
+    )
+    .unwrap();
+    assert!(request.starts_with("GET /token?scope=repository%3Alibrary%2Fnginx%3Apull"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains(&format!("\r\nauthorization: {old}").to_ascii_lowercase())
+    );
+    let requested = tokio::time::Instant::now();
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    initial
+        .write_all(b"HTTP/1.1 302 Found\r\nlocation: /redirect\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let (mut redirected, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("redirect token peer did not connect")
+        .unwrap();
+    let request = String::from_utf8(
+        tokio::time::timeout(Duration::from_secs(5), read_request(&mut redirected))
+            .await
+            .expect("redirect token peer did not receive the request"),
+    )
+    .unwrap();
+    assert!(request.starts_with("GET /redirect"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains(&format!("\r\nauthorization: {old}").to_ascii_lowercase())
+    );
+    redirected
+        .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let (mut refreshed, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("refreshed token peer did not connect")
+        .unwrap();
+    let request = String::from_utf8(
+        tokio::time::timeout(Duration::from_secs(5), read_request(&mut refreshed))
+            .await
+            .expect("refreshed token peer did not receive the request"),
+    )
+    .unwrap();
+    assert!(request.starts_with("GET /token?scope=repository%3Alibrary%2Fnginx%3Apull"));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains(&format!("\r\nauthorization: {new}").to_ascii_lowercase())
+    );
+    (refreshed, requested)
+}
+
+#[tokio::test]
+async fn test_token_exchange_deadline_spans_a_redirect_and_credential_refresh() {
+    let server = MockServer::start().await;
+    let base = format!("{}/", server.uri());
+    let token_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_base = format!("http://{}/", token_listener.local_addr().unwrap());
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .and(Unauthenticated)
+        .respond_with(challenge(&token_base))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/nginx/manifests/latest"))
+        .and(match_header("authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let credentials = CredentialProvider::refreshing(
+        basic("alice", "old"),
+        CredentialRefresh {
+            interval: Duration::from_mins(1),
+            on_unauthorized: true,
+            failure: CredentialFailure::Fail,
+        },
+        {
+            let refreshes = Arc::clone(&refreshes);
+            move || {
+                let refreshes = Arc::clone(&refreshes);
+                async move {
+                    refreshes.fetch_add(1, Ordering::SeqCst);
+                    Ok(basic("alice", "new"))
+                }
+            }
+        },
+    );
+    let upstream = Arc::new(Upstream::new());
+    let client = upstream_client(&base, credentials);
+    let started = tokio::time::Instant::now();
+    let timed_out = tokio::spawn({
+        let upstream = Arc::clone(&upstream);
+        let client = client.clone();
+        let token_base = token_base.clone();
+        async move {
+            upstream
+                .manifest(&client, "library/nginx", "latest", &configured_realms(&[&token_base]))
+                .await
+        }
+    });
+    let old = basic_header("alice", "old");
+    let new = basic_header("alice", "new");
+    let (mut refreshed_token, token_requested) = redirect_then_refresh_token(&token_listener, &old, &new).await;
+    let deadline = token_requested + Duration::from_secs(30);
+    refreshed_token
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\nconnection: close\r\n\r\n{\"token\":\"a")
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout_at(deadline + Duration::from_secs(5), timed_out)
+            .await
+            .expect("redirected token exchange did not time out")
+            .unwrap(),
+        Err(UpstreamError::Timeout)
+    ));
+    let finished = tokio::time::Instant::now();
+    assert!(finished >= started + Duration::from_secs(30));
+    assert!(finished < token_requested + Duration::from_secs(50));
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    drop(refreshed_token);
+
+    let response = tokio::time::timeout(Duration::from_secs(5), async {
+        let retry = tokio::spawn({
+            let upstream = Arc::clone(&upstream);
+            let client = client.clone();
+            let token_base = token_base.clone();
+            async move {
+                upstream
+                    .manifest(&client, "library/nginx", "latest", &configured_realms(&[&token_base]))
+                    .await
+            }
+        });
+        let (mut healthy, _) = token_listener.accept().await.unwrap();
+        let request = String::from_utf8(read_request(&mut healthy).await).unwrap();
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("\r\nauthorization: {new}").to_ascii_lowercase())
+        );
+        healthy
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\n\r\n{\"token\":\"tok\"}")
+            .await
+            .unwrap();
+        retry.await.unwrap().unwrap()
+    })
+    .await
+    .expect("healthy redirected token recovery did not complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+}
+
+async fn read_request(connection: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buffer = [0; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = connection.read(&mut buffer).await.unwrap();
+        assert_ne!(read, 0, "request ended before its headers");
+        request.extend_from_slice(&buffer[..read]);
+    }
+    request
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1458,13 +2025,13 @@ async fn test_send_coalesces_concurrent_token_exchanges() {
     for outcome in outcomes {
         assert_eq!(outcome.unwrap(), StatusCode::OK);
     }
-    let cached = upstream.tokens.lock().await.values();
+    let cached = upstream.tokens.lock().values();
     assert_eq!(cached, ["tok"]);
 }
 
 /// The fixture verifies waiter re-election after leader failure.
 struct FailThenIssueToken {
-    calls: AtomicUsize,
+    calls: Arc<AtomicUsize>,
     first: ResponseGate,
 }
 impl wiremock::Respond for FailThenIssueToken {
@@ -1492,7 +2059,7 @@ async fn test_send_reelects_a_leader_after_a_failed_exchange() {
     Mock::given(method("GET"))
         .and(path("/token"))
         .respond_with(FailThenIssueToken {
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
             first: first.clone(),
         })
         .expect(2)
@@ -1528,6 +2095,125 @@ async fn test_send_reelects_a_leader_after_a_failed_exchange() {
                 .count(),
         ),
         (2, 1, 1)
+    );
+}
+
+async fn accept_bearer_challenge(
+    registry: &tokio::net::TcpListener,
+    realm: &str,
+    content_length: usize,
+) -> tokio::net::TcpStream {
+    let (mut connection, _) = tokio::time::timeout(Duration::from_secs(5), registry.accept())
+        .await
+        .expect("registry request did not arrive")
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(5), read_request(&mut connection))
+        .await
+        .expect("registry request was incomplete");
+    assert!(request.starts_with(b"GET /v2/library/nginx/manifests/latest HTTP/1.1\r\n"));
+    connection
+        .write_all(
+            format!(
+                "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer realm=\"{realm}\",service=reg,scope=\"repository:library/nginx:pull\"\r\ncontent-length: {content_length}\r\nconnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    connection
+}
+
+async fn await_follower_drop(follower: &mut tokio::net::TcpStream) {
+    let mut eof = [0];
+    let read = tokio::time::timeout(Duration::from_secs(5), follower.read(&mut eof))
+        .await
+        .expect("follower did not drop its incomplete challenge response");
+    assert!(matches!(
+        read.as_ref().map_err(std::io::Error::kind),
+        Ok(0) | Err(std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_send_reelects_a_token_leader_after_cancellation() {
+    let registry = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", registry.local_addr().unwrap());
+    let token_base = format!("http://{}/", token.local_addr().unwrap());
+    let realm = format!("{token_base}token");
+    let upstream = Arc::new(Upstream::new());
+    let client = upstream_client(&base, credentials(basic("alice", "pw")));
+    let manifest = |upstream: Arc<Upstream>, client: UpstreamClient, token_base: String| async move {
+        upstream
+            .manifest(&client, "library/nginx", "latest", &configured_realms(&[&token_base]))
+            .await
+    };
+    let leader = tokio::spawn(manifest(Arc::clone(&upstream), client.clone(), token_base.clone()));
+    let mut initial = accept_bearer_challenge(&registry, &realm, 0).await;
+    initial.shutdown().await.unwrap();
+    let (mut first_token, _) = tokio::time::timeout(Duration::from_secs(5), token.accept())
+        .await
+        .expect("leader did not request a token")
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(5), read_request(&mut first_token))
+        .await
+        .expect("leader token request was incomplete");
+    assert!(request.starts_with(b"GET /token?"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let waiter = tokio::spawn(manifest(upstream, client, token_base));
+    let mut follower = accept_bearer_challenge(&registry, &realm, 1).await;
+    await_follower_drop(&mut follower).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), token.accept())
+            .await
+            .is_err(),
+        "follower started a replacement token exchange before the leader was cancelled"
+    );
+    leader.abort();
+    assert!(leader.await.unwrap_err().is_cancelled());
+    let _ = first_token
+        .write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+        .await;
+    let _ = first_token.shutdown().await;
+    drop(follower);
+    let (mut replacement, _) = tokio::time::timeout_at(deadline, token.accept())
+        .await
+        .expect("waiter did not replace the cancelled token leader")
+        .unwrap();
+    let request = tokio::time::timeout_at(deadline, read_request(&mut replacement))
+        .await
+        .expect("replacement token request was incomplete");
+    assert!(request.starts_with(b"GET /token?"));
+    replacement
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\nconnection: close\r\n\r\n{\"token\":\"tok\"}")
+        .await
+        .unwrap();
+    replacement.shutdown().await.unwrap();
+
+    let (mut replay, _) = tokio::time::timeout_at(deadline, registry.accept())
+        .await
+        .expect("waiter did not replay the authenticated registry request")
+        .unwrap();
+    let request = String::from_utf8(
+        tokio::time::timeout_at(deadline, read_request(&mut replay))
+            .await
+            .expect("authenticated replay was incomplete"),
+    )
+    .unwrap();
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("\r\nauthorization: bearer tok\r\n")
+    );
+    replay
+        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    replay.shutdown().await.unwrap();
+
+    assert_eq!(
+        timeout_at(deadline, waiter).await.unwrap().unwrap().unwrap().status(),
+        StatusCode::OK
     );
 }
 

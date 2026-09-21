@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::task::Poll;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
@@ -56,6 +57,8 @@ use peryx_storage::meta::MetaStore;
 use peryx_upstream::UpstreamClient;
 use rstest::rstest;
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tower::ServiceExt as _;
 
 use crate::IndexSettings;
@@ -858,6 +861,87 @@ async fn send_with(
     let headers = response.headers().clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     (status, headers, body)
+}
+
+pub async fn stalled_upstream_response(
+    app: &axum::Router,
+    listener: &TcpListener,
+    uri: &str,
+    body: bool,
+) -> (StatusCode, HeaderMap, Bytes) {
+    let app = app.clone();
+    let uri = uri.to_owned();
+    let request = tokio::spawn(async move { send(&app, Method::GET, &uri).await });
+    let (mut peer, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .expect("stalled upstream peer did not connect")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), read_upstream_path(&mut peer))
+        .await
+        .expect("stalled upstream peer did not send headers");
+    if body {
+        peer.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/vnd.oci.image.index.v1+json\r\ncontent-length: 1\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    }
+    let response = tokio::time::timeout(Duration::from_secs(40), request)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peer.shutdown())
+        .await
+        .expect("stalled upstream peer did not close")
+        .unwrap();
+    response
+}
+
+pub async fn read_upstream_path(peer: &mut tokio::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let mut chunk = [0; 1024];
+        let read = peer.read(&mut chunk).await.unwrap();
+        assert_ne!(read, 0, "upstream request ended before its headers");
+        request.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8(request)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_owned()
+}
+
+fn allow_not_found<T>(result: std::io::Result<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            None
+        }
+    }
+}
+
+pub fn staged_usage(dir: &TempDir) -> (usize, u64) {
+    allow_not_found(std::fs::read_dir(dir.path().join("blobs"))).map_or((0, 0), |entries| {
+        entries
+            .map(|entry| entry.expect("could not inspect a staged blob"))
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".peryx-stage-"))
+            .fold((0, 0), |(files, bytes), entry| {
+                allow_not_found(entry.metadata()).map_or((files, bytes), |metadata| (files + 1, bytes + metadata.len()))
+            })
+    })
+}
+
+pub async fn wait_for_staged_bytes(dir: &TempDir) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while staged_usage(dir).1 == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("upstream bytes did not reach staging");
 }
 
 fn assert_registry_version(headers: &HeaderMap) {

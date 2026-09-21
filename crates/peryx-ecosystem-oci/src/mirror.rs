@@ -312,7 +312,7 @@ fn descriptors_of(
 /// side, and after one of those no later `cached` or `synced` row is a claim anything checked.
 const fn reference_scoped(err: &DownloadError) -> bool {
     match err {
-        DownloadError::Stream(_) => true,
+        DownloadError::Timeout | DownloadError::Stream(_) => true,
         DownloadError::Blob(err) => matches!(err.kind(), BlobErrorKind::DigestMismatch),
     }
 }

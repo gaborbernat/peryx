@@ -12,6 +12,18 @@ fn test_detail_html_snapshot() {
 }
 
 #[test]
+fn test_detail_html_omits_the_internal_authoritative_version() {
+    let mut detail = sample_detail();
+    detail.files[0].authoritative_version = Some("1.0.post1".to_owned());
+
+    let html = render_detail_html(&detail);
+
+    assert!(!html.contains("authoritative_version"));
+    assert!(!html.contains("authoritative-version"));
+    assert!(!html.contains("1.0.post1"));
+}
+
+#[test]
 fn test_index_html_snapshot() {
     insta::assert_snapshot!("index_html", render_index_html(&sample_list()));
 }
@@ -35,6 +47,7 @@ fn test_render_detail_html_non_sha256_metadata_hash_advertises_true() {
             dist_info_metadata: CoreMetadata::Hashes(hashes),
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         }],
     });
 
@@ -60,6 +73,7 @@ fn test_render_detail_html_falls_back_to_non_sha256_hash_fragment() {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         }],
     });
 
@@ -84,6 +98,7 @@ fn test_render_detail_html_escapes_hash_fragment() {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         }],
     });
 
@@ -110,6 +125,7 @@ fn test_render_detail_html_escapes_core_metadata_hash() {
             dist_info_metadata: CoreMetadata::Hashes(hashes),
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         }],
     });
 

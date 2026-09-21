@@ -123,6 +123,7 @@ fn test_policy_dry_run_scopes_each_ecosystem_to_its_own_indexes() {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     })

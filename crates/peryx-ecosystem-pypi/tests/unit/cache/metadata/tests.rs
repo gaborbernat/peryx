@@ -412,6 +412,7 @@ fn hosted_upload(state: &ServingState, index: &str, artifact: &Digest, trashed: 
             dist_info_metadata: crate::CoreMetadata::Absent,
             gpg_sig: None,
             provenance: crate::Provenance::Absent,
+            authoritative_version: None,
         },
         trashed,
     };

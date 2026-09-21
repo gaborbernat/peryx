@@ -596,6 +596,7 @@ fn uploaded(filename: &str, version: &str, digest: &str, size: u64) -> Uploaded 
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     }

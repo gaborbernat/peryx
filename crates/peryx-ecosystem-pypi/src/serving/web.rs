@@ -26,9 +26,7 @@ use crate::store::PypiStore as _;
 use crate::view::{
     AttestationView, FileView, MetadataBlock, MetadataView, ProjectView, ProvenanceSource, ProvenanceView, SubjectMatch,
 };
-use crate::{
-    file_matches_version, normalize_name, normalize_name_cow, parse_version, to_json, ui_meta, ui_project_from_detail,
-};
+use crate::{normalize_name, normalize_name_cow, parse_version, ui_meta, ui_project_from_detail, versions_match};
 
 pub(super) const BROWSE_PATHS: &[&str] = &[
     "/upload",
@@ -714,9 +712,7 @@ pub(super) async fn project_page(
     else {
         return Ok(None);
     };
-    // `to_json` serializes the detail, so parsing it straight back cannot fail.
-    let value = serde_json::from_str(&to_json(&resolved.detail)).expect("to_json emits JSON that round-trips");
-    let mut ui = ui_project_from_detail(&value);
+    let mut ui = ui_project_from_detail(&resolved.detail);
     if let Some(display) = state
         .meta
         .get_project(&index.name, &normalized)
@@ -755,7 +751,17 @@ pub(super) async fn project_page(
     // A pre-PEP 700 upstream names no versions, so no release owns a file and the newest sibling stands in.
     let sibling = match default.as_deref() {
         Some(version) => metadata_file(&ui, version),
-        None => ui.files.iter().rev().find(|file| file.has_metadata),
+        None => ui.files.iter().rev().find(|file| {
+            file.has_metadata
+                && file.lifecycle.is_none()
+                && resolved
+                    .detail
+                    .files
+                    .iter()
+                    .find(|candidate| candidate.filename == file.filename)
+                    .and_then(crate::File::release_version)
+                    .is_some()
+        }),
     };
     // The view model carries the digest as text for the UI, so the sibling is only reachable once
     // that text parses back into the content address the blob store is keyed by.
@@ -939,16 +945,20 @@ fn default_version(project: &ProjectView) -> Option<String> {
 }
 
 /// The file whose PEP 658 metadata sibling describes `version`, so the page never borrows another
-/// release's metadata. An active file outranks a yanked one, and the filename settles the rest, so a
-/// release with several siblings always renders the same one.
+/// release's metadata. The filename settles a release's active siblings deterministically.
 fn metadata_file<'a>(project: &'a ProjectView, version: &str) -> Option<&'a FileView> {
     project
         .files
         .iter()
-        .filter(|file| file.has_metadata && file_matches_version(&file.filename, version))
-        .min_by(|left, right| {
-            (left.lifecycle.is_some(), &left.filename).cmp(&(right.lifecycle.is_some(), &right.filename))
+        .filter(|file| {
+            file.has_metadata
+                && file.lifecycle.is_none()
+                && file
+                    .release
+                    .as_deref()
+                    .is_some_and(|release| versions_match(release, version))
         })
+        .min_by(|left, right| left.filename.cmp(&right.filename))
 }
 
 /// Fetch and parse the PEP 658 metadata sibling of `file` into the neutral view model.

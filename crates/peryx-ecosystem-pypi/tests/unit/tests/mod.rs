@@ -90,6 +90,7 @@ pub fn register_publication(
             dist_info_metadata: crate::CoreMetadata::Absent,
             gpg_sig: None,
             provenance: crate::Provenance::Absent,
+            authoritative_version: None,
         }],
     });
     meta.put_cached_page(crate::store::CachedPageWrite {

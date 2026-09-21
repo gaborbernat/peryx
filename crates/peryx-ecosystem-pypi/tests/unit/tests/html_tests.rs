@@ -188,6 +188,17 @@ fn test_parse_yanked_empty_and_core_metadata_values() {
     assert_eq!(file.core_metadata, CoreMetadata::Available);
 }
 
+#[rstest::rstest]
+#[case::underscore("authoritative_version")]
+#[case::kebab("authoritative-version")]
+fn test_parse_detail_html_ignores_authoritative_version_injection(#[case] attribute: &str) {
+    let html = format!(r#"<a href="pkg-1.0.tar.gz" {attribute}="9.9">pkg-1.0.tar.gz</a>"#);
+
+    let file = &parse_detail_html("pkg", &html, &base()).unwrap().files[0];
+
+    assert_eq!(file.authoritative_version, None);
+}
+
 #[test]
 fn test_parse_legacy_dist_info_metadata_and_no_hash() {
     let html = r#"<a href="x-1.tar.gz" data-dist-info-metadata="sha256=fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9">x-1.tar.gz</a>"#;

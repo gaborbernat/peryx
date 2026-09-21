@@ -39,5 +39,6 @@ fn sample_file(project: &str, index: usize) -> File {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::default(),
+        authoritative_version: None,
     }
 }

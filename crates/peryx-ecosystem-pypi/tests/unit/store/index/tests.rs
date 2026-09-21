@@ -507,6 +507,7 @@ mod generation {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: crate::simple::Provenance::Absent,
+            authoritative_version: None,
         }
     }
 

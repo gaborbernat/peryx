@@ -620,10 +620,11 @@ pub fn local_detail(state: &ServingState, name: &str, project: &str) -> Result<O
     let mut files = Vec::with_capacity(entries.len());
     let mut versions = BTreeSet::new();
     for (_filename, bytes) in entries {
-        let uploaded: Uploaded = serde_json::from_slice(&bytes)?;
+        let mut uploaded: Uploaded = serde_json::from_slice(&bytes)?;
         if uploaded.trashed.is_some() {
             continue;
         }
+        uploaded.file.authoritative_version = Some(uploaded.version.clone());
         versions.insert(uploaded.version);
         files.push(uploaded.file);
     }

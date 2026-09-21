@@ -5,7 +5,7 @@ use crate::quota::PendingQuota;
 use crate::store::PypiStore as _;
 use crate::store::{Guard, PromotedRelease};
 use crate::upload::{self, PreparedUpload, TrashInfo, Uploaded};
-use crate::{ProjectStatus, Yanked, file_matches_version, parse_distribution_filename, to_json, versions_match};
+use crate::{ProjectStatus, Yanked, inferred_release_version, parse_distribution_filename, to_json, versions_match};
 use peryx_core::path::local_artifact_url;
 use peryx_driver::state::ServingState;
 use peryx_index::{Index, IndexKind};
@@ -552,8 +552,8 @@ async fn served_filenames(
     Ok(detail
         .files
         .into_iter()
+        .filter(|file| version.is_none_or(|version| file.matches_version(version)))
         .map(|file| file.filename)
-        .filter(|filename| version.is_none_or(|version| file_matches_version(filename, version)))
         .collect())
 }
 
@@ -571,7 +571,10 @@ fn hidden_filenames(
         .list_overrides(hosted, normalized)?
         .into_iter()
         .filter(|(filename, record)| {
-            record.hidden && version.is_none_or(|version| file_matches_version(filename, version))
+            record.hidden
+                && version.is_none_or(|version| {
+                    inferred_release_version(filename).is_some_and(|candidate| versions_match(candidate, version))
+                })
         })
         .map(|(filename, _)| filename)
         .collect())

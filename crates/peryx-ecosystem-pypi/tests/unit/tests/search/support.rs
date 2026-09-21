@@ -70,6 +70,7 @@ pub(super) fn put_uploaded_package_with_metadata(
             )])),
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     };
@@ -98,6 +99,7 @@ pub(super) fn put_uploaded_file(state: &ServingState, normalized: &str, version:
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     };
@@ -247,6 +249,7 @@ pub(super) fn file_with_hash(filename: &str, sha256: &str, requires_python: Opti
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::Absent,
+        authoritative_version: None,
     }
 }
 

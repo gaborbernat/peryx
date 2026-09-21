@@ -159,6 +159,7 @@ pub use changelog::{
     CHANGELOG_PAGE_SIZE, ChangelogEntry, ChangelogRequest, ChangelogRequestError, dispatch_changelog_request,
     parse_changelog_request, render_changelog_fault, render_changelog_response, render_last_serial_response,
 };
+pub(crate) use filename::inferred_release_version;
 pub use filename::{
     DistributionFilename, DistributionFilenameError, DistributionKind, distribution_name_segment,
     distribution_python_tag, distribution_version_segment, parse_distribution_filename,

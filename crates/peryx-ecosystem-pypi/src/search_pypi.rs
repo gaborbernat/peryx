@@ -348,6 +348,7 @@ fn local_detail(
         if uploaded.trashed.is_some() {
             continue;
         }
+        uploaded.file.authoritative_version = Some(uploaded.version.clone());
         versions.insert(uploaded.version);
         if let Some(sha256) = uploaded.file.hashes.get("sha256") {
             uploaded.file.url = local_artifact_url(serve_route, sha256, &uploaded.file.filename);
@@ -506,7 +507,12 @@ fn content_source(ctx: &IndexerCtx<'_>, index: &Index, normalized: &str) -> Resu
 }
 
 fn metadata_doc(ctx: &IndexerCtx<'_>, detail: &ProjectDetail) -> Result<Option<CoreMetadataDoc>, SearchError> {
-    for file in detail.files.iter().rev() {
+    for file in detail
+        .files
+        .iter()
+        .rev()
+        .filter(|file| file.release_version().is_some() && matches!(file.yanked, Yanked::No))
+    {
         let Some(artifact_sha256) = file.hashes.get("sha256") else {
             continue;
         };

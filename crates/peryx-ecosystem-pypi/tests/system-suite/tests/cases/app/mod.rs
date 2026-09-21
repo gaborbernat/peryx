@@ -99,6 +99,7 @@ fn uploaded_record_json(digest: &Digest) -> Vec<u8> {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     })

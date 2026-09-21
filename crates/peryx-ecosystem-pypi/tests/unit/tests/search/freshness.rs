@@ -113,6 +113,7 @@ async fn test_search_rebuilds_after_yank_and_hide_overrides() {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             }],
         },
     );

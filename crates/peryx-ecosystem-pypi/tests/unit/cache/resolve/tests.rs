@@ -73,6 +73,7 @@ fn test_merge_candidates_keeps_the_first_file_owner() {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::default(),
+                authoritative_version: None,
             }],
         },
         last_serial: None,
@@ -114,6 +115,7 @@ fn test_present_file_advertises_cached_generated_metadata() {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::default(),
+        authoritative_version: None,
     };
 
     let file = present_file(file, "pypi", &BTreeMap::from([(artifact.clone(), metadata.clone())]));
@@ -143,6 +145,7 @@ fn test_present_file_content_addresses_when_sha256_accompanies_other_hashes() {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::default(),
+        authoritative_version: None,
     };
 
     let file = present_file(file, "pypi", &BTreeMap::new());
@@ -169,6 +172,7 @@ fn test_present_file_drops_gpg_sig_once_url_points_at_peryx() {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: Some(true),
         provenance: Provenance::default(),
+        authoritative_version: None,
     };
 
     let file = present_file(file, "pypi", &BTreeMap::new());
@@ -194,6 +198,7 @@ fn test_present_file_keeps_gpg_sig_when_url_stays_upstream() {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: Some(true),
         provenance: Provenance::default(),
+        authoritative_version: None,
     };
 
     let file = present_file(file, "pypi", &BTreeMap::new());

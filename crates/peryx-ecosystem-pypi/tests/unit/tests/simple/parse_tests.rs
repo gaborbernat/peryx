@@ -404,6 +404,7 @@ fn test_legacy_project_json_groups_unparseable_version_and_dashless_file() {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             },
             File {
                 filename: "dashless".to_owned(),
@@ -417,6 +418,7 @@ fn test_legacy_project_json_groups_unparseable_version_and_dashless_file() {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             },
         ],
     };
@@ -458,6 +460,7 @@ fn test_legacy_project_json_maps_legacy_filename_shapes() {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         })
         .collect(),
     };

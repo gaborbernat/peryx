@@ -85,6 +85,7 @@ fn artifact_detail(base: &str) -> ProjectDetail {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             },
             File {
                 filename: "demo-1.0.tar.gz".to_owned(),
@@ -98,6 +99,7 @@ fn artifact_detail(base: &str) -> ProjectDetail {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             },
             File {
                 filename: "demo-1.0.zip".to_owned(),
@@ -111,6 +113,7 @@ fn artifact_detail(base: &str) -> ProjectDetail {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             },
         ],
     }
@@ -921,6 +924,7 @@ async fn sync_files_reports_invalid_metadata_and_artifact_digests() {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::Absent,
+        authoritative_version: None,
     };
     let detail = ProjectDetail {
         meta: Meta::default(),
@@ -1196,6 +1200,7 @@ async fn sync_overlaps_artifact_transfers_up_to_the_upstream_ceiling() {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             }
         })
         .collect::<Vec<_>>();

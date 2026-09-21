@@ -6,17 +6,14 @@ use std::path::Path;
 use serde_json::{Map, Value, json};
 
 use crate::version::{VersionKey, version_key};
-use crate::{
-    CoreMetadataDoc, File, ProjectDetail, Yanked, distribution_python_tag, distribution_version_segment,
-    file_matches_version, parse_distribution_filename, parse_version, sorted_desc,
-};
+use crate::{CoreMetadataDoc, File, ProjectDetail, Yanked, distribution_python_tag, sorted_desc, versions_match};
 
 /// Bucket a project's files by release version in a single pass, so rendering every release is linear
 /// in the number of files rather than files times versions.
 fn group_by_version(detail: &ProjectDetail) -> OrderedMap<VersionKey, Vec<&File>> {
     let mut groups: OrderedMap<VersionKey, Vec<&File>> = OrderedMap::new();
     for file in &detail.files {
-        if let Some(candidate) = distribution_version_segment(&file.filename) {
+        if let Some(candidate) = file.release_version() {
             groups.entry(version_key(candidate)).or_default().push(file);
         }
     }
@@ -65,7 +62,7 @@ pub fn render_legacy_json_with_serial(
 }
 
 fn legacy_info(detail: &ProjectDetail, version: Option<&str>, metadata: Option<&CoreMetadataDoc>) -> Value {
-    let first_file = version.and_then(|version| release_files(detail, version).next());
+    let first_file = version.and_then(|version| release_files(detail, version).find(|file| !yanked_bool(&file.yanked)));
     let requires_python = first_file.and_then(|file| file.requires_python.as_deref());
     let yanked = version.is_some_and(|version| release_yanked(detail, version));
     let yanked_reason = version.and_then(|version| release_yanked_reason(detail, version));
@@ -184,21 +181,18 @@ fn release_versions(detail: &ProjectDetail) -> Vec<String> {
     let mut versions: Vec<String> = detail.versions.clone();
     let mut seen: BTreeSet<VersionKey> = detail.versions.iter().map(|version| version_key(version)).collect();
     for file in &detail.files {
-        let Some(version) = filename_version(&file.filename) else {
+        let Some(version) = file.release_version() else {
             continue;
         };
-        if seen.insert(version_key(&version)) {
-            versions.push(version);
+        if seen.insert(version_key(version)) {
+            versions.push(version.to_owned());
         }
     }
     sorted_desc(&versions)
 }
 
 fn release_files<'a>(detail: &'a ProjectDetail, version: &'a str) -> impl Iterator<Item = &'a File> + 'a {
-    detail
-        .files
-        .iter()
-        .filter(move |file| file_matches_version(&file.filename, version))
+    detail.files.iter().filter(move |file| file.matches_version(version))
 }
 
 fn release_yanked(detail: &ProjectDetail, version: &str) -> bool {
@@ -230,21 +224,6 @@ fn yanked_reason(yanked: &Yanked) -> Option<&str> {
         Yanked::Reason(reason) => Some(reason),
         Yanked::No | Yanked::Yes => None,
     }
-}
-
-fn filename_version(filename: &str) -> Option<String> {
-    let parsed = parse_distribution_filename(filename).ok()?;
-    Some(parsed.version.to_string())
-}
-
-fn versions_match(left: &str, right: &str) -> bool {
-    if left == right {
-        return true;
-    }
-    let (Some(left), Some(right)) = (parse_version(left), parse_version(right)) else {
-        return false;
-    };
-    left == right
 }
 
 fn packagetype(filename: &str) -> &'static str {

@@ -1,6 +1,7 @@
 use super::support::*;
 use crate::policy::FallbackMode;
 use crate::tests::http::{LogCapture, field, policy, put_local_project};
+use crate::{CoreMetadata, ui_project_from_detail};
 use peryx_driver::serving::{BrowseDriver as _, BrowseRequest};
 use peryx_identity::IndexAcl;
 
@@ -11,6 +12,39 @@ fn nested_flask_page(digest: &str) -> String {
          \"url\":\"https://upstream.invalid/flask-1.0-py3-none-any.whl\",\
          \"hashes\":{{\"sha256\":\"{digest}\"}}}}]}}"
     )
+}
+
+fn store_metadata(state: &AppState, artifact: &Digest, bytes: &[u8]) -> Digest {
+    let metadata = state.serving.blobs.blocking().put_bytes(bytes).unwrap();
+    state
+        .serving
+        .meta
+        .put_metadata(artifact.as_str(), metadata.as_str())
+        .unwrap();
+    metadata
+}
+
+fn collision_state(dir: &tempfile::TempDir, server: &MockServer) -> Arc<AppState> {
+    custom_state(dir, &format!("{}/simple/", server.uri()), |client| {
+        vec![
+            runtime_index("pypi", IndexKind::Cached { client, offline: false }),
+            runtime_index("hosted", IndexKind::Hosted { volatile: true }),
+            runtime_index(
+                "inner",
+                IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: None,
+                },
+            ),
+            runtime_index(
+                "outer",
+                IndexKind::Virtual {
+                    layers: vec![2, 1],
+                    write_target: None,
+                },
+            ),
+        ]
+    })
 }
 
 #[tokio::test]
@@ -920,6 +954,93 @@ async fn test_a_cache_below_a_nested_member_does_not_shadow_a_hosted_filename() 
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(hosted.as_str()), "{body}");
     assert!(!body.contains(upstream.as_str()), "{body}");
+}
+
+#[tokio::test]
+async fn test_hosted_collision_retains_its_release_owner_and_metadata() {
+    let server = MockServer::start().await;
+    let filename = "flask-1.0-py3-none-any.whl";
+    let cached = Digest::of(b"cached flask");
+    let cached_metadata = Digest::of(b"Metadata-Version: 2.1\nName: Flask\nVersion: 1.0\nSummary: cached collision\n");
+    let page = format!(
+        "{{\"meta\":{{\"api-version\":\"1.1\"}},\"name\":\"flask\",\"versions\":[\"1.0\"],\
+         \"files\":[{{\"filename\":\"{filename}\",\"size\":11,\"url\":\"https://upstream.invalid/{filename}\",\
+         \"hashes\":{{\"sha256\":\"{cached}\"}},\"core-metadata\":{{\"sha256\":\"{cached_metadata}\"}}}}]}}",
+        cached = cached.as_str(),
+        cached_metadata = cached_metadata.as_str(),
+    );
+    mount_json_page(&server, &page).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = collision_state(&dir, &server);
+    let hosted = put_local_project(&state, "flask", filename, b"hosted flask", "1.0.post1");
+    let hosted_metadata = store_metadata(
+        &state,
+        &hosted,
+        b"Metadata-Version: 2.1\nName: Flask\nVersion: 1.0.post1\nSummary: hosted collision\n",
+    );
+    store_metadata(
+        &state,
+        &cached,
+        b"Metadata-Version: 2.1\nName: Flask\nVersion: 1.0\nSummary: cached collision\n",
+    );
+    let (_, bytes) = state
+        .serving
+        .meta
+        .list_upload_entries("hosted", "flask")
+        .unwrap()
+        .pop()
+        .unwrap();
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(&bytes).unwrap();
+    uploaded.file.core_metadata = CoreMetadata::Hashes(std::collections::BTreeMap::from([(
+        "sha256".to_owned(),
+        hosted_metadata.as_str().to_owned(),
+    )]));
+    uploaded.file.dist_info_metadata = uploaded.file.core_metadata.clone();
+    state
+        .serving
+        .meta
+        .put_upload("hosted", "flask", filename, crate::to_json(&uploaded).as_bytes())
+        .unwrap();
+
+    let resolved = cache::resolve_detail_for_ui(&state.serving, state.serving.index_at(3), "flask", "outer")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.detail.files.len(), 1);
+    let file = resolved.detail.files.first().unwrap();
+    assert_eq!(
+        (file.sha256(), file.authoritative_version.as_deref()),
+        (Some(hosted.as_str()), Some("1.0.post1"))
+    );
+    assert_eq!(resolved.owner(filename).unwrap().leaf(), "hosted");
+    let ui = ui_project_from_detail(&resolved.detail);
+    let file = ui.files.first().unwrap();
+    assert_eq!((file.release.as_deref(), file.has_metadata), (Some("1.0.post1"), true));
+
+    let access = peryx_driver::access::ReadAccess::from_headers(&state.serving, &axum::http::HeaderMap::new());
+    let browse = crate::PypiServing
+        .browse(BrowseRequest {
+            state: state.serving.clone(),
+            position: 3,
+            raw_query: "index=outer&project=flask".to_owned(),
+            access: &access,
+            base: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(browse.summary.as_deref(), Some("hosted collision"));
+
+    let (status, _, body) = get(
+        &state,
+        "/outer/+search?q=hosted%20collision&type=cached&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    let search: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(search["total"], 1);
+    assert_eq!(search["results"][0]["summary"], "hosted collision");
 }
 
 #[tokio::test(flavor = "current_thread")]

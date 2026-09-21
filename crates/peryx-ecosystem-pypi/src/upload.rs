@@ -320,6 +320,7 @@ fn uploaded_file(file: UploadedFile<'_>) -> File {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: file.provenance,
+        authoritative_version: None,
     }
 }
 

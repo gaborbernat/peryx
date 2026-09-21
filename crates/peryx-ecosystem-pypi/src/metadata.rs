@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 
 #[cfg(feature = "serving")]
-use crate::distribution_version_segment;
-#[cfg(feature = "serving")]
 use crate::version::{Version, VersionKey, parse_version, version_key, version_order_desc};
+#[cfg(feature = "serving")]
+use crate::{File, ProjectDetail, Yanked};
 
 /// The fields of a core-metadata document that the web UI presents, in the spirit of a pypi.org
 /// project page. Unknown fields are ignored.
@@ -401,11 +401,8 @@ pub fn ui_meta(metadata_text: &str) -> Result<crate::view::MetadataView, Metadat
 /// PEP 592 `yanked`) are read here so the UI never sees them.
 #[must_use]
 #[cfg(feature = "serving")]
-pub fn ui_project_from_detail(value: &serde_json::Value) -> crate::view::ProjectView {
-    fn string_at(value: &serde_json::Value, key: &str) -> String {
-        value[key].as_str().unwrap_or_default().to_owned()
-    }
-    let versions = releases(value);
+pub fn ui_project_from_detail(detail: &ProjectDetail) -> crate::view::ProjectView {
+    let versions = releases(detail);
     let mut release_by_key: HashMap<VersionKey, Option<&str>> = HashMap::with_capacity(versions.len());
     for release in &versions {
         release_by_key
@@ -413,38 +410,41 @@ pub fn ui_project_from_detail(value: &serde_json::Value) -> crate::view::Project
             .and_modify(|version| *version = None)
             .or_insert(Some(&release.version));
     }
-    let files = value["files"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let files = detail
+        .files
+        .iter()
         .map(|file| {
-            let filename = string_at(file, "filename");
-            let browsable = crate::archive::is_supported_archive(&filename);
-            let release = distribution_version_segment(&filename)
-                .and_then(|version| release_by_key.get(&version_key(version)).copied().flatten())
+            let release = file
+                .authoritative_version
+                .as_deref()
+                .filter(|version| detail.versions.iter().any(|declared| declared == version))
+                .or_else(|| {
+                    file.release_version()
+                        .and_then(|version| release_by_key.get(&version_key(version)).copied().flatten())
+                })
                 .map(str::to_owned);
             crate::view::FileView {
-                filename,
+                filename: file.filename.clone(),
                 release,
-                url: string_at(file, "url"),
-                sha256: file["hashes"]["sha256"].as_str().unwrap_or_default().to_owned(),
-                size: file["size"].as_u64(),
-                upload_time: file["upload-time"].as_str().map(str::to_owned),
-                lifecycle: file_yanked(file).then(|| crate::view::LifecycleView {
+                url: file.url.clone(),
+                sha256: file.sha256().unwrap_or_default().to_owned(),
+                size: file.size,
+                upload_time: file.upload_time.clone(),
+                lifecycle: yanked(file).then(|| crate::view::LifecycleView {
                     label: "yanked".to_owned(),
-                    reasons: file["yanked"]
-                        .as_str()
-                        .filter(|reason| !reason.is_empty())
-                        .map(str::to_owned)
-                        .into_iter()
-                        .collect(),
+                    reasons: match &file.yanked {
+                        Yanked::Reason(reason) if !reason.is_empty() => Some(reason.clone()),
+                        Yanked::No | Yanked::Yes | Yanked::Reason(_) => None,
+                    }
+                    .into_iter()
+                    .collect(),
                 }),
-                has_metadata: file["core-metadata"].is_object() || file["core-metadata"].as_bool() == Some(true),
-                browsable,
-                provenance: file["provenance"]
-                    .as_str()
-                    .filter(|url| !url.is_empty())
-                    .map(str::to_owned),
+                has_metadata: !file.metadata().is_absent(),
+                browsable: crate::archive::is_supported_archive(&file.filename),
+                provenance: match &file.provenance {
+                    crate::Provenance::Url(url) if !url.is_empty() => Some(url.clone()),
+                    crate::Provenance::Absent | crate::Provenance::None | crate::Provenance::Url(_) => None,
+                },
                 provenance_detail: None,
                 upstream: None,
                 source: peryx_core::UiArtifactSource::Proxy,
@@ -453,8 +453,8 @@ pub fn ui_project_from_detail(value: &serde_json::Value) -> crate::view::Project
         })
         .collect();
     crate::view::ProjectView {
-        name: string_at(value, "name"),
-        status: project_status(value),
+        name: detail.name.clone(),
+        status: project_status(detail),
         versions,
         files,
         actions: Vec::new(),
@@ -466,25 +466,27 @@ pub fn ui_project_from_detail(value: &serde_json::Value) -> crate::view::Project
 /// and unrecognized markers carry `None`, so the page flags only a state that departs from serving
 /// the project as usual.
 #[cfg(feature = "serving")]
-fn project_status(value: &serde_json::Value) -> Option<Box<crate::view::ProjectStatusView>> {
-    let project_status = &value["project-status"];
-    let status = project_status["status"]
-        .as_str()
+fn project_status(detail: &ProjectDetail) -> Option<Box<crate::view::ProjectStatusView>> {
+    let status = detail
+        .meta
+        .project_status
+        .as_deref()
         .and_then(crate::ProjectStatus::from_marker)
         .filter(|status| *status != crate::ProjectStatus::Active)?;
     Some(Box::new(crate::view::ProjectStatusView {
         marker: status.marker().to_owned(),
-        reason: project_status["reason"]
-            .as_str()
-            .filter(|reason| !reason.is_empty())
-            .map(str::to_owned),
+        reason: detail
+            .meta
+            .project_status_reason
+            .clone()
+            .filter(|reason| !reason.is_empty()),
     }))
 }
 
 /// PEP 592 spells a yank as `true` or as the reason itself, so a string counts as a yank too.
 #[cfg(feature = "serving")]
-fn file_yanked(file: &serde_json::Value) -> bool {
-    file["yanked"].as_bool().unwrap_or(false) || file["yanked"].is_string()
+const fn yanked(file: &File) -> bool {
+    !matches!(file.yanked, Yanked::No)
 }
 
 /// The releases the detail page declares, each with the yank state its files give it, newest-first.
@@ -497,26 +499,25 @@ fn file_yanked(file: &serde_json::Value) -> bool {
 /// lists its versions out of order; a version that does not parse keeps its listed order after the
 /// parseable ones.
 #[cfg(feature = "serving")]
-fn releases(value: &serde_json::Value) -> Vec<crate::view::ReleaseView> {
+fn releases(detail: &ProjectDetail) -> Vec<crate::view::ReleaseView> {
     let mut yanks: HashMap<VersionKey, ReleaseYank> = HashMap::new();
-    for file in value["files"].as_array().into_iter().flatten() {
-        let Some(version) = file["filename"].as_str().and_then(distribution_version_segment) else {
+    for file in &detail.files {
+        let Some(version) = file.release_version() else {
             continue;
         };
         let yank = yanks.entry(version_key(version)).or_default();
-        if !file_yanked(file) {
+        if !yanked(file) {
             yank.active = true;
-        } else if let Some(reason) = file["yanked"].as_str().filter(|reason| !reason.is_empty())
+        } else if let Yanked::Reason(reason) = &file.yanked
+            && !reason.is_empty()
             && !yank.reasons.iter().any(|seen| seen == reason)
         {
             yank.reasons.push(reason.to_owned());
         }
     }
-    let mut releases: Vec<(Option<Version>, crate::view::ReleaseView)> = value["versions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
+    let mut releases: Vec<(Option<Version>, crate::view::ReleaseView)> = detail
+        .versions
+        .iter()
         .map(|version| {
             let yank = yanks.get(&version_key(version)).filter(|yank| !yank.active);
             (

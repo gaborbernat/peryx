@@ -76,6 +76,7 @@ fn seed_pypi_trash(state: &ServingState, filename: &str, deleted_at_unix: i64) {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: Some(TrashInfo {
             deleted_at_unix,

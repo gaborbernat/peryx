@@ -135,13 +135,56 @@ pub const fn within_stale_bound(now: i64, max_stale_secs: i64, fetched_at: i64, 
 const NEGATIVE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 // Moka does not expose allocation size, so this covers its Arc, table slot, and entry metadata.
 const NEGATIVE_CACHE_ENTRY_OVERHEAD_BYTES: usize = 128;
+const RESOURCE_TICKET_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+const RESOURCE_TICKET_CACHE_ENTRY_OVERHEAD_BYTES: usize = 128;
+
+struct ResourceTickets {
+    entries: BTreeMap<String, u64>,
+    charged_bytes: usize,
+    next: u64,
+}
+
+impl ResourceTickets {
+    const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            charged_bytes: 0,
+            next: 0,
+        }
+    }
+
+    fn get_or_insert(&mut self, key: String) -> u64 {
+        if let Some(&ticket) = self.entries.get(&key) {
+            return ticket;
+        }
+        let ticket = self.next;
+        self.next = self.next.checked_add(1).expect("resource ticket overflow");
+        let charge = resource_ticket_weight(&key);
+        if u64::from(charge) <= RESOURCE_TICKET_CACHE_BYTES {
+            while self.charged_bytes.saturating_add(usize::try_from(charge).unwrap())
+                > usize::try_from(RESOURCE_TICKET_CACHE_BYTES).unwrap()
+            {
+                let (key, _) = self.entries.pop_first().expect("ticket cache is charged");
+                self.charged_bytes -= usize::try_from(resource_ticket_weight(&key)).unwrap();
+            }
+            self.charged_bytes += usize::try_from(charge).unwrap();
+            self.entries.insert(key, ticket);
+        }
+        ticket
+    }
+
+    fn invalidate(&mut self, key: &str) {
+        if let Some((key, _)) = self.entries.remove_entry(key) {
+            self.charged_bytes -= usize::try_from(resource_ticket_weight(&key)).unwrap();
+        }
+    }
+}
 
 pub struct ServingCache {
     pub inflight: Inflight,
     pub hot: moka::sync::Cache<String, (bytes::Bytes, i64, Option<u64>)>,
     pub negative: moka::sync::Cache<String, i64>,
-    /// A `BTreeMap` keeps benchmark instruction counts deterministic.
-    pub resource_epochs: Mutex<BTreeMap<String, BTreeMap<String, u64>>>,
+    resource_tickets: Mutex<ResourceTickets>,
 }
 
 impl ServingCache {
@@ -161,7 +204,7 @@ impl ServingCache {
                 .weigher(|key: &String, _: &i64| negative_weight(key))
                 .support_invalidation_closures()
                 .build(),
-            resource_epochs: Mutex::new(BTreeMap::new()),
+            resource_tickets: Mutex::new(ResourceTickets::new()),
         }
     }
 
@@ -192,18 +235,16 @@ impl ServingCache {
     }
 
     /// # Panics
-    /// Panics if the epoch map's mutex was poisoned.
+    /// Panics if the resource ticket mutex was poisoned or the ticket counter exhausted `u64`.
     #[must_use]
     pub fn representation_key(&self, route: &str, resource: &str, representation: &str) -> String {
-        let epoch = self
-            .resource_epochs
+        let key = format!("{route}\u{0}{resource}");
+        let ticket = self
+            .resource_tickets
             .lock()
-            .expect("hot epoch lock")
-            .get(route)
-            .and_then(|epochs| epochs.get(resource))
-            .copied()
-            .unwrap_or(0);
-        format!("{route}\u{0}{resource}\u{0}{representation}\u{0}{epoch}")
+            .expect("resource ticket lock")
+            .get_or_insert(key);
+        format!("{route}\u{0}{resource}\u{0}{representation}\u{0}{ticket}")
     }
 
     #[must_use]
@@ -240,16 +281,12 @@ impl ServingCache {
     }
 
     /// # Panics
-    /// Panics if the epoch map's mutex was poisoned.
+    /// Panics if the resource ticket mutex was poisoned.
     pub fn invalidate_resource(&self, route: &str, resource: &str) {
-        *self
-            .resource_epochs
+        self.resource_tickets
             .lock()
-            .expect("hot epoch lock")
-            .entry(route.to_owned())
-            .or_default()
-            .entry(resource.to_owned())
-            .or_default() += 1;
+            .expect("resource ticket lock")
+            .invalidate(&format!("{route}\u{0}{resource}"));
     }
 }
 
@@ -258,6 +295,15 @@ fn negative_weight(key: &String) -> u32 {
         .saturating_add(key.capacity())
         .saturating_add(std::mem::size_of::<i64>())
         .saturating_add(NEGATIVE_CACHE_ENTRY_OVERHEAD_BYTES);
+    u32::try_from(bytes).unwrap_or(u32::MAX)
+}
+
+fn resource_ticket_weight(key: &String) -> u32 {
+    let bytes = std::mem::size_of::<String>()
+        .saturating_add(key.capacity())
+        .saturating_add(std::mem::size_of::<u64>())
+        .saturating_add(RESOURCE_TICKET_CACHE_ENTRY_OVERHEAD_BYTES)
+        .saturating_add(128);
     u32::try_from(bytes).unwrap_or(u32::MAX)
 }
 

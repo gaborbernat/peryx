@@ -139,7 +139,7 @@ fn test_versioned_hot_cache_returns_source_revision() {
 }
 
 #[test]
-fn test_representation_keys_change_only_for_the_invalidated_route_and_resource() {
+fn test_representation_keys_isolate_routes_and_resources() {
     let cache = ServingCache::new(1024, 60);
     let first = cache.representation_key("route", "first", "json");
     let second = cache.representation_key("route", "second", "json");
@@ -153,18 +153,109 @@ fn test_representation_keys_change_only_for_the_invalidated_route_and_resource()
 }
 
 #[test]
-fn test_concurrent_invalidations_advance_distinct_epochs() {
+fn test_invalidation_makes_an_old_response_unreachable() {
     let cache = ServingCache::new(1024, 60);
+    let old = cache.representation_key("route", "resource", "json");
+
+    cache.invalidate_resource("route", "resource");
+    let fresh = cache.representation_key("route", "resource", "json");
+    cache.store_hot(old.clone(), Bytes::from_static(b"old"), 10);
+
+    assert_ne!(fresh, old);
+    assert_eq!(cache.hot_fresh(&fresh, 0), None);
+}
+
+#[test]
+fn test_invalidation_handles_seen_and_unseen_resources() {
+    let cache = ServingCache::new(1024, 60);
+    let seen = cache.representation_key("route", "seen", "json");
+
+    cache.invalidate_resource("route", "unseen");
+    cache.invalidate_resource("route", "seen");
+
+    assert_ne!(cache.representation_key("route", "seen", "json"), seen);
+}
+
+#[test]
+fn test_concurrent_invalidations_remove_one_ticket() {
+    let cache = ServingCache::new(1024, 60);
+    let old = cache.representation_key("route", "resource", "json");
     std::thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| cache.invalidate_resource("route", "resource"));
         }
     });
 
-    assert_eq!(
-        cache.representation_key("route", "resource", "json"),
-        "route\0resource\0json\08"
+    assert_ne!(cache.representation_key("route", "resource", "json"), old);
+}
+
+#[test]
+fn test_lookup_invalidation_and_refresh_do_not_reuse_a_ticket() {
+    let cache = ServingCache::new(1024, 60);
+    let barrier = std::sync::Barrier::new(2);
+    let old = std::thread::scope(|scope| {
+        let lookup = scope.spawn(|| {
+            let old = cache.representation_key("route", "resource", "json");
+            barrier.wait();
+            old
+        });
+        barrier.wait();
+        cache.invalidate_resource("route", "resource");
+        lookup.join().unwrap()
+    });
+
+    assert_ne!(cache.representation_key("route", "resource", "json"), old);
+}
+
+#[test]
+fn test_eviction_revisit_does_not_reuse_a_ticket() {
+    let cache = ServingCache::new(1024, 60);
+    let cohort = (0..64)
+        .map(|index| format!("resource-{index}-{}", "x".repeat(131_072)))
+        .collect::<Vec<_>>();
+    let old = cohort
+        .iter()
+        .map(|resource| cache.representation_key("route", resource, "json"))
+        .collect::<Vec<_>>();
+
+    for resource in &cohort {
+        let _ = cache.representation_key("route", resource, "json");
+    }
+
+    let fresh = cohort
+        .iter()
+        .map(|resource| cache.representation_key("route", resource, "json"))
+        .collect::<Vec<_>>();
+    let evicted = old
+        .iter()
+        .zip(&fresh)
+        .filter(|(old, fresh)| old != fresh)
+        .collect::<Vec<_>>();
+    assert!(!evicted.is_empty());
+    assert!(evicted.iter().all(|(old, _)| fresh.iter().all(|fresh| *old != fresh)));
+}
+
+#[test]
+fn test_oversized_resource_names_get_fresh_unadmitted_tickets() {
+    let cache = ServingCache::new(1024, 60);
+    let resource = "x".repeat(8 * 1024 * 1024);
+
+    assert_ne!(
+        cache.representation_key("route", &resource, "json"),
+        cache.representation_key("route", &resource, "json")
     );
+}
+
+#[test]
+fn test_million_mutation_only_churn_does_not_allocate_tickets() {
+    let cache = ServingCache::new(1024, 60);
+    let before = cache.representation_key("route", "resource", "json");
+
+    for resource in 0..1_000_000 {
+        cache.invalidate_resource("route", &resource.to_string());
+    }
+
+    assert_eq!(cache.representation_key("route", "resource", "json"), before);
 }
 
 #[test]

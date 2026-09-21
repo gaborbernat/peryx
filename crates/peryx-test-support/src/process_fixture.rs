@@ -61,7 +61,7 @@ fn run_peryx(executable: &Path, args: &[String], public_listener: Option<TcpList
     }
     let port = argument(args, "--port").parse::<u16>().expect("public port");
     let serve_mode = fs::read_to_string(sibling(executable, "serve-mode")).expect("read serve mode");
-    if matches!(serve_mode.as_str(), "hang" | "two-event-hang") {
+    if matches!(serve_mode.as_str(), "hang" | "two-event-hang" | "two-event-ready") {
         println!(r#"{{"message":"fixture process started"}}"#);
         // A second event that is not the startup signal, so a harness waiting for the signal is one
         // event past the one it started on when the process goes away under it.

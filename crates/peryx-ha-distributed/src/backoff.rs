@@ -56,6 +56,21 @@ impl ReconnectPolicy {
         }
     }
 
+    #[must_use]
+    pub const fn base(&self) -> Duration {
+        self.base
+    }
+
+    #[must_use]
+    pub const fn multiplier(&self) -> NonZeroU32 {
+        self.multiplier
+    }
+
+    #[must_use]
+    pub const fn max_delay(&self) -> Duration {
+        self.max_delay
+    }
+
     /// Treats `attempt` as one-based. Terminal errors fail closed on the first attempt. Retryable
     /// errors give up with [`RETRY_EXHAUSTED`] at `max_attempts`.
     #[must_use]

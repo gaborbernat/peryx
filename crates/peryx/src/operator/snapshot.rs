@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use anyhow::Context as _;
 use ipnet::IpNet;
 use peryx_core::Ecosystem;
 use peryx_driver::rate_limit::{RateLimitConfig, RouteLimit};
+use peryx_ha_distributed::read_through::ReadThroughLimits;
 use peryx_identity::{Action, ExternalGroupGrant, GrantScope, Role};
 use peryx_policy::PolicyConfig;
 use peryx_upstream::{CredentialFailure, ExecCredentialConfig};
@@ -13,9 +15,10 @@ use time::format_description::well_known::Rfc3339;
 use toml::{Table, Value};
 
 use crate::config::{
-    AcmeConfig, AuthConfig, AvailabilityConfig, Config, CredentialFailureMode, CredentialRefreshConfig, IndexConfig,
-    IndexKind, JobsConfig, JobsMode, LdapBindConfig, LdapProviderConfig, LogConfig, LogFormat, LogSink,
-    OidcProviderConfig, ReplicationConfig, SecretSource, TlsConfig, TokenConfig, WebhookConfig, WebhookSecret,
+    AcmeConfig, AuthConfig, AvailabilityConfig, Config, CredentialFailureMode, CredentialRefreshConfig, DcMember,
+    DcMembership, DcRole, IndexConfig, IndexKind, JobsConfig, JobsMode, LdapBindConfig, LdapProviderConfig, LogConfig,
+    LogFormat, LogSink, OidcProviderConfig, ReplicationConfig, SecretSource, TlsConfig, TokenConfig, WebhookConfig,
+    WebhookSecret, WriteAckConfig,
 };
 
 #[derive(Serialize)]
@@ -318,6 +321,59 @@ struct SnapshotAvailability<'a> {
     mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     replication: Option<SnapshotReplication<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    write_ack: Option<SnapshotWriteAck>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<&'a str>,
+    #[serde(rename = "member", skip_serializing_if = "Vec::is_empty")]
+    members: Vec<SnapshotDcMember<'a>>,
+    #[serde(rename = "read-through", skip_serializing_if = "Option::is_none")]
+    read_through: Option<SnapshotReadThrough>,
+}
+
+#[derive(Serialize)]
+struct SnapshotWriteAck {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<&'static str>,
+    #[serde(rename = "deadline-secs")]
+    deadline_secs: u64,
+}
+
+#[derive(Serialize)]
+struct SnapshotDcMember<'a> {
+    node: &'a str,
+    dc: &'a str,
+    address: &'a str,
+    role: &'static str,
+}
+
+#[derive(Serialize)]
+struct SnapshotReadThrough {
+    concurrency: usize,
+    #[serde(rename = "per-fetch-bytes")]
+    per_fetch_bytes: u64,
+    #[serde(rename = "chunk-bytes")]
+    chunk_bytes: usize,
+    #[serde(rename = "max-fanout")]
+    max_fanout: usize,
+    #[serde(rename = "trip-after")]
+    trip_after: u32,
+    #[serde(rename = "cooldown-secs")]
+    cooldown_secs: u64,
+    #[serde(rename = "probe-timeout-secs")]
+    probe_timeout_secs: u64,
+    retry: SnapshotRetry,
+}
+
+#[derive(Serialize)]
+struct SnapshotRetry {
+    #[serde(rename = "base-ms")]
+    base_ms: u64,
+    multiplier: u32,
+    #[serde(rename = "max-delay-secs")]
+    max_delay_secs: u64,
+    #[serde(rename = "max-attempts")]
+    max_attempts: u32,
 }
 
 #[derive(Serialize)]
@@ -362,10 +418,10 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
         rate_limit,
         auth,
         availability,
-        write_ack: _,
-        dc_membership: _,
+        write_ack,
+        dc_membership,
         availability_listener: _,
-        read_through: _,
+        read_through,
         jobs,
         // A backup only ever captures a filesystem-backed repository: an object-store backend is
         // rejected before any snapshot runs, so the effective config restores to the filesystem default.
@@ -418,7 +474,7 @@ pub(super) fn config_snapshot(config: &Config) -> anyhow::Result<String> {
             oidc_providers: oidc_providers.iter().map(snapshot_oidc_provider).collect(),
             extensions,
         },
-        availability: snapshot_availability(availability),
+        availability: snapshot_availability(availability, write_ack, dc_membership.as_ref(), *read_through)?,
         jobs: snapshot_jobs(jobs),
     };
     Ok(toml::to_string_pretty(&snapshot)?)
@@ -516,18 +572,70 @@ fn snapshot_jobs(jobs: &JobsConfig) -> Option<SnapshotJobs> {
     Some(SnapshotJobs { mode, schedules })
 }
 
-/// A snapshot carries the `[availability]` table only for a `dc` or `ha` node, so a single-node `none`
-/// backup omits it and restores to the same default. The nested `[availability.replication]` role
-/// round-trips the configured topology.
-fn snapshot_availability(availability: &AvailabilityConfig) -> Option<SnapshotAvailability<'_>> {
+/// A snapshot preserves distributed availability behavior but excludes node-local identity and listener state.
+fn snapshot_availability<'a>(
+    availability: &'a AvailabilityConfig,
+    write_ack: &WriteAckConfig,
+    membership: Option<&'a DcMembership>,
+    read_through: Option<ReadThroughLimits>,
+) -> anyhow::Result<Option<SnapshotAvailability<'a>>> {
     let (mode, replication) = match availability {
-        AvailabilityConfig::None => return None,
-        AvailabilityConfig::Dc(replication) => ("dc", replication),
-        AvailabilityConfig::Ha(replication) => ("ha", replication),
+        AvailabilityConfig::None if *write_ack == WriteAckConfig::default() => return Ok(None),
+        AvailabilityConfig::None => ("none", None),
+        AvailabilityConfig::Dc(replication) => ("dc", Some(replication)),
+        AvailabilityConfig::Ha(replication) => ("ha", Some(replication)),
     };
-    Some(SnapshotAvailability {
+    let (group, members) = membership.map_or((None, Vec::new()), |membership| {
+        (
+            Some(membership.group.as_str()),
+            membership.members.iter().map(snapshot_member).collect(),
+        )
+    });
+    Ok(Some(SnapshotAvailability {
         mode,
-        replication: Some(snapshot_replication(replication)),
+        replication: replication.map(snapshot_replication),
+        write_ack: Some(SnapshotWriteAck {
+            policy: (mode != "none").then_some(write_ack.policy.as_str()),
+            deadline_secs: write_ack.deadline.as_secs(),
+        }),
+        group,
+        members,
+        read_through: read_through.map(snapshot_read_through).transpose()?,
+    }))
+}
+
+fn snapshot_member(member: &DcMember) -> SnapshotDcMember<'_> {
+    SnapshotDcMember {
+        node: &member.node,
+        dc: &member.dc,
+        address: &member.address,
+        role: match member.role {
+            DcRole::Writer => "writer",
+            DcRole::Replica => "replica",
+        },
+    }
+}
+
+fn snapshot_read_through(limits: ReadThroughLimits) -> anyhow::Result<SnapshotReadThrough> {
+    Ok(SnapshotReadThrough {
+        concurrency: limits.concurrency.get(),
+        per_fetch_bytes: limits.per_fetch_bytes.get(),
+        chunk_bytes: limits.chunk_bytes.get(),
+        max_fanout: limits.max_fanout.get(),
+        trip_after: limits.circuit.trip_after,
+        cooldown_secs: limits.circuit.cooldown.as_secs(),
+        probe_timeout_secs: limits.circuit.probe_timeout.as_secs(),
+        retry: SnapshotRetry {
+            base_ms: limits
+                .policy
+                .base()
+                .as_millis()
+                .try_into()
+                .context("read-through retry base exceeds config milliseconds")?,
+            multiplier: limits.policy.multiplier().get(),
+            max_delay_secs: limits.policy.max_delay().as_secs(),
+            max_attempts: limits.policy.max_attempts(),
+        },
     })
 }
 

@@ -818,9 +818,7 @@ impl Node {
             }
         }
         if !first_event_is_startup {
-            match wait_for_startup(child, &self.process_events, self.ready_timeout, &mut |line| {
-                line.contains("peryx listening")
-            })? {
+            match wait_for_startup(child, &self.process_events, self.ready_timeout, &mut startup_signal)? {
                 StartupSignal::Matched => {}
                 StartupSignal::Exited(status) => return Err(self.exited_early(status)),
                 StartupSignal::TimedOut => {
@@ -1545,6 +1543,10 @@ pub(crate) enum StartupSignal {
     Matched,
     Exited(std::process::ExitStatus),
     TimedOut,
+}
+
+fn startup_signal(line: &str) -> bool {
+    line.contains("peryx listening")
 }
 
 pub(crate) fn wait_for_startup(

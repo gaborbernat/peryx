@@ -1,6 +1,7 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
-use peryx_ha::{ArtifactPlacement, ArtifactPlacementStore, ArtifactSource};
+use peryx_ha::{ArtifactPlacement, ArtifactPlacementStore, ArtifactSource, DurabilityPolicy};
 use peryx_storage::blob::BlobStore;
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
@@ -774,6 +775,63 @@ fn test_backup_round_trips_job_kinds() {
         .unwrap();
 
     assert_eq!(restored.jobs.schedules, schedules);
+}
+
+#[rstest]
+#[case::majority(DurabilityPolicy::Majority)]
+#[case::local(DurabilityPolicy::Local)]
+#[case::everywhere(DurabilityPolicy::Everywhere)]
+fn test_backup_reloads_portable_availability_settings(#[case] policy: DurabilityPolicy) {
+    let (root, fixture, _content, _metadata) = backup_fixture();
+    let text = format!(
+        "[availability]\nmode = \"dc\"\ngroup = \"availability\"\n\
+         [availability.replication]\nrole = \"primary\"\nsource = \"writer-a\"\ntoken = \"replication-token\"\n\
+         [availability.write_ack]\npolicy = \"{}\"\ndeadline-secs = 17\n\
+         [[availability.member]]\nnode = \"replica-b\"\ndc = \"west\"\naddress = \"https://replica-b.example:8443\"\nrole = \"replica\"\n\
+         [[availability.member]]\nnode = \"writer-a\"\ndc = \"east\"\naddress = \"https://writer-a.example:8443\"\nrole = \"writer\"\n\
+         [[availability.member]]\nnode = \"replica-c\"\ndc = \"north\"\naddress = \"https://replica-c.example:8443\"\nrole = \"replica\"\n\
+         [availability.read-through]\nconcurrency = 3\nper-fetch-bytes = 1024\nchunk-bytes = 512\nmax-fanout = 2\ntrip-after = 5\ncooldown-secs = 7\nprobe-timeout-secs = 9\n\
+         [availability.read-through.retry]\nbase-ms = 1700\nmultiplier = 3\nmax-delay-secs = 1\nmax-attempts = 4\n",
+        policy.as_str()
+    );
+    let plugins = plugins();
+    let mut config = Config::with_plugins(&plugins)
+        .apply_with_plugins(
+            config::from_toml(PathBuf::from("source.toml"), &text).unwrap(),
+            &plugins,
+        )
+        .unwrap();
+    config.data_dir = fixture.data_dir;
+    let backup = root.path().join("backup");
+    backup_create(&config, &backup, &mut Vec::new()).unwrap();
+    let snapshot = std::fs::read_to_string(backup.join("config.toml")).unwrap();
+    let restored = Config::with_plugins(&plugins)
+        .apply_with_plugins(
+            config::from_toml(PathBuf::from("config.toml"), &snapshot).unwrap(),
+            &plugins,
+        )
+        .unwrap();
+
+    assert_eq!(restored, config);
+}
+
+#[rstest]
+#[case::default(Duration::from_secs(5), false)]
+#[case::custom(Duration::from_secs(17), true)]
+fn test_backup_omits_default_none_availability(#[case] deadline: Duration, #[case] has_availability: bool) {
+    let (source, mut config, _content, _metadata) = backup_fixture();
+    config.write_ack.deadline = deadline;
+    let backup = source.path().join("backup");
+    backup_create(&config, &backup, &mut Vec::new()).unwrap();
+    let snapshot = std::fs::read_to_string(backup.join("config.toml")).unwrap();
+
+    assert_eq!(snapshot.contains("[availability]"), has_availability, "{snapshot}");
+    assert_eq!(
+        snapshot.contains("[availability.write_ack]"),
+        has_availability,
+        "{snapshot}"
+    );
+    assert!(!snapshot.contains("[availability.write_ack]\npolicy"), "{snapshot}");
 }
 
 #[test]

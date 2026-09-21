@@ -6,7 +6,7 @@
 //! Ranges are dispatched in offset order and each starts at a different source, so healthy sources share
 //! the transfer instead of queueing behind the first one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 
 use bytes::Bytes;
@@ -18,6 +18,7 @@ use peryx_storage::blob::{
 
 use crate::blob::{BlobRequest, BlobTransport, ByteRange};
 use crate::blob_pull::{ChunkFailure, ChunkUnavailable, chunk_ranges};
+use crate::peer::TransportError;
 
 /// Matches the copy path's range size, so one request never outgrows what a peer serves in one response.
 const RANGE_BYTES: usize = 8 * 1024 * 1024;
@@ -52,6 +53,28 @@ pub struct StagedPull {
     pub chunks: Option<ChunkedDigest>,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SourceReport {
+    pub contributors: BTreeSet<usize>,
+    pub failures: BTreeSet<usize>,
+    pub transport_failures: Vec<(usize, TransportError)>,
+}
+
+impl SourceReport {
+    fn failed(&mut self, failures: &[(usize, ChunkFailure)]) {
+        for (source, failure) in failures {
+            self.failures.insert(*source);
+            if let ChunkFailure::Transport(error) = failure {
+                self.transport_failures.push((*source, error.clone()));
+            }
+        }
+    }
+
+    fn contributed(&mut self, source: usize) {
+        self.contributors.insert(source);
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StagedPullError {
     #[error("no source served the {} bytes at offset {}", .0.range.length, .0.range.offset)]
@@ -83,34 +106,70 @@ pub async fn pull_blob_staged<T: BlobTransport + ?Sized>(
     catalog: Option<&ChunkedDigest>,
     budget: RangedPullBudget,
 ) -> Result<StagedPull, StagedPullError> {
+    pull_blob_staged_reported(blobs, sources, digest, total_length, catalog, budget)
+        .await
+        .map(|(pull, _)| pull)
+        .map_err(|(error, _)| error)
+}
+
+pub async fn pull_blob_staged_reported<T: BlobTransport + ?Sized>(
+    blobs: &BlobStorage,
+    sources: &[&T],
+    digest: &Digest,
+    total_length: usize,
+    catalog: Option<&ChunkedDigest>,
+    budget: RangedPullBudget,
+) -> Result<(StagedPull, SourceReport), (StagedPullError, SourceReport)> {
     let ranges = plan_ranges(total_length, catalog, budget.range_bytes);
-    // Every source already matched a trusted chunk digest, so a rotation would restage the same bytes.
-    let attempts = if catalog.is_some() { 1 } else { sources.len().max(1) };
-    for rotation in 0..attempts {
-        if let Some(staged) = stage_pass(blobs, sources, digest, &ranges, catalog, budget, rotation).await? {
-            return Ok(staged);
+    let attempts = if catalog.is_none() && sources.len() >= 2 {
+        sources.len() + 1
+    } else {
+        1
+    };
+    let mut report = SourceReport::default();
+    let mut first_unavailable = None;
+    for assignment in 0..attempts {
+        let (sources, offset) = if assignment == 0 {
+            (sources, 0)
+        } else {
+            (&sources[assignment - 1..assignment], assignment - 1)
+        };
+        match stage_pass(blobs, (sources, offset), digest, &ranges, catalog, budget, &mut report).await {
+            Ok(Some(staged)) => return Ok((staged, report)),
+            Ok(None) => {}
+            Err(StagedPullError::RangeUnavailable(unavailable)) if catalog.is_none() => {
+                first_unavailable.get_or_insert(unavailable);
+            }
+            Err(StagedPullError::RangeUnavailable(unavailable)) => {
+                return Err((StagedPullError::RangeUnavailable(unavailable), report));
+            }
+            Err(error) => return Err((error, report)),
         }
     }
-    Err(StagedPullError::DigestMismatch { attempts })
+    let error = first_unavailable
+        .map(StagedPullError::RangeUnavailable)
+        .unwrap_or(StagedPullError::DigestMismatch { attempts });
+    Err((error, report))
 }
 
 /// Returns `None` when the staged bytes failed whole-digest verification, leaving nothing published.
 async fn stage_pass<T: BlobTransport + ?Sized>(
     blobs: &BlobStorage,
-    sources: &[&T],
+    sources: (&[&T], usize),
     digest: &Digest,
     ranges: &[ByteRange],
     catalog: Option<&ChunkedDigest>,
     budget: RangedPullBudget,
-    rotation: usize,
+    report: &mut SourceReport,
 ) -> Result<Option<StagedPull>, StagedPullError> {
     let mut stage = blobs.begin().await.map_err(StagedPullError::Stage)?;
     let mut derived = catalog.is_none().then(|| ChunkedDigestBuilder::new(CHUNK_BYTES));
     let mut dispatched = 0;
     let mut next_write = 0;
     let mut resident = 0;
-    let mut window: BTreeMap<usize, Bytes> = BTreeMap::new();
+    let mut window: BTreeMap<usize, (usize, Bytes)> = BTreeMap::new();
     let mut in_flight = FuturesUnordered::new();
+    let mut contributors = Vec::new();
     loop {
         while dispatched < ranges.len()
             && in_flight.len() < budget.max_in_flight.get()
@@ -118,38 +177,52 @@ async fn stage_pass<T: BlobTransport + ?Sized>(
         {
             resident += ranges[dispatched].length;
             in_flight.push(fetch_range(
-                sources,
+                sources.0,
                 digest,
                 catalog,
                 dispatched,
                 ranges[dispatched],
-                rotation,
+                sources.1,
             ));
             dispatched += 1;
         }
-        let Some((index, bytes)) = in_flight
-            .next()
-            .await
-            .transpose()
-            .map_err(StagedPullError::RangeUnavailable)?
-        else {
+        let Some(result) = in_flight.next().await else {
             break;
         };
-        window.insert(index, bytes);
-        while let Some(bytes) = window.remove(&next_write) {
+        let (index, source, bytes, failures) = match result {
+            Ok(result) => result,
+            Err(unavailable) => {
+                report.failed(&unavailable.failures);
+                return Err(StagedPullError::RangeUnavailable(unavailable));
+            }
+        };
+        report.failed(&failures);
+        window.insert(index, (source, bytes));
+        while let Some((source, bytes)) = window.remove(&next_write) {
             resident -= bytes.len();
             if let Some(builder) = &mut derived {
                 builder.update(&bytes);
             }
             stage.write_chunk(bytes).await.map_err(StagedPullError::Stage)?;
+            contributors.push(source);
+            if catalog.is_some() {
+                report.contributed(source);
+            }
             next_write += 1;
         }
     }
     match stage.commit(digest).await {
-        Ok(receipt) => Ok(Some(StagedPull {
-            receipt,
-            chunks: derived.map(ChunkedDigestBuilder::finish),
-        })),
+        Ok(receipt) => {
+            if catalog.is_none() {
+                for source in contributors {
+                    report.contributed(source);
+                }
+            }
+            Ok(Some(StagedPull {
+                receipt,
+                chunks: derived.map(ChunkedDigestBuilder::finish),
+            }))
+        }
         Err(error) if error.kind() == BlobErrorKind::DigestMismatch => Ok(None),
         Err(error) => Err(StagedPullError::Stage(error)),
     }
@@ -187,28 +260,29 @@ async fn fetch_range<T: BlobTransport + ?Sized>(
     catalog: Option<&ChunkedDigest>,
     index: usize,
     range: ByteRange,
-    rotation: usize,
-) -> Result<(usize, Bytes), ChunkUnavailable> {
+    source_offset: usize,
+) -> Result<(usize, usize, Bytes, Vec<(usize, ChunkFailure)>), ChunkUnavailable> {
     let mut failures = Vec::new();
     for attempt in 0..sources.len() {
-        let source = (index + rotation + attempt) % sources.len();
+        let source = (index + attempt) % sources.len();
+        let source_index = source + source_offset;
         let request = BlobRequest {
             digest: digest.clone(),
             range: Some(range),
         };
         match sources[source].fetch_blob(request).await {
-            Err(error) => failures.push((source, ChunkFailure::Transport(error))),
+            Err(error) => failures.push((source_index, ChunkFailure::Transport(error))),
             Ok(bytes) if bytes.len() != range.length => failures.push((
-                source,
+                source_index,
                 ChunkFailure::WrongLength {
                     expected: range.length,
                     got: bytes.len(),
                 },
             )),
             Ok(bytes) if catalog.is_some_and(|catalog| !catalog.verify_chunk(index, &bytes)) => {
-                failures.push((source, ChunkFailure::DigestMismatch));
+                failures.push((source_index, ChunkFailure::DigestMismatch));
             }
-            Ok(bytes) => return Ok((index, Bytes::from(bytes))),
+            Ok(bytes) => return Ok((index, source_index, Bytes::from(bytes), failures)),
         }
     }
     Err(ChunkUnavailable { index, range, failures })

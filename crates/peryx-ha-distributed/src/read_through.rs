@@ -8,10 +8,11 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::blob_stage::{SourceReport, pull_blob_staged_reported};
 use crate::{
     BlobTransport, CircuitBreaker, CircuitConfig, CircuitPermit, DEFAULT_CIRCUIT, DEFAULT_RANGED_PULL_BUDGET,
     DEFAULT_RECONNECT_POLICY, FetchPlan, PlacementDescriptor, RangedPullBudget, ReconnectPolicy, Retry,
-    StagedPullError, TransportError, plan_blob_fetch, pull_blob_staged, route_blob_placements,
+    StagedPullError, TransportError, plan_blob_fetch, route_blob_placements,
 };
 use peryx_ha::{
     BlobAvailability, BlobAvailabilityError, BlobAvailabilityFailure, BlobPlacementRecord, BlobPlacementState,
@@ -209,31 +210,37 @@ impl RemotePlacementReader {
             }
             let transports: Vec<&(dyn BlobTransport + Send + Sync)> =
                 admitted.iter().map(|source| source.source.transport.as_ref()).collect();
-            let pull = pull_blob_staged(&self.blobs, &transports, digest, total_length, catalog, self.budget).await;
+            let pull =
+                pull_blob_staged_reported(&self.blobs, &transports, digest, total_length, catalog, self.budget).await;
             match pull {
                 Ok(staged) => {
-                    admitted[0].success();
-                    if let Some(chunks) = &staged.chunks {
+                    settle(&mut admitted, &staged.1);
+                    if let Some(chunks) = &staged.0.chunks {
                         catalog_chunks(&self.meta, artifact, digest, chunks);
                     }
                     return Ok(ReadThroughOutcome::Served(BlobMetadata {
-                        bytes: staged.receipt.size,
+                        bytes: staged.0.receipt.size,
                         modified: None,
                     }));
                 }
-                Err(StagedPullError::Stage(error)) => return Err(ReadThroughError::Blob(error)),
-                Err(StagedPullError::DigestMismatch { .. }) => return Ok(ReadThroughOutcome::Unavailable),
-                Err(StagedPullError::RangeUnavailable(unavailable)) => {
-                    let failures = unavailable.transport_failures();
-                    record_failures(&mut admitted, &failures);
-                    if failures.is_empty() {
+                Err((StagedPullError::DigestMismatch { .. }, report)) => {
+                    settle(&mut admitted, &report);
+                    return Ok(ReadThroughOutcome::Unavailable);
+                }
+                Err((StagedPullError::RangeUnavailable(_), report)) => {
+                    settle(&mut admitted, &report);
+                    if report.transport_failures.is_empty() {
                         return Ok(ReadThroughOutcome::Unavailable);
                     }
-                    match self.policy.on_error(representative(&failures), attempt) {
+                    match self
+                        .policy
+                        .on_error(representative(&report.transport_failures), attempt)
+                    {
                         Retry::After(delay) => tokio::time::sleep(delay).await,
                         Retry::GiveUp { .. } => break,
                     }
                 }
+                Err((StagedPullError::Stage(error), _)) => return Err(ReadThroughError::Blob(error)),
             }
         }
         Ok(ReadThroughOutcome::Unavailable)
@@ -268,9 +275,13 @@ impl AdmittedSource<'_> {
     }
 }
 
-fn record_failures(admitted: &mut [AdmittedSource<'_>], failures: &[(usize, TransportError)]) {
-    for (index, _) in failures {
-        admitted[*index].failure();
+fn settle(admitted: &mut [AdmittedSource<'_>], report: &SourceReport) {
+    for (index, source) in admitted.iter_mut().enumerate() {
+        if report.failures.contains(&index) {
+            source.failure();
+        } else if report.contributors.contains(&index) {
+            source.success();
+        }
     }
 }
 

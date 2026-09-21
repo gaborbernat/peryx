@@ -1,5 +1,27 @@
 use super::support::*;
 use crate::store::read_journal_entries;
+use peryx_core::path::local_artifact_url;
+
+fn store_ambiguous_sdist(state: &AppState, index: &str) -> (&'static str, Digest) {
+    let filename = "peryxpkg-1.0-1.tar.gz";
+    let payload = b"historical sdist";
+    let digest = Digest::of(payload);
+    state.serving.blobs.blocking().put_bytes_as(payload, &digest).unwrap();
+    let uploaded = upload_record(
+        filename,
+        "1.0-1",
+        local_artifact_url(index, digest.as_str(), filename),
+        BTreeMap::from([("sha256".to_owned(), digest.as_str().to_owned())]),
+        Some(payload.len() as u64),
+    );
+    state
+        .serving
+        .meta
+        .put_upload(index, "peryxpkg", filename, crate::to_json(&uploaded).as_bytes())
+        .unwrap();
+    state.serving.meta.put_project(index, "peryxpkg", "peryxpkg").unwrap();
+    (filename, digest)
+}
 
 #[tokio::test]
 async fn test_yank_and_unyank_and_delete() {
@@ -399,6 +421,143 @@ async fn test_versioned_delete_matches_upload_record_when_filename_lacks_version
     );
     let (status, ..) = get(&h.state, "/hosted/simple/peryxpkg/", Some("application/json")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_ambiguous_stored_sdist_keeps_its_release_through_promotion() {
+    let h = authority_promotion_harness().await;
+    let (filename, digest) = store_ambiguous_sdist(&h.state, "staging");
+    upload_wheel_to(
+        &h.state,
+        "/staging/",
+        "peryxpkg-1.0-py3-none-any.whl",
+        "1.0",
+        &fixture_wheel(),
+    )
+    .await;
+
+    let stored = h
+        .state
+        .serving
+        .meta
+        .get_upload("staging", "peryxpkg", filename)
+        .unwrap()
+        .unwrap();
+    assert!(!std::str::from_utf8(&stored).unwrap().contains("authoritative_version"));
+
+    let source = crate::cache::local_detail(&h.state.serving, "staging", "peryxpkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        source
+            .files
+            .iter()
+            .find(|file| file.filename == filename)
+            .and_then(|file| file.authoritative_version.as_deref()),
+        Some("1.0-1")
+    );
+    assert_eq!(
+        crate::ui_project_from_detail(&source)
+            .files
+            .iter()
+            .find(|file| file.filename == filename)
+            .and_then(|file| file.release.as_deref()),
+        Some("1.0-1")
+    );
+    let (status, _, body) = get(&h.state, "/staging/peryxpkg/json", None).await;
+    let legacy: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(legacy["releases"]["1.0-1"][0]["filename"], filename);
+    assert_eq!(
+        legacy["releases"]["1.0-1"][0]["url"],
+        local_artifact_url("staging", digest.as_str(), filename)
+    );
+    assert!(legacy["releases"]["1.0"].as_array().is_some());
+    let (status, _, body) = get(&h.state, "/staging/peryxpkg/1.0.post1/json", None).await;
+    let legacy: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(legacy["urls"][0]["filename"], filename);
+    assert_eq!(
+        legacy["urls"][0]["url"],
+        local_artifact_url("staging", digest.as_str(), filename)
+    );
+
+    assert_eq!(
+        request(
+            &h.state,
+            "PUT",
+            "/prod/peryxpkg/1.0.post1/promote?from=staging",
+            Some(&upload_auth())
+        )
+        .await,
+        StatusCode::OK
+    );
+
+    let target = crate::cache::local_detail(&h.state.serving, "prod", "peryxpkg")
+        .unwrap()
+        .unwrap();
+    assert_eq!(target.files[0].authoritative_version.as_deref(), Some("1.0-1"));
+    assert_eq!(
+        crate::ui_project_from_detail(&target).files[0].release.as_deref(),
+        Some("1.0-1")
+    );
+    let entries = h.state.serving.meta.list_upload_entries("prod", "peryxpkg").unwrap();
+    let promoted: crate::upload::Uploaded = serde_json::from_slice(&entries[0].1).unwrap();
+    assert_eq!(promoted.version, "1.0-1");
+    let (status, _, body) = get(&h.state, "/prod/peryxpkg/json", None).await;
+    let legacy: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        legacy["releases"]["1.0-1"][0]["url"],
+        local_artifact_url("prod", digest.as_str(), filename)
+    );
+    let (status, _, body) = get(&h.state, "/prod/peryxpkg/1.0.post1/json", None).await;
+    let legacy: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        legacy["urls"][0]["url"],
+        local_artifact_url("prod", digest.as_str(), filename)
+    );
+}
+
+#[tokio::test]
+async fn test_release_mutations_target_the_stored_ambiguous_sdist_version() {
+    let h = authority_harness().await;
+    let (filename, _) = store_ambiguous_sdist(&h.state, "hosted");
+    put_local_file(&h.state, "peryxpkg-1.0-py3-none-any.whl", b"current wheel", "1.0");
+
+    assert_eq!(
+        request(
+            &h.state,
+            "PUT",
+            "/hosted/peryxpkg/1.0.post1/yank?reason=historical",
+            Some(&upload_auth())
+        )
+        .await,
+        StatusCode::OK
+    );
+    let (_, _, yanked) = get(&h.state, "/hosted/simple/peryxpkg/", Some("application/json")).await;
+    let yanked: serde_json::Value = serde_json::from_str(&yanked).unwrap();
+    let files = yanked["files"].as_array().unwrap();
+    assert_eq!(
+        files.iter().find(|file| file["filename"] == filename).unwrap()["yanked"],
+        "historical"
+    );
+    assert_eq!(
+        files
+            .iter()
+            .find(|file| file["filename"] == "peryxpkg-1.0-py3-none-any.whl")
+            .unwrap()["yanked"],
+        false
+    );
+
+    assert_eq!(
+        request(&h.state, "DELETE", "/hosted/peryxpkg/1.0.post1/", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    let (_, _, remaining) = get(&h.state, "/hosted/simple/peryxpkg/", Some("application/json")).await;
+    assert!(remaining.contains("peryxpkg-1.0-py3-none-any.whl"), "{remaining}");
+    assert!(!remaining.contains(filename), "{remaining}");
 }
 #[tokio::test]
 async fn test_versioned_delete_removes_parsable_and_opaque_filenames() {

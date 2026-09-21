@@ -359,6 +359,7 @@ fn put_file_with_provenance(
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance,
+            authoritative_version: None,
         },
         trashed: None,
     };

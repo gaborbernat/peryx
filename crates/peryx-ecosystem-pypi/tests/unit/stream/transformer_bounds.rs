@@ -100,6 +100,7 @@ fn test_emit_local_files_records_a_served_version_before_the_page_declares_any()
         dist_info_metadata: crate::CoreMetadata::Absent,
         gpg_sig: None,
         provenance: crate::Provenance::Absent,
+        authoritative_version: None,
     };
     let mut transformer = PageTransformer::new(page_context(
         "root/pypi",

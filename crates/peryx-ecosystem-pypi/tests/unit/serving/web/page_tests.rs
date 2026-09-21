@@ -22,7 +22,7 @@ const FILENAME: &str = "demo-1.0-py3-none-any.whl";
 
 #[tokio::test]
 async fn project_page_converts_metadata_lifecycle_and_provenance() {
-    let (_directory, state) = rich_project(stored_provenance);
+    let (_directory, state) = rich_project(stored_provenance, Yanked::No);
     let access = peryx_driver::access::ReadAccess::from_headers(&state.serving, &axum::http::HeaderMap::new());
     let page = PypiServing
         .browse(BrowseRequest {
@@ -77,14 +77,6 @@ async fn project_page_converts_metadata_lifecycle_and_provenance() {
                 && entries[0].value == "Software Development, Utilities"
     ));
     assert!(matches!(
-        &page.sections[5],
-        BrowseSection::Table { heading, rows, .. }
-            if heading == "Releases"
-                && rows.len() == 1
-                && rows[0].badges.len() == 1
-                && rows[0].badges[0].hint.as_deref() == Some("security issue")
-    ));
-    assert!(matches!(
         &page.sections[6],
         BrowseSection::Table { heading, rows, .. }
             if heading == "Files"
@@ -101,8 +93,39 @@ async fn project_page_converts_metadata_lifecycle_and_provenance() {
 }
 
 #[tokio::test]
+async fn project_page_keeps_yanked_lifecycle_without_its_metadata() {
+    let (_directory, state) = rich_project(stored_provenance, Yanked::Reason("security issue".to_owned()));
+    let access = peryx_driver::access::ReadAccess::from_headers(&state.serving, &axum::http::HeaderMap::new());
+    let page = PypiServing
+        .browse(BrowseRequest {
+            state: state.serving.clone(),
+            position: 0,
+            raw_query: "index=hosted&project=demo&version=1.0".to_owned(),
+            access: &access,
+            base: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(page.summary, None);
+    let releases = page
+        .sections
+        .iter()
+        .find(|section| matches!(section, BrowseSection::Table { heading, .. } if heading == "Releases"))
+        .unwrap();
+    assert!(matches!(
+        releases,
+        BrowseSection::Table { heading, rows, .. }
+            if heading == "Releases"
+                && rows.len() == 1
+                && rows[0].badges[0].hint.as_deref() == Some("security issue")
+    ));
+}
+
+#[tokio::test]
 async fn project_page_supports_substring_filters() {
-    let (_directory, state) = rich_project(stored_provenance);
+    let (_directory, state) = rich_project(stored_provenance, Yanked::No);
     let access = peryx_driver::access::ReadAccess::from_headers(&state.serving, &axum::http::HeaderMap::new());
     let page = PypiServing
         .browse(BrowseRequest {
@@ -124,7 +147,7 @@ async fn project_page_supports_substring_filters() {
 
 #[tokio::test]
 async fn project_page_rejects_invalid_filename_regexes() {
-    let (_directory, state) = rich_project(stored_provenance);
+    let (_directory, state) = rich_project(stored_provenance, Yanked::No);
     let access = peryx_driver::access::ReadAccess::from_headers(&state.serving, &axum::http::HeaderMap::new());
     let error = PypiServing
         .browse(BrowseRequest {
@@ -145,7 +168,7 @@ async fn project_page_rejects_invalid_filename_regexes() {
 
 #[tokio::test]
 async fn project_page_reads_a_provenance_bundle_up_to_the_real_byte_limit() {
-    let (_directory, state) = rich_project(padded_provenance);
+    let (_directory, state) = rich_project(padded_provenance, Yanked::No);
     let access = peryx_driver::access::ReadAccess::from_headers(&state.serving, &axum::http::HeaderMap::new());
 
     let page = PypiServing
@@ -184,7 +207,7 @@ fn padded_provenance(artifact: &str) -> Vec<u8> {
     serde_json::to_vec(&bundle).unwrap()
 }
 
-fn rich_project(provenance_for: impl FnOnce(&str) -> Vec<u8>) -> (tempfile::TempDir, Arc<AppState>) {
+fn rich_project(provenance_for: impl FnOnce(&str) -> Vec<u8>, yanked: Yanked) -> (tempfile::TempDir, Arc<AppState>) {
     let directory = tempfile::tempdir().unwrap();
     let mut state = AppState::new(
         MetaStore::open(directory.path().join("peryx.redb")).unwrap(),
@@ -254,7 +277,7 @@ fn rich_project(provenance_for: impl FnOnce(&str) -> Vec<u8>) -> (tempfile::Temp
                     requires_python: Some(">=3.11".to_owned()),
                     size: Some(8),
                     upload_time: Some("2026-08-10T00:00:00Z".to_owned()),
-                    yanked: Yanked::Reason("security issue".to_owned()),
+                    yanked,
                     core_metadata: CoreMetadata::Hashes(BTreeMap::from([(
                         "sha256".to_owned(),
                         metadata_digest.as_str().to_owned(),
@@ -262,6 +285,7 @@ fn rich_project(provenance_for: impl FnOnce(&str) -> Vec<u8>) -> (tempfile::Temp
                     dist_info_metadata: CoreMetadata::Absent,
                     gpg_sig: None,
                     provenance: Provenance::Url("/provenance".to_owned()),
+                    authoritative_version: None,
                 },
                 trashed: None,
             })

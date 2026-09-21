@@ -350,6 +350,7 @@ fn display_named_app() -> (tempfile::TempDir, Arc<AppState>, String, String) {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     };

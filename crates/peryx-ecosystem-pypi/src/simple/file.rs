@@ -6,6 +6,8 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::{Host, Url};
 
+use crate::{inferred_release_version, versions_match};
+
 /// Whether a file is yanked (PEP 592): not yanked, yanked, or yanked with a reason.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Yanked {
@@ -152,9 +154,23 @@ pub struct File {
     pub dist_info_metadata: CoreMetadata,
     pub gpg_sig: Option<bool>,
     pub provenance: Provenance,
+    pub authoritative_version: Option<String>,
 }
 
 impl File {
+    #[must_use]
+    pub fn release_version(&self) -> Option<&str> {
+        self.authoritative_version
+            .as_deref()
+            .or_else(|| inferred_release_version(&self.filename))
+    }
+
+    #[must_use]
+    pub fn matches_version(&self, version: &str) -> bool {
+        self.release_version()
+            .is_some_and(|candidate| versions_match(candidate, version))
+    }
+
     /// The content address a served file resolves through: its `sha256` hash, the digest peryx keys
     /// every cached artifact by. A file the Simple response left without one cannot be content-addressed.
     #[must_use]
@@ -252,6 +268,7 @@ impl From<IncomingFile> for File {
             dist_info_metadata: file.dist_info_metadata,
             gpg_sig: file.gpg_sig,
             provenance: file.provenance,
+            authoritative_version: None,
         };
         file.retain_canonical_digests();
         file

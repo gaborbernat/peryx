@@ -361,6 +361,7 @@ fn seed_shadow_candidate(state: &peryx_driver::AppState) {
             dist_info_metadata: peryx_ecosystem_pypi::CoreMetadata::Absent,
             gpg_sig: None,
             provenance: peryx_ecosystem_pypi::Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     };

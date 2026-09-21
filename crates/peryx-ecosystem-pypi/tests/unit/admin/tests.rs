@@ -72,6 +72,7 @@ fn upload_record(filename: &str, digest: &str) -> Uploaded {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     }
@@ -863,6 +864,7 @@ fn test_purge_project_keeps_a_digest_a_generation_still_serves() {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         }],
     )
     .unwrap();
@@ -979,6 +981,7 @@ fn test_purge_project_ignores_the_target_projects_own_generation_rows() {
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         })
         .as_bytes(),
     )

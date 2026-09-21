@@ -162,6 +162,7 @@ fn anchor_to_file(tag: &HTMLTag, base: &Url) -> Option<File> {
         dist_info_metadata: parse_metadata_attr(tag, "data-dist-info-metadata"),
         gpg_sig: parse_gpg_sig(tag),
         provenance: attr_string(tag, "data-provenance").map_or(Provenance::Absent, Provenance::Url),
+        authoritative_version: None,
     };
     file.provenance.retain_secure_url();
     file.retain_canonical_digests();

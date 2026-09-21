@@ -101,6 +101,32 @@ pub fn distribution_version_segment(filename: &str) -> Option<&str> {
     None
 }
 
+/// The filename-only release identity for a file without a stored publication version.
+///
+/// A legacy sdist can place a dash in either its name or version. When an earlier split names a
+/// valid project and PEP 440 version, its last-dash split does not establish a release identity.
+pub fn inferred_release_version(filename: &str) -> Option<&str> {
+    for suffix in SDIST_ARCHIVE_SUFFIXES {
+        let Some(stem) = strip_ascii_suffix_ignore_case(filename, suffix) else {
+            continue;
+        };
+        let (name, version) = stem.rsplit_once('-')?;
+        if version.is_empty() {
+            return None;
+        }
+        for (candidate_name, candidate_version) in name
+            .match_indices('-')
+            .map(|(index, _)| (&name[..index], &stem[index + 1..]))
+        {
+            if is_valid_name(candidate_name) && parse_version(candidate_version).is_some() {
+                return None;
+            }
+        }
+        return Some(version);
+    }
+    distribution_version_segment(filename)
+}
+
 /// The project-name segment of a distribution filename, or `None` when the filename carries no
 /// recognizable name/version boundary.
 ///

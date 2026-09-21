@@ -67,6 +67,7 @@ fn local_wheel(filename: &str) -> File {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::Absent,
+        authoritative_version: None,
     }
 }
 
@@ -487,6 +488,7 @@ fn test_local_files_emitted_into_empty_upstream_array() {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::Absent,
+        authoritative_version: None,
     };
     let (out, _) = transform(page, page_context("r", vec![local], Vec::new(), &BTreeMap::new()), 3);
     let detail = parse_detail(out.as_bytes()).unwrap();
@@ -679,6 +681,7 @@ fn test_two_local_files_emit_with_separators() {
         dist_info_metadata: CoreMetadata::Absent,
         gpg_sig: None,
         provenance: Provenance::Absent,
+        authoritative_version: None,
     };
     let context = page_context(
         "root/pypi",

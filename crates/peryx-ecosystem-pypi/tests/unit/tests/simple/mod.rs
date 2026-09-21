@@ -38,6 +38,7 @@ pub(super) fn sample_detail() -> ProjectDetail {
                 )),
                 gpg_sig: Some(true),
                 provenance: Provenance::Url("https://files.example/a.provenance".to_owned()),
+                authoritative_version: None,
             },
             File {
                 filename: "proj-1.5.tar.gz".to_owned(),
@@ -51,6 +52,7 @@ pub(super) fn sample_detail() -> ProjectDetail {
                 dist_info_metadata: CoreMetadata::Available,
                 gpg_sig: Some(false),
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             },
             File {
                 filename: "proj-1.0-py3-none-any.whl".to_owned(),
@@ -64,6 +66,7 @@ pub(super) fn sample_detail() -> ProjectDetail {
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::None,
+                authoritative_version: None,
             },
         ],
     }

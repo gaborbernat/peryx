@@ -1,6 +1,6 @@
 use super::support::*;
 use crate::PypiIndexer;
-use crate::tests::http::placement_harness;
+use crate::tests::http::{placement_harness, request, upload_auth};
 use peryx_ha::{ArtifactPlacement, ArtifactSource};
 use peryx_search::{INDEXED_TEXT_BYTES, IndexerCtx, SearchDocumentProvider as _, SearchError};
 
@@ -197,6 +197,226 @@ async fn test_search_keeps_a_live_release_when_a_sibling_is_trashed() {
     assert_eq!(value["total"], 1);
     assert_eq!(value["results"][0]["display_label"], "MixedPkg");
 }
+
+#[tokio::test]
+async fn test_yanked_upload_stays_browsable_without_supplying_search_metadata() {
+    let h = harness().await;
+    let normalized = "yankedpkg";
+    put_uploaded_package(&h.state.serving, "YankedPkg", normalized, "yanked summary");
+    let filename = format!("{normalized}-1.0-py3-none-any.whl");
+    let (_, bytes) = h
+        .state
+        .serving
+        .meta
+        .list_upload_entries("hosted", normalized)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let mut uploaded: Uploaded = serde_json::from_slice(&bytes).unwrap();
+    uploaded.file.yanked = Yanked::Reason("withdrawn".to_owned());
+    h.state
+        .serving
+        .meta
+        .put_upload("hosted", normalized, &filename, to_json(&uploaded).as_bytes())
+        .unwrap();
+    h.state.serving.bump_search_epoch();
+
+    let (status, _, detail) = get(&h.state, "/hosted/simple/yankedpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(detail.contains("withdrawn"), "{detail}");
+    let access = peryx_driver::access::ReadAccess::from_headers(&h.state.serving, &axum::http::HeaderMap::new());
+    let page = peryx_driver::serving::BrowseDriver::browse(
+        &crate::PypiServing,
+        peryx_driver::serving::BrowseRequest {
+            state: h.state.serving.clone(),
+            position: 1,
+            raw_query: "index=hosted&project=yankedpkg".to_owned(),
+            access: &access,
+            base: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(page.summary, None);
+
+    let (status, _, body) = get(
+        &h.state,
+        "/hosted/+search?q=yanked%20summary&type=uploaded&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"], 0);
+
+    put_uploaded_package(&h.state.serving, "ActivePkg", "activepkg", "active summary");
+    let (status, _, body) = get(
+        &h.state,
+        "/hosted/+search?q=active%20summary&type=uploaded&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"], 1);
+}
+
+#[tokio::test]
+async fn test_trashed_and_revoked_uploads_are_excluded_from_browse_and_search() {
+    let h = harness().await;
+    put_uploaded_package(&h.state.serving, "TrashedPkg", "trashedpkg", "trashed summary");
+    trash_upload(&h.state.serving, "trashedpkg", "trashedpkg-1.0-py3-none-any.whl");
+    put_uploaded_package(&h.state.serving, "RevokedPkg", "revokedpkg", "revoked summary");
+    revoke_digest(&h.state, &Digest::of(b"revokedpkg-1.0-py3-none-any.whl"));
+
+    let access = peryx_driver::access::ReadAccess::from_headers(&h.state.serving, &axum::http::HeaderMap::new());
+    let (status, _, _) = get(&h.state, "/hosted/simple/trashedpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let trashed = peryx_driver::serving::BrowseDriver::browse(
+        &crate::PypiServing,
+        peryx_driver::serving::BrowseRequest {
+            state: h.state.serving.clone(),
+            position: 1,
+            raw_query: "index=hosted&project=trashedpkg".to_owned(),
+            access: &access,
+            base: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(trashed.is_none());
+
+    let (status, _, revoked) = get(&h.state, "/hosted/simple/revokedpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!revoked.contains("revokedpkg-1.0-py3-none-any.whl"), "{revoked}");
+    let revoked = peryx_driver::serving::BrowseDriver::browse(
+        &crate::PypiServing,
+        peryx_driver::serving::BrowseRequest {
+            state: h.state.serving.clone(),
+            position: 1,
+            raw_query: "index=hosted&project=revokedpkg".to_owned(),
+            access: &access,
+            base: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(revoked.summary, None);
+    assert!(
+        !serde_json::to_string(&revoked)
+            .unwrap()
+            .contains("revokedpkg-1.0-py3-none-any.whl")
+    );
+
+    for project in ["trashedpkg", "revokedpkg"] {
+        let (status, _, body) = get(
+            &h.state,
+            &format!("/hosted/+search?q={project}&type=uploaded&page_size=25"),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{project}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"],
+            0,
+            "{project}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_hidden_cached_upload_is_excluded_from_browse_and_search() {
+    let h = harness().await;
+    let digest = Digest::of(b"hidden cache");
+    let metadata = h
+        .state
+        .serving
+        .blobs
+        .blocking()
+        .put_bytes(b"Metadata-Version: 2.1\nName: HiddenPkg\nVersion: 1.0\nSummary: hidden cache summary\n")
+        .unwrap();
+    h.state
+        .serving
+        .meta
+        .put_metadata(digest.as_str(), metadata.as_str())
+        .unwrap();
+    let mut file = file_with_hash("hiddenpkg-1.0-py3-none-any.whl", digest.as_str(), None);
+    file.core_metadata = CoreMetadata::Hashes(BTreeMap::from([("sha256".to_owned(), metadata.as_str().to_owned())]));
+    file.dist_info_metadata = file.core_metadata.clone();
+    put_cached_package(
+        &h.state.serving,
+        "pypi/hiddenpkg",
+        "pypi",
+        "hiddenpkg",
+        &ProjectDetail {
+            meta: Meta::default(),
+            name: "HiddenPkg".to_owned(),
+            versions: vec!["1.0".to_owned()],
+            files: vec![file],
+        },
+    );
+
+    let access = peryx_driver::access::ReadAccess::from_headers(&h.state.serving, &axum::http::HeaderMap::new());
+    let page = peryx_driver::serving::BrowseDriver::browse(
+        &crate::PypiServing,
+        peryx_driver::serving::BrowseRequest {
+            state: h.state.serving.clone(),
+            position: 2,
+            raw_query: "index=root%2Fpypi&project=hiddenpkg".to_owned(),
+            access: &access,
+            base: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(page.summary.as_deref(), Some("hidden cache summary"));
+    let (status, _, body) = get(
+        &h.state,
+        "/root/pypi/+search?q=hidden%20cache%20summary&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    let search: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(search["total"], 1);
+    assert_eq!(search["results"][0]["summary"], "hidden cache summary");
+
+    assert_eq!(
+        request(&h.state, "DELETE", "/root/pypi/hiddenpkg/", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    let (status, _, hidden) = get(&h.state, "/root/pypi/simple/hiddenpkg/", Some("application/json")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!hidden.contains("hiddenpkg-1.0-py3-none-any.whl"), "{hidden}");
+    let page = peryx_driver::serving::BrowseDriver::browse(
+        &crate::PypiServing,
+        peryx_driver::serving::BrowseRequest {
+            state: h.state.serving.clone(),
+            position: 2,
+            raw_query: "index=root%2Fpypi&project=hiddenpkg".to_owned(),
+            access: &access,
+            base: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(page.summary, None);
+    assert!(
+        !serde_json::to_string(&page)
+            .unwrap()
+            .contains("hiddenpkg-1.0-py3-none-any.whl")
+    );
+    let (status, _, body) = get(
+        &h.state,
+        "/root/pypi/+search?q=hidden%20cache%20summary&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["total"], 0);
+}
 #[tokio::test]
 async fn test_search_collects_direct_mirror_and_local_projects() {
     let h = placement_harness().await;
@@ -346,6 +566,7 @@ fn metadata_skips_project(invalid_utf8: &Digest, missing_blob: &Digest, invalid_
                 dist_info_metadata: CoreMetadata::Absent,
                 gpg_sig: None,
                 provenance: Provenance::Absent,
+                authoritative_version: None,
             },
         ],
     }

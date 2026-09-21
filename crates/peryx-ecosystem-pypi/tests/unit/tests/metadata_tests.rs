@@ -1,27 +1,46 @@
 use rstest::rstest;
+use serde_json::Value;
 
 use crate::view::{LifecycleView, MetadataBlock, ProjectStatusView, ReleaseView};
-use crate::{MetadataError, file_matches_version, parse_metadata, ui_project_from_detail};
+use crate::{MetadataError, ProjectDetail, file_matches_version, parse_detail, parse_metadata, ui_project_from_detail};
+
+fn detail(mut value: Value) -> ProjectDetail {
+    if value.get("meta").is_none() {
+        value["meta"] = serde_json::json!({"api-version": "1.0"});
+    }
+    for file in value["files"].as_array_mut().into_iter().flatten() {
+        file["url"] = Value::String(String::new());
+    }
+    let parsed =
+        parse_detail(&serde_json::to_vec(&value).expect("fixture serializes")).expect("fixture is a project detail");
+    ProjectDetail {
+        meta: parsed.meta,
+        name: parsed.name,
+        versions: parsed.versions,
+        files: parsed.files,
+    }
+}
 
 #[test]
 fn test_ui_project_from_detail_maps_files() {
+    let digest = "a".repeat(64);
     let value = serde_json::json!({
         "name": "veloxdemo",
         "versions": ["1.0"],
         "files": [{
             "filename": "veloxdemo-1.0-py3-none-any.whl",
             "url": "/hosted/files/aa/veloxdemo-1.0-py3-none-any.whl",
-            "hashes": {"sha256": "aa"},
+            "hashes": {"sha256": digest},
             "size": 10,
             "upload-time": "2026-01-01T00:00:00Z",
             "yanked": "broken",
             "core-metadata": {"sha256": "bb"},
         }],
     });
-    let project = ui_project_from_detail(&value);
+    let project = ui_project_from_detail(&detail(value));
     assert_eq!(project.name, "veloxdemo");
     assert_eq!(project.files[0].release.as_deref(), Some("1.0"));
-    assert_eq!(project.files[0].sha256, "aa");
+    assert_eq!(project.files[0].sha256, digest);
     assert_eq!(project.files[0].upload_time.as_deref(), Some("2026-01-01T00:00:00Z"));
     assert!(project.files[0].has_metadata);
 }
@@ -40,17 +59,17 @@ fn test_ui_project_from_detail_carries_only_a_named_provenance_url(
     if let Some(provenance) = provenance {
         file["provenance"] = provenance;
     }
-    let project = ui_project_from_detail(&serde_json::json!({
+    let project = ui_project_from_detail(&detail(serde_json::json!({
         "name": "veloxdemo",
         "versions": ["1.0"],
         "files": [file],
-    }));
+    })));
     assert_eq!(project.files[0].provenance.as_deref(), expected);
 }
 
 #[test]
 fn test_ui_project_from_detail_attaches_provenance_only_to_the_matching_artifact() {
-    let project = ui_project_from_detail(&serde_json::json!({
+    let project = ui_project_from_detail(&detail(serde_json::json!({
         "name": "veloxdemo",
         "versions": ["1.0", "2.0"],
         "files": [
@@ -58,7 +77,7 @@ fn test_ui_project_from_detail_attaches_provenance_only_to_the_matching_artifact
             {"filename": "veloxdemo-2.0-py3-none-any.whl", "yanked": "broken"},
             {"filename": "veloxdemo-2.0.tar.gz", "provenance": "https://pypi.example/two.provenance"},
         ],
-    }));
+    })));
     let by_name: Vec<_> = project
         .files
         .iter()
@@ -100,12 +119,24 @@ fn test_ui_project_from_detail_associates_files_with_one_declared_release(
     #[case] filename: &str,
     #[case] expected: Option<&str>,
 ) {
-    let project = ui_project_from_detail(&serde_json::json!({
+    let project = ui_project_from_detail(&detail(serde_json::json!({
         "name": "veloxdemo",
         "versions": versions,
         "files": [{"filename": filename}],
-    }));
+    })));
     assert_eq!(project.files[0].release.as_deref(), expected);
+}
+
+#[test]
+fn test_ui_project_from_detail_prefers_an_authoritative_declared_spelling() {
+    let mut detail = detail(serde_json::json!({
+        "name": "veloxdemo",
+        "versions": ["1.0", "1.0.0"],
+        "files": [{"filename": "veloxdemo-1.0-1.tar.gz"}],
+    }));
+    detail.files[0].authoritative_version = Some("1.0".to_owned());
+
+    assert_eq!(ui_project_from_detail(&detail).files[0].release.as_deref(), Some("1.0"));
 }
 
 #[rstest]
@@ -119,11 +150,15 @@ fn test_ui_project_from_detail_maps_yanked(
     #[case] expected: bool,
     #[case] reason: Option<&str>,
 ) {
+    let mut file = serde_json::json!({"filename": "veloxdemo-1.0-py3-none-any.whl"});
+    if !yanked.is_null() {
+        file["yanked"] = yanked;
+    }
     let value = serde_json::json!({
         "name": "veloxdemo",
-        "files": [{"filename": "veloxdemo-1.0-py3-none-any.whl", "yanked": yanked}],
+        "files": [file],
     });
-    let project = ui_project_from_detail(&value);
+    let project = ui_project_from_detail(&detail(value));
     assert_eq!(
         (
             project.files[0].lifecycle.is_some(),
@@ -182,14 +217,14 @@ fn test_ui_project_from_detail_orders_releases_newest_first() {
 
 #[test]
 fn test_ui_project_from_detail_leaves_a_release_a_nameless_file_says_nothing_about() {
-    let detail = serde_json::json!({
+    let detail = detail(serde_json::json!({
         "name": "veloxdemo",
         "versions": ["1.0"],
         "files": [
             {"filename": "notes.txt", "yanked": true},
             {"filename": "veloxdemo-1.0-py3-none-any.whl", "yanked": false},
         ],
-    });
+    }));
 
     assert_eq!(
         ui_project_from_detail(&detail).versions,
@@ -207,7 +242,6 @@ fn test_ui_project_from_detail_leaves_a_release_a_nameless_file_says_nothing_abo
 #[case::deprecated_without_reason(Some("deprecated"), None, Some(("deprecated", None)))]
 #[case::reason_markup_carried_verbatim(Some("quarantined"), Some("<b>x</b>"), Some(("quarantined", Some("<b>x</b>"))))]
 #[case::active_is_served_as_usual(Some("active"), Some("available"), None)]
-#[case::unknown_marker_ignored(Some("frozen"), None, None)]
 #[case::empty_reason_dropped(Some("archived"), Some(""), Some(("archived", None)))]
 #[case::omitted(None, None, None)]
 fn test_ui_project_from_detail_carries_project_status(
@@ -227,7 +261,7 @@ fn test_ui_project_from_detail_carries_project_status(
         value["project-status"] = project_status;
     }
     assert_eq!(
-        ui_project_from_detail(&value).status,
+        ui_project_from_detail(&detail(value)).status,
         expected.map(|(marker, reason)| Box::new(ProjectStatusView {
             marker: marker.to_owned(),
             reason: reason.map(str::to_owned),
@@ -235,7 +269,33 @@ fn test_ui_project_from_detail_carries_project_status(
     );
 }
 
-fn detail_with_yanks(versions: &[&str], files: &[(&str, &str)]) -> serde_json::Value {
+#[test]
+fn test_ui_project_from_detail_ignores_an_unknown_typed_project_status() {
+    let detail = ProjectDetail {
+        meta: crate::Meta {
+            api_version: crate::API_VERSION_BASE,
+            project_status: Some("frozen".to_owned()),
+            project_status_reason: Some("maintenance".to_owned()),
+        },
+        name: "veloxdemo".to_owned(),
+        versions: Vec::new(),
+        files: Vec::new(),
+    };
+
+    assert_eq!(ui_project_from_detail(&detail).status, None);
+}
+
+#[test]
+fn test_detail_rejects_an_unknown_project_status_marker() {
+    let error = parse_detail(
+        br#"{"meta":{"api-version":"1.0"},"project-status":{"status":"frozen"},"name":"veloxdemo","files":[]}"#,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, crate::SimpleError::InvalidProjectStatus(status) if status == "frozen"));
+}
+
+fn detail_with_yanks(versions: &[&str], files: &[(&str, &str)]) -> ProjectDetail {
     let files: Vec<serde_json::Value> = files
         .iter()
         .enumerate()
@@ -246,7 +306,7 @@ fn detail_with_yanks(versions: &[&str], files: &[(&str, &str)]) -> serde_json::V
             })
         })
         .collect();
-    serde_json::json!({"name": "veloxdemo", "versions": versions, "files": files})
+    detail(serde_json::json!({"name": "veloxdemo", "versions": versions, "files": files}))
 }
 
 #[test]

@@ -630,6 +630,7 @@ fn seed_file(state: &AppState, repository: &str, filename: &str, version: &str, 
             dist_info_metadata: CoreMetadata::Absent,
             gpg_sig: None,
             provenance: Provenance::Absent,
+            authoritative_version: None,
         },
         trashed: None,
     };

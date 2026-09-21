@@ -107,6 +107,7 @@ fn file(filename: &str, digest: Option<&str>, size: Option<u64>, metadata: CoreM
         dist_info_metadata: metadata,
         gpg_sig: None,
         provenance: Provenance::Absent,
+        authoritative_version: None,
     }
 }
 

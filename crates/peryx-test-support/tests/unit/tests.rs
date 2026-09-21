@@ -731,6 +731,20 @@ fn process_accepts_the_startup_signal_after_another_event() {
 }
 
 #[test]
+fn process_accepts_the_startup_signal_after_an_observed_event() {
+    with_fixture(|fixture| {
+        fs::write(fixture.serve_mode(), "two-event-ready").expect("emit an event before startup");
+        let mut node = fixture
+            .harness()
+            .spawn_until_event("after-observed", "", "fixture process started")
+            .expect("observe an event before startup");
+
+        node.await_ready().expect("start after observed event");
+        assert!(node.is_ready());
+    });
+}
+
+#[test]
 fn process_reports_failure_after_startup_signal() {
     with_fixture(|fixture| {
         fs::write(fixture.serve_mode(), "signal-only").expect("set startup mode");

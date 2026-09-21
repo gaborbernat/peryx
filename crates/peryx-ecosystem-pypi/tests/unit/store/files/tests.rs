@@ -79,13 +79,63 @@ fn test_put_and_get_metadata_roundtrips_the_derived_digest() {
 }
 
 #[test]
-fn test_get_metadata_digests_skips_missing_records() {
+fn test_get_metadata_digests_deduplicates_and_skips_missing_records() {
     let (_dir, meta) = store();
-    meta.put_metadata("wheelsha", "metasha").unwrap();
+    meta.put_metadata("wheelsha-a", "metasha-a").unwrap();
+    meta.put_metadata("wheelsha-b", "metasha-b").unwrap();
 
-    let digests = meta.get_metadata_digests(["missing", "wheelsha"]).unwrap();
+    let digests = meta
+        .get_metadata_digests(["missing", "wheelsha-b", "wheelsha-a", "wheelsha-b"])
+        .unwrap();
 
-    assert_eq!(digests, BTreeMap::from([("wheelsha".to_owned(), "metasha".to_owned())]));
+    assert_eq!(
+        digests,
+        BTreeMap::from([
+            ("wheelsha-a".to_owned(), "metasha-a".to_owned()),
+            ("wheelsha-b".to_owned(), "metasha-b".to_owned()),
+        ])
+    );
+}
+
+#[test]
+fn test_get_metadata_digests_rejects_a_malformed_present_record() {
+    let (_dir, meta) = store();
+    let key = super::metadata_key("wheelsha");
+    meta.put_driver_value(&key, &[0xff]).unwrap();
+
+    assert_eq!(
+        meta.get_metadata_digests(["wheelsha"]).unwrap_err().to_string(),
+        format!("driver record {key:?} is not UTF-8")
+    );
+}
+
+#[test]
+fn test_get_metadata_digests_reads_one_snapshot_before_the_input_commits() {
+    let (_dir, meta) = store();
+    meta.put_metadata("wheelsha-a", "metasha-before").unwrap();
+    meta.put_metadata("wheelsha-b", "metasha-before").unwrap();
+    let digests = meta
+        .get_metadata_digests(["wheelsha-a", "wheelsha-b"].into_iter().inspect(|_| {
+            meta.put_metadata("wheelsha-a", "metasha-after").unwrap();
+            meta.put_metadata("wheelsha-b", "metasha-after").unwrap();
+        }))
+        .unwrap();
+
+    assert_eq!(
+        digests,
+        BTreeMap::from([
+            ("wheelsha-a".to_owned(), "metasha-before".to_owned()),
+            ("wheelsha-b".to_owned(), "metasha-before".to_owned()),
+        ])
+    );
+    assert_eq!(
+        meta.get_metadata_digest("wheelsha-a").unwrap(),
+        Some("metasha-after".to_owned())
+    );
+    assert_eq!(
+        meta.get_metadata_digest("wheelsha-b").unwrap(),
+        Some("metasha-after".to_owned())
+    );
 }
 
 #[test]

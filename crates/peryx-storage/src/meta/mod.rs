@@ -3,6 +3,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(any(test, feature = "fault-injection"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use peryx_core::Clock;
@@ -229,6 +231,8 @@ const ANALYTICS_APPLY_KEY: &str = "apply_state";
 /// Durable generation and export watermark prevent duplicate sealed-day exports after restart.
 const ANALYTICS_PRODUCER_KEY: &str = "producer";
 const WRITER_KEY: &str = "active";
+#[cfg(any(test, feature = "fault-injection"))]
+const DRIVER_PREFIX_SCAN_FAULT_DISABLED: usize = usize::MAX;
 
 /// Opaque driver writes committed atomically through [`MetaStore::commit_driver_batch`].
 #[derive(Debug, Default)]
@@ -256,6 +260,8 @@ impl DriverBatch {
 pub struct MetaStore {
     db: Arc<MetaDatabase>,
     clock: Clock,
+    #[cfg(any(test, feature = "fault-injection"))]
+    driver_prefix_scan_fault: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for MetaStore {
@@ -347,7 +353,14 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadWrite(uncached_database(backend)?)),
             clock: system_clock(),
+            driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })
+    }
+
+    /// Fails a driver transaction prefix scan after `after` matching rows without invalidating its transaction.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub fn fail_driver_prefix_scan_after(&self, after: usize) {
+        self.driver_prefix_scan_fault.store(after, Ordering::SeqCst);
     }
 
     fn initialize(db: Database) -> Result<Self, MetaError> {
@@ -400,6 +413,8 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadWrite(db)),
             clock: system_clock(),
+            #[cfg(any(test, feature = "fault-injection"))]
+            driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })
     }
 
@@ -447,6 +462,8 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadWrite(Database::open(path)?)),
             clock: system_clock(),
+            #[cfg(any(test, feature = "fault-injection"))]
+            driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })
     }
 
@@ -458,6 +475,8 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadOnly(ReadOnlyDatabase::open(path)?)),
             clock: system_clock(),
+            #[cfg(any(test, feature = "fault-injection"))]
+            driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })
     }
 }

@@ -1046,6 +1046,29 @@ async fn test_idle_tag_page_sweep_rolls_back_a_tag_page_commit_failure() {
     assert!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn test_idle_tag_page_sweep_rolls_back_every_tag_page_storage_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    for query in ["n=1&last=a", "n=1&last=b"] {
+        store::set_tag_page(
+            &state.serving.meta,
+            "hub",
+            "app",
+            query,
+            600,
+            None,
+            br#"{"name":"app","tags":["tag"]}"#,
+        )
+        .unwrap();
+    }
+    let rows = state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap();
+
+    state.serving.meta.fail_driver_prefix_scan_after(1);
+    assert_eq!(reclaim_idle(&state).await, 0);
+    assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(), rows);
+}
+
 async fn reclaim_idle(state: &std::sync::Arc<peryx_driver::AppState>) -> usize {
     let reclaimer = state
         .idle_reclaimers()

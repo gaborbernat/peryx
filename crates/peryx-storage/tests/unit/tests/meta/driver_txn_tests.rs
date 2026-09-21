@@ -297,6 +297,24 @@ fn test_driver_txn_prefix_reads_staged_rows() {
 }
 
 #[test]
+fn test_driver_txn_prefix_surfaces_a_storage_scan_failure() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/key", b"value").unwrap();
+    store.fail_driver_prefix_scan_after(0);
+    let mut prefix_failed = None;
+    let transaction_failed = store
+        .commit_driver_cache_txn(|txn| {
+            let result = txn.prefix("scope/");
+            prefix_failed = Some(result.is_err());
+            result
+        })
+        .is_err();
+
+    assert_eq!(prefix_failed, Some(true));
+    assert!(transaction_failed);
+}
+
+#[test]
 fn test_driver_txn_scan_prefix_visitor_error_rolls_back_staged_rows() {
     let (_dir, store) = super::store();
     store.put_driver_value("scope/removed", b"old").unwrap();

@@ -401,6 +401,8 @@ impl MetaStore {
             let mut driver = DriverTxn {
                 txn: &txn,
                 table: txn.open_table(DRIVER_KV).map_err(MetaError::from)?,
+                #[cfg(any(test, feature = "fault-injection"))]
+                prefix_scan_fault: &self.driver_prefix_scan_fault,
                 touched: std::collections::BTreeSet::new(),
                 blobs: std::collections::BTreeSet::new(),
                 webhooks: Vec::new(),
@@ -600,6 +602,8 @@ pub(super) fn write_reference_revision(txn: &redb::WriteTransaction) -> Result<u
 pub struct DriverTxn<'txn> {
     txn: &'txn redb::WriteTransaction,
     table: redb::Table<'txn, &'static str, &'static [u8]>,
+    #[cfg(any(test, feature = "fault-injection"))]
+    prefix_scan_fault: &'txn std::sync::Arc<std::sync::atomic::AtomicUsize>,
     touched: std::collections::BTreeSet<String>,
     blobs: std::collections::BTreeSet<DriverBlobReference>,
     webhooks: Vec<WebhookEventIntent>,
@@ -793,6 +797,22 @@ impl DriverTxn<'_> {
             let (key, value) = entry.map_err(MetaError::from)?;
             if !key.value().starts_with(prefix) {
                 break;
+            }
+            #[cfg(any(test, feature = "fault-injection"))]
+            if self
+                .prefix_scan_fault
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| match remaining {
+                        usize::MAX => None,
+                        0 => Some(usize::MAX),
+                        _ => Some(remaining - 1),
+                    },
+                )
+                .is_ok_and(|remaining| remaining == 0)
+            {
+                return Err(MetaError::DriverPrecondition("injected driver prefix scan failure".to_owned()).into());
             }
             if visit(key.value(), value.value())?.is_break() {
                 break;

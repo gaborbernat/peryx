@@ -1405,7 +1405,7 @@ fn test_repair_leaves_a_valid_upload_with_a_missing_blob_for_operator_recovery()
 
 #[test]
 fn test_repair_can_resume_after_the_metadata_phase_fails() {
-    let observed_boundary = (0..32).any(|fail_after| {
+    let observed_boundary = (0..32).rev().any(|fail_after| {
         let (_dir, meta) = store();
         meta.put_driver_value("pypi\0p\0cached/flask", b"Flask").unwrap();
         meta.put_driver_value("pypi\0f\0legacy", b"url\ncached").unwrap();

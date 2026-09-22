@@ -732,6 +732,27 @@ fn test_file_batcher_admits_exactly_max_files_before_refusing_the_next() {
     assert_eq!(admitted, 2);
 }
 
+/// Files wait in the batch until it fills, so a sync writes one transaction per batch rather than one
+/// per file.
+#[test]
+fn test_file_batcher_holds_files_until_the_batch_fills() {
+    let (_dir, meta) = store();
+    let (id, _) = begin_project_generation(&meta, "pypi", "flask").unwrap();
+    let policy = Policy::default();
+    let mut batcher = super::FileBatcher::new(&meta, "pypi", "flask", &policy, id, None, 2);
+
+    batcher.file(file("a.whl", &"a".repeat(64))).unwrap();
+
+    let mut written = 0;
+    meta.scan_project_file_records(|_, _| {
+        written += 1;
+        Ok::<_, std::convert::Infallible>(())
+    })
+    .unwrap();
+    assert_eq!(written, 0);
+    assert_eq!(batcher.finish().unwrap(), 1);
+}
+
 #[test]
 fn test_file_batcher_rejects_the_file_beyond_max_files() {
     let (_dir, meta) = store();

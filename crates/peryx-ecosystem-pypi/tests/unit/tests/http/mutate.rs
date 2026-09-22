@@ -913,6 +913,103 @@ async fn test_restore_one_version_leaves_the_other_trashed() {
     assert!(body.contains("peryxpkg-1.0"));
     assert!(!body.contains("peryxpkg-2.0"));
 }
+fn stored_upload(state: &AppState, filename: &str) -> crate::upload::Uploaded {
+    serde_json::from_slice(
+        &state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Drop a stored upload's import classification, as a record written before peryx classified imports.
+fn unclassify(state: &AppState, filename: &str) {
+    let mut uploaded = stored_upload(state, filename);
+    uploaded.imports = None;
+    state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", filename, crate::to_json(&uploaded).as_bytes())
+        .unwrap();
+}
+
+/// A file coming back from the trash rejoins its release, so a restore classifies it first, exactly as
+/// an upload into that release would.
+#[tokio::test]
+async fn test_restore_classifies_a_legacy_file_it_brings_back() {
+    let h = authority_harness().await;
+    upload_version(&h.state, "/hosted/", "1.0").await;
+    assert_eq!(
+        request(&h.state, "DELETE", "/hosted/peryxpkg/1.0/", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    unclassify(&h.state, "peryxpkg-1.0-py3-none-any.whl");
+
+    assert_eq!(
+        request(&h.state, "PUT", "/hosted/peryxpkg/1.0/restore", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+
+    assert!(
+        stored_upload(&h.state, "peryxpkg-1.0-py3-none-any.whl")
+            .imports
+            .is_some()
+    );
+}
+
+/// A restore classifies only the releases it brings files back into; a live release it leaves alone
+/// keeps its legacy records for the next upload into it to settle.
+#[tokio::test]
+async fn test_restore_classifies_only_the_releases_it_restores() {
+    let h = authority_harness().await;
+    upload_version(&h.state, "/hosted/", "1.0").await;
+    upload_version(&h.state, "/hosted/", "2.0").await;
+    assert_eq!(
+        request(&h.state, "DELETE", "/hosted/peryxpkg/1.0/", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    unclassify(&h.state, "peryxpkg-2.0-py3-none-any.whl");
+
+    assert_eq!(
+        request(&h.state, "PUT", "/hosted/peryxpkg/restore", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+
+    assert!(
+        stored_upload(&h.state, "peryxpkg-2.0-py3-none-any.whl")
+            .imports
+            .is_none()
+    );
+}
+
+/// A restore that brings nothing back has nothing new to serve, so the render a prior read cached
+/// stays current.
+#[tokio::test]
+async fn test_restore_that_restores_nothing_keeps_the_cached_render() {
+    let h = authority_harness().await;
+    upload_version(&h.state, "/hosted/", "1.0").await;
+    let key = h
+        .state
+        .serving
+        .representation_key("hosted", "peryxpkg", crate::cache::SIMPLE_JSON);
+
+    assert_eq!(
+        crate::cache::restore_files(&h.state.serving, "hosted", "peryxpkg", None)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let current = h
+        .state
+        .serving
+        .representation_key("hosted", "peryxpkg", crate::cache::SIMPLE_JSON);
+    assert_eq!(current, key);
+}
+
 #[tokio::test]
 async fn test_restore_with_only_live_uploads_is_not_found() {
     let h = authority_harness().await;

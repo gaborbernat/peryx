@@ -803,9 +803,13 @@ async fn test_promote_logs_the_refused_source_read() {
 }
 
 /// A wheel the target would refuse from a direct upload is refused from a promotion too. Promotion
-/// copies a record into the target's namespace, so the target's rules decide what may land there.
+/// copies a record into the target's namespace, so the target's rules decide what may land there. A
+/// virtual route passes its write target's rules on, the same as an upload through it.
+#[rstest]
+#[case::hosted_target("prod")]
+#[case::virtual_route_over_the_target("release")]
 #[tokio::test]
-async fn test_promote_applies_the_target_upload_policy() {
+async fn test_promote_applies_the_target_upload_policy(#[case] route: &str) {
     let h = promotion_harness_with_target_policy(policy(|_neutral, pypi| {
         pypi.block_wheel_pythons = vec!["py3".to_owned()];
     }))
@@ -816,7 +820,7 @@ async fn test_promote_applies_the_target_upload_policy() {
     let (status, _) = request_response(
         &h.state,
         "PUT",
-        "/prod/peryxpkg/1.0/promote?from=staging",
+        &format!("/{route}/peryxpkg/1.0/promote?from=staging"),
         Some(&upload_auth()),
     )
     .await;
@@ -922,33 +926,38 @@ async fn test_promote_charges_no_quota_for_a_file_it_skips() {
     );
 }
 
-/// A re-promotion that publishes nothing has nothing new to serve, so the render a prior read cached
-/// must survive it untouched rather than being retired for no reason.
+/// A promotion that publishes a file retires the render a prior read of the target cached. A
+/// re-promotion that publishes nothing has nothing new to serve, so that render survives it.
+#[rstest]
+#[case::publishes_a_file(false, "promoted 1 file(s)", false)]
+#[case::publishes_nothing(true, "promoted 0 file(s)", true)]
 #[tokio::test]
-async fn test_promote_leaves_the_cached_render_untouched_when_it_publishes_nothing() {
+async fn test_promote_retires_the_cached_render_only_when_it_publishes(
+    #[case] already_promoted: bool,
+    #[case] message: &str,
+    #[case] kept: bool,
+) {
     let h = authority_promotion_harness().await;
     let wheel = fixture_wheel();
     upload_wheel_to(&h.state, "/staging/", "peryxpkg-1.0-py3-none-any.whl", "1.0", &wheel).await;
     let auth = upload_auth();
-    request_response(&h.state, "PUT", "/prod/peryxpkg/1.0/promote?from=staging", Some(&auth)).await;
+    if already_promoted {
+        request_response(&h.state, "PUT", "/prod/peryxpkg/1.0/promote?from=staging", Some(&auth)).await;
+    }
     let key = h
         .state
         .serving
         .representation_key("prod", "peryxpkg", crate::cache::SIMPLE_JSON);
-    h.state
-        .serving
-        .cache
-        .store_hot(key.clone(), bytes::Bytes::from_static(b"cached render"), i64::MAX);
-    h.state.serving.cache.hot.run_pending_tasks();
 
     let (status, body) =
         request_response(&h.state, "PUT", "/prod/peryxpkg/1.0/promote?from=staging", Some(&auth)).await;
 
-    assert_eq!((status, body.as_str()), (StatusCode::OK, "promoted 0 file(s)"));
-    assert!(
-        h.state.serving.hot_fresh(&key).is_some(),
-        "promoting nothing new must not invalidate the target's cached render"
-    );
+    assert_eq!((status, body.as_str()), (StatusCode::OK, message));
+    let current = h
+        .state
+        .serving
+        .representation_key("prod", "peryxpkg", crate::cache::SIMPLE_JSON);
+    assert_eq!(current == key, kept);
 }
 
 /// An audit-mode required-attestation rule records what it would have blocked without blocking it, the

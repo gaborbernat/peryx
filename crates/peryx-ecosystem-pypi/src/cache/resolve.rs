@@ -66,16 +66,6 @@ impl ResolvedPage {
         }
     }
 
-    fn prune_owners(&mut self) {
-        let filenames = self
-            .detail
-            .files
-            .iter()
-            .map(|file| file.filename.as_str())
-            .collect::<BTreeSet<_>>();
-        self.owners.retain(|filename, _| filenames.contains(filename.as_str()));
-    }
-
     pub fn owner(&self, filename: &str) -> Option<&ResolvedFileOwner> {
         self.owners.get(filename)
     }
@@ -105,7 +95,6 @@ pub async fn resolve_detail(
         return Ok(None);
     };
     filter_revoked_files(state, &mut page.detail)?;
-    page.prune_owners();
     rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     Ok(Some(page.detail))
 }
@@ -122,7 +111,6 @@ pub async fn resolve_detail_for_ui(
         return Ok(None);
     };
     filter_revoked_files(state, &mut page.detail)?;
-    page.prune_owners();
     rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     Ok(Some(page))
 }
@@ -154,7 +142,6 @@ pub async fn resolve_detail_page(
         return Ok(None);
     };
     let revoked_files_removed = filter_revoked_files(state, &mut page.detail)?;
-    page.prune_owners();
     rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     Ok(Some(DetailPage {
         detail: page.detail,
@@ -209,7 +196,6 @@ async fn resolve_detail_page_with(
         page.detail = index
             .policy
             .apply_detail(PolicyAction::Serve, project, page.detail, Some((state.clock)()))?;
-        page.prune_owners();
         Ok(page)
     })
     .transpose()
@@ -320,7 +306,6 @@ fn member_candidates<'a>(
                 page.detail = member
                     .policy
                     .apply_detail(PolicyAction::Serve, project, page.detail, now)?;
-                page.prune_owners();
                 Ok((leaf, page))
             })
             .collect()
@@ -465,7 +450,6 @@ fn apply_overrides(
                 file.yanked = record.yanked.clone();
             }
         }
-        page.prune_owners();
     }
     Ok(())
 }

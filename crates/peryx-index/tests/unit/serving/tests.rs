@@ -4,7 +4,10 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use rstest::rstest;
 
-use super::{Inflight, ServingCache, flight_gate, negative_weight, release_flight, within_stale_bound};
+use super::{
+    Inflight, ResourceTickets, ServingCache, flight_gate, negative_weight, release_flight, resource_ticket_weight,
+    within_stale_bound,
+};
 
 /// Bounds the waits that fail by never resolving; the paused clock fires it as soon as nothing else can run.
 const NEVER: std::time::Duration = std::time::Duration::from_mins(1);
@@ -244,6 +247,34 @@ fn test_oversized_resource_names_get_fresh_unadmitted_tickets() {
         cache.representation_key("route", &resource, "json"),
         cache.representation_key("route", &resource, "json")
     );
+}
+
+#[rstest]
+#[case::exactly_fills_the_budget(8_388_608, true)]
+#[case::one_byte_over_the_budget(8_388_609, false)]
+fn test_resource_ticket_admission_at_the_eight_mebibyte_budget(#[case] weight: usize, #[case] admitted: bool) {
+    let mut tickets = ResourceTickets::new();
+
+    let first = tickets.get_or_insert(ticket_name_weighing("x", weight));
+
+    assert_eq!(tickets.get_or_insert("x".to_owned()) == first, admitted);
+}
+
+#[test]
+fn test_resource_ticket_invalidation_releases_its_budget() {
+    let mut tickets = ResourceTickets::new();
+    let _ = tickets.get_or_insert(ticket_name_weighing("old", 8_388_608));
+
+    tickets.invalidate("old");
+    let fresh = tickets.get_or_insert(ticket_name_weighing("fresh", 8_388_608));
+
+    assert_eq!(tickets.get_or_insert("fresh".to_owned()), fresh);
+}
+
+fn ticket_name_weighing(name: &str, weight: usize) -> String {
+    let mut key = String::with_capacity(weight - usize::try_from(resource_ticket_weight(&String::new())).unwrap());
+    key.push_str(name);
+    key
 }
 
 #[test]

@@ -38,6 +38,9 @@ fn test_blob_error_from_s3_error() {
         BlobError::from(S3Error::Request("reset".to_owned())).kind(),
         BlobErrorKind::Io
     );
+    let invalid_cursor = BlobError::from(S3Error::InvalidCursor);
+    assert_eq!(invalid_cursor.kind(), BlobErrorKind::InvalidCursor);
+    assert_eq!(invalid_cursor.to_string(), "invalid listing cursor");
 }
 
 #[rstest]

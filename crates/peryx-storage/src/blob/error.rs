@@ -58,6 +58,7 @@ pub enum BlobErrorKind {
     InvalidRange,
     LimitExceeded,
     Unsupported,
+    InvalidCursor,
 }
 
 #[derive(Debug)]
@@ -75,6 +76,7 @@ enum BlobErrorDetail {
     InvalidRange { start: u64, end: u64, bytes: u64 },
     LimitExceeded { limit: u64, actual: u64 },
     Unsupported(&'static str),
+    InvalidCursor,
 }
 
 impl BlobError {
@@ -96,6 +98,7 @@ impl BlobError {
             BlobErrorDetail::InvalidRange { .. } => BlobErrorKind::InvalidRange,
             BlobErrorDetail::LimitExceeded { .. } => BlobErrorKind::LimitExceeded,
             BlobErrorDetail::Unsupported(_) => BlobErrorKind::Unsupported,
+            BlobErrorDetail::InvalidCursor => BlobErrorKind::InvalidCursor,
         }
     }
 
@@ -144,6 +147,14 @@ impl BlobError {
         Self {
             context: None,
             detail: BlobErrorDetail::Unsupported(capability),
+        }
+    }
+
+    #[must_use]
+    pub const fn invalid_cursor() -> Self {
+        Self {
+            context: None,
+            detail: BlobErrorDetail::InvalidCursor,
         }
     }
 
@@ -229,6 +240,7 @@ impl fmt::Display for BlobErrorDetail {
                 write!(formatter, "blob size {actual} exceeds {limit} byte limit")
             }
             Self::Unsupported(capability) => write!(formatter, "{capability} is unsupported"),
+            Self::InvalidCursor => formatter.write_str("invalid listing cursor"),
         }
     }
 }

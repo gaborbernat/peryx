@@ -101,7 +101,10 @@ key prefix plus the bucket-level health check:
     },
     {
       "Effect": "Allow",
-      "Action": "s3:GetBucketLocation",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
       "Resource": "arn:aws:s3:::peryx-blobs"
     }
   ]
@@ -109,8 +112,8 @@ key prefix plus the bucket-level health check:
 ```
 
 The object actions land on `<prefix>/*` because peryx keys every blob `<prefix>/sha256/<digest>`. `s3:GetBucketLocation`
-sits on the bucket itself because the readiness probe uses it, and `s3:AbortMultipartUpload` lets an interrupted
-multipart upload clean up its parts.
+sits on the bucket itself because the readiness probe uses it. `s3:ListBucket` lets placement repair inventory digest
+keys, and `s3:AbortMultipartUpload` lets an interrupted multipart upload clean up its parts.
 
 ## Verify the backend
 

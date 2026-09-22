@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
-#[cfg(feature = "container-tests")]
 use std::process::Stdio;
 #[cfg(feature = "container-tests")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,7 +26,7 @@ use testcontainers::{ContainerAsync, GenericImage};
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const BUCKET: &str = "peryx-tests";
@@ -231,6 +230,185 @@ fn complete_response() -> ResponseTemplate {
 
 fn service_error(status: u16, code: &str) -> ResponseTemplate {
     ResponseTemplate::new(status).set_body_raw(format!("<Error><Code>{code}</Code></Error>"), "application/xml")
+}
+
+#[tokio::test]
+async fn test_repair_resets_a_rejected_s3_cursor_for_the_next_run() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .and(query_param_is_missing("continuation-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>rejected</NextContinuationToken><Contents><Key>cache/sha256/not-a-digest</Key></Contents></ListBucketResult>",
+            "application/xml",
+        ))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .and(query_param("continuation-token", "rejected"))
+        .respond_with(service_error(400, "InvalidToken"))
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .and(query_param_is_missing("continuation-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+            "application/xml",
+        ))
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    assert_child_succeeded(
+        &child(
+            &server.uri(),
+            staging.path(),
+            "wire_repair_cursor",
+            ROOT_ACCESS_KEY,
+            ROOT_SECRET_KEY,
+        )
+        .await,
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn test_repair_does_not_project_s3_content_that_disappeared_after_listing() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>cache/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</Key></Contents></ListBucketResult>",
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .respond_with(service_error(404, "NoSuchKey"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    assert_child_succeeded(
+        &child(
+            &server.uri(),
+            staging.path(),
+            "wire_repair_missing_content",
+            ROOT_ACCESS_KEY,
+            ROOT_SECRET_KEY,
+        )
+        .await,
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn test_repair_stops_after_an_s3_listing_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .respond_with(service_error(403, "AccessDenied"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .respond_with(service_error(404, "NoSuchKey"))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    assert_child_succeeded(
+        &child(
+            &server.uri(),
+            staging.path(),
+            "wire_repair_content_failure",
+            ROOT_ACCESS_KEY,
+            ROOT_SECRET_KEY,
+        )
+        .await,
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn test_repair_cancellation_preserves_a_committed_content_report() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>cache/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</Key></Contents></ListBucketResult>",
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-length", "1"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("HEAD"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-length", "1")
+                .set_delay(Duration::from_secs(10)),
+        )
+        .expect(1)
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    let _slot = CHILD_SLOTS.acquire().await.unwrap();
+    let mut process = child_command(
+        &server.uri(),
+        staging.path(),
+        "wire_repair_cancelled_after_content",
+        ROOT_ACCESS_KEY,
+        ROOT_SECRET_KEY,
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let heads = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.method.as_str() == "HEAD")
+                .count();
+            if heads == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    process.stdin.take().unwrap().write_all(b"cancel").await.unwrap();
+    assert_child_succeeded(
+        &tokio::time::timeout(Duration::from_secs(30), process.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    server.verify().await;
 }
 
 fn part_response() -> ResponseTemplate {

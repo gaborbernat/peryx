@@ -176,8 +176,8 @@ pub use peer_receipt_http::{HttpReceiptError, HttpReceiptSource, ReceiptReply, r
 pub use peryx_ha::{AvailabilityAudience, AvailabilityAuthorizer};
 pub use peryx_ha::{Completeness, CompletenessQuery, CompletenessReport, DayBucket, ExpectedProducer, ProducerReport};
 pub use placement_policy::{
-    BlobPlacementError, apply_blob_placement, apply_placement_event, record_artifact_placement, record_local_placement,
-    route_blob_placements,
+    BlobPlacementError, apply_blob_placement, mark_artifact_local, mark_artifact_missing, record_artifact_placement,
+    record_local_placement, route_blob_placements,
 };
 pub use placement_runtime::FilesystemPlacementReconciler;
 pub use protocol::{

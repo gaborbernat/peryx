@@ -60,6 +60,11 @@ async fn placement_body_renders_rows_and_pager() {
                         source: UiArtifactSource::Generated,
                         availability: UiByteAvailability::Unavailable,
                     },
+                    PlacementRow {
+                        digest: "sha256:unknown".to_owned(),
+                        source: UiArtifactSource::Unknown,
+                        availability: UiByteAvailability::Local,
+                    },
                 ]),
                 next_cursor: Some("next".to_owned()),
             }
@@ -71,6 +76,7 @@ async fn placement_body_renders_rows_and_pager() {
         ("sha256:hosted", "hosted", "Bytes are held by this instance"),
         ("sha256:proxy", "proxy", "Bytes require a remote source"),
         ("sha256:generated", "generated", "No source can serve these bytes"),
+        ("sha256:unknown", "unknown", "Bytes are held by this instance"),
     ] {
         let (_, rest) = html.split_once(digest).expect("placement row is rendered");
         let (row, _) = rest.split_once("</tr>").expect("placement row is complete");

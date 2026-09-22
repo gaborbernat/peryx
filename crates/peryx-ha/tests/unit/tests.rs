@@ -84,6 +84,7 @@ fn artifact_placement_health_totals_each_availability_class() {
 #[case::hosted(ArtifactSource::Hosted, "hosted", false, ByteAvailability::Unavailable)]
 #[case::proxy(ArtifactSource::Proxy, "proxy", true, ByteAvailability::RemoteOnly)]
 #[case::generated(ArtifactSource::Generated, "generated", false, ByteAvailability::Unavailable)]
+#[case::unknown(ArtifactSource::Unknown, "unknown", false, ByteAvailability::Unavailable)]
 fn artifact_source_projects_absent_bytes(
     #[case] source: ArtifactSource,
     #[case] label: &str,
@@ -108,21 +109,6 @@ fn byte_availability_projects_its_wire_value(
     #[case] local: bool,
 ) {
     assert_eq!((availability.as_str(), availability.is_local()), (label, local));
-}
-
-#[rstest]
-#[case::verified(PlacementEvent::BytesVerified, ByteAvailability::Local)]
-#[case::repaired_absent(PlacementEvent::Repaired { present: false }, ByteAvailability::RemoteOnly)]
-#[case::failed(PlacementEvent::WriteFailed, ByteAvailability::RemoteOnly)]
-#[case::repaired(PlacementEvent::Repaired { present: true }, ByteAvailability::Local)]
-fn artifact_placement_applies_events(#[case] event: PlacementEvent, #[case] availability: ByteAvailability) {
-    assert_eq!(
-        ArtifactPlacement::record(ArtifactSource::Proxy, false).after(event),
-        ArtifactPlacement {
-            source: ArtifactSource::Proxy,
-            availability,
-        }
-    );
 }
 
 #[test]

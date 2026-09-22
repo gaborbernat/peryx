@@ -4,9 +4,9 @@ use peryx_ha::{
     ArtifactPlacement, ArtifactPlacementHealth, ArtifactPlacementPage, ArtifactPlacementQuery, ArtifactPlacementRow,
     ArtifactPlacementStore, ArtifactSource, ByteAvailability,
 };
-use redb::{ReadableTable as _, ReadableTableMetadata as _};
+use redb::{ReadableTable as _, ReadableTableMetadata as _, TableHandle as _};
 
-use super::{ARTIFACT_PLACEMENT, MetaError, MetaStore};
+use super::{ARTIFACT_PLACEMENT, ARTIFACT_PLACEMENT_REVISION, BLOB_RECLAIM_GUARD, MetaError, MetaStore};
 
 const MAX_QUERY_LIMIT: usize = 100;
 
@@ -23,10 +23,17 @@ impl MetaStore {
     /// Returns a store error when the write fails.
     pub fn put_artifact_placement(&self, digest: &str, placement: &ArtifactPlacement) -> Result<(), MetaError> {
         let txn = self.db.begin_write()?;
+        ensure_placement_unlocked(&txn, digest)?;
         {
             let mut table = txn.open_table(ARTIFACT_PLACEMENT)?;
-            table.insert(digest, serde_json::to_vec(placement)?.as_slice())?;
+            let existing = table
+                .get(digest)?
+                .map(|value| serde_json::from_slice::<ArtifactPlacement>(value.value()))
+                .transpose()?;
+            let placement = preserve_source(existing, *placement);
+            table.insert(digest, serde_json::to_vec(&placement)?.as_slice())?;
         }
+        advance_artifact_placement_revision(&txn, digest)?;
         txn.commit()?;
         Ok(())
     }
@@ -40,9 +47,24 @@ impl MetaStore {
         if placements.is_empty() {
             return Ok(());
         }
-        let mut table = txn.open_table(ARTIFACT_PLACEMENT)?;
-        for (digest, placement) in placements {
-            table.insert(digest.as_str(), serde_json::to_vec(placement)?.as_slice())?;
+        for (digest, _) in placements {
+            ensure_placement_unlocked(txn, digest)?;
+        }
+        {
+            let mut table = txn.open_table(ARTIFACT_PLACEMENT)?;
+            for (digest, placement) in placements {
+                let existing = table
+                    .get(digest.as_str())?
+                    .map(|value| serde_json::from_slice::<ArtifactPlacement>(value.value()))
+                    .transpose()?;
+                table.insert(
+                    digest.as_str(),
+                    serde_json::to_vec(&preserve_source(existing, *placement))?.as_slice(),
+                )?;
+            }
+        }
+        for (digest, _) in placements {
+            advance_artifact_placement_revision(txn, digest)?;
         }
         Ok(())
     }
@@ -90,21 +112,58 @@ impl MetaStore {
         placement: &ArtifactPlacement,
     ) -> Result<ArtifactPlacement, MetaError> {
         let txn = self.db.begin_write()?;
-        let stored = {
+        ensure_placement_unlocked(&txn, digest)?;
+        let (stored, written) = {
             let mut table = txn.open_table(ARTIFACT_PLACEMENT)?;
             let current = table
                 .get(digest)?
                 .map(|value| serde_json::from_slice::<ArtifactPlacement>(value.value()))
                 .transpose()?;
             if let Some(existing) = current {
-                existing
+                if existing.source.is_unknown() && !placement.source.is_unknown() {
+                    let replacement = ArtifactPlacement::record(placement.source, existing.availability.is_local());
+                    table.insert(digest, serde_json::to_vec(&replacement)?.as_slice())?;
+                    (replacement, true)
+                } else {
+                    (existing, false)
+                }
             } else {
                 table.insert(digest, serde_json::to_vec(placement)?.as_slice())?;
-                *placement
+                (*placement, true)
             }
         };
+        if written {
+            advance_artifact_placement_revision(&txn, digest)?;
+        }
         txn.commit()?;
         Ok(stored)
+    }
+
+    /// Records local availability while preserving a known source in one transaction.
+    ///
+    /// # Errors
+    /// Returns a store error when the transaction cannot be read, encoded, or committed.
+    pub fn mark_artifact_local(&self, digest: &str, source: ArtifactSource) -> Result<ArtifactPlacement, MetaError> {
+        let txn = self.db.begin_write()?;
+        ensure_placement_unlocked(&txn, digest)?;
+        let placement = {
+            let mut table = txn.open_table(ARTIFACT_PLACEMENT)?;
+            let current = table
+                .get(digest)?
+                .map(|value| serde_json::from_slice::<ArtifactPlacement>(value.value()))
+                .transpose()?;
+            let placement = ArtifactPlacement::record(
+                current
+                    .filter(|placement| !placement.source.is_unknown())
+                    .map_or(source, |placement| placement.source),
+                true,
+            );
+            table.insert(digest, serde_json::to_vec(&placement)?.as_slice())?;
+            placement
+        };
+        advance_artifact_placement_revision(&txn, digest)?;
+        txn.commit()?;
+        Ok(placement)
     }
 
     /// Replaces a row only when it still equals `expected`.
@@ -118,6 +177,7 @@ impl MetaStore {
         replacement: &ArtifactPlacement,
     ) -> Result<bool, MetaError> {
         let txn = self.db.begin_write()?;
+        ensure_placement_unlocked(&txn, digest)?;
         let written = {
             let mut table = txn.open_table(ARTIFACT_PLACEMENT)?;
             let current = {
@@ -133,6 +193,9 @@ impl MetaStore {
                 false
             }
         };
+        if written {
+            advance_artifact_placement_revision(&txn, digest)?;
+        }
         txn.commit()?;
         Ok(written)
     }
@@ -145,6 +208,9 @@ impl MetaStore {
             let mut table = txn.open_table(ARTIFACT_PLACEMENT)?;
             table.remove(digest)?.is_some()
         };
+        if removed {
+            advance_artifact_placement_revision(&txn, digest)?;
+        }
         txn.commit()?;
         Ok(removed)
     }
@@ -229,6 +295,51 @@ impl MetaStore {
         }
         Ok(health)
     }
+}
+
+pub(super) fn advance_artifact_placement_revision(
+    txn: &redb::WriteTransaction,
+    digest: &str,
+) -> Result<u64, MetaError> {
+    let mut revisions = txn.open_table(ARTIFACT_PLACEMENT_REVISION)?;
+    let revision = revisions
+        .get(digest)?
+        .map_or(0, |value| value.value())
+        .checked_add(1)
+        .ok_or(MetaError::ArtifactPlacementRevisionOverflow)?;
+    revisions.insert(digest, revision)?;
+    Ok(revision)
+}
+
+const fn preserve_source(existing: Option<ArtifactPlacement>, replacement: ArtifactPlacement) -> ArtifactPlacement {
+    let Some(existing) = existing else {
+        return replacement;
+    };
+    ArtifactPlacement::record(
+        if existing.source.is_unknown() {
+            replacement.source
+        } else {
+            existing.source
+        },
+        replacement.availability.is_local(),
+    )
+}
+
+fn ensure_placement_unlocked(txn: &redb::WriteTransaction, digest: &str) -> Result<(), MetaError> {
+    let guarded = if txn
+        .list_tables()?
+        .any(|table| table.name() == BLOB_RECLAIM_GUARD.name())
+    {
+        txn.open_table(BLOB_RECLAIM_GUARD)?.get(digest)?.is_some()
+    } else {
+        false
+    };
+    if guarded {
+        return Err(MetaError::BlobReclaiming {
+            digest: digest.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl ArtifactPlacementStore for MetaStore {

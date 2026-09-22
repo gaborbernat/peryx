@@ -184,6 +184,10 @@ impl S3Config {
             format!("{}/sha256/{digest}", self.prefix)
         }
     }
+
+    pub(crate) fn repair_cursor_identity(&self) -> String {
+        format!("s3/v1:{}:{}:{}", self.endpoint, self.bucket, self.prefix)
+    }
 }
 
 #[cfg(test)]

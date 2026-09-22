@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use peryx_ha::{ReclaimGuard, ReclaimGuardArm, ReclaimGuardStore as _};
+use peryx_ha::{ArtifactPlacement, ArtifactSource, ReclaimGuard, ReclaimGuardArm, ReclaimGuardStore as _};
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::{MetaError, MetaStore};
 
@@ -45,6 +45,11 @@ fn dry_run_rechecks_references_without_creating_guard_state() {
 fn confirmed_purge_deletes_and_disarms_owned_candidates() {
     let (_directory, _path, meta, blobs) = stores();
     let orphan = blobs.blocking().put_bytes(b"orphan").unwrap();
+    meta.put_artifact_placement(
+        orphan.as_str(),
+        &ArtifactPlacement::record(ArtifactSource::Hosted, true),
+    )
+    .unwrap();
 
     let report = purge_orphaned_blobs(&meta, &blobs, true, 10, || Ok(BTreeSet::new())).unwrap();
 
@@ -52,6 +57,7 @@ fn confirmed_purge_deletes_and_disarms_owned_candidates() {
     assert_eq!(report.bytes, 6);
     assert!(blobs.blocking().head(&orphan).unwrap().is_none());
     assert_eq!(meta.reclaim_guard(orphan.as_str()).unwrap(), None);
+    assert_eq!(meta.get_artifact_placement(orphan.as_str()).unwrap(), None);
 }
 
 /// The racing publication appends no replication entry, as every publication does on a deployment
@@ -190,6 +196,11 @@ fn corrupt_blob_tree_returns_a_scan_error() {
 fn deletion_failure_keeps_the_guard_armed() {
     let (_directory, _path, meta, blobs) = stores();
     let orphan = blobs.blocking().put_bytes(b"orphan").unwrap();
+    meta.put_artifact_placement(
+        orphan.as_str(),
+        &ArtifactPlacement::record(ArtifactSource::Hosted, true),
+    )
+    .unwrap();
     let orphan_path = purge_orphaned_blobs(&meta, &blobs, false, 10, || Ok(BTreeSet::new()))
         .unwrap()
         .blobs
@@ -217,6 +228,7 @@ fn deletion_failure_keeps_the_guard_armed() {
         }
     ));
     assert!(meta.reclaim_guard(orphan.as_str()).unwrap().is_some());
+    assert_eq!(meta.get_artifact_placement(orphan.as_str()).unwrap(), None);
 }
 
 #[test]

@@ -33,6 +33,8 @@ pub enum S3Error {
     GenerationChanged,
     #[error("s3 request failed: {0}")]
     Request(String),
+    #[error("s3 rejected the list continuation token")]
+    InvalidCursor,
     #[error("s3 returned an invalid {0}")]
     InvalidResponse(&'static str),
 }
@@ -57,6 +59,12 @@ pub struct S3Part {
     pub number: i32,
     pub etag: String,
     pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3ListPage {
+    pub keys: Vec<String>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +167,59 @@ impl S3Client {
                 error => Err(error),
             },
         }
+    }
+
+    /// Lists one object page below `prefix` after an opaque continuation cursor.
+    ///
+    /// # Errors
+    /// Returns [`S3Error`] when the listing fails or a truncated response omits its continuation cursor.
+    pub async fn list(&self, prefix: &str, cursor: Option<&str>, limit: i32) -> Result<S3ListPage, S3Error> {
+        if !(1..=1_000).contains(&limit) {
+            return Err(S3Error::InvalidResponse("list page size"));
+        }
+        if cursor.is_some_and(str::is_empty) {
+            return Err(S3Error::InvalidResponse("list continuation token"));
+        }
+        let page_size = usize::try_from(limit).map_err(|_| S3Error::InvalidResponse("list page size"))?;
+        let mut request = self
+            .client()
+            .await
+            .list_objects_v2()
+            .bucket(&self.config.bucket)
+            .prefix(prefix)
+            .max_keys(limit);
+        if let Some(cursor) = cursor {
+            request = request.continuation_token(cursor);
+        }
+        let output = request
+            .send()
+            .await
+            .map_err(aws_sdk_s3::Error::from)
+            .map_err(|error| map_sdk_error(&error))?;
+        let truncated = output.is_truncated() == Some(true);
+        let next_cursor = output.next_continuation_token().map(str::to_owned);
+        if (truncated && next_cursor.as_deref().is_none_or(str::is_empty))
+            || (!truncated && next_cursor.is_some())
+            || next_cursor.as_deref().is_some_and(|next| Some(next) == cursor)
+        {
+            return Err(S3Error::InvalidResponse("list continuation token"));
+        }
+        if output.contents().len() > page_size {
+            return Err(S3Error::InvalidResponse("list object count"));
+        }
+        Ok(S3ListPage {
+            keys: output
+                .contents()
+                .iter()
+                .map(|entry| {
+                    entry
+                        .key()
+                        .map(str::to_owned)
+                        .ok_or(S3Error::InvalidResponse("list object key"))
+                })
+                .collect::<Result<_, _>>()?,
+            next_cursor,
+        })
     }
 
     /// Streams an object or end-exclusive byte range.
@@ -439,6 +500,7 @@ fn map_sdk_error(error: &aws_sdk_s3::Error) -> S3Error {
         Some("PreconditionFailed") => S3Error::AlreadyExists,
         Some("ConditionalRequestConflict") => S3Error::Conflict,
         Some("NoSuchUpload") => S3Error::NoSuchUpload,
+        Some("InvalidArgument" | "InvalidToken") => S3Error::InvalidCursor,
         _ => S3Error::Request(error.to_string()),
     }
 }

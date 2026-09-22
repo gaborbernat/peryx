@@ -240,6 +240,7 @@ fn placement_row(row: ArtifactPlacementRow) -> PlacementRow {
             ArtifactSource::Hosted => UiArtifactSource::Hosted,
             ArtifactSource::Proxy => UiArtifactSource::Proxy,
             ArtifactSource::Generated => UiArtifactSource::Generated,
+            ArtifactSource::Unknown => UiArtifactSource::Unknown,
         },
         availability: match row.availability {
             ByteAvailability::Local => UiByteAvailability::Local,

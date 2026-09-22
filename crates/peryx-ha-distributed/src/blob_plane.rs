@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 
 use bytes::Bytes;
 use futures_util::FutureExt as _;
-use peryx_ha::{ArtifactSource, BlobCommit, PlacementEvent};
+use peryx_ha::{ArtifactSource, BlobCommit};
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
@@ -19,7 +19,7 @@ use crate::blob_pull::{ChunkFailure, ChunkUnavailable};
 use crate::blob_stage::{DEFAULT_RANGED_PULL_BUDGET, StagedPullError, pull_blob_staged};
 use crate::error::SyncError;
 use crate::protocol::{PlacementAvailability, PlacementDescriptor};
-use crate::{TransportError, apply_placement_event, record_artifact_placement};
+use crate::{TransportError, mark_artifact_local, record_artifact_placement};
 
 /// The readable frontier gates metadata visibility on this blob-availability view.
 pub const BLOB_VIEW: &str = peryx_ha::AVAILABILITY_BLOB_VIEW;
@@ -433,7 +433,7 @@ fn repair_local_placement(meta: &MetaStore, digest: &Digest) -> Result<bool, Syn
     match meta.get_artifact_placement(digest.as_str())? {
         Some(placement) if placement.availability.is_local() => Ok(false),
         Some(_) => {
-            apply_placement_event(meta, digest.as_str(), PlacementEvent::BytesVerified)?;
+            mark_artifact_local(meta, digest.as_str(), ArtifactSource::Proxy)?;
             Ok(true)
         }
         None => {

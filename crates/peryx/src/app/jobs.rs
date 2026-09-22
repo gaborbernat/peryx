@@ -5,10 +5,11 @@ use std::sync::Arc;
 use anyhow::{Context as _, ensure};
 use peryx_driver::AppState;
 use peryx_driver::jobs::{
-    JobLimits, JobRunOutcome, JobScheduler, MAX_SEARCH_REBUILD_CHUNK, NodeJob, ScheduledJob, SearchRebuildJob,
-    scheduled_job,
+    ArtifactPlacementRepairJob, JobLimits, JobRunOutcome, JobScheduler, MAX_SEARCH_REBUILD_CHUNK, NodeJob,
+    ScheduledJob, SearchRebuildJob, scheduled_job,
 };
 use peryx_ha_distributed::AuthorityDrainJob;
+use peryx_storage::meta::MAX_REPAIR_BATCH;
 use peryx_storage::meta::{JobRunQuery, MetaStore};
 
 use crate::cli::JobCommand;
@@ -63,6 +64,7 @@ pub fn job_with_active_plugins(
             out,
         ),
         JobCommand::Reindex { chunk_size, .. } => run_search_rebuild(config, plugins, *chunk_size, out),
+        JobCommand::RepairPlacements { batch, .. } => run_artifact_placement_repair(config, plugins, *batch, out),
         JobCommand::Drain { authority, .. } => run_authority_drain(config, plugins, authority, out),
     }
 }
@@ -133,6 +135,22 @@ fn run_search_rebuild(
         config,
         plugins,
         Box::new(move |_| Ok(Arc::new(SearchRebuildJob::new(chunk)))),
+        out,
+    )
+}
+
+fn run_artifact_placement_repair(
+    config: &Config,
+    plugins: &peryx_plugin_registry::PluginRegistry,
+    batch: usize,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    ensure!(batch <= MAX_REPAIR_BATCH, "batch exceeds the per-run limit");
+    ensure!(batch > 0, "batch must be positive");
+    run_node_job(
+        config,
+        plugins,
+        Box::new(move |_| Ok(Arc::new(ArtifactPlacementRepairJob::new(batch)))),
         out,
     )
 }

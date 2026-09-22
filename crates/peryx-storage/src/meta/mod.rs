@@ -2,15 +2,16 @@
 //! monotonic serial.
 
 use std::path::Path;
-use std::sync::Arc;
 #[cfg(any(test, feature = "fault-injection"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use peryx_core::Clock;
 use redb::{Database, ReadOnlyDatabase, ReadableDatabase as _, ReadableTable as _, TableDefinition};
 
 mod analytics;
+pub(crate) mod artifact_repair;
 mod blob_chunk_digest;
 mod blob_placement;
 mod bootstrap;
@@ -86,10 +87,10 @@ pub use peryx_ha::{
     ArtifactPlacementRow, ArtifactSource, BackendId, BackendLocation, BlobPlacementDecisionError, BlobPlacementFailure,
     BlobPlacementGroupPage, BlobPlacementKey, BlobPlacementOutcome, BlobPlacementPage, BlobPlacementRecord,
     BlobPlacementRouting, BlobPlacementState, BlobPlacementStatus, BlobPlacementTransition, ByteAvailability,
-    CompareWrite, DataCenterId, MAX_PLACEMENTS_PER_DIGEST, MAX_REPAIR_BATCH, NewReconcileEntry, PlacementEvent,
-    PlacementKeyError, PlacementRepairPage, ReadyOutcome, ReclamationDecisionError, ReclamationProgress,
-    ReclamationSnapshot, ReclamationState, ReclamationStatus, ReclamationTombstone, ReclamationTombstonePage,
-    ReconcileEnqueue, ReconcileEntry, ReconcilePage, SelectOutcome, SkipReason, TransferAudit,
+    CompareWrite, DataCenterId, MAX_PLACEMENTS_PER_DIGEST, MAX_REPAIR_BATCH, NewReconcileEntry, PlacementKeyError,
+    PlacementRepairPage, ReadyOutcome, ReclamationDecisionError, ReclamationProgress, ReclamationSnapshot,
+    ReclamationState, ReclamationStatus, ReclamationTombstone, ReclamationTombstonePage, ReconcileEnqueue,
+    ReconcileEntry, ReconcilePage, SelectOutcome, SkipReason, TransferAudit,
 };
 pub use placement::ArtifactPlacementQueryError;
 pub use policy_decision::{
@@ -203,6 +204,9 @@ const DIGEST_REVOCATION_STATE: TableDefinition<&str, u64> = TableDefinition::new
 const DIGEST_REVOCATION_BY_STATUS: TableDefinition<&str, ()> = TableDefinition::new("digest_revocation_by_status");
 /// Combines source and byte availability to avoid content-store probes during reads.
 const ARTIFACT_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("artifact_placement");
+/// A monotonic observation generation fences repair from an intervening placement or reclaim change.
+const ARTIFACT_PLACEMENT_REVISION: TableDefinition<&str, u64> = TableDefinition::new("artifact_placement_revision");
+const ARTIFACT_REPAIR_CURSOR: TableDefinition<&str, &[u8]> = TableDefinition::new("artifact_repair_cursor");
 const BLOB_PLACEMENT: TableDefinition<&str, &[u8]> = TableDefinition::new("blob_placement");
 /// Where each datacenter's last cross-datacenter copy pass stopped scanning the placement index.
 const BLOB_COPY_CURSOR: TableDefinition<&str, &str> = TableDefinition::new("blob_copy_cursor");
@@ -262,6 +266,8 @@ impl DriverBatch {
 pub struct MetaStore {
     db: Arc<MetaDatabase>,
     clock: Clock,
+    reclaim_ownership: Arc<Mutex<()>>,
+    repair_ownership: Arc<tokio::sync::Mutex<()>>,
     #[cfg(any(test, feature = "fault-injection"))]
     driver_prefix_scan_fault: Arc<AtomicUsize>,
 }
@@ -355,6 +361,8 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadWrite(uncached_database(backend)?)),
             clock: system_clock(),
+            reclaim_ownership: Arc::new(Mutex::new(())),
+            repair_ownership: Arc::new(tokio::sync::Mutex::new(())),
             driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })
     }
@@ -415,6 +423,8 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadWrite(db)),
             clock: system_clock(),
+            reclaim_ownership: Arc::new(Mutex::new(())),
+            repair_ownership: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(any(test, feature = "fault-injection"))]
             driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })
@@ -425,6 +435,17 @@ impl MetaStore {
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
         self
+    }
+
+    /// Serializes confirmed orphan purges in this process.
+    pub fn reclaim_ownership(&self) -> MutexGuard<'_, ()> {
+        self.reclaim_ownership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) async fn artifact_repair_ownership(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.repair_ownership.lock().await
     }
 
     /// Validates distributed persistence without creating domain tables.
@@ -486,6 +507,8 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadWrite(Database::open(path)?)),
             clock: system_clock(),
+            reclaim_ownership: Arc::new(Mutex::new(())),
+            repair_ownership: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(any(test, feature = "fault-injection"))]
             driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })
@@ -499,6 +522,8 @@ impl MetaStore {
         Ok(Self {
             db: Arc::new(MetaDatabase::ReadOnly(ReadOnlyDatabase::open(path)?)),
             clock: system_clock(),
+            reclaim_ownership: Arc::new(Mutex::new(())),
+            repair_ownership: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(any(test, feature = "fault-injection"))]
             driver_prefix_scan_fault: Arc::new(AtomicUsize::new(DRIVER_PREFIX_SCAN_FAULT_DISABLED)),
         })

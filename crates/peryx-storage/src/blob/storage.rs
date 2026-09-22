@@ -62,6 +62,13 @@ impl BlobStorage {
         }
     }
 
+    pub(crate) fn repair_cursor_identity(&self) -> String {
+        match &self.backend {
+            Backend::Filesystem(store) => store.repair_cursor_identity(),
+            Backend::S3(backend) => backend.repair_cursor_identity(),
+        }
+    }
+
     /// Derives placement identity from the configured backend instead of a caller-provided label.
     #[must_use]
     pub fn backend_id(&self) -> crate::meta::BackendId {
@@ -215,6 +222,31 @@ impl BlobStorage {
                     .try_collect(),
             )
             .await,
+        }
+    }
+
+    /// Reads one bounded digest page. Filesystem enumeration stays off the async executor; object stores
+    /// use their opaque continuation cursor unchanged.
+    ///
+    /// # Errors
+    /// Returns a contextual listing error.
+    pub async fn digest_page(
+        &self,
+        cursor: Option<&str>,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<BlobDigestPage, BlobError> {
+        match &self.backend {
+            Backend::Filesystem(store) => {
+                let store = store.clone();
+                let cursor = cursor.map(str::to_owned);
+                filesystem_worker(
+                    tokio::task::spawn_blocking(move || store.scan_page(cursor.as_deref(), limit)),
+                    BlobOperation::List,
+                    None,
+                )
+                .await
+            }
+            Backend::S3(backend) => backend.digest_page(cursor, limit.get()).await,
         }
     }
 

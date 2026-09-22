@@ -10,6 +10,10 @@ use crate::cli::{Command, JobCommand, JobShowArgs, RuntimeArgs};
 #[case::show(&["peryx", "job", "show", "run-id", "--data-dir", "/show"], "/show")]
 #[case::run(&["peryx", "job", "run", "run", "--target", "target", "--data-dir", "/run"], "/run")]
 #[case::reindex(&["peryx", "job", "reindex", "--data-dir", "/reindex"], "/reindex")]
+#[case::repair_placements(
+    &["peryx", "job", "repair-placements", "--data-dir", "/repair-placements"],
+    "/repair-placements"
+)]
 #[case::drain(
     &["peryx", "job", "drain", "--authority", "authority", "--data-dir", "/drain"],
     "/drain"
@@ -40,6 +44,19 @@ fn test_parse_job_reindex_chunk_size(#[case] argv: &[&str], #[case] expected: us
         panic!("expected job reindex command");
     };
     assert_eq!(chunk_size, expected);
+}
+
+#[rstest]
+#[case::default(
+    &["peryx", "job", "repair-placements"],
+    peryx_driver::jobs::DEFAULT_ARTIFACT_REPAIR_BATCH
+)]
+#[case::explicit(&["peryx", "job", "repair-placements", "--batch", "50"], 50)]
+fn test_parse_job_repair_placements_batch(#[case] argv: &[&str], #[case] expected: usize) {
+    let Command::Job(JobCommand::RepairPlacements { batch, .. }) = parse(argv).command else {
+        panic!("expected placement repair command");
+    };
+    assert_eq!(batch, expected);
 }
 
 #[test]

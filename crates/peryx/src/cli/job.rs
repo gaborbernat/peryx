@@ -38,6 +38,14 @@ pub enum JobCommand {
         #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_SEARCH_REBUILD_CHUNK)]
         chunk_size: usize,
     },
+    /// Reconcile one bounded page of artifact placement observations on this node.
+    RepairPlacements {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        /// Digests inspected from each direction.
+        #[arg(long, default_value_t = peryx_driver::jobs::DEFAULT_ARTIFACT_REPAIR_BATCH)]
+        batch: usize,
+    },
     /// Finalize an authority's retained ingress intents at its new home after a failover transfer.
     Drain {
         #[command(flatten)]
@@ -54,7 +62,10 @@ impl JobCommand {
         match self {
             Self::List(args) => &args.runtime,
             Self::Show(args) => &args.runtime,
-            Self::Run { runtime, .. } | Self::Reindex { runtime, .. } | Self::Drain { runtime, .. } => runtime,
+            Self::Run { runtime, .. }
+            | Self::Reindex { runtime, .. }
+            | Self::RepairPlacements { runtime, .. }
+            | Self::Drain { runtime, .. } => runtime,
         }
     }
 }

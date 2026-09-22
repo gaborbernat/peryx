@@ -38,6 +38,7 @@ fn placement_view_projects_health_rows_and_paging() {
         ("sha256:1", ArtifactSource::Hosted, true),
         ("sha256:2", ArtifactSource::Proxy, false),
         ("sha256:3", ArtifactSource::Generated, false),
+        ("sha256:4", ArtifactSource::Unknown, false),
     ] {
         state
             .serving
@@ -53,9 +54,9 @@ fn placement_view_projects_health_rows_and_paging() {
             health.health.remote_only,
             health.health.unavailable
         ),
-        (1, 1, 1)
+        (1, 1, 2)
     );
-    assert_eq!(health.health.total, 3);
+    assert_eq!(health.health.total, 4);
     assert!(health.rows.is_none());
 
     let first = state.serving.placement_view(query(true, 2)).unwrap();
@@ -79,10 +80,14 @@ fn placement_view_projects_health_rows_and_paging() {
             include_rows: true,
         })
         .unwrap();
-    let row = &second.rows.unwrap()[0];
+    let rows = second.rows.unwrap();
     assert_eq!(
-        (row.source, row.availability),
+        (rows[0].source, rows[0].availability),
         (UiArtifactSource::Generated, UiByteAvailability::Unavailable)
+    );
+    assert_eq!(
+        (rows[1].source, rows[1].availability),
+        (UiArtifactSource::Unknown, UiByteAvailability::Unavailable)
     );
     assert!(second.next_cursor.is_none());
 }

@@ -90,13 +90,15 @@ peryx index show <index> [--config <path>] [--data-dir <path>]
 
 Inspect the durable history of background jobs and run the ones an operator triggers on demand. `list` prints the most
 recent runs newest-first as JSON; `show` prints one run by its `jr_...` id. Ecosystem owners may add one-shot jobs;
-`reindex` rebuilds the search index; `drain` finalizes an authority's retained writes at its new home after a failover.
-Every run records a durable history entry you can read back with `list` and `show`.
+`reindex` rebuilds the search index; `repair-placements` reconciles one page of local blob observations; `drain`
+finalizes an authority's retained writes at its new home after a failover. Every run records a durable history entry you
+can read back with `list` and `show`.
 
 ```
 peryx job list [--data-dir <path>] [--config <path>]
 peryx job show <id> [--data-dir <path>] [--config <path>]
 peryx job reindex [--chunk-size <n>] [--data-dir <path>] [--config <path>]
+peryx job repair-placements [--batch <n>] [--data-dir <path>] [--config <path>]
 peryx job drain --authority <name> [--data-dir <path>] [--config <path>]
 ```
 
@@ -116,6 +118,16 @@ Publication is atomic. Searches keep serving the prior complete index for the wh
 only once every batch has committed, so a query never sees a half-built index. If the process stops mid-rebuild, the
 partial index is discarded on the next start and the incremental refresh rebuilds it. A restart does not serve partial
 results. A rebuild cancelled at shutdown leaves the served index untouched.
+
+### `job repair-placements`
+
+Reconcile one page of blob-storage observations and one page of placement rows on this node. `--batch` defaults to `256`
+and accepts values from `1` through `1000`. The command records an `artifact_placement_repair` job and advances each
+durable cursor only with that page's metadata changes. Repeat it until both pages reach EOF, or leave the node-local
+maintenance job to continue the scan.
+
+The command needs read access to the configured blob backend. On S3, the bucket policy must grant `s3:ListBucket` in
+addition to the normal object permissions. A denied list leaves the content cursor unchanged.
 
 ### `job drain`
 

@@ -363,6 +363,41 @@ fn test_job_reindex_records_a_node_wide_run() {
     );
 }
 
+#[test]
+fn test_job_repair_placements_records_a_node_local_run() {
+    let plugins = plugins();
+    let (_directory, meta, config) = store_and_config(&plugins);
+    drop(meta);
+
+    job_with_plugins(&config, &plugins, &repair_placements_command(1), &mut Vec::new()).unwrap();
+
+    let runs = MetaStore::open_existing(config.data_dir.join("peryx.redb"))
+        .unwrap()
+        .list_job_runs()
+        .unwrap();
+    assert_eq!(
+        (runs[0].kind.clone(), runs[0].scope.as_str(), runs[0].state),
+        (
+            JobKind::new("artifact_placement_repair").unwrap(),
+            "",
+            JobState::Succeeded
+        )
+    );
+}
+
+#[rstest]
+#[case::zero(0, "batch must be positive")]
+#[case::above_limit(peryx_storage::meta::MAX_REPAIR_BATCH + 1, "batch exceeds the per-run limit")]
+fn test_job_repair_placements_rejects_invalid_batches(#[case] batch: usize, #[case] expected: &str) {
+    let plugins = plugins();
+    let directory = tempfile::tempdir().unwrap();
+    let config = config_at(&directory, &plugins);
+
+    let error = job_with_plugins(&config, &plugins, &repair_placements_command(batch), &mut Vec::new()).unwrap_err();
+
+    assert_eq!(error.to_string(), expected);
+}
+
 #[rstest]
 #[case::zero(0, "chunk-size must be positive")]
 #[case::above_limit(peryx_driver::jobs::MAX_SEARCH_REBUILD_CHUNK + 1, "chunk-size exceeds the per-run limit")]
@@ -587,6 +622,13 @@ fn reindex_command(chunk_size: usize) -> JobCommand {
     JobCommand::Reindex {
         runtime: RuntimeArgs::default(),
         chunk_size,
+    }
+}
+
+fn repair_placements_command(batch: usize) -> JobCommand {
+    JobCommand::RepairPlacements {
+        runtime: RuntimeArgs::default(),
+        batch,
     }
 }
 

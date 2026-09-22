@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use peryx_storage::meta::{AccountingClass, NewQuotaReservation, QuotaLimits};
+use peryx_storage::meta::{AccountingClass, DriverMutation, JournalEntry, NewQuotaReservation, QuotaLimits};
 use rstest::rstest;
+use serde_json::json;
 
 use super::{
     FileOverride, Guard, MetaError, MetaStore, MetadataSibling, OverrideMutation, PromotedRelease, ProvenanceSibling,
@@ -14,6 +15,8 @@ use super::{
 use crate::Yanked;
 use crate::store::{PypiStore as _, read_journal_entries};
 use crate::upload::UploadStoreError;
+
+const PUBLISHED_RECORD: &[u8] = br#"{"version":"1.0","file":{"filename":"flask-1.0.whl","url":"https://files.invalid/flask-1.0.whl"},"imports":{"V1":{"exclusive":[],"shared":[]}}}"#;
 
 fn store() -> (tempfile::TempDir, MetaStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -36,7 +39,7 @@ fn published() -> PublishedFile<'static> {
         filename: "flask-1.0.whl",
         artifact_sha256: "artifact-sha",
         artifact_size: 8,
-        record: b"record",
+        record: PUBLISHED_RECORD,
         version: "1.0",
         submitted_at_unix: 123,
         metadata: Some(MetadataSibling {
@@ -46,6 +49,722 @@ fn published() -> PublishedFile<'static> {
         provenance: None,
         quota: None,
     }
+}
+
+fn import_record(version: &str, exclusive: &[&str], shared: &[&str]) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "version": version,
+        "file": {"filename": "flask-1.0.whl", "url": "https://files.invalid/flask-1.0.whl"},
+        "imports": {
+            "V1": {
+                "exclusive": exclusive.iter().map(|name| json!({"name": name, "private": false})).collect::<Vec<_>>(),
+                "shared": shared.iter().map(|name| json!({"name": name, "private": false})).collect::<Vec<_>>(),
+            },
+        },
+    }))
+    .unwrap()
+}
+
+fn seed_release(meta: &MetaStore, count: usize) {
+    let record = import_record("1.0", &["flask"], &[]);
+    for position in 0..count {
+        meta.put_driver_value(
+            &upload_key("hosted", "flask", &format!("flask-1.0-{position:03}.whl")),
+            &record,
+        )
+        .unwrap();
+    }
+}
+
+fn mark_release_imports_initialized(meta: &MetaStore) {
+    meta.put_driver_value(&crate::store::release_imports_init_key("hosted", "flask"), b"")
+        .unwrap();
+}
+
+fn put_release_import_constraint(meta: &MetaStore, value: &serde_json::Value) {
+    mark_release_imports_initialized(meta);
+    meta.put_driver_value(
+        &crate::store::release_imports_key("hosted", "flask", "1"),
+        &serde_json::to_vec(value).unwrap(),
+    )
+    .unwrap();
+}
+
+fn keep_upload(_filename: &str, record: &[u8]) -> Result<UploadMutation, MetaError> {
+    serde_json::from_slice::<serde_json::Value>(record)?;
+    Ok(UploadMutation::Keep)
+}
+
+fn replace_with_published_record(_filename: &str, record: &[u8]) -> Result<UploadMutation, MetaError> {
+    serde_json::from_slice::<serde_json::Value>(record)?;
+    Ok(UploadMutation::Replace(PUBLISHED_RECORD.to_vec()))
+}
+
+#[test]
+fn test_publish_rejects_conflicting_release_import_declarations() {
+    let (_dir, meta) = store();
+    let first = import_record("1.0", &["flask"], &[]);
+    let second = import_record("1.0.0", &[], &["flask"]);
+
+    meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-py3-none-any.whl",
+            record: &first,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    )
+    .unwrap();
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0.tar.gz",
+            record: &second,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(result, Err(MetaError::DriverPrecondition(message)) if message.contains("exclusive and shared")));
+    assert!(
+        meta.get_upload("hosted", "flask", "flask-1.0.tar.gz")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_publish_rejects_inconsistent_release_import_declarations() {
+    let (_dir, meta) = store();
+    let first = import_record("1.0", &["flask"], &[]);
+    let second = import_record("1.0", &["other"], &[]);
+    meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-py3-none-any.whl",
+            record: &first,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    )
+    .unwrap();
+
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0.tar.gz",
+            record: &second,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(result, Err(MetaError::DriverPrecondition(message)) if message.contains("are inconsistent")));
+}
+
+#[test]
+fn test_publish_rejects_mixing_legacy_and_declared_imports() {
+    let (_dir, meta) = store();
+    let legacy = br#"{"version":"1.0","imports":"Before25"}"#;
+    meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0.tar.gz",
+            record: legacy,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    )
+    .unwrap();
+    let declared = import_record("1.0", &["flask"], &[]);
+
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0.whl",
+            record: &declared,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(result, Err(MetaError::DriverPrecondition(message)) if message.contains("metadata before 2.5")));
+}
+
+#[test]
+fn test_publish_rejects_replacing_a_release_member_with_conflicting_imports() {
+    let (_dir, meta) = store();
+    let matching = import_record("1.0", &["flask"], &[]);
+    for filename in ["flask-1.0-py3-none-any.whl", "flask-1.0.tar.gz"] {
+        meta.publish_file_if(
+            false,
+            &PublishedFile {
+                filename,
+                record: &matching,
+                ..published()
+            },
+            |_stored| Ok::<_, MetaError>(Guard::Commit),
+        )
+        .unwrap();
+    }
+    let conflicting = import_record("1.0.0", &[], &["flask"]);
+
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-py3-none-any.whl",
+            record: &conflicting,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(result, Err(MetaError::DriverPrecondition(message)) if message.contains("exclusive and shared")));
+    assert_eq!(
+        meta.get_upload("hosted", "flask", "flask-1.0-py3-none-any.whl")
+            .unwrap()
+            .as_deref(),
+        Some(matching.as_slice())
+    );
+}
+
+#[test]
+fn test_deleting_the_last_declaration_drops_its_release_constraint() {
+    let (_dir, meta) = store();
+    let exclusive = import_record("1.0", &["flask"], &[]);
+    let legacy = serde_json::to_vec(&json!({
+        "version": "1.0",
+        "file": {"filename": "flask-1.0.tar.gz", "url": "https://files.invalid/flask-1.0.tar.gz"},
+    }))
+    .unwrap();
+    let exclusive_filename = "flask-1.0-py3-none-any.whl";
+    let legacy_filename = "flask-1.0.tar.gz";
+    meta.put_driver_value(&upload_key("hosted", "flask", exclusive_filename), &exclusive)
+        .unwrap();
+    meta.put_driver_value(&upload_key("hosted", "flask", legacy_filename), &legacy)
+        .unwrap();
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+
+    assert!(
+        meta.delete_upload(false, "hosted", "flask", exclusive_filename, 123)
+            .unwrap()
+    );
+    let shared = serde_json::from_value(json!({
+        "V1": {"exclusive": [], "shared": [{"name": "flask", "private": false}]}
+    }))
+    .unwrap();
+    assert!(
+        crate::store::classify_upload_if_unchanged(&meta, "hosted", "flask", legacy_filename, &legacy, shared,)
+            .unwrap()
+    );
+
+    let record = import_record("1.0", &[], &["flask"]);
+    meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-py3-none-any-2.whl",
+            record: &record,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_classifying_legacy_release_members_does_not_admit_each_partial_projection() {
+    let (_dir, meta) = store();
+    let first = serde_json::to_vec(&json!({
+        "version": "1.0",
+        "file": {"filename": "flask-1.0-py3-none-any.whl", "url": "https://files.invalid/flask-1.0-py3-none-any.whl"},
+    }))
+    .unwrap();
+    let second = serde_json::to_vec(&json!({
+        "version": "1.0",
+        "file": {"filename": "flask-1.0.tar.gz", "url": "https://files.invalid/flask-1.0.tar.gz"},
+    }))
+    .unwrap();
+    let first_filename = "flask-1.0-py3-none-any.whl";
+    let second_filename = "flask-1.0.tar.gz";
+    meta.put_driver_value(&upload_key("hosted", "flask", first_filename), &first)
+        .unwrap();
+    meta.put_driver_value(&upload_key("hosted", "flask", second_filename), &second)
+        .unwrap();
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+    let imports: crate::upload::ImportDeclarations = serde_json::from_value(json!({
+        "V1": {"exclusive": [{"name": "flask", "private": false}], "shared": []}
+    }))
+    .unwrap();
+
+    assert!(
+        crate::store::classify_upload_if_unchanged(&meta, "hosted", "flask", first_filename, &first, imports.clone(),)
+            .unwrap()
+    );
+    assert!(
+        crate::store::classify_upload_if_unchanged(&meta, "hosted", "flask", second_filename, &second, imports,)
+            .unwrap()
+    );
+    let record = import_record("1.0", &["flask"], &[]);
+    meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-py3-none-any-2.whl",
+            record: &record,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    )
+    .unwrap();
+}
+
+#[rstest]
+#[case::missing(None, b"expected", false)]
+#[case::stale(Some(&br#"{"version":"1.0"}"#[..]), b"different", false)]
+#[case::classified(Some(PUBLISHED_RECORD), PUBLISHED_RECORD, false)]
+fn test_classify_upload_if_unchanged_resolves_non_writable_rows(
+    #[case] stored: Option<&[u8]>,
+    #[case] expected: &[u8],
+    #[case] changed: bool,
+) {
+    let (_dir, meta) = store();
+    let filename = "flask-1.0.whl";
+    if let Some(stored) = stored {
+        meta.put_driver_value(&upload_key("hosted", "flask", filename), stored)
+            .unwrap();
+    }
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+
+    assert_eq!(
+        crate::store::classify_upload_if_unchanged(
+            &meta,
+            "hosted",
+            "flask",
+            filename,
+            expected,
+            crate::upload::ImportDeclarations::Before25,
+        )
+        .unwrap(),
+        changed
+    );
+}
+
+#[test]
+fn test_status_rewrite_keeps_a_historical_import_conflict_manageable() {
+    let (_dir, meta) = store();
+    let exclusive = import_record("1.0", &["flask"], &[]);
+    let shared = import_record("1.0", &[], &["flask"]);
+    meta.put_driver_value(&upload_key("hosted", "flask", "flask-1.0.whl"), &exclusive)
+        .unwrap();
+    meta.put_driver_value(&upload_key("hosted", "flask", "flask-1.0.tar.gz"), &shared)
+        .unwrap();
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+
+    assert_eq!(
+        meta.mutate_uploads(false, "hosted", "flask", "yank", 123, |_filename, record| {
+            let mut uploaded = serde_json::from_slice::<crate::upload::Uploaded>(record).unwrap();
+            uploaded.file.yanked = Yanked::Yes;
+            Ok::<_, MetaError>(UploadMutation::Replace(serde_json::to_vec(&uploaded).unwrap()))
+        })
+        .unwrap(),
+        2
+    );
+}
+
+#[rstest]
+#[case::empty(0)]
+#[case::one_page(128)]
+#[case::one_page_and_one(129)]
+#[case::two_pages(256)]
+#[case::two_pages_and_one(257)]
+fn test_release_import_initialization_pages_preserve_admission(#[case] count: usize) {
+    let (_dir, meta) = store();
+    seed_release(&meta, count);
+
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+    let conflicting = import_record("1.0", &[], &["flask"]);
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-new.whl",
+            record: &conflicting,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    if count == 0 {
+        assert!(result.unwrap());
+    } else {
+        assert!(matches!(
+            result,
+            Err(MetaError::DriverPrecondition(message)) if message.contains("exclusive and shared")
+        ));
+    }
+}
+
+#[test]
+fn test_release_import_initialization_resumes_after_a_page_scan_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    let meta = MetaStore::open(&path).unwrap();
+    seed_release(&meta, 257);
+    meta.fail_driver_prefix_scan_after(129);
+
+    assert!(crate::store::initialize_release_imports(&meta, "hosted", "flask").is_err());
+    assert_eq!(meta.current_serial().unwrap(), 1);
+    drop(meta);
+
+    let meta = MetaStore::open_existing(path).unwrap();
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+    let conflicting = import_record("1.0", &[], &["flask"]);
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-new.whl",
+            record: &conflicting,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(
+        result,
+        Err(MetaError::DriverPrecondition(message)) if message.contains("exclusive and shared")
+    ));
+}
+
+#[test]
+fn test_release_import_migration_replays_without_a_warehouse_entry() {
+    let (_writer_directory, writer) = store();
+    let (_replica_directory, replica) = store();
+    let record = import_record("1.0", &["flask"], &[]);
+    writer
+        .commit_driver_txn(|txn| {
+            txn.put("test/release-import-replay", b"seed").unwrap();
+            for position in 0..129 {
+                txn.put(
+                    &upload_key("hosted", "flask", &format!("flask-1.0-{position:03}.whl")),
+                    &record,
+                )
+                .unwrap();
+            }
+            Ok::<_, MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    writer
+        .commit_driver_txn(|txn| {
+            txn.remove("test/release-import-replay")?;
+            Ok::<_, MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    crate::store::initialize_release_imports(&writer, "hosted", "flask").unwrap();
+    assert!(read_journal_entries(&writer, 0, 16).unwrap().entries.is_empty());
+
+    for record in writer.journal_after(0, 16).unwrap() {
+        let expected = replica.current_serial().unwrap();
+        replica
+            .commit_replica_txn(expected, |txn| {
+                for mutation in &record.mutations {
+                    match mutation {
+                        DriverMutation::Put { key, value } => txn.put(key, value)?,
+                        DriverMutation::Delete { key } => {
+                            txn.remove(key)?;
+                        }
+                    }
+                }
+                Ok::<_, MetaError>((
+                    (),
+                    vec![JournalEntry {
+                        payload: record.payload.clone(),
+                        mutations: record.mutations.clone(),
+                        blobs: record.blobs.clone(),
+                    }],
+                ))
+            })
+            .unwrap();
+    }
+    assert_eq!(replica.current_serial().unwrap(), writer.current_serial().unwrap());
+
+    let conflicting = import_record("1.0", &[], &["flask"]);
+    let result = replica.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-new.whl",
+            record: &conflicting,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(
+        result,
+        Err(MetaError::DriverPrecondition(message)) if message.contains("exclusive and shared")
+    ));
+}
+
+#[rstest]
+#[case::invalid_utf8(b"\xff")]
+#[case::outside_prefix(b"other")]
+fn test_release_import_initialization_rejects_a_corrupt_cursor(#[case] marker: &[u8]) {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&crate::store::release_imports_init_key("hosted", "flask"), marker)
+        .unwrap();
+
+    let error = crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap_err();
+
+    assert!(
+        matches!(error, MetaError::DriverPrecondition(message) if message.contains("corrupt release import initialization"))
+    );
+}
+
+#[test]
+fn test_release_import_initialization_rejects_a_cursor_at_the_upload_prefix() {
+    let (_dir, meta) = store();
+    let cursor = upload_key("hosted", "flask", "");
+    meta.put_driver_value(
+        &crate::store::release_imports_init_key("hosted", "flask"),
+        cursor.as_bytes(),
+    )
+    .unwrap();
+
+    let error = crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap_err();
+
+    assert!(matches!(error, MetaError::DriverPrecondition(message) if message.contains("outside its upload prefix")));
+}
+
+#[test]
+fn test_release_import_initialization_excludes_trashed_rows() {
+    let (_dir, meta) = store();
+    meta.put_driver_value(
+        &upload_key("hosted", "flask", "flask-1.0.whl"),
+        &serde_json::to_vec(&json!({
+            "version": "1.0",
+            "imports": "Before25",
+            "trashed": {"at": 1},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+    let record = import_record("1.0", &["flask"], &[]);
+    assert!(
+        meta.publish_file_if(
+            false,
+            &PublishedFile {
+                filename: "flask-1.0-new.whl",
+                record: &record,
+                ..published()
+            },
+            |_stored| Ok::<_, MetaError>(Guard::Commit),
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn test_upload_admission_rejects_incomplete_initialization() {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&upload_key("hosted", "flask", "flask-1.0-old.whl"), PUBLISHED_RECORD)
+        .unwrap();
+    let record = import_record("1.0", &[], &[]);
+
+    meta.commit_driver_txn(|txn| {
+        let error = crate::store::admit_upload_row(txn, "hosted", "flask", "flask-1.0-new.whl", &record).unwrap_err();
+        assert!(
+            matches!(error, crate::store::UploadWriteError::Meta(MetaError::DriverPrecondition(message)) if message.contains("initialization") && message.contains("incomplete"))
+        );
+        Ok::<_, MetaError>(((), Vec::new()))
+    })
+    .unwrap();
+}
+
+#[test]
+fn test_journal_version_falls_back_to_the_distribution_filename() {
+    assert_eq!(
+        super::journal_version("flask-2.0-py3-none-any.whl", b"invalid"),
+        Some("2.0".to_owned())
+    );
+}
+
+#[rstest]
+#[case::trashed(br#"{"version":"1.0","imports":"Before25","trashed":{}}"#, None)]
+#[case::invalid_version(
+    br#"{"version":"invalid version","imports":"Before25"}"#,
+    Some("invalid uploaded release version")
+)]
+#[case::unclassified(br#"{"version":"1.0"}"#, Some("are incomplete"))]
+fn test_upload_admission_handles_projection_boundaries(#[case] record: &[u8], #[case] expected: Option<&str>) {
+    let (_dir, meta) = store();
+    mark_release_imports_initialized(&meta);
+
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-new.whl",
+            record,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    match expected {
+        Some(expected) => {
+            assert!(matches!(result, Err(MetaError::DriverPrecondition(message)) if message.contains(expected)));
+        }
+        None => assert!(result.unwrap()),
+    }
+}
+
+#[test]
+fn test_upload_admission_rejects_unclassified_incumbents() {
+    let (_dir, meta) = store();
+    meta.put_driver_value(
+        &upload_key("hosted", "flask", "flask-1.0-old.whl"),
+        br#"{"version":"1.0"}"#,
+    )
+    .unwrap();
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+    let record = import_record("1.0", &[], &[]);
+
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-new.whl",
+            record: &record,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(result, Err(MetaError::DriverPrecondition(message)) if message.contains("unclassified artifact")));
+}
+
+#[rstest]
+#[case::invalid_json(json!("record"), "corrupt release import constraint")]
+#[case::zero_bucket(
+    json!({"live": 0, "unclassified": 0, "declarations": [{"declaration": "Before25", "count": 0}]}),
+    "invalid declaration buckets",
+)]
+#[case::duplicate_bucket(
+    json!({"live": 2, "unclassified": 0, "declarations": [
+        {"declaration": "Before25", "count": 1},
+        {"declaration": "Before25", "count": 1},
+    ]}),
+    "invalid declaration buckets",
+)]
+#[case::declaration_overflow(
+    json!({"live": 0, "unclassified": 0, "declarations": [
+        {"declaration": "Before25", "count": u64::MAX},
+        {"declaration": {"V1": {"exclusive": null, "shared": null}}, "count": 1},
+    ]}),
+    "declaration count overflowed",
+)]
+#[case::count_overflow(
+    json!({"live": 0, "unclassified": u64::MAX, "declarations": [
+        {"declaration": "Before25", "count": 1},
+    ]}),
+    "count overflowed",
+)]
+#[case::count_mismatch(
+    json!({"live": 2, "unclassified": 0, "declarations": [
+        {"declaration": "Before25", "count": 1},
+    ]}),
+    "counts do not match",
+)]
+fn test_upload_admission_rejects_corrupt_release_constraints(
+    #[case] constraint: serde_json::Value,
+    #[case] expected: &str,
+) {
+    let (_dir, meta) = store();
+    put_release_import_constraint(&meta, &constraint);
+    let record = import_record("1.0", &[], &[]);
+
+    let result = meta.publish_file_if(
+        false,
+        &PublishedFile {
+            filename: "flask-1.0-new.whl",
+            record: &record,
+            ..published()
+        },
+        |_stored| Ok::<_, MetaError>(Guard::Commit),
+    );
+
+    assert!(matches!(result, Err(MetaError::DriverPrecondition(message)) if message.contains(expected)));
+}
+
+#[test]
+fn test_upload_projection_rejects_a_live_count_overflow() {
+    let (_dir, meta) = store();
+    put_release_import_constraint(
+        &meta,
+        &json!({"live": u64::MAX, "unclassified": u64::MAX, "declarations": []}),
+    );
+
+    let error = meta
+        .put_upload("hosted", "flask", "flask-1.0-new.whl", br#"{"version":"1.0"}"#)
+        .unwrap_err();
+
+    assert!(matches!(error, MetaError::DriverPrecondition(message) if message.contains("overflowed live count")));
+}
+
+#[test]
+fn test_upload_projection_rejects_an_invalid_release_version() {
+    let (_dir, meta) = store();
+    mark_release_imports_initialized(&meta);
+
+    let error = meta
+        .put_upload(
+            "hosted",
+            "flask",
+            "flask-invalid.whl",
+            br#"{"version":"invalid version","imports":"Before25"}"#,
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(error, MetaError::DriverPrecondition(message) if message.contains("invalid uploaded release version"))
+    );
+}
+
+#[rstest]
+#[case::invalid_version(
+    br#"{"version":"invalid version","imports":"Before25"}"#,
+    json!({"live": 0, "unclassified": 0, "declarations": []}),
+    "invalid uploaded release version",
+)]
+#[case::missing_bucket(
+    br#"{"version":"1.0","imports":{"V1":{"exclusive":null,"shared":null}}}"#,
+    json!({"live": 1, "unclassified": 0, "declarations": [{"declaration": "Before25", "count": 1}]}),
+    "misses a declaration bucket",
+)]
+#[case::unclassified_underflow(
+    br#"{"version":"1.0"}"#,
+    json!({"live": 1, "unclassified": 0, "declarations": [{"declaration": "Before25", "count": 1}]}),
+    "underflowed unclassified count",
+)]
+#[case::live_underflow(
+    br#"{"version":"1.0","imports":"Before25"}"#,
+    json!({"live": 0, "unclassified": 0, "declarations": []}),
+    "underflowed live count",
+)]
+fn test_upload_projection_rejects_corrupt_removal_state(
+    #[case] stored: &[u8],
+    #[case] constraint: serde_json::Value,
+    #[case] expected: &str,
+) {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&upload_key("hosted", "flask", "flask-1.0-old.whl"), stored)
+        .unwrap();
+    put_release_import_constraint(&meta, &constraint);
+
+    let error = meta
+        .delete_upload(false, "hosted", "flask", "flask-1.0-old.whl", 1)
+        .unwrap_err();
+
+    assert!(matches!(error, MetaError::DriverPrecondition(message) if message.contains(expected)));
 }
 
 #[test]
@@ -71,7 +790,7 @@ fn test_publish_file_if_commit_writes_record_sibling_project_and_serial() {
         meta.get_driver_value(&upload_key("hosted", "flask", "flask-1.0.whl"))
             .unwrap()
             .as_deref(),
-        Some(b"record".as_slice())
+        Some(PUBLISHED_RECORD)
     );
     assert!(
         meta.get_metadata_digest("artifact-sha").unwrap().is_some(),
@@ -273,7 +992,7 @@ fn test_publish_file_if_commit_without_a_metadata_sibling_writes_no_sibling() {
         meta.get_driver_value(&upload_key("hosted", "flask", "flask-1.0.whl"))
             .unwrap()
             .as_deref(),
-        Some(b"record".as_slice())
+        Some(PUBLISHED_RECORD)
     );
 }
 
@@ -385,7 +1104,7 @@ fn test_publish_file_if_shows_the_guard_the_publications_stored_bundle() {
         assert_eq!(
             stored,
             PublishedState {
-                record: Some(b"record"),
+                record: Some(PUBLISHED_RECORD),
                 provenance: Some("bundle-sha"),
             }
         );
@@ -449,7 +1168,7 @@ fn test_promote_files_checked_writes_the_release_project_and_journal() {
     let records = vec![(
         "flask-1.0.whl".to_owned(),
         "artifact-sha".to_owned(),
-        br#"{"version":"1.0"}"#.to_vec(),
+        import_record("1.0", &[], &[]),
     )];
     let blob_sizes = BTreeMap::from([("artifact-sha".to_owned(), 8)]);
 
@@ -478,7 +1197,7 @@ fn test_promote_files_checked_writes_the_release_project_and_journal() {
         meta.get_driver_value(&upload_key("hosted", "flask", "flask-1.0.whl"))
             .unwrap()
             .as_deref(),
-        Some(br#"{"version":"1.0"}"#.as_slice())
+        Some(import_record("1.0", &[], &[]).as_slice())
     );
     assert_eq!(meta.get_project("hosted", "flask").unwrap().as_deref(), Some("Flask"));
     let batch = meta.journal_after(0, 2).unwrap().pop().unwrap();
@@ -580,7 +1299,7 @@ fn promote(meta: &MetaStore, source: &str) -> Result<usize, MetaError> {
     let records = vec![(
         "flask-1.0.whl".to_owned(),
         "artifact-sha".to_owned(),
-        br#"{"version":"1.0"}"#.to_vec(),
+        import_record("1.0", &[], &[]),
     )];
     meta.promote_files_checked::<MetaError>(
         true,
@@ -635,8 +1354,10 @@ fn test_scan_upload_records_propagates_store_errors_after_visiting_healthy_recor
 #[test]
 fn test_scan_upload_records_keeps_deleted_row_from_its_snapshot() {
     let (_dir, meta) = store();
-    meta.put_upload("hosted", "flask", "a.whl", b"a").unwrap();
-    meta.put_upload("hosted", "flask", "z.whl", b"z").unwrap();
+    let first = import_record("1.0", &[], &[]);
+    let last = import_record("2.0", &[], &[]);
+    meta.put_upload("hosted", "flask", "a.whl", &first).unwrap();
+    meta.put_upload("hosted", "flask", "z.whl", &last).unwrap();
     let (scan_started_tx, scan_started_rx) = sync_channel(0);
     let (delete_done_tx, delete_done_rx) = sync_channel(0);
     let mut seen = Vec::new();
@@ -664,13 +1385,13 @@ fn test_scan_upload_records_keeps_deleted_row_from_its_snapshot() {
     assert_eq!(
         seen,
         vec![
-            ("hosted/flask/a.whl".to_owned(), b"a".to_vec()),
-            ("hosted/flask/z.whl".to_owned(), b"z".to_vec()),
+            ("hosted/flask/a.whl".to_owned(), first.clone()),
+            ("hosted/flask/z.whl".to_owned(), last),
         ]
     );
     assert_eq!(
         meta.list_upload_entries("hosted", "flask").unwrap(),
-        vec![("a.whl".to_owned(), b"a".to_vec())]
+        vec![("a.whl".to_owned(), first)]
     );
 }
 
@@ -758,12 +1479,18 @@ fn test_scan_override_records_propagates_the_visitor_error() {
 #[test]
 fn test_mutate_uploads_journals_the_action_for_each_rewritten_record() {
     let (_dir, meta) = store();
-    meta.put_upload("hosted", "flask", "flask-1.0.whl", b"a").unwrap();
-    meta.put_upload("hosted", "flask", "flask-2.0.whl", b"b").unwrap();
+    meta.put_upload("hosted", "flask", "flask-1.0.whl", &import_record("1.0", &[], &[]))
+        .unwrap();
+    meta.put_upload("hosted", "flask", "flask-2.0.whl", &import_record("2.0", &[], &[]))
+        .unwrap();
 
     let changed = meta
-        .mutate_uploads(true, "hosted", "flask", "yank", 123, |_filename, _record| {
-            Ok::<_, MetaError>(UploadMutation::Replace(b"yanked".to_vec()))
+        .mutate_uploads(true, "hosted", "flask", "yank", 123, |filename, _record| {
+            Ok::<_, MetaError>(UploadMutation::Replace(import_record(
+                if filename.contains("1.0") { "1.0" } else { "2.0" },
+                &[],
+                &[],
+            )))
         })
         .unwrap();
 
@@ -798,11 +1525,12 @@ fn test_mutate_uploads_journals_the_action_for_each_rewritten_record() {
 #[test]
 fn test_mutate_uploads_counts_rewrites_without_an_outbox() {
     let (_dir, meta) = store();
-    meta.put_upload("hosted", "flask", "flask-1.0.whl", b"active").unwrap();
+    let record = import_record("1.0", &[], &[]);
+    meta.put_upload("hosted", "flask", "flask-1.0.whl", &record).unwrap();
 
     let changed = meta
         .mutate_uploads(false, "hosted", "flask", "yank", 123, |_filename, _record| {
-            Ok::<_, MetaError>(UploadMutation::Replace(b"yanked".to_vec()))
+            Ok::<_, MetaError>(UploadMutation::Replace(record.clone()))
         })
         .unwrap();
 
@@ -811,7 +1539,7 @@ fn test_mutate_uploads_counts_rewrites_without_an_outbox() {
         meta.get_driver_value(&upload_key("hosted", "flask", "flask-1.0.whl"))
             .unwrap()
             .as_deref(),
-        Some(b"yanked".as_slice()),
+        Some(record.as_slice()),
     );
     assert_eq!(meta.current_serial().unwrap(), 0);
 }
@@ -819,8 +1547,10 @@ fn test_mutate_uploads_counts_rewrites_without_an_outbox() {
 #[test]
 fn test_mutate_uploads_journals_only_the_removed_record_and_keeps_the_rest() {
     let (_dir, meta) = store();
-    meta.put_upload("hosted", "flask", "flask-1.0.whl", b"a").unwrap();
-    meta.put_upload("hosted", "flask", "flask-2.0.whl", b"b").unwrap();
+    meta.put_upload("hosted", "flask", "flask-1.0.whl", &import_record("1.0", &[], &[]))
+        .unwrap();
+    meta.put_upload("hosted", "flask", "flask-2.0.whl", &import_record("2.0", &[], &[]))
+        .unwrap();
 
     let changed = meta
         .mutate_uploads(true, "hosted", "flask", "delete-file", 123, |filename, _record| {
@@ -850,21 +1580,21 @@ fn test_mutate_uploads_journals_only_the_removed_record_and_keeps_the_rest() {
 }
 
 #[rstest::rstest]
-#[case::replace("1.0", Some(b"replaced".as_slice()), 1)]
-#[case::delete("2.0", None, 1)]
-#[case::keep("3.0", Some(b"3.0".as_slice()), 0)]
+#[case::replace("1.0", true, 1)]
+#[case::delete("2.0", false, 1)]
+#[case::keep("3.0", true, 0)]
 fn test_mutate_uploads_applies_each_mutation(
     #[case] version: &str,
-    #[case] expected: Option<&[u8]>,
+    #[case] expected: bool,
     #[case] expected_changes: usize,
 ) {
     let (_directory, meta) = store();
     let filename = format!("flask-{version}.whl");
-    meta.put_upload("hosted", "flask", &filename, version.as_bytes())
-        .unwrap();
+    let record = import_record(version, &[], &[]);
+    meta.put_upload("hosted", "flask", &filename, &record).unwrap();
     let mutate = |filename: &str, _record: &[u8]| {
         Ok::<_, MetaError>(match filename {
-            "flask-1.0.whl" => UploadMutation::Replace(b"replaced".to_vec()),
+            "flask-1.0.whl" => UploadMutation::Replace(record.clone()),
             "flask-2.0.whl" => UploadMutation::Delete,
             _ => UploadMutation::Keep,
         })
@@ -878,7 +1608,7 @@ fn test_mutate_uploads_applies_each_mutation(
     assert_eq!(
         meta.get_driver_value(&upload_key("hosted", "flask", &filename))
             .unwrap()
-            .as_deref(),
+            .is_some(),
         expected
     );
 }
@@ -886,12 +1616,11 @@ fn test_mutate_uploads_applies_each_mutation(
 #[test]
 fn test_mutate_uploads_that_keeps_every_record_journals_nothing() {
     let (_dir, meta) = store();
-    meta.put_upload("hosted", "flask", "flask-1.0.whl", b"a").unwrap();
+    meta.put_upload("hosted", "flask", "flask-1.0.whl", &import_record("1.0", &[], &[]))
+        .unwrap();
 
     let changed = meta
-        .mutate_uploads(true, "hosted", "flask", "yank", 123, |_filename, _record| {
-            Ok::<_, MetaError>(UploadMutation::Keep)
-        })
+        .mutate_uploads(true, "hosted", "flask", "yank", 123, keep_upload)
         .unwrap();
 
     assert_eq!(changed, 0);
@@ -901,7 +1630,8 @@ fn test_mutate_uploads_that_keeps_every_record_journals_nothing() {
 #[test]
 fn test_delete_upload_removes_the_record_and_journals_delete_file() {
     let (_dir, meta) = store();
-    meta.put_upload("hosted", "flask", "flask-1.0.whl", b"record").unwrap();
+    meta.put_upload("hosted", "flask", "flask-1.0.whl", PUBLISHED_RECORD)
+        .unwrap();
 
     let existed = meta
         .delete_upload(true, "hosted", "flask", "flask-1.0.whl", 123)
@@ -1159,8 +1889,13 @@ fn test_combined_mutation_reports_override_changes(
 ) {
     let (_dir, meta) = store();
     let filename = "flask-1.0.whl";
-    meta.put_driver_value(&upload_key("hosted", "flask", filename), b"record")
-        .unwrap();
+    meta.put_driver_value(
+        &upload_key("hosted", "flask", filename),
+        &import_record("1.0", &[], &[]),
+    )
+    .unwrap();
+    crate::store::initialize_release_imports(&meta, "hosted", "flask").unwrap();
+    let serial = meta.current_serial().unwrap();
     if let Some(stored) = stored {
         meta.put_driver_value(&override_key("hosted", "flask", filename), stored.as_bytes())
             .unwrap();
@@ -1189,8 +1924,38 @@ fn test_combined_mutation_reports_override_changes(
 
     assert_eq!(changed, expected);
     assert_eq!(webhook_calls.get(), usize::from(expected > 0));
-    assert_eq!(meta.current_serial().unwrap(), expected as u64);
+    assert_eq!(meta.current_serial().unwrap(), serial + expected as u64);
     assert_eq!(meta.next_webhook_event_id().unwrap(), None);
+}
+
+#[test]
+fn test_mutating_rejects_an_unreadable_legacy_upload_during_initialization() {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&upload_key("hosted", "flask", "flask-1.0.whl"), b"record")
+        .unwrap();
+
+    let error = meta
+        .mutate_uploads(false, "hosted", "flask", "yank", 123, replace_with_published_record)
+        .unwrap_err();
+
+    assert!(matches!(error, MetaError::DriverPrecondition(message) if message.starts_with("corrupt uploaded record:")));
+    assert_eq!(meta.current_serial().unwrap(), 0);
+}
+
+#[test]
+fn test_mutating_rejects_a_corrupt_initialized_upload() {
+    let (_dir, meta) = store();
+    let key = upload_key("hosted", "flask", "flask-1.0.whl");
+    meta.put_upload("hosted", "flask", "flask-1.0.whl", PUBLISHED_RECORD)
+        .unwrap();
+    meta.put_driver_value(&key, b"record").unwrap();
+
+    let error = meta
+        .mutate_uploads(false, "hosted", "flask", "yank", 123, keep_upload)
+        .unwrap_err();
+
+    assert!(matches!(error, MetaError::DriverPrecondition(message) if message.starts_with("corrupt uploaded record:")));
+    assert_eq!(meta.get_driver_value(&key).unwrap(), Some(b"record".to_vec()));
 }
 
 #[derive(Clone, Copy)]
@@ -1213,10 +1978,8 @@ fn apply_hosted_mutation(meta: &MetaStore, mutation: HostedMutation) {
             promote(meta, "staging").unwrap();
         }
         HostedMutation::Rewrite => {
-            meta.mutate_uploads(true, "hosted", "flask", "yank", 123, |_filename, _record| {
-                Ok::<_, MetaError>(UploadMutation::Replace(b"yanked".to_vec()))
-            })
-            .unwrap();
+            meta.mutate_uploads(true, "hosted", "flask", "yank", 123, replace_with_published_record)
+                .unwrap();
         }
         HostedMutation::Remove => {
             meta.delete_upload(true, "hosted", "flask", "flask-1.0.whl", 123)
@@ -1246,7 +2009,7 @@ fn apply_hosted_mutation(meta: &MetaStore, mutation: HostedMutation) {
                     override_mutation: OverrideMutation::Hidden(true),
                 },
                 || Ok::<_, MetaError>(()),
-                |_filename, _record| Ok::<_, MetaError>(Some(b"rewritten".to_vec())),
+                |_filename, _record| Ok::<_, MetaError>(Some(PUBLISHED_RECORD.to_vec())),
                 |_| None,
             )
             .unwrap();
@@ -1268,7 +2031,7 @@ fn revisions(meta: &MetaStore) -> [u64; 3] {
 fn test_hosted_mutation_advances_only_its_own_repository(#[case] mutation: HostedMutation, #[case] expected: [u64; 3]) {
     let (_dir, meta) = store();
     for index in ["hosted", "staging", "prod"] {
-        meta.put_upload(index, "flask", "flask-1.0.whl", br#"{"version":"1.0"}"#)
+        meta.put_upload(index, "flask", "flask-1.0.whl", PUBLISHED_RECORD)
             .unwrap();
     }
     let before = revisions(&meta);
@@ -1396,12 +2159,12 @@ fn test_promote_files_checked_announces_a_release_once_across_its_files() {
         (
             "flask-1.0.tar.gz".to_owned(),
             "sdist-sha".to_owned(),
-            br#"{"version":"1.0"}"#.to_vec(),
+            import_record("1.0", &[], &[]),
         ),
         (
             "flask-1.0-py3-none-any.whl".to_owned(),
             "wheel-sha".to_owned(),
-            br#"{"version":"1.0"}"#.to_vec(),
+            import_record("1.0", &[], &[]),
         ),
     ];
 
@@ -1440,11 +2203,11 @@ fn test_promote_files_checked_announces_a_release_once_across_its_files() {
 }
 
 #[test]
-fn test_promote_files_checked_announces_no_release_for_a_file_that_names_no_version() {
+fn test_promote_files_checked_rejects_a_record_that_names_no_version() {
     let (_dir, meta) = store();
     let records = vec![("README".to_owned(), "readme-sha".to_owned(), b"{}".to_vec())];
 
-    meta.promote_files_checked::<MetaError>(
+    let result = meta.promote_files_checked::<MetaError>(
         true,
         &PromotedRelease {
             source: "staging",
@@ -1457,17 +2220,12 @@ fn test_promote_files_checked_announces_no_release_for_a_file_that_names_no_vers
             submitted_at_unix: 123,
         },
         |_, _, _| Ok::<_, MetaError>(Guard::Commit),
-    )
-    .unwrap();
-
-    assert_eq!(
-        journal_actions(&meta),
-        [(
-            "add-file".to_owned(),
-            Some("README".to_owned()),
-            Some("source".to_owned())
-        )]
     );
+
+    assert!(
+        matches!(result, Err(MetaError::DriverPrecondition(message)) if message.starts_with("corrupt uploaded record:"))
+    );
+    assert!(journal_actions(&meta).is_empty());
 }
 
 /// Nothing in production removes an upload record today: the served `DELETE` trashes it and retention

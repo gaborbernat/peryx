@@ -10,7 +10,7 @@ use crate::serving::finalize::{
 const ARTIFACT: &[u8] = b"finalized-artifact-bytes";
 const INTENT_KEY: &str = "pypi:hosted:flask:flask-1.0-py3-none-any.whl";
 const AUTHORITY: &str = "flask";
-const RECORD: &[u8] = br#"{"filename":"flask-1.0-py3-none-any.whl"}"#;
+const RECORD: &[u8] = br#"{"filename":"flask-1.0-py3-none-any.whl","version":"1.0","imports":"Before25"}"#;
 
 fn digest() -> String {
     Digest::of(ARTIFACT).as_str().to_owned()

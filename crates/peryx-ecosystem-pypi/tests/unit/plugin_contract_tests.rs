@@ -598,6 +598,7 @@ fn uploaded(filename: &str, version: &str, digest: &str, size: u64) -> Uploaded 
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     }
 }

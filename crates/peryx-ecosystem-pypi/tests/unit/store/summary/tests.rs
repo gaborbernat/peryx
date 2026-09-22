@@ -21,7 +21,9 @@ fn store() -> (tempfile::TempDir, MetaStore) {
 }
 
 fn record(filename: &str, version: &str, at: &str, size: u64) -> String {
-    format!(r#"{{"version":"{version}","file":{{"filename":"{filename}","upload-time":"{at}","size":{size}}}}}"#)
+    format!(
+        r#"{{"version":"{version}","file":{{"filename":"{filename}","upload-time":"{at}","size":{size}}},"imports":"Before25"}}"#
+    )
 }
 
 fn upload(meta: &MetaStore, index: &str, project: &str, filename: &str, version: &str, at: &str, size: u64) {
@@ -332,25 +334,21 @@ fn test_republishing_an_upload_counts_it_once() {
     );
 }
 
-/// A record that never parsed held no position, so replacing it adds one rather than moving one.
 #[test]
-fn test_replacing_an_unparsable_upload_gives_it_a_recent_entry() {
+fn test_replacing_an_unparsable_upload_fails() {
     let (_dir, meta) = store();
     meta.put_upload("hosted", "flask", "flask-1.0.whl", b"not json")
         .unwrap();
-    upload(
-        &meta,
+    let result = meta.put_upload(
         "hosted",
         "flask",
         "flask-1.0.whl",
-        "1.0",
-        "2026-01-01T00:00:00Z",
-        10,
+        record("flask-1.0.whl", "1.0", "2026-01-01T00:00:00Z", 10).as_bytes(),
     );
 
-    let summary = meta.summarize_indexes(&["hosted".to_owned()], 5).unwrap();
-    assert_eq!(summary["hosted"].write_count, 1);
-    assert_eq!(artifacts(&meta, "hosted", 5), vec!["flask-1.0.whl"]);
+    assert!(
+        matches!(result, Err(MetaError::DriverPrecondition(message)) if message.starts_with("corrupt uploaded record:"))
+    );
 }
 
 #[test]

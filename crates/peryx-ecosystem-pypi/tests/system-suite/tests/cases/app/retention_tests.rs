@@ -29,6 +29,7 @@ fn seed_upload(config: &Config, project: &str, version: &str) -> Digest {
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: Some(peryx_ecosystem_pypi::upload::ImportDeclarations::Before25),
         trashed: None,
     })
     .unwrap();

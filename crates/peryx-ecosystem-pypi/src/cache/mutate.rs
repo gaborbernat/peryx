@@ -5,7 +5,9 @@ use crate::quota::PendingQuota;
 use crate::store::PypiStore as _;
 use crate::store::{Guard, PromotedRelease};
 use crate::upload::{self, PreparedUpload, TrashInfo, Uploaded};
-use crate::{ProjectStatus, Yanked, inferred_release_version, parse_distribution_filename, to_json, versions_match};
+use crate::{
+    CoreMetadata, ProjectStatus, Yanked, inferred_release_version, parse_distribution_filename, to_json, versions_match,
+};
 use peryx_core::path::local_artifact_url;
 use peryx_driver::state::ServingState;
 use peryx_index::{Index, IndexKind};
@@ -29,15 +31,23 @@ async fn commit_control<T>(
     fence: u64,
     mutation: impl FnOnce(&ControlLease<'_>) -> Result<T, CacheError>,
 ) -> Result<T, CacheError> {
+    let lease = begin_control(state, authority, fence).await?;
+    let result = mutation(&lease);
+    lease.finish().await;
+    result
+}
+
+async fn begin_control<'a>(
+    state: &'a ServingState,
+    authority: &str,
+    fence: u64,
+) -> Result<ControlLease<'a>, CacheError> {
     let lease = match state.begin_authority_epoch_write(authority, fence).await {
         Ok(Some(lease)) => Some(lease),
         Ok(None) if state.ownership_authority().is_none() => None,
         Ok(None) | Err(_) => return Err(CacheError::AuthoritySuperseded),
     };
-    let lease = ControlLease { state, lease };
-    let result = mutation(&lease);
-    lease.finish().await;
-    result
+    Ok(ControlLease { state, lease })
 }
 
 struct ControlLease<'a> {
@@ -91,6 +101,7 @@ pub async fn store_upload(
     fence: u64,
     webhook: Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<StoredUpload, CacheError> {
+    backfill_release_imports(state, name, project, &prepared.record.version, false, fence).await?;
     let publish = upload::stage_publish(&state.blobs, prepared).await?;
     let published = commit_control(state, project, fence, |lease| {
         lease.check()?;
@@ -118,6 +129,153 @@ pub async fn store_upload(
     })
 }
 
+async fn backfill_release_imports(
+    state: &ServingState,
+    index: &str,
+    normalized: &str,
+    version: &str,
+    include_trashed: bool,
+    fence: u64,
+) -> Result<(), CacheError> {
+    initialize_release_imports(state, index, normalized, fence).await?;
+    for (filename, mut record) in state.meta.list_upload_entries(index, normalized)? {
+        let mut retried = false;
+        let mut complete = false;
+        while !complete {
+            let uploaded: Uploaded = serde_json::from_slice(&record)?;
+            if (uploaded.trashed.is_some() && !include_trashed)
+                || uploaded.imports.is_some()
+                || !versions_match(&uploaded.version, version)
+            {
+                break;
+            }
+            let bytes = legacy_metadata_bytes(state, &filename, &uploaded, version).await?;
+            let metadata = crate::parse_metadata(std::str::from_utf8(&bytes).map_err(|_| {
+                peryx_storage::meta::MetaError::DriverPrecondition(format!(
+                    "metadata sidecar for {filename:?} is not UTF-8"
+                ))
+            })?)
+            .map_err(|error| {
+                CacheError::Meta(peryx_storage::meta::MetaError::DriverPrecondition(format!(
+                    "invalid metadata sidecar for {filename:?}: {error}"
+                )))
+            })?;
+            let imports = upload::classify_imports(&metadata, normalized, &uploaded.version).map_err(|error| {
+                CacheError::Meta(peryx_storage::meta::MetaError::DriverPrecondition(format!(
+                    "invalid metadata sidecar for {filename:?}: {error:?}"
+                )))
+            })?;
+            let lease = begin_control(state, normalized, fence).await?;
+            let result = (|| {
+                lease.check()?;
+                upload::classify_or_reconcile(
+                    &state.meta,
+                    upload::ClassificationTarget {
+                        index,
+                        normalized,
+                        filename: &filename,
+                        include_trashed,
+                        version,
+                    },
+                    &imports,
+                    &mut record,
+                    &mut retried,
+                )
+                .map_err(CacheError::from)
+            })();
+            lease.finish().await;
+            complete = result?;
+        }
+    }
+    Ok(())
+}
+
+async fn initialize_release_imports(
+    state: &ServingState,
+    index: &str,
+    normalized: &str,
+    fence: u64,
+) -> Result<(), CacheError> {
+    loop {
+        if crate::store::release_imports_initialized(&state.meta, index, normalized)? {
+            return Ok(());
+        }
+        let lease = begin_control(state, normalized, fence).await?;
+        let result = (|| {
+            lease.check()?;
+            crate::store::initialize_release_imports_page(&state.meta, index, normalized).map_err(CacheError::from)
+        })();
+        lease.finish().await;
+        if !result? {
+            return Ok(());
+        }
+    }
+}
+
+async fn legacy_metadata_bytes(
+    state: &ServingState,
+    filename: &str,
+    uploaded: &Uploaded,
+    version: &str,
+) -> Result<Vec<u8>, CacheError> {
+    if let CoreMetadata::Hashes(hashes) = uploaded.file.metadata() {
+        let Some(digest) = hashes
+            .get("sha256")
+            .and_then(|digest| peryx_storage::blob::Digest::from_hex(digest))
+        else {
+            return Err(CacheError::Meta(peryx_storage::meta::MetaError::DriverPrecondition(
+                format!("metadata sidecar for {filename:?} has no valid digest"),
+            )));
+        };
+        let bytes = state
+            .blobs
+            .read_bytes(&digest, crate::archive::MAX_WHEEL_METADATA_BYTES)
+            .await?;
+        if peryx_storage::blob::Digest::of(&bytes) != digest {
+            return Err(CacheError::Meta(peryx_storage::meta::MetaError::DriverPrecondition(
+                format!("metadata sidecar for {filename:?} does not match its recorded digest"),
+            )));
+        }
+        return Ok(bytes);
+    }
+    let Some(digest) = uploaded.file.sha256().and_then(peryx_storage::blob::Digest::from_hex) else {
+        return Err(CacheError::MissingSha256(filename.to_owned()));
+    };
+    let lease = state.blobs.materialize(&digest).await?;
+    let task_filename = filename.to_owned();
+    let task_digest = digest.clone();
+    let metadata = join_archive_metadata(tokio::task::spawn_blocking(move || {
+        upload::verified_archive_metadata(&task_filename, lease.path(), &task_digest)
+    }))
+    .await?;
+    match metadata {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err(CacheError::ReleaseImports(format!(
+            "release import declarations for {version:?} are incomplete because {filename:?} has no archive metadata"
+        ))),
+        Err(upload::LegacyMetadataError::CorruptDigest) => {
+            Err(CacheError::Meta(peryx_storage::meta::MetaError::DriverPrecondition(
+                format!("archive for {filename:?} does not match its recorded digest"),
+            )))
+        }
+        Err(upload::LegacyMetadataError::Archive(error)) => {
+            Err(CacheError::Meta(peryx_storage::meta::MetaError::DriverPrecondition(
+                format!("archive metadata for {filename:?} cannot be read: {error}"),
+            )))
+        }
+    }
+}
+
+pub(super) async fn join_archive_metadata(
+    task: tokio::task::JoinHandle<Result<Option<Vec<u8>>, upload::LegacyMetadataError>>,
+) -> Result<Result<Option<Vec<u8>>, upload::LegacyMetadataError>, CacheError> {
+    task.await.map_err(|error| {
+        CacheError::Meta(peryx_storage::meta::MetaError::DriverPrecondition(format!(
+            "archive metadata backfill task failed: {error}"
+        )))
+    })
+}
+
 /// Copy one uploaded release from one hosted layer to another without touching blob bytes.
 ///
 /// # Errors
@@ -138,9 +296,11 @@ pub async fn promote_release(
     normalized: &str,
     version: &str,
 ) -> Result<usize, CacheError> {
-    let target = hosted.name.as_str();
-    let target_route = route.route.as_str();
     let fence = control_epoch(state, normalized).await;
+    backfill_release_imports(state, source, normalized, version, false, fence).await?;
+    let target = hosted.name.as_str();
+    backfill_release_imports(state, target, normalized, version, false, fence).await?;
+    let target_route = route.route.as_str();
     let mut matched = false;
     let mut records = Vec::new();
     let mut blob_sizes = BTreeMap::new();
@@ -270,6 +430,7 @@ pub async fn set_yanked_with_webhook(
     webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<usize, CacheError> {
     let fence = control_epoch(state, normalized).await;
+    initialize_release_imports(state, hosted, normalized, fence).await?;
     let uploaded = upload_filenames(state, hosted, normalized)?;
     let served = served_filenames(state, index, normalized, version).await?;
     // A hidden file is served by no layer, so it has to be named explicitly for a yank to reach it;
@@ -376,6 +537,7 @@ pub async fn remove_files_with_webhook(
     webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<usize, CacheError> {
     let fence = control_epoch(state, normalized).await;
+    initialize_release_imports(state, hosted, normalized, fence).await?;
     let filenames = served_filenames(state, index, normalized, version).await?;
     let uploaded = upload_filenames(state, hosted, normalized)?;
     let override_filenames = filenames
@@ -447,7 +609,18 @@ pub async fn restore_files_with_webhook(
     version: Option<&str>,
     webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<usize, CacheError> {
+    let mut releases = BTreeSet::new();
+    for (_filename, record) in state.meta.list_upload_entries(hosted, normalized)? {
+        let uploaded: Uploaded = serde_json::from_slice(&record)?;
+        if uploaded.trashed.is_some() && version.is_none_or(|version| versions_match(&uploaded.version, version)) {
+            releases.insert(uploaded.version);
+        }
+    }
     let fence = control_epoch(state, normalized).await;
+    initialize_release_imports(state, hosted, normalized, fence).await?;
+    for release in releases {
+        backfill_release_imports(state, hosted, normalized, &release, true, fence).await?;
+    }
     let override_filenames = hidden_filenames(state, hosted, normalized, version)?;
     let submitted_at_unix = (state.clock)();
     let restored = commit_control(state, normalized, fence, |lease| {

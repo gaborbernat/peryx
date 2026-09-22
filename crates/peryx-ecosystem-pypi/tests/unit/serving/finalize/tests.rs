@@ -7,3 +7,9 @@ fn test_a_store_fault_maps_to_a_finalize_store_error() {
     let err = MetaError::Decode(serde_json::from_str::<serde_json::Value>("x").unwrap_err());
     assert!(matches!(FinalizeError::from(err), FinalizeError::Store(_)));
 }
+
+#[test]
+fn test_an_upload_write_fault_maps_to_a_finalize_store_error() {
+    let error = crate::store::UploadWriteError::ReleaseImports("imports".to_owned());
+    assert_eq!(FinalizeError::from(error), FinalizeError::Store("imports".to_owned()));
+}

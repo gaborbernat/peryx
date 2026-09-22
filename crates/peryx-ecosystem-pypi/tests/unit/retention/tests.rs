@@ -57,6 +57,7 @@ fn seed_content(
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed,
     };
     meta.put_upload(index, project, &filename, &serde_json::to_vec(&uploaded).unwrap())
@@ -198,7 +199,7 @@ fn test_evaluate_retention_rejects_unsupported_selectors(#[case] selector: Reten
 #[test]
 fn test_evaluate_retention_orders_versions_by_pep440_and_keeps_the_newest() {
     let (_dir, meta) = store();
-    for version in ["2.0", "1.0", "1.0rc1", "2.0+local", "not-a-version", "also-bad"] {
+    for version in ["2.0", "1.0", "1.0rc1", "2.0+local"] {
         seed(&meta, "pypi", "demo", version, Yanked::No, None);
     }
 
@@ -215,8 +216,6 @@ fn test_evaluate_retention_orders_versions_by_pep440_and_keeps_the_newest() {
             ("2.0", RetentionOutcome::Retain),
             ("1.0", RetentionOutcome::Remove),
             ("1.0rc1", RetentionOutcome::Remove),
-            ("also-bad", RetentionOutcome::Remove),
-            ("not-a-version", RetentionOutcome::Remove),
         ]
     );
 }

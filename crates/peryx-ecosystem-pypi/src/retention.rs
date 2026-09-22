@@ -217,7 +217,12 @@ fn over_budget(project: &str, budget: usize) -> String {
 /// a decision reports is not always the size set here. A record with no `sha256` hash leaves the digest
 /// empty, which names no content and so shares none.
 fn candidate(project: &str, uploaded: Uploaded) -> RetentionCandidate {
-    let Uploaded { version, file, trashed } = uploaded;
+    let Uploaded {
+        version,
+        file,
+        imports: _,
+        trashed,
+    } = uploaded;
     let class = if trashed.is_some() {
         RetentionClass::Trash
     } else {

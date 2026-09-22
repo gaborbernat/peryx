@@ -6,8 +6,11 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::Read as _;
+use std::path::Path;
 
 use md5::{Digest as _, Md5};
+use sha2::Sha256;
 use unicode_ident::{is_xid_continue, is_xid_start};
 use unicode_normalization::UnicodeNormalization;
 use url::Url;
@@ -35,11 +38,35 @@ use peryx_core::path::{local_artifact_url, validate_artifact_name};
 pub struct Uploaded {
     pub version: String,
     pub file: File,
+    /// The normalized Core Metadata import declarations, when this record was written by a version
+    /// that classified them. Older records omit the field and must be reconciled before a modern
+    /// artifact joins their release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<ImportDeclarations>,
     /// Set when the file is soft-deleted. The record and its blob stay in the store for recovery,
     /// but every served page hides the file until a restore clears this or a purge removes it. Absent
     /// on a live file, and skipped on the wire so an untrashed record encodes exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trashed: Option<TrashInfo>,
+}
+
+/// One normalized import declaration from Core Metadata 2.5 or later.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ImportEntry {
+    pub name: String,
+    pub private: bool,
+}
+
+/// The import classification an uploaded artifact contributes to its release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportDeclarations {
+    /// Metadata before 2.5 has no import-declaration semantics.
+    Before25,
+    /// Core Metadata 2.5 declarations after NFKC normalization and deduplication.
+    V1 {
+        exclusive: Option<BTreeSet<ImportEntry>>,
+        shared: Option<BTreeSet<ImportEntry>>,
+    },
 }
 
 /// The fields peryx reads from an upload's multipart form. Every field is optional here so the
@@ -184,6 +211,158 @@ pub enum UploadStoreError {
     FileExists(String),
     #[error("file already exists with different attestations: {0}")]
     ProvenanceMismatch(String),
+    #[error("release import declarations are incomplete or inconsistent: {0}")]
+    ReleaseImports(String),
+    #[error("{0}")]
+    ConcurrentChange(String),
+    #[error("file record lacks sha256: {0}")]
+    MissingSha256(String),
+}
+
+impl From<crate::store::UploadWriteError> for UploadStoreError {
+    fn from(error: crate::store::UploadWriteError) -> Self {
+        match error {
+            crate::store::UploadWriteError::Meta(error) => Self::Meta(error),
+            crate::store::UploadWriteError::ReleaseImports(message) => Self::ReleaseImports(message),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum LegacyMetadataError {
+    CorruptDigest,
+    Archive(String),
+}
+
+enum ClassificationRace {
+    Resolved,
+    Retry(Vec<u8>),
+    Changed,
+    RetryExhausted,
+}
+
+fn resolve_classification_race(
+    current: Option<Vec<u8>>,
+    include_trashed: bool,
+    version: &str,
+    imports: &ImportDeclarations,
+    retried: bool,
+) -> Result<ClassificationRace, serde_json::Error> {
+    let Some(current) = current else {
+        return Ok(ClassificationRace::Resolved);
+    };
+    let uploaded: Uploaded = serde_json::from_slice(&current)?;
+    if (uploaded.trashed.is_some() && !include_trashed) || !crate::versions_match(&uploaded.version, version) {
+        return Ok(ClassificationRace::Resolved);
+    }
+    if let Some(existing) = uploaded.imports {
+        return Ok(if existing == *imports {
+            ClassificationRace::Resolved
+        } else {
+            ClassificationRace::Changed
+        });
+    }
+    Ok(if retried {
+        ClassificationRace::RetryExhausted
+    } else {
+        ClassificationRace::Retry(current)
+    })
+}
+
+fn reconcile_classification(
+    classified: bool,
+    current: impl FnOnce() -> Result<Option<Vec<u8>>, MetaError>,
+    include_trashed: bool,
+    version: &str,
+    imports: &ImportDeclarations,
+    record: &mut Vec<u8>,
+    retried: &mut bool,
+) -> Result<bool, UploadStoreError> {
+    if classified {
+        return Ok(true);
+    }
+    match resolve_classification_race(current()?, include_trashed, version, imports, *retried)? {
+        ClassificationRace::Resolved => Ok(true),
+        ClassificationRace::Retry(current) => {
+            *record = current;
+            *retried = true;
+            Ok(false)
+        }
+        ClassificationRace::Changed => Err(UploadStoreError::ConcurrentChange(format!(
+            "release import declarations for {version:?} changed during metadata backfill"
+        ))),
+        ClassificationRace::RetryExhausted => Err(UploadStoreError::ConcurrentChange(format!(
+            "release import declarations for {version:?} changed during metadata backfill; retry the upload"
+        ))),
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ClassificationTarget<'a> {
+    pub index: &'a str,
+    pub normalized: &'a str,
+    pub filename: &'a str,
+    pub include_trashed: bool,
+    pub version: &'a str,
+}
+
+pub(crate) fn classify_or_reconcile(
+    meta: &MetaStore,
+    target: ClassificationTarget<'_>,
+    imports: &ImportDeclarations,
+    record: &mut Vec<u8>,
+    retried: &mut bool,
+) -> Result<bool, UploadStoreError> {
+    let classified = crate::store::classify_upload_if_unchanged(
+        meta,
+        target.index,
+        target.normalized,
+        target.filename,
+        record,
+        imports.clone(),
+    )?;
+    reconcile_classification(
+        classified,
+        || meta.get_upload(target.index, target.normalized, target.filename),
+        target.include_trashed,
+        target.version,
+        imports,
+        record,
+        retried,
+    )
+}
+
+pub(crate) fn verified_archive_metadata(
+    filename: &str,
+    path: &Path,
+    expected: &Digest,
+) -> Result<Option<Vec<u8>>, LegacyMetadataError> {
+    let mut file = std::fs::File::open(path).map_err(|error| LegacyMetadataError::Archive(error.to_string()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| LegacyMetadataError::Archive(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if Digest::from_sha256(hasher.finalize().into()) != *expected {
+        return Err(LegacyMetadataError::CorruptDigest);
+    }
+    match parse_distribution_filename(filename)
+        .map_err(|error| LegacyMetadataError::Archive(format!("{error:?}")))?
+        .kind
+    {
+        DistributionKind::Wheel => crate::archive::wheel_metadata_path(filename, path),
+        DistributionKind::SdistTarGz => crate::archive::sdist_metadata_path(filename, path),
+        DistributionKind::SdistZip => {
+            crate::archive::validate_zip_sdist_path(filename, path).map(|archive| Some(archive.metadata))
+        }
+    }
+    .map_err(|error| LegacyMetadataError::Archive(error.to_string()))
 }
 
 /// # Errors
@@ -253,7 +432,7 @@ pub fn prepare(
         .filter(|requires_python| !requires_python.trim().is_empty())
         .map(validate_requires_python)
         .transpose()?;
-    validate_metadata_identity(&form, &metadata_doc, &normalized, &parsed_version)?;
+    let imports = validate_metadata_identity(&form, &metadata_doc, &normalized, &parsed_version)?;
     if let Some(value) = missing_license_files.into_iter().next() {
         return Err(UploadError::InvalidLicenseFile {
             value,
@@ -290,6 +469,7 @@ pub fn prepare(
         record: Uploaded {
             version,
             file,
+            imports: Some(imports),
             trashed: None,
         },
         submitted_at_unix: upload_time_unix,
@@ -453,6 +633,7 @@ pub fn store_prepared_blocking(
     name: &str,
     prepared: PreparedUpload,
 ) -> Result<bool, UploadStoreError> {
+    backfill_release_imports_blocking(meta, blobs, name, &prepared.normalized, &prepared.record.version)?;
     let blocking = blobs.blocking();
     let metadata = blocking.stage_bytes(&prepared.metadata)?;
     let metadata_digest = metadata.digest().clone();
@@ -490,6 +671,100 @@ pub fn store_prepared_blocking(
         None,
         false,
     )
+}
+
+fn backfill_release_imports_blocking(
+    meta: &MetaStore,
+    blobs: &BlobStorage,
+    index: &str,
+    normalized: &str,
+    version: &str,
+) -> Result<(), UploadStoreError> {
+    crate::store::initialize_release_imports(meta, index, normalized)?;
+    for (filename, mut record) in meta.list_upload_entries(index, normalized)? {
+        let mut retried = false;
+        let mut complete = false;
+        while !complete {
+            let uploaded: Uploaded = serde_json::from_slice(&record)?;
+            if uploaded.trashed.is_some()
+                || uploaded.imports.is_some()
+                || !crate::versions_match(&uploaded.version, version)
+            {
+                break;
+            }
+            let bytes = legacy_metadata_bytes_blocking(blobs, &filename, &uploaded, version)?;
+            let metadata = parse_metadata(std::str::from_utf8(&bytes).map_err(|_| {
+                UploadStoreError::Meta(MetaError::DriverPrecondition(format!(
+                    "metadata sidecar for {filename:?} is not UTF-8"
+                )))
+            })?)
+            .map_err(|error| {
+                UploadStoreError::Meta(MetaError::DriverPrecondition(format!(
+                    "invalid metadata sidecar for {filename:?}: {error}"
+                )))
+            })?;
+            let imports = classify_imports(&metadata, normalized, &uploaded.version).map_err(|error| {
+                UploadStoreError::Meta(MetaError::DriverPrecondition(format!(
+                    "invalid metadata sidecar for {filename:?}: {error:?}"
+                )))
+            })?;
+            complete = classify_or_reconcile(
+                meta,
+                ClassificationTarget {
+                    index,
+                    normalized,
+                    filename: &filename,
+                    include_trashed: false,
+                    version,
+                },
+                &imports,
+                &mut record,
+                &mut retried,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn legacy_metadata_bytes_blocking(
+    blobs: &BlobStorage,
+    filename: &str,
+    uploaded: &Uploaded,
+    version: &str,
+) -> Result<Vec<u8>, UploadStoreError> {
+    if let CoreMetadata::Hashes(hashes) = uploaded.file.metadata() {
+        let Some(digest) = hashes.get("sha256").and_then(|digest| Digest::from_hex(digest)) else {
+            return Err(UploadStoreError::Meta(MetaError::DriverPrecondition(format!(
+                "metadata sidecar for {filename:?} has no valid digest"
+            ))));
+        };
+        let bytes = blobs
+            .blocking()
+            .read_bytes(&digest, crate::archive::MAX_WHEEL_METADATA_BYTES)?;
+        if Digest::of(&bytes) != digest {
+            return Err(UploadStoreError::Meta(MetaError::DriverPrecondition(format!(
+                "metadata sidecar for {filename:?} does not match its recorded digest"
+            ))));
+        }
+        return Ok(bytes);
+    }
+    let Some(digest) = uploaded.file.sha256().and_then(Digest::from_hex) else {
+        return Err(UploadStoreError::MissingSha256(filename.to_owned()));
+    };
+    let lease = blobs.blocking().materialize(&digest)?;
+    verified_archive_metadata(filename, lease.path(), &digest).map_err(|error| match error {
+        LegacyMetadataError::CorruptDigest => UploadStoreError::Meta(MetaError::DriverPrecondition(format!(
+            "archive for {filename:?} does not match its recorded digest"
+        ))),
+        LegacyMetadataError::Archive(error) => UploadStoreError::Meta(MetaError::DriverPrecondition(format!(
+            "archive metadata for {filename:?} cannot be read: {error}"
+        ))),
+    })?
+    .ok_or_else(|| {
+        UploadStoreError::ReleaseImports(format!(
+            "release import declarations for {version:?} are incomplete because {filename:?} has no archive metadata"
+        ))
+    })
 }
 
 fn staged_reference(blob: &BlobStaged) -> (Digest, u64) {
@@ -753,7 +1028,7 @@ fn validate_metadata_identity(
     metadata: &crate::CoreMetadataDoc,
     normalized: &str,
     parsed_version: &crate::Version,
-) -> Result<(), UploadError> {
+) -> Result<ImportDeclarations, UploadError> {
     let declared = validate_metadata_version(metadata.metadata_version.as_deref())?;
     validate_field_introductions(metadata, declared)?;
     if normalize_name(&metadata.name) != normalized || !is_valid_name(&metadata.name) {
@@ -783,7 +1058,7 @@ fn validate_metadata_identity(
     validate_requirements(metadata)?;
     validate_legacy_urls(metadata)?;
     validate_dynamic(metadata)?;
-    validate_import_names(metadata)?;
+    let imports = validate_import_names(metadata, declared)?;
     validate_contact_addresses(metadata)?;
     compare_metadata_field(
         "Metadata-Version",
@@ -804,7 +1079,46 @@ fn validate_metadata_identity(
     validate_license_files(&metadata.license_files)?;
     compare_metadata_list("License-File", &form.license_files, &metadata.license_files)?;
     compare_metadata_list("Provides-Extra", &form.provides_extra, &metadata.provides_extra)?;
-    compare_project_urls(form, metadata)
+    compare_project_urls(form, metadata)?;
+    Ok(imports)
+}
+
+/// Classify verified stored Core Metadata for a release-wide import check.
+///
+/// Backfill never accepts metadata from a different project or release, even when an artifact and
+/// its sidecar are both locally present.
+pub(crate) fn classify_imports(
+    metadata: &CoreMetadataDoc,
+    normalized: &str,
+    version: &str,
+) -> Result<ImportDeclarations, UploadError> {
+    let declared = validate_metadata_version(metadata.metadata_version.as_deref())?;
+    validate_field_introductions(metadata, declared)?;
+    if normalize_name(&metadata.name) != normalized || !is_valid_name(&metadata.name) {
+        return Err(UploadError::MetadataNameMismatch {
+            metadata: metadata.name.clone(),
+            form: normalized.to_owned(),
+        });
+    }
+    let Some(expected) = parse_version(version) else {
+        return Err(UploadError::MetadataVersionMismatch {
+            metadata: metadata.version.clone(),
+            form: version.to_owned(),
+        });
+    };
+    let Some(actual) = parse_version(&metadata.version) else {
+        return Err(UploadError::MetadataVersionMismatch {
+            metadata: metadata.version.clone(),
+            form: expected.to_string(),
+        });
+    };
+    if actual != expected {
+        return Err(UploadError::MetadataVersionMismatch {
+            metadata: actual.to_string(),
+            form: expected.to_string(),
+        });
+    }
+    validate_import_names(metadata, declared)
 }
 
 /// A supported Core Metadata version, ranked as `major * 10 + minor` so a declared version orders
@@ -1045,25 +1359,41 @@ fn validate_dynamic(metadata: &CoreMetadataDoc) -> Result<(), UploadError> {
 /// provides. Each value is a dotted Python identifier (empty only for `Import-Name`, meaning no
 /// modules), optionally suffixed `; private`. A name given as both exclusive and shared is ambiguous,
 /// so the spec forbids it.
-fn validate_import_names(metadata: &CoreMetadataDoc) -> Result<(), UploadError> {
-    let mut exclusive = HashSet::with_capacity(metadata.import_names.len());
-    for raw in &metadata.import_names {
-        exclusive.insert(validate_import_value("Import-Name", raw, true)?);
+fn validate_import_names(metadata: &CoreMetadataDoc, declared: u8) -> Result<ImportDeclarations, UploadError> {
+    if declared < 25 {
+        return Ok(ImportDeclarations::Before25);
     }
+    let mut exclusive = BTreeSet::new();
+    for raw in &metadata.import_names {
+        if let Some(entry) = validate_import_value("Import-Name", raw, true)? {
+            exclusive.insert(entry);
+        }
+    }
+    let mut exclusive_names = HashSet::with_capacity(exclusive.len());
+    exclusive_names.extend(exclusive.iter().map(|entry| entry.name.as_str()));
+    let mut shared = BTreeSet::new();
     for raw in &metadata.import_namespaces {
-        let name = validate_import_value("Import-Namespace", raw, false)?;
-        if exclusive.contains(&name) {
+        let entry = validate_import_value("Import-Namespace", raw, false)?.expect("namespaces are nonempty");
+        if exclusive_names.contains(entry.name.as_str()) {
             return Err(UploadError::InvalidMetadataValue {
                 field: "Import-Namespace",
                 value: raw.clone(),
                 reason: "is already declared exclusive by Import-Name",
             });
         }
+        shared.insert(entry);
     }
-    Ok(())
+    Ok(ImportDeclarations::V1 {
+        exclusive: (!metadata.import_names.is_empty()).then_some(exclusive),
+        shared: (!metadata.import_namespaces.is_empty()).then_some(shared),
+    })
 }
 
-fn validate_import_value(field: &'static str, raw: &str, allow_empty: bool) -> Result<String, UploadError> {
+fn validate_import_value(
+    field: &'static str,
+    raw: &str,
+    allow_empty: bool,
+) -> Result<Option<ImportEntry>, UploadError> {
     let (name, marker) = crate::metadata::import_parts(raw);
     let invalid = |reason| UploadError::InvalidMetadataValue {
         field,
@@ -1074,13 +1404,16 @@ fn validate_import_value(field: &'static str, raw: &str, allow_empty: bool) -> R
         return Err(invalid("the only marker allowed after ';' is 'private'"));
     }
     if name.is_empty() {
-        return allow_empty
-            .then(String::new)
-            .ok_or_else(|| invalid("must not be empty"));
+        return allow_empty.then_some(None).ok_or_else(|| invalid("must not be empty"));
     }
     name.split('.')
         .all(is_python_identifier)
-        .then(|| name.nfkc().collect())
+        .then(|| {
+            Some(ImportEntry {
+                name: name.nfkc().collect(),
+                private: marker.is_some(),
+            })
+        })
         .ok_or_else(|| invalid("must be a dotted sequence of Python identifiers"))
 }
 

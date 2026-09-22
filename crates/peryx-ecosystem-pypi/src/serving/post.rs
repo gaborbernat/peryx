@@ -571,6 +571,9 @@ fn upload_store_error_response(audit: &UploadAudit<'_>, err: CacheError) -> Resp
                  a re-upload cannot change them"
             ),
         ),
+        CacheError::ReleaseImports(reason) => {
+            upload_denied_response(audit, audit.filename, "release import declarations conflict", reason)
+        }
         err => {
             let reason = err.user_message();
             security_upload_event(

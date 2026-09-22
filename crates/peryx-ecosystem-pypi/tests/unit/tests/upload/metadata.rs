@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::support::*;
 use rstest::rstest;
 
@@ -943,6 +945,12 @@ fn test_prepare_accepts_valid_import_names_and_namespaces() {
     assert_eq!(prepared.metadata.as_slice(), metadata.as_bytes());
     assert_eq!(doc.import_names, ["flask", "cafe\u{301}.cli; private", "ｃｌａｓｓ"]);
     assert_eq!(doc.import_namespaces, ["shared.plugins", "match"]);
+    assert!(matches!(
+        prepared.record.imports,
+        Some(crate::upload::ImportDeclarations::V1 { exclusive, shared })
+            if exclusive.as_ref().unwrap().iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>() == ["café.cli", "class", "flask"]
+                && shared.as_ref().unwrap().iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>() == ["match", "shared.plugins"]
+    ));
 }
 
 #[test]
@@ -952,10 +960,67 @@ fn test_prepare_accepts_empty_import_name_for_a_project_without_modules() {
     );
     let (_dir, staged) = staged_upload(&bytes);
 
-    assert_eq!(
+    assert!(matches!(
         prepare(staged_form(&bytes), staged, "root/hosted", 1000)
             .unwrap()
-            .display_name,
-        "Flask"
+            .record
+            .imports,
+        Some(crate::upload::ImportDeclarations::V1 { exclusive, shared })
+            if exclusive.as_ref().is_some_and(BTreeSet::is_empty) && shared.is_none()
+    ));
+}
+
+#[test]
+fn test_prepare_preserves_omitted_import_name() {
+    let bytes = wheel_metadata_bytes(b"Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\nRequires-Python: >=3.8\n");
+    let (_dir, staged) = staged_upload(&bytes);
+
+    assert!(matches!(
+        prepare(staged_form(&bytes), staged, "root/hosted", 1000)
+            .unwrap()
+            .record
+            .imports,
+        Some(crate::upload::ImportDeclarations::V1 {
+            exclusive: None,
+            shared: None
+        })
+    ));
+}
+
+#[rstest]
+#[case::name(
+    "Metadata-Version: 2.5\nName: Other\nVersion: 1.0\n",
+    "flask",
+    "1.0",
+    UploadError::MetadataNameMismatch { metadata: "Other".to_owned(), form: "flask".to_owned() },
+)]
+#[case::stored_version(
+    "Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\n",
+    "flask",
+    "invalid version",
+    UploadError::MetadataVersionMismatch { metadata: "1.0".to_owned(), form: "invalid version".to_owned() },
+)]
+#[case::metadata_version(
+    "Metadata-Version: 2.5\nName: Flask\nVersion: invalid\n",
+    "flask",
+    "1.0",
+    UploadError::MetadataVersionMismatch { metadata: "invalid".to_owned(), form: "1.0".to_owned() },
+)]
+#[case::different_version(
+    "Metadata-Version: 2.5\nName: Flask\nVersion: 2.0\n",
+    "flask",
+    "1.0",
+    UploadError::MetadataVersionMismatch { metadata: "2.0".to_owned(), form: "1.0".to_owned() },
+)]
+fn test_classify_imports_rejects_mismatched_identity(
+    #[case] source: &str,
+    #[case] normalized: &str,
+    #[case] version: &str,
+    #[case] expected: UploadError,
+) {
+    let metadata = crate::parse_metadata(source).unwrap();
+    assert_eq!(
+        crate::upload::classify_imports(&metadata, normalized, version),
+        Err(expected)
     );
 }

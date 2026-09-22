@@ -361,6 +361,7 @@ fn put_file_with_provenance(
             provenance,
             authoritative_version: None,
         },
+        imports: Some(peryx_ecosystem_pypi::upload::ImportDeclarations::Before25),
         trashed: None,
     };
     state

@@ -103,6 +103,12 @@ impl From<MetaError> for FinalizeError {
     }
 }
 
+impl From<crate::store::UploadWriteError> for FinalizeError {
+    fn from(error: crate::store::UploadWriteError) -> Self {
+        Self::Store(error.to_string())
+    }
+}
+
 /// # Errors
 /// Returns [`FinalizeError::NotStaged`] when no intent is staged, [`FinalizeError::Rejected`] when a
 /// validation refuses publication, and [`FinalizeError::Store`] when the store fails. A refusal is

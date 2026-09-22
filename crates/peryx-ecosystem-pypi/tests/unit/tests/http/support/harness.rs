@@ -665,6 +665,14 @@ pub struct AuthorityDouble {
     pub current: u64,
     pub lease_expires_at_unix: i64,
     pub finish_available: bool,
+    pub begin_calls: Arc<AtomicUsize>,
+    pub write_limit: usize,
+    pub first_write_entered: Option<Arc<tokio::sync::Notify>>,
+    pub first_write_release: Option<Arc<tokio::sync::Notify>>,
+    pub second_write_entered: Option<Arc<tokio::sync::Notify>>,
+    pub second_write_release: Option<Arc<tokio::sync::Notify>>,
+    pub write_barrier: Option<Arc<tokio::sync::Barrier>>,
+    pub synchronized_writes: usize,
 }
 
 impl Default for AuthorityDouble {
@@ -674,6 +682,14 @@ impl Default for AuthorityDouble {
             current: 0,
             lease_expires_at_unix: i64::MAX,
             finish_available: true,
+            begin_calls: Arc::default(),
+            write_limit: usize::MAX,
+            first_write_entered: None,
+            first_write_release: None,
+            second_write_entered: None,
+            second_write_release: None,
+            write_barrier: None,
+            synchronized_writes: 0,
         }
     }
 }
@@ -693,8 +709,27 @@ impl peryx_driver::state::OwnershipAuthority for AuthorityDouble {
         authority: &str,
         presented: u64,
     ) -> Result<Option<peryx_ha::AuthorityWriteLease>, peryx_ha::OwnershipError> {
+        let call = self.begin_calls.fetch_add(1, Ordering::Relaxed);
+        if call == 0
+            && let (Some(entered), Some(release)) = (&self.first_write_entered, &self.first_write_release)
+        {
+            entered.notify_one();
+            release.notified().await;
+        }
+        if call == 1
+            && let (Some(entered), Some(release)) = (&self.second_write_entered, &self.second_write_release)
+        {
+            entered.notify_one();
+            release.notified().await;
+        }
+        if call < self.synchronized_writes
+            && let Some(barrier) = &self.write_barrier
+        {
+            barrier.wait().await;
+        }
+        let within_limit = call < self.write_limit;
         Ok(
-            (self.current != 0 && presented == self.current).then(|| peryx_ha::AuthorityWriteLease {
+            (within_limit && self.current != 0 && presented == self.current).then(|| peryx_ha::AuthorityWriteLease {
                 authority: authority.to_owned(),
                 epoch: presented,
                 id: "test-write".to_owned(),

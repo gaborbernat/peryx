@@ -72,6 +72,14 @@ fn test_cache_error_status_maps_store_and_policy_errors() {
         StatusCode::CONFLICT
     );
     assert_eq!(
+        cache_error_status(&CacheError::ConcurrentChange("retry".to_owned()), &context),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        cache_error_status(&CacheError::ReleaseImports("imports".to_owned()), &context),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
         cache_error_status(&CacheError::NotVolatile, &context),
         StatusCode::FORBIDDEN
     );

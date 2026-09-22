@@ -287,6 +287,7 @@ fn rich_project(provenance_for: impl FnOnce(&str) -> Vec<u8>, yanked: Yanked) ->
                     provenance: Provenance::Url("/provenance".to_owned()),
                     authoritative_version: None,
                 },
+                imports: None,
                 trashed: None,
             })
             .as_bytes(),

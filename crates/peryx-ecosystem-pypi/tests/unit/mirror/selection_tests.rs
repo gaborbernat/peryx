@@ -894,6 +894,7 @@ fn publish(state: &peryx_driver::ServingState, filename: &str) {
     let uploaded = crate::upload::Uploaded {
         version: "1.0".to_owned(),
         file: file(filename, Some(&"a".repeat(64)), Some(1), CoreMetadata::Absent),
+        imports: None,
         trashed: None,
     };
     state

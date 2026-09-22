@@ -2,6 +2,7 @@
 
 mod attestations;
 mod files;
+mod imports;
 mod index;
 mod journal;
 mod overrides;
@@ -10,12 +11,33 @@ mod record;
 mod summary;
 mod uploads;
 
+/// A hosted upload write failed in storage or release-wide import admission.
+#[derive(Debug, thiserror::Error)]
+pub enum UploadWriteError {
+    /// The metadata store rejected the transaction.
+    #[error(transparent)]
+    Meta(#[from] peryx_storage::meta::MetaError),
+    /// The candidate conflicts with the release's import declarations or cannot yet be validated.
+    #[error("{0}")]
+    ReleaseImports(String),
+}
+
+impl From<UploadWriteError> for peryx_storage::meta::MetaError {
+    fn from(error: UploadWriteError) -> Self {
+        match error {
+            UploadWriteError::Meta(error) => error,
+            UploadWriteError::ReleaseImports(message) => Self::DriverPrecondition(message),
+        }
+    }
+}
+
 pub(crate) use files::split_file_source_key;
 pub use files::{
     FilePublication, FileSource, MetadataClaim, PypiArtifactOrigin, drop_legacy_file_sources, get_file_publication,
     get_file_url, get_metadata_digest, get_metadata_digests, get_provenance, put_file_url, put_metadata,
     put_provenance, scan_file_publications, scan_file_urls, scan_metadata_records, scan_provenance_records,
 };
+pub(crate) use imports::{initialize_release_imports, initialize_release_imports_page, release_imports_initialized};
 pub use index::{
     CachedPageWrite, PublishedFileWrite, abort_project_generation, active_project_generation, begin_project_generation,
     get_index, get_project_status, list_index_pages, list_project_files, project_meta_state,
@@ -41,15 +63,16 @@ pub use summary::{
     summary_row_counts,
 };
 pub(crate) use summary::{
-    put_cached_project_row, put_project_row, put_upload_row, remove_cached_project_row, remove_upload_row,
+    admit_upload_row, put_cached_project_row, put_project_row, put_upload_row, remove_cached_project_row,
+    remove_upload_row,
 };
 pub(crate) use uploads::publish_file_in_txn;
 pub(crate) use uploads::publish_file_with_commit_if;
 pub(crate) use uploads::scan_upload_policy_snapshot;
 pub use uploads::{
     Guard, MetadataSibling, PromotedRelease, ProvenanceSibling, PublishedFile, PublishedState, UploadMutation,
-    delete_upload, get_upload, list_overrides, list_upload_entries, mutate_uploads, promote_files_checked,
-    publish_file_if, put_upload, scan_override_records, scan_upload_records, set_override,
+    classify_upload_if_unchanged, delete_upload, get_upload, list_overrides, list_upload_entries, mutate_uploads,
+    promote_files_checked, publish_file_if, put_upload, scan_override_records, scan_upload_records, set_override,
 };
 pub(crate) use uploads::{UploadMutationPlan, mutate_uploads_and_overrides};
 
@@ -107,6 +130,10 @@ const PROJECT_STATUS_PREFIX: &str = "pypi\u{0}s\u{0}";
 const RETIRED_PREFIX: &str = "pypi\u{0}x\u{0}";
 /// The former `uploads` table: hosted file records, keyed by `{index}/{normalized}/{filename}`.
 const UPLOAD_PREFIX: &str = "pypi\u{0}u\u{0}";
+/// Release-wide import declaration constraints, keyed by `{index}/{normalized}/{canonical version}`.
+const RELEASE_IMPORTS_PREFIX: &str = "pypi\u{0}q\u{0}";
+/// Marks hosted projects whose existing upload rows have been projected into release constraints.
+const RELEASE_IMPORTS_INIT_PREFIX: &str = "pypi\u{0}z\u{0}";
 /// How many upload records a hosted project holds and how many of those are untrashed, keyed by
 /// `{index}/{normalized}`. Maintained by every write that adds or removes an upload row, in that
 /// write's own transaction.
@@ -293,6 +320,14 @@ fn project_file_key(index: &str, normalized: &str, generation: u64, filename: &s
 
 pub(crate) fn upload_key(index: &str, normalized: &str, filename: &str) -> String {
     format!("{UPLOAD_PREFIX}{index}/{normalized}/{filename}")
+}
+
+fn release_imports_key(index: &str, normalized: &str, version: &str) -> String {
+    format!("{RELEASE_IMPORTS_PREFIX}{index}/{normalized}/{version}")
+}
+
+fn release_imports_init_key(index: &str, normalized: &str) -> String {
+    format!("{RELEASE_IMPORTS_INIT_PREFIX}{index}/{normalized}")
 }
 
 fn override_key(index: &str, normalized: &str, filename: &str) -> String {
@@ -706,7 +741,7 @@ pub trait PypiStore {
     ///
     /// # Errors
     /// Returns the guard's error, or a store error mapped into it, if the transaction fails.
-    fn publish_file_if<E: From<peryx_storage::meta::MetaError>>(
+    fn publish_file_if<E: From<peryx_storage::meta::MetaError> + From<UploadWriteError>>(
         &self,
         outbox: bool,
         file: &PublishedFile,
@@ -730,7 +765,7 @@ pub trait PypiStore {
     ///
     /// # Errors
     /// Returns the guard's error, or a store error mapped into it, if the transaction fails.
-    fn promote_files_checked<E: From<peryx_storage::meta::MetaError>>(
+    fn promote_files_checked<E: From<peryx_storage::meta::MetaError> + From<UploadWriteError>>(
         &self,
         outbox: bool,
         release: &PromotedRelease<'_>,
@@ -739,7 +774,7 @@ pub trait PypiStore {
 
     /// # Errors
     /// Returns the closure's error, or a store error mapped into it, if the transaction fails.
-    fn mutate_uploads<E: From<peryx_storage::meta::MetaError>>(
+    fn mutate_uploads<E: From<peryx_storage::meta::MetaError> + From<UploadWriteError>>(
         &self,
         outbox: bool,
         index: &str,
@@ -1115,7 +1150,7 @@ impl PypiStore for peryx_storage::meta::MetaStore {
         projects::delete_project_cache(self, index, normalized, metadata_digests)
     }
 
-    fn publish_file_if<E: From<peryx_storage::meta::MetaError>>(
+    fn publish_file_if<E: From<peryx_storage::meta::MetaError> + From<UploadWriteError>>(
         &self,
         outbox: bool,
         file: &PublishedFile,
@@ -1134,7 +1169,7 @@ impl PypiStore for peryx_storage::meta::MetaStore {
         uploads::put_upload(self, index, normalized, filename, record)
     }
 
-    fn promote_files_checked<E: From<peryx_storage::meta::MetaError>>(
+    fn promote_files_checked<E: From<peryx_storage::meta::MetaError> + From<UploadWriteError>>(
         &self,
         outbox: bool,
         release: &PromotedRelease<'_>,
@@ -1143,7 +1178,7 @@ impl PypiStore for peryx_storage::meta::MetaStore {
         uploads::promote_files_checked(self, outbox, release, guard)
     }
 
-    fn mutate_uploads<E: From<peryx_storage::meta::MetaError>>(
+    fn mutate_uploads<E: From<peryx_storage::meta::MetaError> + From<UploadWriteError>>(
         &self,
         outbox: bool,
         index: &str,

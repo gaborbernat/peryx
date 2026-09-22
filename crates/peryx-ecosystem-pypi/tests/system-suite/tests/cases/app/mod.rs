@@ -101,6 +101,7 @@ fn uploaded_record_json(digest: &Digest) -> Vec<u8> {
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     })
     .unwrap()

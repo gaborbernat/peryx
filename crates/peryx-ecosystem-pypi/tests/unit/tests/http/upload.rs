@@ -679,6 +679,592 @@ async fn test_upload_same_file_is_idempotent() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["files"].as_array().unwrap().len(), 1);
 }
+
+fn unclassify_upload(state: &AppState, filename: &str) {
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    uploaded.imports = None;
+    state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", filename, &serde_json::to_vec(&uploaded).unwrap())
+        .unwrap();
+}
+
+struct PausedBackfill {
+    upload: tokio::task::JoinHandle<(StatusCode, String)>,
+    first_release: Arc<tokio::sync::Notify>,
+    second_entered: Option<Arc<tokio::sync::Notify>>,
+    second_release: Option<Arc<tokio::sync::Notify>>,
+}
+
+async fn start_paused_backfill(h: &Harness, pause_second: bool) -> PausedBackfill {
+    let metadata =
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n";
+    let legacy_filename = "peryxpkg-1.0-py3-none-any.whl";
+    let (content_type, body) = multipart_body(
+        &upload_fields(),
+        Some((legacy_filename, &fixture_wheel_with_metadata(metadata))),
+    );
+    assert_eq!(
+        post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    unclassify_upload(&h.state, legacy_filename);
+    let first_entered = Arc::new(tokio::sync::Notify::new());
+    let first_release = Arc::new(tokio::sync::Notify::new());
+    let second_entered = pause_second.then(|| Arc::new(tokio::sync::Notify::new()));
+    let second_release = pause_second.then(|| Arc::new(tokio::sync::Notify::new()));
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 5,
+            first_write_entered: Some(Arc::clone(&first_entered)),
+            first_write_release: Some(Arc::clone(&first_release)),
+            second_write_entered: second_entered.clone(),
+            second_write_release: second_release.clone(),
+            ..AuthorityDouble::default()
+        },
+    );
+    let (candidate_type, candidate_body) = multipart_body(
+        &upload_fields(),
+        Some((
+            "peryxpkg-1.0-1-py3-none-any.whl",
+            &fixture_wheel_with_build_and_metadata("1", metadata),
+        )),
+    );
+    let state = Arc::clone(&h.state);
+    let upload = tokio::spawn(async move {
+        post_upload_response(
+            &state,
+            "/hosted/",
+            Some(&upload_auth()),
+            &candidate_type,
+            candidate_body,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), first_entered.notified())
+        .await
+        .unwrap();
+    PausedBackfill {
+        upload,
+        first_release,
+        second_entered,
+        second_release,
+    }
+}
+
+fn rewrite_legacy_upload(h: &Harness, mutate: impl FnOnce(&mut crate::upload::Uploaded)) {
+    let filename = "peryxpkg-1.0-py3-none-any.whl";
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    mutate(&mut uploaded);
+    h.state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", filename, &serde_json::to_vec(&uploaded).unwrap())
+        .unwrap();
+}
+
+#[rstest]
+#[case::metadata_sibling(false)]
+#[case::archive_fallback(true)]
+#[tokio::test]
+async fn test_upload_backfills_legacy_release_imports_before_admission(#[case] archive_fallback: bool) {
+    let h = harness().await;
+    let first_filename = "peryxpkg-1.0-py3-none-any.whl";
+    let first = fixture_wheel_with_metadata(
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n",
+    );
+    let (content_type, body) = multipart_body(&upload_fields(), Some((first_filename, &first)));
+    assert_eq!(
+        post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", first_filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    uploaded.imports = None;
+    if archive_fallback {
+        uploaded.file.clear_metadata();
+    }
+    h.state
+        .serving
+        .meta
+        .put_upload(
+            "hosted",
+            "peryxpkg",
+            first_filename,
+            &serde_json::to_vec(&uploaded).unwrap(),
+        )
+        .unwrap();
+    let second = fixture_wheel_with_metadata(
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Namespace: peryxpkg\n",
+    );
+    let (content_type, body) = multipart_body(&upload_fields(), Some(("PeryxPkg-1.0-py3-none-any.whl", &second)));
+
+    let (status, body) = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("exclusive and shared"), "{body}");
+    let stored: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", first_filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(stored.imports.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backfill_retries_after_a_public_yank_changes_the_row() {
+    let h = authority_harness().await;
+    let legacy_filename = "peryxpkg-1.0-py3-none-any.whl";
+    let metadata =
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n";
+    let legacy = fixture_wheel_with_metadata(metadata);
+    let (content_type, body) = multipart_body(&upload_fields(), Some((legacy_filename, &legacy)));
+    assert_eq!(
+        post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    unclassify_upload(&h.state, legacy_filename);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 5,
+            first_write_entered: Some(Arc::clone(&entered)),
+            first_write_release: Some(Arc::clone(&release)),
+            ..AuthorityDouble::default()
+        },
+    );
+    let candidate = fixture_wheel_with_build_and_metadata("1", metadata);
+    let (candidate_type, candidate_body) =
+        multipart_body(&upload_fields(), Some(("peryxpkg-1.0-1-py3-none-any.whl", &candidate)));
+    let state = Arc::clone(&h.state);
+    let upload = tokio::spawn(async move {
+        post_upload_response(
+            &state,
+            "/hosted/",
+            Some(&upload_auth()),
+            &candidate_type,
+            candidate_body,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        request(&h.state, "PUT", "/root/pypi/peryxpkg/1.0/yank", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    release.notify_one();
+    assert_eq!(upload.await.unwrap().0, StatusCode::OK);
+
+    let stored: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", legacy_filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(stored.imports.is_some());
+    assert_eq!(stored.file.yanked, crate::Yanked::Yes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backfill_accepts_when_the_legacy_row_is_deleted_during_classification() {
+    let h = authority_harness().await;
+    let paused = start_paused_backfill(&h, false).await;
+    assert!(
+        h.state
+            .serving
+            .meta
+            .delete_upload(false, "hosted", "peryxpkg", "peryxpkg-1.0-py3-none-any.whl", 1000)
+            .unwrap()
+    );
+
+    paused.first_release.notify_one();
+
+    assert_eq!(paused.upload.await.unwrap().0, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backfill_accepts_when_the_legacy_row_is_trashed_during_classification() {
+    let h = authority_harness().await;
+    let paused = start_paused_backfill(&h, false).await;
+    rewrite_legacy_upload(&h, |uploaded| {
+        uploaded.trashed = Some(TrashInfo {
+            deleted_at_unix: 1000,
+            actor: None,
+            reason: None,
+        });
+    });
+
+    paused.first_release.notify_one();
+
+    assert_eq!(paused.upload.await.unwrap().0, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backfill_rejects_a_conflicting_classification_race() {
+    let h = authority_harness().await;
+    let paused = start_paused_backfill(&h, false).await;
+    rewrite_legacy_upload(&h, |uploaded| {
+        uploaded.imports = Some(shared_imports("peryxpkg"));
+    });
+
+    paused.first_release.notify_one();
+    let (status, body) = paused.upload.await.unwrap();
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains("changed during metadata backfill"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backfill_rejects_a_corrupt_concurrent_record() {
+    let h = authority_harness().await;
+    let paused = start_paused_backfill(&h, false).await;
+    h.state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", "peryxpkg-1.0-py3-none-any.whl", b"{")
+        .unwrap();
+
+    paused.first_release.notify_one();
+
+    assert_eq!(paused.upload.await.unwrap().0, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backfill_rejects_a_second_unclassified_change() {
+    let h = authority_harness().await;
+    let paused = start_paused_backfill(&h, true).await;
+    rewrite_legacy_upload(&h, |uploaded| uploaded.file.yanked = crate::Yanked::Yes);
+    paused.first_release.notify_one();
+    let second_entered = paused.second_entered.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), second_entered.notified())
+        .await
+        .unwrap();
+    rewrite_legacy_upload(&h, |uploaded| {
+        uploaded.file.yanked = crate::Yanked::Reason("changed again".to_owned());
+    });
+
+    paused.second_release.unwrap().notify_one();
+    let (status, body) = paused.upload.await.unwrap();
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body.contains("retry the upload"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn test_concurrent_backfills_classify_one_legacy_member_once() {
+    let h = authority_harness().await;
+    let legacy_filename = "peryxpkg-1.0-py3-none-any.whl";
+    let metadata =
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n";
+    let legacy = fixture_wheel_with_metadata(metadata);
+    let (content_type, body) = multipart_body(&upload_fields(), Some((legacy_filename, &legacy)));
+    assert_eq!(
+        post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    unclassify_upload(&h.state, legacy_filename);
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 5,
+            write_barrier: Some(Arc::new(tokio::sync::Barrier::new(2))),
+            synchronized_writes: 2,
+            ..AuthorityDouble::default()
+        },
+    );
+    let mut uploads = Vec::new();
+    for build in [1, 2] {
+        let wheel = fixture_wheel_with_build_and_metadata(&build.to_string(), metadata);
+        let filename = format!("peryxpkg-1.0-{build}-py3-none-any.whl");
+        let (content_type, body) = multipart_body(&upload_fields(), Some((&filename, &wheel)));
+        let state = Arc::clone(&h.state);
+        uploads.push(tokio::spawn(async move {
+            post_upload_response(&state, "/hosted/", Some(&upload_auth()), &content_type, body).await
+        }));
+    }
+    for upload in uploads {
+        assert_eq!(upload.await.unwrap().0, StatusCode::OK);
+    }
+    assert_eq!(
+        h.state
+            .serving
+            .meta
+            .list_upload_entries("hosted", "peryxpkg")
+            .unwrap()
+            .len(),
+        3
+    );
+
+    assert_eq!(
+        request(&h.state, "DELETE", "/root/pypi/peryxpkg/", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    let replacement = fixture_wheel_with_build_and_metadata(
+        "3",
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Namespace: peryxpkg\n",
+    );
+    let (content_type, body) = multipart_body(
+        &upload_fields(),
+        Some(("peryxpkg-1.0-3-py3-none-any.whl", &replacement)),
+    );
+    assert_eq!(
+        post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[rstest]
+#[case::utf8(b"\xff")]
+#[case::syntax(b"not metadata")]
+#[case::name(b"Metadata-Version: 2.5\nName: other\nVersion: 1.0\n")]
+#[case::version(b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 2.0\n")]
+#[tokio::test]
+async fn test_upload_rejects_an_invalid_legacy_metadata_sidecar(#[case] metadata: &[u8]) {
+    let h = harness().await;
+    let first_filename = "peryxpkg-1.0-py3-none-any.whl";
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", first_filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    uploaded.imports = None;
+    let digest = h.state.serving.blobs.blocking().put_bytes(metadata).unwrap();
+    uploaded.file.set_metadata(CoreMetadata::Hashes(BTreeMap::from([(
+        "sha256".to_owned(),
+        digest.as_str().to_owned(),
+    )])));
+    h.state
+        .serving
+        .meta
+        .put_upload(
+            "hosted",
+            "peryxpkg",
+            first_filename,
+            &serde_json::to_vec(&uploaded).unwrap(),
+        )
+        .unwrap();
+    let second = fixture_wheel_with_body("1.0", b"VALUE = 2\n");
+    let (content_type, body) = multipart_body(&upload_fields(), Some(("PeryxPkg-1.0-py3-none-any.whl", &second)));
+
+    let response = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", response.1);
+}
+
+#[tokio::test]
+async fn test_upload_rejects_a_legacy_metadata_sidecar_without_a_digest() {
+    let h = harness().await;
+    let filename = "peryxpkg-1.0-py3-none-any.whl";
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    uploaded.imports = None;
+    uploaded.file.set_metadata(CoreMetadata::Hashes(BTreeMap::new()));
+    h.state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", filename, &serde_json::to_vec(&uploaded).unwrap())
+        .unwrap();
+    let second = fixture_wheel_with_body("1.0", b"VALUE = 2\n");
+    let (content_type, body) = multipart_body(&upload_fields(), Some(("PeryxPkg-1.0-py3-none-any.whl", &second)));
+
+    let response = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", response.1);
+}
+
+#[tokio::test]
+async fn test_upload_rejects_a_legacy_archive_without_a_digest() {
+    let h = harness().await;
+    let filename = "peryxpkg-1.0-py3-none-any.whl";
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    uploaded.imports = None;
+    uploaded.file.clear_metadata();
+    uploaded.file.hashes.clear();
+    h.state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", filename, &serde_json::to_vec(&uploaded).unwrap())
+        .unwrap();
+    let second = fixture_wheel_with_body("1.0", b"VALUE = 2\n");
+    let (content_type, body) = multipart_body(&upload_fields(), Some(("PeryxPkg-1.0-py3-none-any.whl", &second)));
+
+    let response = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", response.1);
+}
+
+#[rstest]
+#[case::sidecar(false)]
+#[case::archive(true)]
+#[tokio::test]
+async fn test_upload_rejects_corrupt_legacy_metadata_bytes(#[case] archive: bool) {
+    let h = harness().await;
+    let filename = "peryxpkg-1.0-py3-none-any.whl";
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    uploaded.imports = None;
+    let bytes = if archive { fixture_wheel() } else { b"metadata".to_vec() };
+    let digest = h.state.serving.blobs.blocking().put_bytes(&bytes).unwrap();
+    let lease = h.state.serving.blobs.blocking().materialize(&digest).unwrap();
+    std::fs::write(lease.path(), b"changed").unwrap();
+    drop(lease);
+    if archive {
+        uploaded.file.clear_metadata();
+        uploaded
+            .file
+            .hashes
+            .insert("sha256".to_owned(), digest.as_str().to_owned());
+    } else {
+        uploaded.file.set_metadata(CoreMetadata::Hashes(BTreeMap::from([(
+            "sha256".to_owned(),
+            digest.as_str().to_owned(),
+        )])));
+    }
+    h.state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", filename, &serde_json::to_vec(&uploaded).unwrap())
+        .unwrap();
+    let second = fixture_wheel_with_body("1.0", b"VALUE = 2\n");
+    let (content_type, body) = multipart_body(&upload_fields(), Some(("PeryxPkg-1.0-py3-none-any.whl", &second)));
+
+    let response = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", response.1);
+}
+
+#[rstest]
+#[case::missing_metadata(fixture_wheel_without_metadata(), StatusCode::BAD_REQUEST)]
+#[case::invalid_archive(b"not an archive".to_vec(), StatusCode::INTERNAL_SERVER_ERROR)]
+#[tokio::test]
+async fn test_upload_handles_legacy_archive_metadata_failures(#[case] archive: Vec<u8>, #[case] expected: StatusCode) {
+    let h = harness().await;
+    let filename = "peryxpkg-1.0-py3-none-any.whl";
+    assert_eq!(
+        upload_peryxpkg(&h.state, "/hosted/", &fixture_wheel()).await,
+        StatusCode::OK
+    );
+    let mut uploaded: crate::upload::Uploaded = serde_json::from_slice(
+        &h.state
+            .serving
+            .meta
+            .get_upload("hosted", "peryxpkg", filename)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    uploaded.imports = None;
+    uploaded.file.clear_metadata();
+    let digest = h.state.serving.blobs.blocking().put_bytes(&archive).unwrap();
+    uploaded
+        .file
+        .hashes
+        .insert("sha256".to_owned(), digest.as_str().to_owned());
+    h.state
+        .serving
+        .meta
+        .put_upload("hosted", "peryxpkg", filename, &serde_json::to_vec(&uploaded).unwrap())
+        .unwrap();
+    let second = fixture_wheel_with_body("1.0", b"VALUE = 2\n");
+    let (content_type, body) = multipart_body(&upload_fields(), Some(("PeryxPkg-1.0-py3-none-any.whl", &second)));
+
+    let response = post_upload_response(&h.state, "/hosted/", Some(&upload_auth()), &content_type, body).await;
+
+    assert_eq!(response.0, expected, "{}", response.1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_concurrent_different_bytes_uploads_leave_one_deterministic_winner() {
     let h = harness().await;
@@ -734,6 +1320,84 @@ async fn test_concurrent_different_bytes_uploads_leave_one_deterministic_winner(
         "the served bytes hash to the advertised digest, so no client sees a hash mismatch"
     );
 }
+
+#[rstest]
+#[case::conflicting(
+    b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Namespace: peryxpkg\n",
+    1,
+    1
+)]
+#[case::matching(
+    b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n",
+    2,
+    0
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_concurrent_distinct_release_members_are_admitted_atomically(
+    #[case] second_metadata: &[u8],
+    #[case] accepted: usize,
+    #[case] rejected: usize,
+) {
+    let h = harness().await;
+    let first = fixture_wheel_with_metadata(
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n",
+    );
+    let second = fixture_wheel_with_build_and_metadata("1", second_metadata);
+    let first_filename = "peryxpkg-1.0-py3-none-any.whl";
+    let second_filename = "peryxpkg-1.0-1-py3-none-any.whl";
+    let (first_type, first_body) = multipart_body(&upload_fields(), Some((first_filename, &first)));
+    let (second_type, second_body) = multipart_body(&upload_fields(), Some((second_filename, &second)));
+    let first_state = Arc::clone(&h.state);
+    let second_state = Arc::clone(&h.state);
+
+    let first_upload = tokio::spawn(async move {
+        post_upload_response(&first_state, "/hosted/", Some(&upload_auth()), &first_type, first_body).await
+    });
+    let second_upload = tokio::spawn(async move {
+        post_upload_response(
+            &second_state,
+            "/hosted/",
+            Some(&upload_auth()),
+            &second_type,
+            second_body,
+        )
+        .await
+    });
+    let responses = [first_upload.await.unwrap(), second_upload.await.unwrap()];
+
+    assert_eq!(
+        responses.iter().filter(|(status, _)| *status == StatusCode::OK).count(),
+        accepted,
+        "{responses:?}"
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|(status, _)| *status == StatusCode::BAD_REQUEST)
+            .count(),
+        rejected
+    );
+    assert_eq!(
+        h.state
+            .serving
+            .meta
+            .list_upload_entries("hosted", "peryxpkg")
+            .unwrap()
+            .len(),
+        accepted
+    );
+    let references = crate::serving::PypiServing
+        .referenced_blob_digests(&h.state.serving.meta)
+        .unwrap();
+    assert_eq!(
+        [Digest::of(&first), Digest::of(&second)]
+            .into_iter()
+            .filter(|digest| references.contains(digest.as_str()))
+            .count(),
+        accepted
+    );
+}
+
 #[tokio::test]
 async fn test_upload_same_filename_with_different_bytes_is_bad_request() {
     let h = harness().await;

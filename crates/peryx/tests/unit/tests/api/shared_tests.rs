@@ -363,6 +363,7 @@ fn seed_shadow_candidate(state: &peryx_driver::AppState) {
             provenance: peryx_ecosystem_pypi::Provenance::Absent,
             authoritative_version: None,
         },
+        imports: Some(peryx_ecosystem_pypi::upload::ImportDeclarations::Before25),
         trashed: None,
     };
     state

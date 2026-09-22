@@ -414,6 +414,7 @@ fn hosted_upload(state: &ServingState, index: &str, artifact: &Digest, trashed: 
             provenance: crate::Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed,
     };
     state

@@ -1,4 +1,4 @@
-pub use std::collections::BTreeMap;
+pub use std::collections::{BTreeMap, BTreeSet};
 pub use std::fmt::Write as _;
 pub use std::io::Write as _;
 pub use std::net::SocketAddr;
@@ -26,7 +26,8 @@ pub use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub use crate::cache;
 pub use crate::tests::{LogCapture, field};
-pub use crate::upload::Uploaded;
+pub use crate::upload::{ImportDeclarations, ImportEntry, Uploaded};
+pub use peryx_core::TrashInfo;
 pub use peryx_core::path::local_artifact_url;
 pub use peryx_driver::DEFAULT_MAX_STALE_SECS;
 pub use peryx_driver::state::AppState;

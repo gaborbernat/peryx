@@ -119,6 +119,7 @@ fn seed_hosted(state: &AppState) {
     let uploaded = Uploaded {
         version: "1.0".to_owned(),
         file: hosted_file(),
+        imports: None,
         trashed: None,
     };
     state

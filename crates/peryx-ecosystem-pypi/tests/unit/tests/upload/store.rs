@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use blake2::Blake2bVar;
@@ -6,7 +8,9 @@ use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::{MetaStore, QuotaLimits};
 use serde_json::{Value, json};
 
-use super::support::{hex, staged_form, wheel_metadata};
+use super::support::{
+    hex, sdist_with_license, staged_form, wheel_metadata, wheel_metadata_bytes, wheel_without_metadata,
+};
 use crate::PackageName;
 use crate::quota::{Admission, PendingQuota, QuotaRejection, admit_upload, quota_reservation};
 use crate::store::PypiStore as _;
@@ -43,7 +47,10 @@ fn publish_wheel(
     wheel: &[u8],
     signature: Option<&str>,
 ) -> Result<bool, UploadStoreError> {
-    let (_staged_dir, staged) = super::support::staged_upload(wheel);
+    let staged = StagedUpload {
+        blob: blobs.blocking().stage_bytes(wheel)?,
+        blake2_256: blake2_256(wheel),
+    };
     let sha = staged.blob.digest().as_str().to_owned();
     let mut form = staged_form(wheel);
     form.attestations = signature.map(|signature| signed_attestations_field(FILENAME, &sha, signature));
@@ -53,6 +60,38 @@ fn publish_wheel(
         "hosted",
         prepare(form, staged, "root/hosted", 1000).unwrap(),
     )
+}
+
+fn publish_named_wheel(
+    meta: &MetaStore,
+    blobs: &BlobStorage,
+    wheel: &[u8],
+    filename: &str,
+) -> Result<bool, UploadStoreError> {
+    let staged = StagedUpload {
+        blob: blobs.blocking().stage_bytes(wheel)?,
+        blake2_256: blake2_256(wheel),
+    };
+    let mut form = staged_form(wheel);
+    form.filename = Some(filename.to_owned());
+    store_prepared_blocking(
+        meta,
+        blobs,
+        "hosted",
+        prepare(form, staged, "root/hosted", 1000).unwrap(),
+    )
+}
+
+fn unclassify_wheel(meta: &MetaStore, filename: &str) -> crate::upload::Uploaded {
+    let mut uploaded: crate::upload::Uploaded =
+        serde_json::from_slice(&meta.get_upload("hosted", "flask", filename).unwrap().unwrap()).unwrap();
+    uploaded.imports = None;
+    uploaded
+}
+
+fn put_legacy_wheel(meta: &MetaStore, filename: &str, uploaded: &crate::upload::Uploaded) {
+    meta.put_upload("hosted", "flask", filename, &serde_json::to_vec(uploaded).unwrap())
+        .unwrap();
 }
 
 fn blake2_256(bytes: &[u8]) -> String {
@@ -304,4 +343,294 @@ fn test_store_prepared_blocking_records_a_placement_for_every_blob_it_commits() 
         hosted
     );
     assert_eq!(meta.get_artifact_placement(&"0".repeat(64)).unwrap(), None);
+}
+
+#[rstest::rstest]
+#[case::metadata_sibling(false)]
+#[case::archive_fallback(true)]
+fn test_store_prepared_blocking_backfills_legacy_release_imports(#[case] archive_fallback: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    let first_filename = "Flask-1.0-py3-none-any.whl";
+    let first = wheel_metadata_bytes(
+        b"Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: flask\n",
+    );
+    assert!(publish_named_wheel(&meta, &blobs, &first, first_filename).unwrap());
+    let mut uploaded: crate::upload::Uploaded =
+        serde_json::from_slice(&meta.get_upload("hosted", "flask", first_filename).unwrap().unwrap()).unwrap();
+    uploaded.imports = None;
+    if archive_fallback {
+        uploaded.file.clear_metadata();
+    }
+    meta.put_upload(
+        "hosted",
+        "flask",
+        first_filename,
+        &serde_json::to_vec(&uploaded).unwrap(),
+    )
+    .unwrap();
+    let second = wheel_metadata_bytes(
+        b"Metadata-Version: 2.5\nName: Flask\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Namespace: flask\n",
+    );
+
+    let result = publish_named_wheel(&meta, &blobs, &second, "flask-1.0-py3-none-any.whl");
+
+    assert!(
+        matches!(
+            &result,
+            Err(UploadStoreError::ReleaseImports(message)) if message.contains("exclusive and shared")
+        ),
+        "{result:?}"
+    );
+    let stored: crate::upload::Uploaded =
+        serde_json::from_slice(&meta.get_upload("hosted", "flask", first_filename).unwrap().unwrap()).unwrap();
+    assert!(stored.imports.is_some());
+}
+
+#[test]
+fn test_store_prepared_blocking_reports_a_missing_legacy_archive_digest() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    let first_filename = "Flask-1.0-py3-none-any.whl";
+    let first = wheel_metadata("Flask", "1.0");
+    assert!(publish_named_wheel(&meta, &blobs, &first, first_filename).unwrap());
+    let mut uploaded: crate::upload::Uploaded =
+        serde_json::from_slice(&meta.get_upload("hosted", "flask", first_filename).unwrap().unwrap()).unwrap();
+    uploaded.imports = None;
+    uploaded.file.clear_metadata();
+    uploaded.file.hashes.clear();
+    meta.put_upload(
+        "hosted",
+        "flask",
+        first_filename,
+        &serde_json::to_vec(&uploaded).unwrap(),
+    )
+    .unwrap();
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    assert!(matches!(
+        result,
+        Err(UploadStoreError::MissingSha256(filename)) if filename == first_filename
+    ));
+}
+
+#[test]
+fn test_upload_store_error_maps_a_typed_store_failure() {
+    let error =
+        crate::store::UploadWriteError::Meta(peryx_storage::meta::MetaError::DriverPrecondition("store".to_owned()));
+    assert!(matches!(UploadStoreError::from(error), UploadStoreError::Meta(_)));
+}
+
+#[rstest::rstest]
+#[case::tar_gz("Flask-1.0.tar.gz")]
+#[case::zip("Flask-1.0.zip")]
+fn test_verified_archive_metadata_reads_sdists(#[case] filename: &str) {
+    let bytes = sdist_with_license(filename, false);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(filename);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let metadata = crate::upload::verified_archive_metadata(filename, &path, &Digest::of(&bytes))
+        .unwrap()
+        .unwrap();
+
+    assert!(std::str::from_utf8(&metadata).unwrap().contains("Name: Flask"));
+}
+
+#[test]
+fn test_verified_archive_metadata_rejects_a_digest_mismatch() {
+    let bytes = wheel_metadata("Flask", "1.0");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(FILENAME);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let error = crate::upload::verified_archive_metadata(FILENAME, &path, &Digest::of(b"other")).unwrap_err();
+
+    assert!(matches!(error, crate::upload::LegacyMetadataError::CorruptDigest));
+}
+
+#[test]
+fn test_verified_archive_metadata_reports_open_read_and_filename_errors() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing =
+        crate::upload::verified_archive_metadata(FILENAME, &directory.path().join("missing"), &Digest::of(b"missing"))
+            .unwrap_err();
+    assert!(matches!(missing, crate::upload::LegacyMetadataError::Archive(_)));
+
+    let read =
+        crate::upload::verified_archive_metadata(FILENAME, directory.path(), &Digest::of(b"directory")).unwrap_err();
+    assert!(matches!(read, crate::upload::LegacyMetadataError::Archive(_)));
+
+    let path = directory.path().join("invalid");
+    std::fs::write(&path, b"archive").unwrap();
+    let filename = crate::upload::verified_archive_metadata("invalid", &path, &Digest::of(b"archive")).unwrap_err();
+    assert!(matches!(filename, crate::upload::LegacyMetadataError::Archive(_)));
+}
+
+#[rstest::rstest]
+#[case::utf8(b"\xff")]
+#[case::syntax(b"not metadata")]
+#[case::name(b"Metadata-Version: 2.5\nName: Other\nVersion: 1.0\n")]
+#[case::version(b"Metadata-Version: 2.5\nName: Flask\nVersion: 2.0\n")]
+fn test_store_prepared_blocking_rejects_invalid_legacy_metadata(#[case] metadata: &[u8]) {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    assert!(publish_named_wheel(&meta, &blobs, &wheel_metadata("Flask", "1.0"), FILENAME).unwrap());
+    let mut uploaded = unclassify_wheel(&meta, FILENAME);
+    let digest = blobs.blocking().put_bytes(metadata).unwrap();
+    uploaded.file.set_metadata(crate::CoreMetadata::Hashes(BTreeMap::from([(
+        "sha256".to_owned(),
+        digest.as_str().to_owned(),
+    )])));
+    put_legacy_wheel(&meta, FILENAME, &uploaded);
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    assert!(matches!(result, Err(UploadStoreError::Meta(_))), "{result:?}");
+}
+
+#[test]
+fn test_store_prepared_blocking_reports_a_corrupt_release_import_projection() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    assert!(publish_named_wheel(&meta, &blobs, &wheel_metadata("Flask", "1.0"), FILENAME).unwrap());
+    let uploaded = unclassify_wheel(&meta, FILENAME);
+    put_legacy_wheel(&meta, FILENAME, &uploaded);
+    meta.put_driver_value("pypi\0q\0hosted/flask/1", b"{").unwrap();
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    assert!(
+        matches!(result, Err(UploadStoreError::Meta(ref error)) if error.to_string().contains("corrupt release import constraint")),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn test_store_prepared_blocking_rejects_a_metadata_sidecar_without_a_digest() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    assert!(publish_named_wheel(&meta, &blobs, &wheel_metadata("Flask", "1.0"), FILENAME).unwrap());
+    let mut uploaded = unclassify_wheel(&meta, FILENAME);
+    uploaded.file.set_metadata(crate::CoreMetadata::Hashes(BTreeMap::new()));
+    put_legacy_wheel(&meta, FILENAME, &uploaded);
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    assert!(matches!(result, Err(UploadStoreError::Meta(_))), "{result:?}");
+}
+
+#[test]
+fn test_store_prepared_blocking_rejects_a_corrupt_metadata_sidecar() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    assert!(publish_named_wheel(&meta, &blobs, &wheel_metadata("Flask", "1.0"), FILENAME).unwrap());
+    let mut uploaded = unclassify_wheel(&meta, FILENAME);
+    let digest = blobs.blocking().put_bytes(b"metadata").unwrap();
+    let lease = blobs.blocking().materialize(&digest).unwrap();
+    std::fs::write(lease.path(), b"changed").unwrap();
+    drop(lease);
+    uploaded.file.set_metadata(crate::CoreMetadata::Hashes(BTreeMap::from([(
+        "sha256".to_owned(),
+        digest.as_str().to_owned(),
+    )])));
+    put_legacy_wheel(&meta, FILENAME, &uploaded);
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    assert!(matches!(result, Err(UploadStoreError::Meta(_))), "{result:?}");
+}
+
+#[test]
+fn test_store_prepared_blocking_rejects_a_corrupt_legacy_archive() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    assert!(publish_named_wheel(&meta, &blobs, &wheel_metadata("Flask", "1.0"), FILENAME).unwrap());
+    let mut uploaded = unclassify_wheel(&meta, FILENAME);
+    uploaded.file.clear_metadata();
+    let digest = blobs.blocking().put_bytes(&wheel_metadata("Flask", "1.0")).unwrap();
+    let lease = blobs.blocking().materialize(&digest).unwrap();
+    std::fs::write(lease.path(), b"changed").unwrap();
+    drop(lease);
+    uploaded
+        .file
+        .hashes
+        .insert("sha256".to_owned(), digest.as_str().to_owned());
+    put_legacy_wheel(&meta, FILENAME, &uploaded);
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    assert!(matches!(result, Err(UploadStoreError::Meta(_))), "{result:?}");
+}
+
+#[rstest::rstest]
+#[case::missing_metadata(wheel_without_metadata(), false)]
+#[case::invalid_archive(b"not an archive".to_vec(), true)]
+fn test_store_prepared_blocking_handles_archive_metadata_failures(
+    #[case] archive: Vec<u8>,
+    #[case] storage_failure: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    assert!(publish_named_wheel(&meta, &blobs, &wheel_metadata("Flask", "1.0"), FILENAME).unwrap());
+    let mut uploaded = unclassify_wheel(&meta, FILENAME);
+    uploaded.file.clear_metadata();
+    let digest = blobs.blocking().put_bytes(&archive).unwrap();
+    uploaded
+        .file
+        .hashes
+        .insert("sha256".to_owned(), digest.as_str().to_owned());
+    put_legacy_wheel(&meta, FILENAME, &uploaded);
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    if storage_failure {
+        assert!(matches!(result, Err(UploadStoreError::Meta(_))), "{result:?}");
+    } else {
+        assert!(matches!(result, Err(UploadStoreError::ReleaseImports(_))), "{result:?}");
+    }
 }

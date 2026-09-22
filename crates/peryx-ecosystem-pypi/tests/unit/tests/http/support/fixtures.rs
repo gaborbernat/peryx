@@ -79,6 +79,7 @@ pub fn fixture_wheel_for_project(project: &str, version: &str) -> Vec<u8> {
         ),
         &[],
         zip::CompressionMethod::Deflated,
+        None,
     )
 }
 pub fn fixture_wheel_with_body(version: &str, body: &[u8]) -> Vec<u8> {
@@ -98,6 +99,17 @@ pub fn fixture_wheel_without_metadata() -> Vec<u8> {
 }
 pub fn fixture_wheel_with_metadata(metadata: &[u8]) -> Vec<u8> {
     fixture_wheel_with_body_and_metadata("1.0", b"VALUE = 1\n", Some(metadata))
+}
+pub fn fixture_wheel_with_build_and_metadata(build: &str, metadata: &[u8]) -> Vec<u8> {
+    fixture_wheel_for_project_with_body_compression(
+        "peryxpkg",
+        "1.0",
+        b"VALUE = 1\n",
+        Some(metadata),
+        &[],
+        zip::CompressionMethod::Deflated,
+        Some(build),
+    )
 }
 pub fn empty_zip() -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -316,7 +328,15 @@ fn fixture_wheel_with_body_and_metadata_compression(
     license_files: &[&str],
     compression: zip::CompressionMethod,
 ) -> Vec<u8> {
-    fixture_wheel_for_project_with_body_compression("peryxpkg", version, body, metadata, license_files, compression)
+    fixture_wheel_for_project_with_body_compression(
+        "peryxpkg",
+        version,
+        body,
+        metadata,
+        license_files,
+        compression,
+        None,
+    )
 }
 fn fixture_wheel_for_project_with_body_compression(
     project: &str,
@@ -325,18 +345,23 @@ fn fixture_wheel_for_project_with_body_compression(
     metadata: Option<&[u8]>,
     license_files: &[&str],
     compression: zip::CompressionMethod,
+    build: Option<&str>,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         let options = zip::write::SimpleFileOptions::default().compression_method(compression);
         let dist_info = format!("{project}-{version}.dist-info");
-        let wheel = b"Wheel-Version: 1.0\nGenerator: peryx-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n";
+        let mut wheel = "Wheel-Version: 1.0\nGenerator: peryx-test\nRoot-Is-Purelib: true\n".to_owned();
+        if let Some(build) = build {
+            writeln!(wheel, "Build: {build}").unwrap();
+        }
+        wheel.push_str("Tag: py3-none-any\n");
         let mut entries = vec![(format!("{project}/__init__.py"), body.to_vec())];
         if let Some(metadata) = metadata {
             entries.push((format!("{dist_info}/METADATA"), metadata.to_vec()));
         }
-        entries.push((format!("{dist_info}/WHEEL"), wheel.to_vec()));
+        entries.push((format!("{dist_info}/WHEEL"), wheel.into_bytes()));
         entries.extend(
             license_files
                 .iter()
@@ -430,8 +455,53 @@ pub fn upload_record(
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     }
+}
+pub fn exclusive_imports(name: &str) -> ImportDeclarations {
+    ImportDeclarations::V1 {
+        exclusive: Some(BTreeSet::from([ImportEntry {
+            name: name.to_owned(),
+            private: false,
+        }])),
+        shared: None,
+    }
+}
+pub fn shared_imports(name: &str) -> ImportDeclarations {
+    ImportDeclarations::V1 {
+        exclusive: None,
+        shared: Some(BTreeSet::from([ImportEntry {
+            name: name.to_owned(),
+            private: false,
+        }])),
+    }
+}
+pub fn store_historical_wheel(
+    state: &AppState,
+    index: &str,
+    filename: &str,
+    wheel: &[u8],
+    imports: ImportDeclarations,
+    trashed: Option<TrashInfo>,
+) {
+    let digest = Digest::of(wheel);
+    state.serving.blobs.blocking().put_bytes_as(wheel, &digest).unwrap();
+    let mut uploaded = upload_record(
+        filename,
+        "1.0",
+        local_artifact_url(index, digest.as_str(), filename),
+        BTreeMap::from([("sha256".to_owned(), digest.as_str().to_owned())]),
+        Some(wheel.len() as u64),
+    );
+    uploaded.imports = Some(imports);
+    uploaded.trashed = trashed;
+    state
+        .serving
+        .meta
+        .put_upload(index, "peryxpkg", filename, to_json(&uploaded).as_bytes())
+        .unwrap();
+    state.serving.meta.put_project(index, "peryxpkg", "peryxpkg").unwrap();
 }
 pub fn put_local_file(state: &AppState, filename: &str, bytes: &[u8], version: &str) -> Digest {
     put_local_project(state, "peryxpkg", filename, bytes, version)

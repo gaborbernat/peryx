@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -14,6 +15,8 @@ use axum::routing::put;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use peryx_ecosystem_pypi::store::PypiStore as _;
+use peryx_ecosystem_pypi::upload::{ImportDeclarations, Uploaded};
+use peryx_ecosystem_pypi::{CoreMetadata, File, Provenance, Yanked};
 use peryx_storage::blob::Digest;
 use peryx_storage::meta::MetaStore;
 use sha2::Digest as _;
@@ -22,7 +25,6 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 const BUCKET: &str = "peryx-tests";
-const FILENAME: &str = "veloxdemo-1.0.0-py3-none-any.whl";
 const WHEEL: &[u8] = include_bytes!("../../../fixtures/veloxdemo-1.0.0-py3-none-any.whl");
 
 struct S3Server {
@@ -176,12 +178,35 @@ async fn child(endpoint: &str, data_dir: &Path) -> Output {
 }
 
 #[tokio::test]
-async fn test_s3_upload_metadata_failure_leaves_a_detectable_orphan() {
+async fn test_s3_upload_admission_failure_leaves_a_detectable_orphan() {
     let server = s3_server().await;
     let data_dir = tempfile::tempdir().unwrap();
+    let filename = "veloxdemo-1.0.0.tar.gz";
+    let uploaded = Uploaded {
+        version: "1.0.0".to_owned(),
+        file: File {
+            filename: filename.to_owned(),
+            url: format!("https://files.invalid/{filename}"),
+            hashes: BTreeMap::from([("sha256".to_owned(), "0".repeat(64))]),
+            requires_python: None,
+            size: Some(1),
+            upload_time: None,
+            yanked: Yanked::No,
+            core_metadata: CoreMetadata::Absent,
+            dist_info_metadata: CoreMetadata::Absent,
+            gpg_sig: None,
+            provenance: Provenance::Absent,
+            authoritative_version: None,
+        },
+        imports: Some(ImportDeclarations::V1 {
+            exclusive: Some(BTreeSet::new()),
+            shared: Some(BTreeSet::new()),
+        }),
+        trashed: None,
+    };
     MetaStore::open(data_dir.path().join("peryx.redb"))
         .unwrap()
-        .put_upload("hosted", "veloxdemo", FILENAME, b"invalid-json")
+        .put_upload("hosted", "veloxdemo", filename, &serde_json::to_vec(&uploaded).unwrap())
         .unwrap();
     let output = child(&server.endpoint, data_dir.path()).await;
     assert_eq!(

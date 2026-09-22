@@ -272,6 +272,75 @@ fn test_driver_txn_scan_prefix_break_visits_one_matching_row() {
 }
 
 #[test]
+fn test_driver_txn_prefix_after_limited_excludes_the_cursor_and_bounds_the_prefix() {
+    let (_dir, store) = super::store();
+    for key in ["scope/a", "scope/b", "scope/c", "scope0/a"] {
+        store.put_driver_value(key, b"value").unwrap();
+    }
+
+    let entries = store
+        .commit_driver_cache_txn(|txn| txn.prefix_after_limited("scope/", Some("scope/a"), 2))
+        .unwrap();
+
+    assert_eq!(
+        entries,
+        vec![
+            ("scope/b".to_owned(), b"value".to_vec()),
+            ("scope/c".to_owned(), b"value".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn test_driver_txn_prefix_after_limited_starts_at_the_prefix_when_the_cursor_precedes_it() {
+    let (_dir, store) = super::store();
+    for key in ["scope/a", "scope/b", "scope/c"] {
+        store.put_driver_value(key, b"value").unwrap();
+    }
+
+    let entries = store
+        .commit_driver_cache_txn(|txn| txn.prefix_after_limited("scope/", Some("before"), 2))
+        .unwrap();
+
+    assert_eq!(
+        entries,
+        vec![
+            ("scope/a".to_owned(), b"value".to_vec()),
+            ("scope/b".to_owned(), b"value".to_vec()),
+        ]
+    );
+}
+
+#[test]
+fn test_driver_txn_prefix_after_limited_does_not_scan_for_zero_limit() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/a", b"value").unwrap();
+    store.fail_driver_prefix_scan_after(0);
+
+    assert!(
+        store
+            .commit_driver_cache_txn(|txn| txn.prefix_after_limited("scope/", None, 0))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_driver_txn_prefix_after_limited_applies_scan_fault_after_the_cursor() {
+    let (_dir, store) = super::store();
+    for key in ["scope/a", "scope/b", "scope/c"] {
+        store.put_driver_value(key, b"value").unwrap();
+    }
+    store.fail_driver_prefix_scan_after(1);
+
+    assert!(
+        store
+            .commit_driver_cache_txn(|txn| txn.prefix_after_limited("scope/", Some("scope/a"), 2))
+            .is_err()
+    );
+}
+
+#[test]
 fn test_driver_txn_prefix_reads_staged_rows() {
     let (_dir, store) = super::store();
     store.put_driver_value("scope/removed", b"old").unwrap();

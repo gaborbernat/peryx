@@ -212,17 +212,68 @@ async fn test_promote_skips_target_file_with_same_digest() {
     assert_eq!(field(&event, "source_index"), Some("staging"));
     assert_eq!(field(&event, "reason"), Some("same files already exist on target"));
 }
+
+#[tokio::test]
+async fn test_promote_rolls_back_every_file_on_a_release_import_conflict() {
+    let h = authority_promotion_harness().await;
+    let exclusive = fixture_wheel_with_metadata(
+        b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n",
+    );
+    upload_wheel_to(&h.state, "/prod/", "peryxpkg-1.0-py3-none-any.whl", "1.0", &exclusive).await;
+    for (build, metadata, imports) in [
+        (
+            1,
+            b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n"
+                .as_slice(),
+            exclusive_imports("peryxpkg"),
+        ),
+        (
+            2,
+            b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Namespace: peryxpkg\n"
+                .as_slice(),
+            shared_imports("peryxpkg"),
+        ),
+    ] {
+        let filename = format!("peryxpkg-1.0-{build}-py3-none-any.whl");
+        store_historical_wheel(
+            &h.state,
+            "staging",
+            &filename,
+            &fixture_wheel_with_build_and_metadata(&build.to_string(), metadata),
+            imports,
+            None,
+        );
+    }
+    let serial = h.state.serving.meta.current_serial().unwrap();
+
+    let (status, body) = request_response(
+        &h.state,
+        "PUT",
+        "/prod/peryxpkg/1.0/promote?from=staging",
+        Some(&upload_auth()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("exclusive and shared"), "{body}");
+    assert_eq!(h.state.serving.meta.current_serial().unwrap(), serial);
+    let target = h.state.serving.meta.list_upload_entries("prod", "peryxpkg").unwrap();
+    assert_eq!(target.len(), 1);
+    assert_eq!(target[0].0, "peryxpkg-1.0-py3-none-any.whl");
+}
+
 #[tokio::test]
 async fn test_promote_reports_missing_sha256_in_source_record() {
     let h = authority_promotion_harness().await;
     let filename = "peryxpkg-1.0-py3-none-any.whl";
-    let uploaded = upload_record(
+    let mut uploaded = upload_record(
         filename,
         "1.0",
         "https://example.test/pkg.whl".to_owned(),
         BTreeMap::new(),
         Some(4),
     );
+    uploaded.imports = Some(crate::upload::ImportDeclarations::Before25);
     h.state
         .serving
         .meta
@@ -265,13 +316,14 @@ async fn test_promote_uses_resource_key_when_source_display_is_missing() {
     let h = authority_promotion_harness().await;
     let filename = "peryxpkg-1.0-py3-none-any.whl";
     let digest = Digest::of(b"wheel");
-    let uploaded = upload_record(
+    let mut uploaded = upload_record(
         filename,
         "1.0",
         local_artifact_url("staging", digest.as_str(), filename),
         BTreeMap::from([("sha256".to_owned(), digest.as_str().to_owned())]),
         Some(5),
     );
+    uploaded.imports = Some(crate::upload::ImportDeclarations::Before25);
     h.state
         .serving
         .meta

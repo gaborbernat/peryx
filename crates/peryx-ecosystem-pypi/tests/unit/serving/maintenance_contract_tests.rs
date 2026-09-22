@@ -488,6 +488,7 @@ fn seed_archive(state: &ServingState) -> (String, String) {
                     provenance: Provenance::Absent,
                     authoritative_version: None,
                 },
+                imports: None,
                 trashed: None,
             })
             .as_bytes(),

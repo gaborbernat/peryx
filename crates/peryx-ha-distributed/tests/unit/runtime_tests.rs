@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use axum::response::IntoResponse as _;
 use axum::{Router, routing::get as route_get};
 use http_body_util::BodyExt as _;
 use peryx_driver::state::AppState;

@@ -10,7 +10,7 @@ use rstest::rstest;
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::{TcpListener, TcpStream};
 
-use super::mirror_concurrency_tests::read_path;
+use super::mirror_concurrency_tests::{read_path, read_path_if_complete};
 use super::mirror_tests::{INDEX_TYPE, MANIFEST_TYPE, image_manifest_with_layers, index_over};
 use super::{oci_digest, proxy, wait_for_staged_bytes};
 use crate::mirror::{MirrorMode, MirrorRow, mirror};
@@ -80,7 +80,9 @@ type Content = Arc<HashMap<String, Answer>>;
 /// A registry keyed by request path, so references a run overlaps get the same answer however their
 /// requests interleave.
 async fn answer(content: Content, mut connection: TcpStream) {
-    let path = read_path(&mut connection).await;
+    let Some(path) = read_path_if_complete(&mut connection).await else {
+        return;
+    };
     let path = path.split('?').next().unwrap();
     let reply = &content[path];
     if reply.challenge {
@@ -289,6 +291,7 @@ async fn test_cancelled_mirror_retries_a_blob_with_the_same_state(#[case] during
         None
     );
     drop(stalled);
+    drop(TcpStream::connect(listener.local_addr().unwrap()).await.unwrap());
 
     let mut peers = tokio::task::JoinSet::new();
     let outcome = tokio::time::timeout(

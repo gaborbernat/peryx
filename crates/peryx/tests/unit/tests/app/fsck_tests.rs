@@ -157,7 +157,7 @@ fn test_cache_repair_plans_nothing_when_no_ecosystem_can_rebuild() {
 
     cache_with_plugins(&config, &plugins(), &repair_command(false), &mut output).unwrap();
 
-    assert_eq!(output, b"planned\t0\n");
+    assert_eq!(output, b"planned\t0\nreport-only\t0\n");
 }
 
 /// A preview reports without writing, which is why it can run against the read-only handle the
@@ -175,7 +175,10 @@ fn test_cache_repair_previews_the_records_a_rebuild_would_write() {
 
     cache_with_plugins(&config, &plugins, &repair_command(false), &mut output).unwrap();
 
-    assert_eq!(output, b"metadata\tcore\twould rebuild\tmain\nplanned\t1\n");
+    assert_eq!(
+        output,
+        b"metadata\tcore\twould rebuild\tmain\nplanned\t1\nreport-only\t0\n"
+    );
 }
 
 #[test]
@@ -191,7 +194,7 @@ fn test_cache_repair_rebuilds_when_confirmed() {
 
     cache_with_plugins(&config, &plugins, &repair_command(true), &mut output).unwrap();
 
-    assert_eq!(output, b"metadata\tcore\trebuilt\tmain\nrepaired\t1\n");
+    assert_eq!(output, b"metadata\tcore\trebuilt\tmain\nrepaired\t1\nreport-only\t0\n");
 }
 
 /// A preview and a rebuild write the same records through the same handle, so an output that cannot

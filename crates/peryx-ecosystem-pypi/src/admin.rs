@@ -6,14 +6,14 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use peryx_driver::serving::{CachePage, PurgeReport};
+use peryx_driver::serving::{CachePage, MetadataRepairCounts, PurgeReport};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{PolicyAction, PolicyDenial};
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::{MetaStore, RepairScan};
 
 use crate::store::PypiStore as _;
-use crate::store::{AuditedIndex, CachedIndex, PypiRecords, SummaryDefect};
+use crate::store::{AuditedIndex, CachedIndex, MetadataRepairFinding, PypiRecords, SummaryDefect};
 
 use crate::policy::PypiPolicy as _;
 use crate::upload::Uploaded;
@@ -449,7 +449,6 @@ fn audited_indexes(indexes: &[Index]) -> Vec<AuditedIndex<'_>> {
 }
 
 fn write_summary_defects(defects: &[SummaryDefect], out: &mut dyn Write) -> Result<u64, String> {
-    let mut problems = 0_u64;
     for defect in defects {
         writeln!(
             out,
@@ -457,32 +456,81 @@ fn write_summary_defects(defects: &[SummaryDefect], out: &mut dyn Write) -> Resu
             defect.namespace, defect.key, defect.message
         )
         .map_err(crate::error_message)?;
-        problems += 1;
     }
-    Ok(problems)
+    Ok(defects.len() as u64)
+}
+
+fn write_summary_repair_findings(
+    defects: &[SummaryDefect],
+    out: &mut dyn Write,
+) -> Result<MetadataRepairCounts, String> {
+    for defect in defects {
+        writeln!(
+            out,
+            "metadata\tpypi\t{}\t{}\trebuild\t{}",
+            defect.namespace, defect.key, defect.message
+        )
+        .map_err(crate::error_message)?;
+    }
+    Ok(MetadataRepairCounts {
+        actionable: defects.len() as u64,
+        report_only: 0,
+    })
+}
+
+fn write_repair_findings(
+    findings: &[MetadataRepairFinding],
+    out: &mut dyn Write,
+) -> Result<MetadataRepairCounts, String> {
+    for finding in findings {
+        writeln!(
+            out,
+            "metadata\tpypi\t{}\t{}\t{}\t{}",
+            finding.namespace, finding.key, finding.disposition, finding.message
+        )
+        .map_err(crate::error_message)?;
+    }
+    Ok(crate::store::repair_counts(findings))
 }
 
 /// Name the derived summary rows a rebuild would write, without writing them.
 ///
 /// # Errors
 /// Returns a message when the store cannot be read or `out` cannot be written.
-pub fn preview_metadata_repair(meta: &MetaStore, indexes: &[Index], out: &mut dyn Write) -> Result<u64, String> {
+pub fn preview_metadata_repair(
+    meta: &MetaStore,
+    indexes: &[Index],
+    out: &mut dyn Write,
+) -> Result<MetadataRepairCounts, String> {
     let defects = crate::store::audit_summary_rows(meta, &audited_indexes(indexes)).map_err(crate::error_message)?;
-    write_summary_defects(&defects, out)
+    let findings = crate::store::plan_metadata_repair(meta, indexes).map_err(crate::error_message)?;
+    let summary = write_summary_repair_findings(&defects, out)?;
+    let metadata = write_repair_findings(&findings, out)?;
+    Ok(MetadataRepairCounts {
+        actionable: summary.actionable + metadata.actionable,
+        report_only: metadata.report_only,
+    })
 }
 
 /// Rebuild the derived summary rows that disagree with the projects and uploads they describe.
 ///
 /// # Errors
 /// Returns a message when the store cannot be read or written, or `out` cannot be written.
-pub fn repair_metadata(meta: &MetaStore, indexes: &[Index], out: &mut dyn Write) -> Result<u64, String> {
-    let dropped = crate::store::drop_legacy_file_sources(meta).map_err(crate::error_message)?;
-    if dropped > 0 {
-        writeln!(out, "dropped {dropped} download source(s) that named no publication")
-            .map_err(crate::error_message)?;
-    }
+pub fn repair_metadata(
+    meta: &MetaStore,
+    indexes: &[Index],
+    out: &mut dyn Write,
+) -> Result<MetadataRepairCounts, String> {
     let defects = crate::store::repair_summary_rows(meta, &audited_indexes(indexes)).map_err(crate::error_message)?;
-    write_summary_defects(&defects, out).map(|summary| summary + dropped as u64)
+    let findings = crate::store::apply_metadata_repair(meta, indexes).map_err(crate::error_message)?;
+    let mut report = Vec::new();
+    let summary = write_summary_repair_findings(&defects, &mut report)?;
+    let metadata = write_repair_findings(&findings, &mut report)?;
+    out.write_all(&report).map_err(crate::error_message)?;
+    Ok(MetadataRepairCounts {
+        actionable: summary.actionable + metadata.actionable,
+        report_only: metadata.report_only,
+    })
 }
 
 /// Report every record in `namespace` that `invalid` rejects, then the rows the scan could not read at
@@ -532,8 +580,7 @@ pub fn fsck_metadata(
     })
     .map_err(crate::error_message)?;
     problems += check_records(meta, PypiRecords::FileUrl, out, |key, value| {
-        crate::store::split_file_source_key(key).is_none_or(|(.., digest)| Digest::from_hex(digest).is_none())
-            || split_pair(value).is_none()
+        !valid_file_source_key(key, indexes) || split_pair(value).is_none()
     })?;
     problems += check_records(meta, PypiRecords::Metadata, out, |digest, metadata_digest| {
         Digest::from_hex(digest).is_none() || Digest::from_hex(metadata_digest).is_none()
@@ -630,6 +677,26 @@ fn split_triple(value: &str) -> Option<(&str, &str, &str)> {
 fn valid_project_key(key: &str) -> bool {
     key.split_once('/')
         .is_some_and(|(index, project)| !index.is_empty() && !project.is_empty())
+}
+
+fn valid_file_source_key(key: &str, indexes: &[Index]) -> bool {
+    indexes
+        .iter()
+        .filter(|index| index.ecosystem == crate::ECOSYSTEM && !matches!(index.kind, IndexKind::Virtual { .. }))
+        .filter_map(|index| {
+            key.strip_prefix(&index.name)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .map(|rest| (index.name.len(), rest))
+        })
+        .max_by_key(|(index_len, _)| *index_len)
+        .map_or_else(
+            || crate::store::split_file_source_key(key).is_some_and(|(.., digest)| Digest::from_hex(digest).is_some()),
+            |(_, project_digest)| {
+                project_digest
+                    .rsplit_once('/')
+                    .is_some_and(|(project, digest)| !project.is_empty() && Digest::from_hex(digest).is_some())
+            },
+        )
 }
 
 fn valid_upload_key(key: &str) -> bool {

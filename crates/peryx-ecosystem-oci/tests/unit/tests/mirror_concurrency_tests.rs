@@ -46,18 +46,28 @@ struct Registry {
 }
 
 pub(super) async fn read_path(connection: &mut TcpStream) -> String {
+    read_path_if_complete(connection)
+        .await
+        .expect("the request ended before its headers")
+}
+
+pub(super) async fn read_path_if_complete(connection: &mut TcpStream) -> Option<String> {
     let mut request = Vec::new();
     while !request.windows(4).any(|window| window == b"\r\n\r\n") {
         let mut chunk = [0; 1024];
         let read = connection.read(&mut chunk).await.unwrap();
-        assert_ne!(read, 0, "the request ended before its headers");
+        if read == 0 {
+            return None;
+        }
         request.extend_from_slice(&chunk[..read]);
     }
-    String::from_utf8_lossy(&request)
-        .split_whitespace()
-        .nth(1)
-        .unwrap()
-        .to_owned()
+    Some(
+        String::from_utf8_lossy(&request)
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .to_owned(),
+    )
 }
 
 async fn answer(registry: Arc<Registry>, mut connection: TcpStream) {

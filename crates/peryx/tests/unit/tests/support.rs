@@ -515,7 +515,7 @@ impl peryx_driver::serving::MetadataRepairDriver for Driver {
         _: &MetaStore,
         indexes: &[peryx_driver::Index],
         out: &mut dyn std::io::Write,
-    ) -> Result<u64, String> {
+    ) -> Result<peryx_driver::serving::MetadataRepairCounts, String> {
         writeln!(
             out,
             "metadata\t{}\twould rebuild\t{}",
@@ -523,7 +523,10 @@ impl peryx_driver::serving::MetadataRepairDriver for Driver {
             index_names(indexes)
         )
         .map_err(|error| error.to_string())?;
-        Ok(1)
+        Ok(peryx_driver::serving::MetadataRepairCounts {
+            actionable: 1,
+            report_only: 0,
+        })
     }
 
     fn repair_metadata(
@@ -531,7 +534,7 @@ impl peryx_driver::serving::MetadataRepairDriver for Driver {
         _: &MetaStore,
         indexes: &[peryx_driver::Index],
         out: &mut dyn std::io::Write,
-    ) -> Result<u64, String> {
+    ) -> Result<peryx_driver::serving::MetadataRepairCounts, String> {
         writeln!(
             out,
             "metadata\t{}\trebuilt\t{}",
@@ -539,7 +542,10 @@ impl peryx_driver::serving::MetadataRepairDriver for Driver {
             index_names(indexes)
         )
         .map_err(|error| error.to_string())?;
-        Ok(1)
+        Ok(peryx_driver::serving::MetadataRepairCounts {
+            actionable: 1,
+            report_only: 0,
+        })
     }
 }
 

@@ -10,7 +10,7 @@ pub enum CacheCommand {
     Size(CacheRuntimeArgs),
     /// Validate metadata records and blob hashes.
     Fsck(CacheRuntimeArgs),
-    /// Plan or rebuild the derived metadata records `fsck` reports.
+    /// Plan repairs and operator actions for metadata problems reported by `fsck`.
     Repair(CacheRepairArgs),
     /// Plan or run cache cleanup.
     #[command(subcommand)]
@@ -41,7 +41,7 @@ pub struct CacheRepairArgs {
     #[command(flatten)]
     pub runtime: RuntimeArgs,
 
-    /// Rebuild the planned records; omission previews the plan.
+    /// Apply safe rebuilds and removals; omission previews every disposition.
     #[arg(long)]
     pub yes: bool,
 }

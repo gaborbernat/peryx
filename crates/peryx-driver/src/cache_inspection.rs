@@ -11,7 +11,7 @@ use peryx_storage::blob::{BlobEntry, BlobError, BlobScanError, BlobStorage};
 use peryx_storage::meta::{MetaError, MetaStore};
 
 use crate::DriverSet;
-use crate::serving::{CachePage, NameDriver};
+use crate::serving::{CachePage, MetadataRepairCounts, NameDriver};
 
 pub struct CacheListFilter<'a> {
     pub index: Option<&'a str>,
@@ -220,17 +220,20 @@ pub fn write_cache_repair(
 ) -> Result<(), CacheInspectionError> {
     let mut ecosystem_drivers = drivers.metadata_repair_drivers().collect::<Vec<_>>();
     ecosystem_drivers.sort_unstable_by_key(|(ecosystem, _)| ecosystem.as_str());
-    let mut repaired = 0_u64;
+    let mut totals = MetadataRepairCounts::default();
     for (_, driver) in ecosystem_drivers {
-        repaired += if apply {
+        let counts = if apply {
             driver.repair_metadata(meta, indexes, out)
         } else {
             driver.preview_metadata_repair(meta, indexes, out)
         }
         .map_err(CacheInspectionError::EcosystemRepair)?;
+        totals.actionable += counts.actionable;
+        totals.report_only += counts.report_only;
     }
     let label = if apply { "repaired" } else { "planned" };
-    writeln!(out, "{label}\t{repaired}").map_err(CacheInspectionError::Write)?;
+    writeln!(out, "{label}\t{}", totals.actionable).map_err(CacheInspectionError::Write)?;
+    writeln!(out, "report-only\t{}", totals.report_only).map_err(CacheInspectionError::Write)?;
     Ok(())
 }
 

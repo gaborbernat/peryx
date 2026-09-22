@@ -334,10 +334,13 @@ async fn test_proxied_tag_list_preserves_an_ascii_ordered_upstream_page() {
     );
 }
 
+#[rstest]
+#[case::case_insensitive(br#"{"name":"app","tags":["a","B"]}"#, ["a", "B"])]
+#[case::bytewise(br#"{"name":"app","tags":["B","a"]}"#, ["B", "a"])]
 #[tokio::test]
-async fn test_proxied_tag_list_accepts_a_case_insensitively_ordered_upstream_page() {
+async fn test_proxied_tag_list_accepts_an_ordered_upstream_page(#[case] page: &'static [u8], #[case] tags: [&str; 2]) {
     let server = MockServer::start().await;
-    mount_tags(&server, "app", br#"{"name":"app","tags":["a","B"]}"#).await;
+    mount_tags(&server, "app", page).await;
     let dir = tempfile::tempdir().unwrap();
     let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
 
@@ -346,7 +349,7 @@ async fn test_proxied_tag_list_accepts_a_case_insensitively_ordered_upstream_pag
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({"name":"hub/app","tags":["a","B"]})
+        serde_json::json!({"name":"hub/app","tags":tags})
     );
 }
 

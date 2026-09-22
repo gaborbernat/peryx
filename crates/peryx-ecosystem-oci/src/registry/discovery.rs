@@ -1233,12 +1233,12 @@ fn link_parameters(parameters: &str) -> Result<Vec<&str>, ServeError> {
 }
 
 fn quoted_link_value(value: &str) -> Result<String, ServeError> {
-    if value.len() < 2 || !value.ends_with('"') {
+    let Some(quoted) = value.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) else {
         return Err(invalid_tag_page("malformed Link parameter"));
-    }
+    };
     let mut decoded = String::new();
     let mut escaped = false;
-    for character in value[1..value.len() - 1].chars() {
+    for character in quoted.chars() {
         if escaped {
             decoded.push(character);
             escaped = false;

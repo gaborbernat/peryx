@@ -556,6 +556,7 @@ async fn test_listing_pagination_rejects_invalid_parameters() {
         "n=1&%6e=2",
         "last=a&%6Cast=b",
         "n=%GG",
+        "n=%2B5",
     ] {
         assert_eq!(
             send(&app, Method::GET, &format!("/v2/store/app/tags/list?{query}"))
@@ -658,6 +659,55 @@ async fn test_proxy_tag_list_forwards_the_pagination_query() {
     let (status, _, body) = send(&app, Method::GET, "/v2/hub/app/tags/list?n=5&last=x").await;
     assert_eq!(status, StatusCode::OK);
     assert!(std::str::from_utf8(&body).unwrap().contains("\"only\""));
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_forwards_a_percent_decoded_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .and(query_param("last", "A"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"name":"app","tags":["B"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list?last=%41").await.0,
+        StatusCode::OK
+    );
+}
+
+/// A page past the stale bound is dropped even when upstream cannot replace it, rather than kept
+/// for a revalidation that can only fail the same way.
+#[tokio::test]
+async fn test_proxy_tag_list_drops_a_page_past_the_stale_bound_when_upstream_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, app) = super::proxy_with_stale(&dir, "http://127.0.0.1:1/", std::sync::Arc::new(|| 1_000), 100);
+    // The 60 second ttl plus the 100 second stale bound puts a page fetched at 840 exactly at the bound.
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "",
+        840,
+        None,
+        br#"{"name":"app","tags":["old"]}"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        send(&app, Method::GET, "/v2/hub/app/tags/list").await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        store::tag_page(&state.serving.meta, "hub", "app", "").unwrap(),
+        store::TagPageRead::Missing
+    );
 }
 
 #[tokio::test]
@@ -852,6 +902,7 @@ async fn test_proxy_tag_list_ignores_empty_link_members() {
 #[case::zero_limit("</v2/app/tags/list?n=0&last=a>; rel=next")]
 #[case::missing_cursor("</v2/app/tags/list?n=1>; rel=next")]
 #[case::unterminated_target("</v2/app/tags/list?n=1&last=a; rel=next")]
+#[case::unterminated_parameter_target("</v2/app/tags/list?n=1&last=a>; rel=next; title=<x")]
 #[case::unterminated_quote("</v2/app/tags/list?n=1&last=a>; rel=\"next")]
 #[case::quote_in_target("</v2/app/tags/list?n=1&last=a>; title=<\"x>; rel=next")]
 #[case::quoted_relation_suffix("</v2/app/tags/list?n=1&last=a>; rel=\"next\"junk")]
@@ -930,6 +981,28 @@ async fn test_proxy_tag_list_accepts_escaped_next_link_parameters() {
         headers[header::LINK],
         "</v2/hub/app/tags/list?n=1&last=a>; rel=\"next\""
     );
+}
+
+#[tokio::test]
+async fn test_proxy_tag_list_treats_an_empty_quoted_relation_as_no_next_link() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/tags/list"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("link", "</v2/app/tags/list?n=1&last=a>; rel=\"\"")
+                .set_body_raw(br#"{"name":"app","tags":["only"]}"#.to_vec(), "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, headers, _) = send(&app, Method::GET, "/v2/hub/app/tags/list").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key(header::LINK));
 }
 
 #[tokio::test]
@@ -1282,6 +1355,70 @@ async fn test_idle_tag_page_sweep_bounds_a_1023_plus_two_byte_eviction() {
 
     assert_eq!(reclaim_idle(&state).await, 1_024);
     assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().len(), 1_024);
+}
+
+const TAG_PAGE_CACHE_BYTES: usize = 64 << 20;
+
+/// Cache a valid `n=1` tag page under `query` whose row, key plus value, is exactly `row_bytes`, padded
+/// through its cached continuation.
+fn cache_tag_page_row(state: &peryx_driver::AppState, query: &str, fetched_at: i64, row_bytes: usize) {
+    let body = br#"{"name":"app","tags":[]}"#;
+    let key = format!("oci\0tp\0hub\0app\0{query}");
+    let padding = row_bytes - key.len() - 12 - "n=1&last=".len() - body.len();
+    let link = format!("n=1&last={}", "x".repeat(padding));
+    store::set_tag_page(&state.serving.meta, "hub", "app", query, fetched_at, Some(&link), body).unwrap();
+    let value = state.serving.meta.get_driver_value(&key).unwrap().unwrap();
+    assert_eq!(key.len() + value.len(), row_bytes);
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_keeps_a_row_of_exactly_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    cache_tag_page_row(&state, "n=1&last=a", 1_000, TAG_PAGE_CACHE_BYTES);
+
+    assert_eq!(reclaim_idle(&state).await, 0);
+    assert_eq!(
+        state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(),
+        vec!["oci\0tp\0hub\0app\0n=1&last=a".to_owned()]
+    );
+}
+
+/// Evicting the oldest row frees exactly its bytes: the two newer rows then fill the byte cap to the
+/// byte and both stay.
+#[tokio::test]
+async fn test_idle_tag_page_sweep_evicts_the_oldest_row_and_credits_its_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let half = TAG_PAGE_CACHE_BYTES / 2;
+    cache_tag_page_row(&state, "n=1&last=a", 998, half + 1);
+    cache_tag_page_row(&state, "n=1&last=b", 999, half);
+    cache_tag_page_row(&state, "n=1&last=c", 1_000, half);
+
+    assert_eq!(reclaim_idle(&state).await, 1);
+    assert_eq!(
+        state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(),
+        vec![
+            "oci\0tp\0hub\0app\0n=1&last=b".to_owned(),
+            "oci\0tp\0hub\0app\0n=1&last=c".to_owned(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_removes_one_batch_of_invalid_rows_per_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    for row in 0..=1_024 {
+        state
+            .serving
+            .meta
+            .put_driver_value(&format!("oci\0tp\0invalid-{row:04}"), &[])
+            .unwrap();
+    }
+
+    assert_eq!(reclaim_idle(&state).await, 1_024);
+    assert_eq!(reclaim_idle(&state).await, 1);
 }
 
 #[tokio::test]

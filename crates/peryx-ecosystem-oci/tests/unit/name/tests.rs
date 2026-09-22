@@ -25,6 +25,30 @@ fn test_parse_digest_requires_a_lowercase_canonical_encoding() {
     assert!(parse_digest("sha256:").is_none());
 }
 
+#[rstest]
+#[case::empty(":abc123")]
+#[case::uppercase("SHA256:abc123")]
+fn test_parse_digest_rejects_an_invalid_algorithm(#[case] digest: &str) {
+    assert_eq!(parse_digest(digest), None);
+}
+
+#[rstest]
+#[case::bare("library/app", Some(("library/app", Reference::Tag("latest".to_owned()))))]
+#[case::tagged("library/app:v1", Some(("library/app", Reference::Tag("v1".to_owned()))))]
+#[case::registry_port("localhost:5000/app", None)]
+#[case::registry_port_and_tag("registry:5000/app:v1", None)]
+#[case::bad_tag("library/app:-v1", None)]
+fn test_parse_image_reference_splits_the_tag_off_the_last_component(
+    #[case] raw: &str,
+    #[case] expected: Option<(&str, Reference)>,
+) {
+    let parsed = parse_image_reference(raw).map(|image| (image.repository, image.reference));
+    assert_eq!(
+        parsed,
+        expected.map(|(repository, reference)| (repository.to_owned(), reference))
+    );
+}
+
 #[test]
 fn test_manifest_by_tag_splits_a_multi_segment_name() {
     assert_eq!(

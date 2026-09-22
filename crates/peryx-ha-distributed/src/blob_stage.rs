@@ -137,11 +137,9 @@ pub async fn pull_blob_staged_reported<T: BlobTransport + ?Sized>(
         match stage_pass(blobs, (sources, offset), digest, &ranges, catalog, budget, &mut report).await {
             Ok(Some(staged)) => return Ok((staged, report)),
             Ok(None) => {}
-            Err(StagedPullError::RangeUnavailable(unavailable)) if catalog.is_none() => {
-                first_unavailable.get_or_insert(unavailable);
-            }
+            // A catalogued pull makes one attempt, so the loop ends here and reports this range.
             Err(StagedPullError::RangeUnavailable(unavailable)) => {
-                return Err((StagedPullError::RangeUnavailable(unavailable), report));
+                first_unavailable.get_or_insert(unavailable);
             }
             Err(error) => return Err((error, report)),
         }

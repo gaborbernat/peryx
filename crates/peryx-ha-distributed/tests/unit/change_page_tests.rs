@@ -123,6 +123,31 @@ async fn test_a_page_includes_a_record_that_exactly_fills_the_remaining_byte_bud
     assert_eq!((status, serials(&page)), (StatusCode::OK, vec![1, 2]));
 }
 
+/// Sized so the envelope plus the record lands exactly on the byte bound, leaving no room for the
+/// separator the record still needs. Nine empty records put it at serial 10, whose extra digit is what
+/// lets the base64 payload reach that exact total.
+#[tokio::test]
+async fn test_a_record_that_leaves_no_room_for_its_separator_is_named_instead_of_served() {
+    let event = vec![b'x'; 3_142_638];
+    let journal: Vec<&[u8]> = [&[][..]; 9].into_iter().chain([&event[..]]).collect();
+    let (_dir, meta) = journaled(&journal);
+    let encoded = serde_json::to_vec(&change(10, &event)).unwrap().len();
+    assert_eq!(
+        encoded, 4_190_208,
+        "the test's byte math assumes this exact encoded length"
+    );
+
+    let (status, body) = served(build_change_page(&meta, "primary-a", 9, 10, &ScanCancellation::new())).await;
+
+    assert_eq!(
+        (status, String::from_utf8(body).unwrap()),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("journal record 10 encodes to {encoded} bytes; a change page holds {MAX_CHANGE_PAGE_BYTES}")
+        )
+    );
+}
+
 #[tokio::test]
 async fn test_a_record_that_fills_a_page_alone_is_named_instead_of_served() {
     let event = vec![b'x'; usize::try_from(MAX_CHANGE_PAGE_BYTES).unwrap()];

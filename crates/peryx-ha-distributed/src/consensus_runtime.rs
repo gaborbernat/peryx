@@ -327,17 +327,6 @@ enum AuditRecovery {
     Complete,
 }
 
-async fn recover_local_transfer_audits(node: RaftNode, home: DatacenterId, store: &MetaStore) -> AuditRecovery {
-    let ownership: Arc<dyn OwnershipAuthority> = Arc::new(OwnershipGroup::new(node, home));
-    match crate::recover_transfer_audits(&ownership, store).await {
-        Ok(_) => AuditRecovery::Complete,
-        Err(error) => {
-            tracing::warn!(%error, "transfer audit recovery after leadership change failed");
-            AuditRecovery::Pending(tokio::time::Instant::now() + AUDIT_RECOVERY_RETRY_DELAY)
-        }
-    }
-}
-
 async fn recover_transfer_audits_on_leadership(
     local: VoterId,
     node: RaftNode,
@@ -345,30 +334,40 @@ async fn recover_transfer_audits_on_leadership(
     store: MetaStore,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<(), tokio::sync::watch::error::RecvError> {
+    let metrics = node.metrics();
+    let recover = move || {
+        let ownership: Arc<dyn OwnershipAuthority> = Arc::new(OwnershipGroup::new(node.clone(), home.clone()));
+        let store = store.clone();
+        async move { crate::recover_transfer_audits(&ownership, &store).await }
+    };
     tokio::select! {
         () = cancellation.cancelled() => Ok(()),
-        result = watch_transfer_audits_on_leadership(local, node, home, store) => result,
+        result = watch_transfer_audits_on_leadership(local, metrics, recover) => result,
     }
 }
 
-async fn watch_transfer_audits_on_leadership(
+async fn watch_transfer_audits_on_leadership<T, E: std::fmt::Display, F: Future<Output = Result<T, E>>>(
     local: VoterId,
-    node: RaftNode,
-    home: DatacenterId,
-    store: MetaStore,
+    mut metrics: tokio::sync::watch::Receiver<openraft::RaftMetrics<VoterId, PeryxNode>>,
+    mut recover: impl FnMut() -> F,
 ) -> Result<(), tokio::sync::watch::error::RecvError> {
-    let mut metrics = node.metrics();
     let mut recovery = AuditRecovery::Unattempted;
     loop {
-        let leads = metrics.borrow_and_update().current_leader == Some(local);
-        if !leads {
+        if metrics.borrow_and_update().current_leader != Some(local) {
             recovery = AuditRecovery::Unattempted;
         } else if matches!(recovery, AuditRecovery::Unattempted) {
-            recovery = recover_local_transfer_audits(node.clone(), home.clone(), &store).await;
+            recovery = match recover().await {
+                Ok(_) => AuditRecovery::Complete,
+                Err(error) => {
+                    tracing::warn!(%error, "transfer audit recovery after leadership change failed");
+                    AuditRecovery::Pending(tokio::time::Instant::now() + AUDIT_RECOVERY_RETRY_DELAY)
+                }
+            };
         }
+        // Losing leadership resets a pending recovery above, so a pending one always belongs to a leader.
         let retry = async move {
             match recovery {
-                AuditRecovery::Pending(retry_at) if leads => tokio::time::sleep_until(retry_at).await,
+                AuditRecovery::Pending(retry_at) => tokio::time::sleep_until(retry_at).await,
                 _ => std::future::pending().await,
             }
         };
@@ -1205,3 +1204,7 @@ pub fn voter_id(datacenter: &str) -> VoterId {
     }
     hash
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/consensus_runtime/audit_recovery_tests.rs"]
+mod audit_recovery_tests;

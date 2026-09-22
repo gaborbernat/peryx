@@ -329,7 +329,7 @@ impl RaftStateMachine<TypeConfig> for OwnershipStateMachine {
     }
 
     async fn begin_receiving_snapshot(&mut self) -> Result<Box<Cursor<Vec<u8>>>, StorageError<NodeId>> {
-        Ok(Box::new(Cursor::new(Vec::new())))
+        Ok(Box::new(Cursor::new(vec![])))
     }
 
     async fn install_snapshot(

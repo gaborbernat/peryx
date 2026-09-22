@@ -641,9 +641,13 @@ async fn test_topology_stream_coalesces_unchanged_state_into_heartbeats() {
     );
 }
 
+/// Off the roster, the local liveness is the only field that changes: no roster node mirrors it.
+#[rstest]
+#[case::roster_member(false, NodeRole::Writer)]
+#[case::off_roster(true, NodeRole::Replica)]
 #[tokio::test(start_paused = true)]
-async fn test_topology_stream_emits_a_new_event_when_state_changes() {
-    let (dir, state) = app(false, false, NodeRole::Writer).await;
+async fn test_topology_stream_emits_a_new_event_when_state_changes(#[case] read_only: bool, #[case] role: NodeRole) {
+    let (dir, state) = app(read_only, false, role).await;
     let mut reader = SseReader::new(stream(&state, Some(("Olivia", USER_PASSWORD))).await);
 
     let (first_id, unhealthy) = reader.data_event().await;
@@ -652,7 +656,9 @@ async fn test_topology_stream_emits_a_new_event_when_state_changes() {
 
     set_blob_health(dir.path(), true);
 
-    let (second_id, healthy) = reader.data_event().await;
+    // The next sample lands before the next heartbeat, so the change is the very next message.
+    let next = reader.message().await;
+    let (second_id, healthy) = parse_data_event(&next).expect("a changed snapshot is the next event");
     assert_eq!(second_id, 2, "each change increments the event id");
     assert_eq!(healthy["local"]["liveness"], "live");
 }

@@ -76,16 +76,9 @@ impl CircuitBreaker {
         let claim = match state.sources.get(source).cloned() {
             None | Some(State::Closed { .. }) => None,
             Some(State::Open { until }) if now < until => return None,
-            Some(State::HalfOpen { until, .. }) if now < until => return None,
-            Some(State::HalfOpen { until, .. }) if now < until + self.shared.config.cooldown => {
-                state.sources.insert(
-                    source.to_owned(),
-                    State::Open {
-                        until: until + self.shared.config.cooldown,
-                    },
-                );
-                return None;
-            }
+            // An expired probe keeps its half-open entry: every path that later reads it (admission, the
+            // probe's outcome, its drop) already treats it as open until the probe deadline plus cooldown.
+            Some(State::HalfOpen { until, .. }) if now < until + self.shared.config.cooldown => return None,
             Some(State::Open { .. } | State::HalfOpen { .. }) => {
                 let claim = Arc::new(());
                 state.sources.insert(

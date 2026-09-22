@@ -3,12 +3,13 @@ use std::collections::BTreeMap;
 use peryx_storage::meta::{DriverTxn, MetaError, MetaScanError, MetaStore, QuotaError, QuotaReservationRecord};
 use uuid::Uuid;
 
+use super::imports::validate_upload_projection;
 use super::journal::JournalEntry;
 use super::overrides::{FileOverride, OverrideMutation};
 use super::{
-    OVERRIDE_PREFIX, UPLOAD_PREFIX, announced_release_key, metadata_key, override_key, provenance_key,
-    provenance_prefix, provenance_value, put_project_row, put_upload_row, record_str, remove_upload_row,
-    scan_utf8_records, split_provenance_value, upload_key,
+    OVERRIDE_PREFIX, UPLOAD_PREFIX, UploadWriteError, admit_upload_row, announced_release_key, metadata_key,
+    override_key, provenance_key, provenance_prefix, provenance_value, put_project_row, put_upload_row, record_str,
+    remove_upload_row, scan_utf8_records, split_provenance_value, upload_key,
 };
 use crate::{distribution_python_tag, distribution_version_segment};
 
@@ -121,7 +122,7 @@ pub struct PublishedState<'a> {
 ///
 /// # Errors
 /// Returns the guard's error, or a store error mapped into it, if the transaction fails.
-pub fn publish_file_if<E: From<MetaError>>(
+pub fn publish_file_if<E: From<MetaError> + From<UploadWriteError>>(
     meta: &MetaStore,
     outbox: bool,
     file: &PublishedFile,
@@ -138,7 +139,7 @@ pub fn publish_file_if<E: From<MetaError>>(
     .map_err(map_publish_error)
 }
 
-pub fn publish_file_with_commit_if<E: From<MetaError>>(
+pub fn publish_file_with_commit_if<E: From<MetaError> + From<UploadWriteError>>(
     meta: &MetaStore,
     outbox: bool,
     file: &PublishedFile,
@@ -181,7 +182,7 @@ impl<E> From<QuotaError> for PublishError<E> {
     }
 }
 
-pub fn publish_file_in_txn<E: From<MetaError>>(
+pub fn publish_file_in_txn<E: From<MetaError> + From<UploadWriteError>>(
     txn: &mut DriverTxn,
     outbox: bool,
     file: &PublishedFile,
@@ -218,12 +219,12 @@ pub fn publish_file_in_txn<E: From<MetaError>>(
                 txn.put(&provenance, value.as_bytes())?;
                 txn.reference_blob(sibling.provenance_sha256, sibling.size);
             }
-            put_upload_row(txn, file.index, file.normalized, file.filename, file.record)?;
+            admit_upload_row(txn, file.index, file.normalized, file.filename, file.record)?;
             put_project_row(txn, file.index, file.normalized, file.display)?;
             let mut journal = Vec::new();
             if outbox {
                 let target = JournalTarget::of(file.index, file.normalized, file.submitted_at_unix);
-                journal.extend(announce_release(txn, &target, Some(file.version))?);
+                journal.extend(announce_release(txn, &target, file.version)?);
                 journal.push(journal_bytes(
                     "add-file",
                     file.normalized,
@@ -251,7 +252,41 @@ pub fn put_upload(
     filename: &str,
     record: &[u8],
 ) -> Result<(), MetaError> {
+    super::initialize_release_imports(meta, index, normalized)?;
     meta.commit_driver_txn(|txn| put_upload_row(txn, index, normalized, filename, record).map(|()| ((), Vec::new())))
+}
+
+/// Persist a verified legacy record's import classification only when the upload row remains
+/// byte-for-byte unchanged since its metadata source was read.
+///
+/// # Errors
+/// Returns a store error if the row cannot be read, decoded, or updated.
+pub fn classify_upload_if_unchanged(
+    meta: &MetaStore,
+    index: &str,
+    normalized: &str,
+    filename: &str,
+    expected: &[u8],
+    imports: crate::upload::ImportDeclarations,
+) -> Result<bool, MetaError> {
+    super::initialize_release_imports(meta, index, normalized)?;
+    meta.commit_driver_txn(|txn| {
+        let key = upload_key(index, normalized, filename);
+        let Some(current) = txn.get(&key)? else {
+            return Ok((false, Vec::new()));
+        };
+        if current != expected {
+            return Ok((false, Vec::new()));
+        }
+        let mut upload: crate::upload::Uploaded = serde_json::from_slice(&current)?;
+        if upload.imports.is_some() {
+            return Ok((false, Vec::new()));
+        }
+        upload.imports = Some(imports);
+        let updated = serde_json::to_vec(&upload)?;
+        put_upload_row(txn, index, normalized, filename, &updated)?;
+        Ok((true, vec![b"{}".to_vec()]))
+    })
 }
 
 /// Promote a release onto `index`, each target filename admitted only if `guard` accepts it.
@@ -270,12 +305,13 @@ pub fn put_upload(
 ///
 /// # Errors
 /// Returns the guard's error, or a store error mapped into it, if the transaction fails.
-pub fn promote_files_checked<E: From<MetaError>>(
+pub fn promote_files_checked<E: From<MetaError> + From<UploadWriteError>>(
     meta: &MetaStore,
     outbox: bool,
     release: &PromotedRelease<'_>,
     guard: impl Fn(&str, &str, Option<&[u8]>) -> Result<Guard, E>,
 ) -> Result<usize, E> {
+    super::initialize_release_imports(meta, release.index, release.normalized)?;
     let held: Vec<Uuid> = release.reservations.values().copied().collect();
     meta.commit_driver_txn_with_quotas::<_, PublishError<E>>(
         &held,
@@ -291,7 +327,8 @@ pub fn promote_files_checked<E: From<MetaError>>(
                     Guard::Commit => {
                         committed.extend(release.reservations.get(filename).copied());
                         txn.touch_policy_inputs(release.index);
-                        put_upload_row(txn, release.index, release.normalized, filename, record)?;
+                        admit_upload_row(txn, release.index, release.normalized, filename, record)
+                            .map_err(|error| PublishError::Body(error.into()))?;
                         if let Some(size) = release.blob_sizes.get(token) {
                             txn.reference_blob(token, *size);
                         }
@@ -354,7 +391,7 @@ fn copy_provenance_in_txn(
 /// # Errors
 /// Returns the closure's error, or a store error mapped into it, if the transaction fails.
 ///
-pub fn mutate_uploads<E: From<MetaError>>(
+pub fn mutate_uploads<E: From<MetaError> + From<UploadWriteError>>(
     meta: &MetaStore,
     outbox: bool,
     index: &str,
@@ -363,15 +400,17 @@ pub fn mutate_uploads<E: From<MetaError>>(
     submitted_at_unix: i64,
     mut mutate: impl FnMut(&str, &[u8]) -> Result<UploadMutation, E>,
 ) -> Result<usize, E> {
+    super::initialize_release_imports(meta, index, normalized)?;
     let prefix = format!("{UPLOAD_PREFIX}{index}/{normalized}/");
     meta.commit_driver_txn(|txn| {
         let mut changed = 0;
         let mut journal = Vec::new();
         for (key, record) in txn.prefix(&prefix)? {
             let filename = &key[prefix.len()..];
+            validate_upload_projection(&record)?;
             match mutate(filename, &record)? {
                 UploadMutation::Keep => continue,
-                UploadMutation::Replace(bytes) => put_upload_row(txn, index, normalized, filename, &bytes)?,
+                UploadMutation::Replace(bytes) => admit_upload_row(txn, index, normalized, filename, &bytes)?,
                 UploadMutation::Delete => remove_upload_row(txn, index, normalized, filename, &record)?,
             }
             txn.touch_policy_inputs(index);
@@ -402,25 +441,27 @@ pub struct UploadMutationPlan<'a> {
     pub override_mutation: OverrideMutation<'a>,
 }
 
-pub fn mutate_uploads_and_overrides<E: From<MetaError>>(
+pub fn mutate_uploads_and_overrides<E: From<MetaError> + From<UploadWriteError>>(
     meta: &MetaStore,
     plan: UploadMutationPlan<'_>,
     guard: impl Fn() -> Result<(), E>,
     mut mutate: impl FnMut(&str, &[u8]) -> Result<Option<Vec<u8>>, E>,
     webhook: impl FnOnce(usize) -> Option<peryx_storage::meta::WebhookEventIntent>,
 ) -> Result<usize, E> {
+    super::initialize_release_imports(meta, plan.index, plan.normalized)?;
     let prefix = format!("{UPLOAD_PREFIX}{}/{}/", plan.index, plan.normalized);
     meta.commit_driver_txn(|txn| {
         let mut changed = 0;
         let mut journal = Vec::new();
         for (key, record) in txn.prefix(&prefix)? {
             let filename = &key[prefix.len()..];
+            validate_upload_projection(&record)?;
             let Some(bytes) = mutate(filename, &record)? else {
                 continue;
             };
             guard()?;
             txn.touch_policy_inputs(plan.index);
-            put_upload_row(txn, plan.index, plan.normalized, filename, &bytes)?;
+            admit_upload_row(txn, plan.index, plan.normalized, filename, &bytes)?;
             changed += 1;
             journal.extend(journal_entries(plan.outbox, || {
                 journal_bytes(
@@ -518,6 +559,7 @@ pub fn delete_upload(
     filename: &str,
     submitted_at_unix: i64,
 ) -> Result<bool, MetaError> {
+    super::initialize_release_imports(meta, index, normalized)?;
     meta.commit_driver_txn(|txn| {
         let key = upload_key(index, normalized, filename);
         if let Some(record) = txn.get(&key)? {
@@ -721,15 +763,13 @@ fn promoted_file_journal(
     filename: &str,
     record: &[u8],
 ) -> Result<Vec<Vec<u8>>, MetaError> {
-    let version = journal_version(filename, record);
+    let version = journal_version(filename, record).expect("admitted upload record has a release version");
     let target = JournalTarget::of(release.index, release.normalized, release.submitted_at_unix);
-    let mut entries: Vec<Vec<u8>> = announce_release(txn, &target, version.as_deref())?
-        .into_iter()
-        .collect();
+    let mut entries: Vec<Vec<u8>> = announce_release(txn, &target, &version)?.into_iter().collect();
     entries.push(journal_bytes(
         "add-file",
         release.normalized,
-        version.as_deref(),
+        Some(&version),
         Some(filename),
         Some(distribution_python_tag(filename)),
         release.submitted_at_unix,
@@ -759,11 +799,8 @@ fn promoted_file_journal(
 fn announce_release(
     txn: &mut DriverTxn,
     target: &JournalTarget<'_>,
-    version: Option<&str>,
+    version: &str,
 ) -> Result<Option<Vec<u8>>, MetaError> {
-    let Some(version) = version else {
-        return Ok(None);
-    };
     let key = announced_release_key(target.index, target.normalized, version);
     if txn.get(&key)?.is_some() {
         return Ok(None);

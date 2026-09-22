@@ -1,4 +1,4 @@
-use std::ops::ControlFlow;
+use std::ops::{Bound, ControlFlow};
 
 use peryx_core::Clock;
 use peryx_ha::{ArtifactPlacement, ReclaimGuard};
@@ -791,9 +791,25 @@ impl DriverTxn<'_> {
     pub fn scan_prefix<E: From<MetaError>>(
         &self,
         prefix: &str,
+        visit: impl FnMut(&str, &[u8]) -> Result<ControlFlow<()>, E>,
+    ) -> Result<(), E> {
+        self.scan_prefix_after(prefix, None, visit)
+    }
+
+    fn scan_prefix_after<E: From<MetaError>>(
+        &self,
+        prefix: &str,
+        cursor: Option<&str>,
         mut visit: impl FnMut(&str, &[u8]) -> Result<ControlFlow<()>, E>,
     ) -> Result<(), E> {
-        for entry in self.table.range(prefix..).map_err(MetaError::from)? {
+        let start = cursor
+            .filter(|cursor| *cursor >= prefix)
+            .map_or_else(|| Bound::Included(prefix), Bound::Excluded);
+        for entry in self
+            .table
+            .range::<&str>((start, Bound::Unbounded))
+            .map_err(MetaError::from)?
+        {
             let (key, value) = entry.map_err(MetaError::from)?;
             if !key.value().starts_with(prefix) {
                 break;
@@ -819,6 +835,34 @@ impl DriverTxn<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Returns at most `limit` rows with `prefix` after `cursor`, in key order.
+    ///
+    /// A cursor is the final key from the preceding page. It keeps a driver-maintained index from
+    /// materializing a project's full upload history inside one write transaction.
+    ///
+    /// # Errors
+    /// Returns a store error if the range cannot be read.
+    pub fn prefix_after_limited(
+        &self,
+        prefix: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, Vec<u8>)>, MetaError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut entries = Vec::with_capacity(limit);
+        self.scan_prefix_after(prefix, cursor, |key, value| {
+            entries.push((key.to_owned(), value.to_vec()));
+            Ok::<_, MetaError>(if entries.len() == limit {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            })
+        })?;
+        Ok(entries)
     }
 
     /// # Errors

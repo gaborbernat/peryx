@@ -82,7 +82,7 @@ fn invalidate_project_route(state: &ServingState, route: &str, project: &str) {
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
     #[error(transparent)]
-    Meta(#[from] peryx_storage::meta::MetaError),
+    Meta(peryx_storage::meta::MetaError),
     #[error(transparent)]
     Blob(#[from] peryx_storage::blob::BlobError),
     #[error(transparent)]
@@ -113,6 +113,10 @@ pub enum CacheError {
     FileExists(String),
     #[error("file already exists with different attestations: {0}")]
     ProvenanceMismatch(String),
+    #[error("release import declarations are incomplete or inconsistent: {0}")]
+    ReleaseImports(String),
+    #[error("{0}")]
+    ConcurrentChange(String),
     #[error("file record lacks sha256: {0}")]
     MissingSha256(String),
     #[error("no uploaded files matched source {source_index:?}, project {project:?}, version {version:?}")]
@@ -140,6 +144,21 @@ pub enum CacheError {
     QuotaDenied(String),
 }
 
+impl From<peryx_storage::meta::MetaError> for CacheError {
+    fn from(err: peryx_storage::meta::MetaError) -> Self {
+        Self::Meta(err)
+    }
+}
+
+impl From<crate::store::UploadWriteError> for CacheError {
+    fn from(error: crate::store::UploadWriteError) -> Self {
+        match error {
+            crate::store::UploadWriteError::Meta(error) => Self::Meta(error),
+            crate::store::UploadWriteError::ReleaseImports(message) => Self::ReleaseImports(message),
+        }
+    }
+}
+
 impl From<crate::SimpleError> for CacheError {
     fn from(err: crate::SimpleError) -> Self {
         match err {
@@ -158,11 +177,14 @@ impl From<crate::SimpleError> for CacheError {
 impl From<upload::UploadStoreError> for CacheError {
     fn from(err: upload::UploadStoreError) -> Self {
         match err {
-            upload::UploadStoreError::Meta(err) => Self::Meta(err),
+            upload::UploadStoreError::Meta(err) => Self::from(err),
             upload::UploadStoreError::Blob(err) => Self::Blob(err),
             upload::UploadStoreError::Parse(err) => Self::Parse(err),
             upload::UploadStoreError::FileExists(filename) => Self::FileExists(filename),
             upload::UploadStoreError::ProvenanceMismatch(filename) => Self::ProvenanceMismatch(filename),
+            upload::UploadStoreError::ReleaseImports(message) => Self::ReleaseImports(message),
+            upload::UploadStoreError::ConcurrentChange(message) => Self::ConcurrentChange(message),
+            upload::UploadStoreError::MissingSha256(filename) => Self::MissingSha256(filename),
         }
     }
 }
@@ -203,6 +225,7 @@ impl CacheError {
             Self::ProvenanceMismatch(filename) => {
                 format!("file {filename:?} already exists with different attestations")
             }
+            Self::ReleaseImports(message) | Self::ConcurrentChange(message) => message.clone(),
             Self::MissingSha256(filename) => format!("uploaded file {filename:?} has no sha256 hash"),
             Self::NoPromotableFiles {
                 source_index,

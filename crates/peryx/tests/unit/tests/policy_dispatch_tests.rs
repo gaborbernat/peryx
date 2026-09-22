@@ -1,8 +1,13 @@
+#[cfg(feature = "composition-pypi")]
 use std::collections::BTreeMap;
 
+#[cfg(feature = "composition-pypi")]
 use peryx_ecosystem_pypi::store::PypiStore as _;
+#[cfg(feature = "composition-pypi")]
 use peryx_ecosystem_pypi::upload::Uploaded;
+#[cfg(feature = "composition-pypi")]
 use peryx_ecosystem_pypi::{CoreMetadata, File, Provenance, Yanked};
+#[cfg(feature = "composition-pypi")]
 use peryx_storage::meta::MetaStore;
 
 use crate::app::policy_with_plugins;
@@ -95,6 +100,7 @@ fn test_policy_dry_run_rejects_configuration_without_support() {
 /// scanning the wrong ecosystem's indexes here can only ever miss the upload, never coincidentally
 /// find it under another name.
 #[test]
+#[cfg(feature = "composition-pypi")]
 fn test_policy_dry_run_scopes_each_ecosystem_to_its_own_indexes() {
     let dir = tempfile::tempdir().unwrap();
     let plugins = crate::compiled_plugins();
@@ -125,6 +131,7 @@ fn test_policy_dry_run_scopes_each_ecosystem_to_its_own_indexes() {
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: Some(peryx_ecosystem_pypi::upload::ImportDeclarations::Before25),
         trashed: None,
     })
     .unwrap();

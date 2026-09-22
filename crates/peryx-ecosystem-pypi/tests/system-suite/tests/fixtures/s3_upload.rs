@@ -38,13 +38,13 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn upload_orphan(endpoint: String, data_dir: PathBuf) -> anyhow::Result<()> {
+    let status = build_router(&config(data_dir.clone(), endpoint.clone()))?
+        .oneshot(upload_request())
+        .await?
+        .status();
     ensure!(
-        build_router(&config(data_dir.clone(), endpoint.clone()))?
-            .oneshot(upload_request())
-            .await?
-            .status()
-            == StatusCode::INTERNAL_SERVER_ERROR,
-        "upload did not fail after the metadata write"
+        status == StatusCode::BAD_REQUEST,
+        "upload returned {status} instead of failing release admission"
     );
     ensure!(
         BlobStorage::s3(S3Config::new(settings(endpoint))?, data_dir.join("orphan-check"),)

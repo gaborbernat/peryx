@@ -78,6 +78,7 @@ fn seed_pypi_trash(state: &ServingState, filename: &str, deleted_at_unix: i64) {
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: Some(peryx_ecosystem_pypi::upload::ImportDeclarations::Before25),
         trashed: Some(TrashInfo {
             deleted_at_unix,
             actor: Some("cleanup-bot".to_owned()),

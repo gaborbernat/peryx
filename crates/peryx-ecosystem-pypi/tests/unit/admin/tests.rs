@@ -74,6 +74,7 @@ fn upload_record(filename: &str, digest: &str) -> Uploaded {
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     }
 }

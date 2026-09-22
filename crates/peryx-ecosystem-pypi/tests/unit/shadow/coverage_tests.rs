@@ -632,6 +632,7 @@ fn seed_file(state: &AppState, repository: &str, filename: &str, version: &str, 
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     };
     state

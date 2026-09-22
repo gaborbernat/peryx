@@ -72,6 +72,7 @@ pub(super) fn put_uploaded_package_with_metadata(
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     };
     state
@@ -101,6 +102,7 @@ pub(super) fn put_uploaded_file(state: &ServingState, normalized: &str, version:
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     };
     state

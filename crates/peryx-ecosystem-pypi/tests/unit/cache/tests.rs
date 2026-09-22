@@ -47,4 +47,58 @@ fn test_cache_error_maps_upload_store_errors() {
         &peryx_storage::blob::Digest::of(b"missing"),
     ));
     assert!(matches!(CacheError::from(err), CacheError::Blob(_)));
+
+    let err = upload::UploadStoreError::Parse(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
+    assert!(matches!(CacheError::from(err), CacheError::Parse(_)));
+    assert!(matches!(
+        CacheError::from(upload::UploadStoreError::FileExists("file".to_owned())),
+        CacheError::FileExists(filename) if filename == "file"
+    ));
+    assert!(matches!(
+        CacheError::from(upload::UploadStoreError::ProvenanceMismatch("file".to_owned())),
+        CacheError::ProvenanceMismatch(filename) if filename == "file"
+    ));
+    assert!(matches!(
+        CacheError::from(upload::UploadStoreError::ReleaseImports("imports".to_owned())),
+        CacheError::ReleaseImports(message) if message == "imports"
+    ));
+    assert!(matches!(
+        CacheError::from(upload::UploadStoreError::ConcurrentChange("retry".to_owned())),
+        CacheError::ConcurrentChange(message) if message == "retry"
+    ));
+    assert!(matches!(
+        CacheError::from(upload::UploadStoreError::MissingSha256("file".to_owned())),
+        CacheError::MissingSha256(filename) if filename == "file"
+    ));
+}
+
+#[test]
+fn test_cache_error_maps_typed_upload_writes() {
+    assert!(matches!(
+        CacheError::from(crate::store::UploadWriteError::Meta(
+            peryx_storage::meta::MetaError::DriverPrecondition("store".to_owned())
+        )),
+        CacheError::Meta(_)
+    ));
+    assert!(matches!(
+        CacheError::from(crate::store::UploadWriteError::ReleaseImports("imports".to_owned())),
+        CacheError::ReleaseImports(message) if message == "imports"
+    ));
+    assert_eq!(
+        CacheError::ReleaseImports("imports".to_owned()).user_message(),
+        "imports"
+    );
+    assert_eq!(CacheError::ConcurrentChange("retry".to_owned()).user_message(), "retry");
+}
+
+#[tokio::test]
+async fn test_archive_metadata_task_reports_a_panicking_worker() {
+    let task = tokio::task::spawn_blocking(|| -> Result<Option<Vec<u8>>, upload::LegacyMetadataError> {
+        panic!("worker failed")
+    });
+
+    assert!(matches!(
+        mutate::join_archive_metadata(task).await,
+        Err(CacheError::Meta(_))
+    ));
 }

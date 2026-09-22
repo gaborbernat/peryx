@@ -33,6 +33,7 @@ fn seed(meta: &MetaStore, index: &str, project: &str, filename: &str, trashed: O
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed,
     };
     meta.put_upload(index, project, filename, &serde_json::to_vec(&uploaded).unwrap())

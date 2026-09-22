@@ -24,8 +24,10 @@ use peryx_driver::serving::{IndexSummary, RecentWrite};
 use peryx_storage::meta::{DriverReadTxn, DriverTxn, MetaError, MetaStore};
 use serde::{Deserialize, Serialize};
 
+use super::imports::{check_release_imports, ensure_release_imports, update_release_imports};
 use super::{
-    COUNT_PREFIX, PROJECTS_PREFIX, RECENT_PREFIX, UPLOAD_PREFIX, live_uploads_key, project_key, record_str, upload_key,
+    COUNT_PREFIX, PROJECTS_PREFIX, RECENT_PREFIX, UPLOAD_PREFIX, UploadWriteError, live_uploads_key, project_key,
+    record_str, upload_key,
 };
 
 /// Whether a derived row travels with the row it describes or stays on the node that wrote it.
@@ -95,16 +97,44 @@ pub fn put_upload_row(
     filename: &str,
     record: &[u8],
 ) -> Result<(), MetaError> {
-    let scope = RowScope::Replicated;
     let key = upload_key(index, normalized, filename);
     let previous = txn.get(&key)?;
-    retire_order_row(txn, scope, index, normalized, filename, previous.as_deref())?;
-    let live = i64::from(serves_files(record)) - previous.as_deref().map_or(0, |bytes| i64::from(serves_files(bytes)));
+    ensure_release_imports(txn, index, normalized)?;
+    write_upload_row(txn, index, normalized, filename, record, &key, previous.as_deref())
+}
+
+pub fn admit_upload_row(
+    txn: &mut DriverTxn,
+    index: &str,
+    normalized: &str,
+    filename: &str,
+    record: &[u8],
+) -> Result<(), UploadWriteError> {
+    let key = upload_key(index, normalized, filename);
+    let previous = txn.get(&key)?;
+    ensure_release_imports(txn, index, normalized)?;
+    check_release_imports(txn, index, normalized, previous.as_deref(), record)?;
+    write_upload_row(txn, index, normalized, filename, record, &key, previous.as_deref()).map_err(Into::into)
+}
+
+fn write_upload_row(
+    txn: &mut DriverTxn,
+    index: &str,
+    normalized: &str,
+    filename: &str,
+    record: &[u8],
+    key: &str,
+    previous: Option<&[u8]>,
+) -> Result<(), MetaError> {
+    let scope = RowScope::Replicated;
+    retire_order_row(txn, scope, index, normalized, filename, previous)?;
+    let live = i64::from(serves_files(record)) - previous.map_or(0, |bytes| i64::from(serves_files(bytes)));
     let rows = i64::from(previous.is_none());
-    if write_row(txn, scope, &key, record)? {
+    if write_row(txn, scope, key, record)? {
         adjust_counts(txn, scope, index, 0, 1)?;
     }
     adjust_live_uploads(txn, scope, index, normalized, live, rows)?;
+    update_release_imports(txn, index, normalized, previous, record)?;
     if let Some(recent) = recent_upload(normalized, filename, record) {
         let value = serde_json::to_vec(&RecentRecord::from(&recent))?;
         write_row(txn, scope, &order_key(index, &recent, filename), &value)?;
@@ -122,10 +152,12 @@ pub fn remove_upload_row(
     record: &[u8],
 ) -> Result<(), MetaError> {
     let scope = RowScope::Replicated;
+    ensure_release_imports(txn, index, normalized)?;
     retire_order_row(txn, scope, index, normalized, filename, Some(record))?;
     remove_row(txn, scope, &upload_key(index, normalized, filename))?;
     adjust_counts(txn, scope, index, 0, -1)?;
-    adjust_live_uploads(txn, scope, index, normalized, -i64::from(serves_files(record)), -1)
+    adjust_live_uploads(txn, scope, index, normalized, -i64::from(serves_files(record)), -1)?;
+    update_release_imports(txn, index, normalized, Some(record), b"")
 }
 
 /// Whether an upload record still serves its file, which is what the root listing asks about. A

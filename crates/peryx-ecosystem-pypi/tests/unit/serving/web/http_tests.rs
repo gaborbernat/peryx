@@ -352,6 +352,7 @@ fn display_named_app() -> (tempfile::TempDir, Arc<AppState>, String, String) {
             provenance: Provenance::Absent,
             authoritative_version: None,
         },
+        imports: None,
         trashed: None,
     };
     state

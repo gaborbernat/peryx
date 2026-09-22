@@ -266,7 +266,7 @@ async fn test_a_local_winner_publishes_once_across_an_identical_retry() {
                 .unwrap()
                 .len(),
         ),
-        (vec!["peryxpkg".to_owned()], vec!["peryxpkg".to_owned()], vec![1], 1,)
+        (vec!["peryxpkg".to_owned()], vec!["peryxpkg".to_owned()], vec![1, 1], 1,)
     );
 }
 
@@ -333,8 +333,8 @@ async fn test_a_publish_under_the_current_authority_epoch_stores() {
     assert_eq!((status, body.as_str()), (StatusCode::OK, "upload accepted"));
     assert_eq!(
         group.admitted(),
-        [7],
-        "the store re-admits the epoch it snapshotted before the record write",
+        [7, 7],
+        "the migration page and record write each re-admit the snapshotted epoch",
     );
     assert_eq!(
         h.state

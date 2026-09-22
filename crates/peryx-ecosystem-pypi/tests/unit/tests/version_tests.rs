@@ -1,4 +1,4 @@
-use crate::{parse_version, sorted_desc};
+use crate::{canonical_release, parse_version, sorted_desc};
 
 #[test]
 fn test_parse_version_valid_and_invalid() {
@@ -11,6 +11,14 @@ fn test_parse_version_valid_and_invalid() {
 fn test_parse_version_orders_pre_and_post() {
     assert!(parse_version("1.0a1") < parse_version("1.0"));
     assert!(parse_version("1.0") < parse_version("1.0.post1"));
+}
+
+#[test]
+fn test_canonical_release_strips_only_trailing_release_zeroes() {
+    assert_eq!(canonical_release("1.0.0"), canonical_release("1.0"));
+    assert_eq!(canonical_release("1.0.post0"), Some("1.post0".to_owned()));
+    assert_eq!(canonical_release("1.0.dev0"), Some("1.dev0".to_owned()));
+    assert_eq!(canonical_release("not-a-version"), None);
 }
 
 #[test]

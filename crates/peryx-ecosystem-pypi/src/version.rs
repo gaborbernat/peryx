@@ -25,6 +25,22 @@ pub fn versions_match(left: &str, right: &str) -> bool {
     left == right || matches!((parse_version(left), parse_version(right)), (Some(left), Some(right)) if left == right)
 }
 
+/// Return the canonical key for one parsed PEP 440 release.
+///
+/// PEP 440 compares release segments after padding trailing zeroes, while `Version` preserves their
+/// spelling. The release index needs one stable key for those equal spellings without changing any
+/// other version component.
+#[must_use]
+pub fn canonical_release(version: &str) -> Option<String> {
+    let parsed = parse_version(version)?;
+    let release = parsed.release().to_vec();
+    let end = release
+        .iter()
+        .rposition(|segment| *segment != 0)
+        .map_or(1, |position| position + 1);
+    Some(parsed.with_release(&release[..end]).to_string())
+}
+
 /// A version identity that matches [`versions_match`]: two versions are the same release when their
 /// strings are equal or they parse to the same PEP 440 version. Grouping by this key collapses a
 /// per-version rescan of the files into one pass.

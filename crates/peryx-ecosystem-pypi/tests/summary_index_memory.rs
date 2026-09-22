@@ -52,7 +52,7 @@ fn store(uploads: u32) -> (tempfile::TempDir, MetaStore) {
         .map(|rank| {
             let filename = format!("flask-{rank:06}.whl");
             let record = format!(
-                r#"{{"version":"{rank}.0","file":{{"filename":"{filename}","upload-time":"{}","size":1024}}}}"#,
+                r#"{{"version":"{rank}.0","file":{{"filename":"{filename}","upload-time":"{}","size":1024}},"imports":"Before25"}}"#,
                 upload_time(rank)
             );
             (filename, format!("{rank:064}"), record.into_bytes())

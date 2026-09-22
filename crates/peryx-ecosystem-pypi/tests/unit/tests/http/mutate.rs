@@ -7,13 +7,14 @@ fn store_ambiguous_sdist(state: &AppState, index: &str) -> (&'static str, Digest
     let payload = b"historical sdist";
     let digest = Digest::of(payload);
     state.serving.blobs.blocking().put_bytes_as(payload, &digest).unwrap();
-    let uploaded = upload_record(
+    let mut uploaded = upload_record(
         filename,
         "1.0-1",
         local_artifact_url(index, digest.as_str(), filename),
         BTreeMap::from([("sha256".to_owned(), digest.as_str().to_owned())]),
         Some(payload.len() as u64),
     );
+    uploaded.imports = Some(crate::upload::ImportDeclarations::Before25);
     state
         .serving
         .meta
@@ -827,6 +828,59 @@ async fn test_soft_delete_then_restore_serves_the_file_again() {
     assert_eq!(back, StatusCode::OK);
     assert!(body.contains("peryxpkg-1.0"));
 }
+
+#[tokio::test]
+async fn test_restore_rolls_back_every_file_on_a_release_import_conflict() {
+    let h = authority_harness().await;
+    for (build, metadata, imports) in [
+        (
+            1,
+            b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Name: peryxpkg\n"
+                .as_slice(),
+            exclusive_imports("peryxpkg"),
+        ),
+        (
+            2,
+            b"Metadata-Version: 2.5\nName: peryxpkg\nVersion: 1.0\nRequires-Python: >=3.8\nImport-Namespace: peryxpkg\n"
+                .as_slice(),
+            shared_imports("peryxpkg"),
+        ),
+    ] {
+        let filename = format!("peryxpkg-1.0-{build}-py3-none-any.whl");
+        store_historical_wheel(
+            &h.state,
+            "hosted",
+            &filename,
+            &fixture_wheel_with_build_and_metadata(&build.to_string(), metadata),
+            imports,
+            Some(TrashInfo {
+                deleted_at_unix: 1000,
+                actor: None,
+                reason: None,
+            }),
+        );
+    }
+    let serial = h.state.serving.meta.current_serial().unwrap();
+
+    let (status, body) = request_response(&h.state, "PUT", "/hosted/peryxpkg/1.0/restore", Some(&upload_auth())).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("exclusive and shared"), "{body}");
+    assert_eq!(h.state.serving.meta.current_serial().unwrap(), serial);
+    let records = h.state.serving.meta.list_upload_entries("hosted", "peryxpkg").unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|(_, bytes)| serde_json::from_slice::<crate::upload::Uploaded>(bytes)
+                .unwrap()
+                .trashed
+                .is_some())
+            .count(),
+        records.len()
+    );
+}
+
 #[tokio::test]
 async fn test_soft_delete_twice_is_idempotent() {
     let h = authority_harness().await;
@@ -921,6 +975,67 @@ async fn test_yank_under_a_superseded_epoch_conflicts_and_writes_nothing() {
     let (_, _, page) = get(&h.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
     assert!(!page.contains("\"yanked\":true"));
     assert_no_topology(&body);
+}
+
+#[tokio::test]
+async fn test_yank_resumes_migration_after_authority_changes_between_pages() {
+    let h = authority_harness().await;
+    for position in 0..129 {
+        let filename = format!("peryxpkg-1.0-{position:03}-py3-none-any.whl");
+        let uploaded = upload_record(
+            &filename,
+            "1.0",
+            format!("https://files.invalid/{filename}"),
+            BTreeMap::new(),
+            None,
+        );
+        h.state
+            .serving
+            .meta
+            .put_driver_value(
+                &format!("pypi\0u\0hosted/peryxpkg/{filename}"),
+                crate::to_json(&uploaded).as_bytes(),
+            )
+            .unwrap();
+    }
+    h.state
+        .serving
+        .meta
+        .put_project("hosted", "peryxpkg", "PeryxPkg")
+        .unwrap();
+    let begin_calls = Arc::new(AtomicUsize::new(0));
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 5,
+            begin_calls: Arc::clone(&begin_calls),
+            write_limit: 1,
+            ..AuthorityDouble::default()
+        },
+    );
+
+    assert_eq!(
+        request(&h.state, "PUT", "/root/pypi/peryxpkg/1.0/yank", Some(&upload_auth())).await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(begin_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(h.state.serving.meta.current_serial().unwrap(), 1);
+
+    install_authority(
+        &h.state,
+        AuthorityDouble {
+            committed: 5,
+            current: 5,
+            ..AuthorityDouble::default()
+        },
+    );
+    assert_eq!(
+        request(&h.state, "PUT", "/root/pypi/peryxpkg/1.0/yank", Some(&upload_auth())).await,
+        StatusCode::OK
+    );
+    let (_, _, page) = get(&h.state, "/root/pypi/simple/peryxpkg/", Some("application/json")).await;
+    assert_eq!(page.matches("\"yanked\":true").count(), 129);
 }
 
 #[tokio::test]

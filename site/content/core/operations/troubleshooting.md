@@ -72,9 +72,10 @@ rules.
 `peryx cache fsck` rehashes content and checks each content-addressed path. It prints mismatches and unreadable content
 to standard output, but exits with status `0`; inspect its output.
 
-It also checks the records peryx derives from other records, such as a `PyPI` index's project and upload counts and its
-recent-upload order. Those are the rows a status page reads instead of walking a history, so a disagreement shows up as
-a wrong number rather than an error. `peryx cache repair` rebuilds the ones `fsck` names, previewing by default.
+It also checks `PyPI` metadata and the rows derived from it. `peryx cache repair` previews a disposition for each
+damaged class. It can rebuild rows from stored values and remove refetchable cache damage. An operator must restore a
+`report-only` row or delete it through the normal workflow. Restore missing blobs from a peer or backup, or retire their
+owners through the normal delete workflow.
 
 `peryx backup verify` and `peryx mirror verify` apply equivalent checks to a backup or mirror selection. They exit with
 a nonzero status when they find a problem.

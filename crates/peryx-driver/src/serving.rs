@@ -288,6 +288,12 @@ pub trait FsckDriver: Send + Sync {
     ) -> Result<u64, String>;
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MetadataRepairCounts {
+    pub actionable: u64,
+    pub report_only: u64,
+}
+
 /// Rebuilding what [`FsckDriver`] only reports.
 ///
 /// It is a capability of its own because only records derived from other records can be rebuilt: a
@@ -303,7 +309,7 @@ pub trait MetadataRepairDriver: Send + Sync {
         meta: &peryx_storage::meta::MetaStore,
         indexes: &[peryx_index::Index],
         out: &mut dyn Write,
-    ) -> Result<u64, String>;
+    ) -> Result<MetadataRepairCounts, String>;
 
     /// Rebuild those same records, returning how many were repaired and writing one line per record to
     /// `out`.
@@ -315,7 +321,7 @@ pub trait MetadataRepairDriver: Send + Sync {
         meta: &peryx_storage::meta::MetaStore,
         indexes: &[peryx_index::Index],
         out: &mut dyn Write,
-    ) -> Result<u64, String>;
+    ) -> Result<MetadataRepairCounts, String>;
 }
 
 /// One retention plan's inputs, including the stop signal its scan checks between pages.

@@ -579,7 +579,9 @@ fn serving_previews_then_rebuilds_a_summary_row_no_write_path_maintained() {
         .preview_metadata_repair(&state.serving.meta, &indexes, &mut again)
         .unwrap();
 
-    assert_eq!((planned, rebuilt, remaining), (1, 1, 0));
+    assert_eq!(planned.actionable, 1);
+    assert_eq!(rebuilt, planned);
+    assert_eq!(remaining, peryx_driver::serving::MetadataRepairCounts::default());
     assert_eq!(previewed, repaired);
     assert!(again.is_empty());
 }

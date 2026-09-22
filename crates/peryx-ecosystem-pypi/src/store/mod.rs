@@ -8,6 +8,7 @@ mod journal;
 mod overrides;
 mod projects;
 mod record;
+mod repair;
 mod summary;
 mod uploads;
 
@@ -58,6 +59,7 @@ pub use record::{
     AttestationAvailability, CachedIndex, CachedIndexPage, CachedIndexSummary, FreshnessOverlay, ProjectGeneration,
     ProjectMetaState, ProjectStatusRecord, UpstreamAttestation,
 };
+pub use repair::{MetadataRepairFinding, apply_metadata_repair, plan_metadata_repair, repair_counts};
 pub use summary::{
     AuditedIndex, SummaryDefect, SummaryRowCounts, audit_summary_rows, repair_summary_rows, summarize_indexes,
     summary_row_counts,

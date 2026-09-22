@@ -416,7 +416,7 @@ impl MetadataRepairDriver for PypiServing {
         meta: &peryx_storage::meta::MetaStore,
         indexes: &[Index],
         out: &mut dyn std::io::Write,
-    ) -> Result<u64, String> {
+    ) -> Result<peryx_driver::serving::MetadataRepairCounts, String> {
         crate::admin::preview_metadata_repair(meta, indexes, out)
     }
 
@@ -425,7 +425,7 @@ impl MetadataRepairDriver for PypiServing {
         meta: &peryx_storage::meta::MetaStore,
         indexes: &[Index],
         out: &mut dyn std::io::Write,
-    ) -> Result<u64, String> {
+    ) -> Result<peryx_driver::serving::MetadataRepairCounts, String> {
         crate::admin::repair_metadata(meta, indexes, out)
     }
 }

@@ -204,14 +204,18 @@ total. Unlike the other commands it walks past a record it cannot decode, so one
 store. It names that row and then prints a `scan incomplete` row for the namespace, because the checks that follow ran
 over fewer records than the namespace holds.
 
-`cache repair` rebuilds the records `cache fsck` reports that peryx can derive again from other records. A record whose
-value nothing else determines has no correct value to restore, so only derived records are in scope: today that is the
-`PyPI` per-index summary, whose counts and recent-upload order are maintained as rows beside the projects and uploads
-they describe. Each rebuilt row is recomputed from those rows, so a repaired store passes a re-run of `cache fsck`.
+`cache repair` assigns every `PyPI` metadata problem a disposition. It rebuilds summary rows from one complete stored
+snapshot and removes corrupt cached pages, project markers, and ownerless locators. Uploads, overrides, provenance,
+source and publication rows, and other values with no unique determiner are `report-only`: restore them from a backup or
+retire them through the normal delete workflow instead of inventing a replacement.
 
-`cache repair` previews by default, printing the same rows `cache fsck` prints for those records and a `planned` total,
-and changes nothing. Add `--yes` to rebuild them and get a `repaired` total instead. The preview reads without writing,
-which is what keeps it available while a server holds the store.
+Missing blob bytes are outside metadata repair. Restore them from a peer or backup, or retire their owner through the
+normal delete workflow. Running `cache repair` never fabricates bytes or deletes a valid owner record without a report.
+
+`cache repair` previews and changes nothing unless you add `--yes`. Each row includes `rebuild`, `remove`, or
+`report-only`, followed by `planned` and `report-only` totals. Apply mode performs the rebuilds and removals and prints
+a `repaired` total. Summary repair commits first; rerun the command after a later metadata phase fails to finish the
+work.
 
 `cache purge resource` removes the selected resource's cached metadata and unshared implementation records. It does not
 delete blob files; run `cache purge orphaned-blobs` after a resource purge to reclaim unreferenced blobs.

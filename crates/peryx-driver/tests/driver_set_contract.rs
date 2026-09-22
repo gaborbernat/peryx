@@ -78,9 +78,12 @@ impl MetadataRepairDriver for Driver {
         _: &peryx_storage::meta::MetaStore,
         _: &[peryx_index::Index],
         out: &mut dyn std::io::Write,
-    ) -> Result<u64, String> {
+    ) -> Result<peryx_driver::serving::MetadataRepairCounts, String> {
         writeln!(out, "metadata\t{}\twould rebuild", self.ecosystem.as_str()).map_err(|error| error.to_string())?;
-        Ok(1)
+        Ok(peryx_driver::serving::MetadataRepairCounts {
+            actionable: 1,
+            report_only: 0,
+        })
     }
 
     fn repair_metadata(
@@ -88,9 +91,12 @@ impl MetadataRepairDriver for Driver {
         _: &peryx_storage::meta::MetaStore,
         _: &[peryx_index::Index],
         out: &mut dyn std::io::Write,
-    ) -> Result<u64, String> {
+    ) -> Result<peryx_driver::serving::MetadataRepairCounts, String> {
         writeln!(out, "metadata\t{}\trebuilt", self.ecosystem.as_str()).map_err(|error| error.to_string())?;
-        Ok(1)
+        Ok(peryx_driver::serving::MetadataRepairCounts {
+            actionable: 1,
+            report_only: 0,
+        })
     }
 }
 
@@ -534,7 +540,8 @@ fn cache_repair_reports_ecosystems_in_name_order(#[case] apply: bool, #[case] ve
              metadata\tcore\t{verb}\n\
              metadata\tmike\t{verb}\n\
              metadata\tzulu\t{verb}\n\
-             {label}\t4\n"
+             {label}\t4\n\
+             report-only\t0\n"
         )
     );
 }

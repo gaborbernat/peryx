@@ -8,7 +8,7 @@ use peryx_storage::meta::{MetaError, MetaScanError, MetaStore};
 use rstest::rstest;
 
 use super::*;
-use crate::store::CachedIndex;
+use crate::store::{CachedIndex, ProjectGeneration, ProjectMetaState};
 use crate::upload::Uploaded;
 use crate::{CoreMetadata, File, Provenance, Yanked};
 
@@ -77,6 +77,16 @@ fn upload_record(filename: &str, digest: &str) -> Uploaded {
         imports: None,
         trashed: None,
     }
+}
+
+fn upload_value(digest: Option<&str>) -> Vec<u8> {
+    let mut upload = upload_record("flask.whl", DIGEST_A);
+    if let Some(digest) = digest {
+        upload.file.hashes.insert("sha256".to_owned(), digest.to_owned());
+    } else {
+        upload.file.hashes.clear();
+    }
+    serde_json::to_vec(&upload).unwrap()
 }
 
 #[test]
@@ -483,9 +493,25 @@ fn audited_fixture() -> Vec<Index> {
 }
 
 fn cached_index() -> Index {
+    cached_index_with_name("cached")
+}
+
+fn cached_index_with_name(name: &str) -> Index {
     Index {
-        name: "cached".to_owned(),
-        route: "cached".to_owned(),
+        name: name.to_owned(),
+        route: name.to_owned(),
+        kind: IndexKind::Cached {
+            client: peryx_upstream::UpstreamClient::new("https://example.invalid/simple/").unwrap(),
+            offline: true,
+        },
+        ..pypi_index()
+    }
+}
+
+fn cached_pypi_index() -> Index {
+    Index {
+        name: "pypi".to_owned(),
+        route: "pypi".to_owned(),
         kind: IndexKind::Cached {
             client: peryx_upstream::UpstreamClient::new("https://example.invalid/simple/").unwrap(),
             offline: true,
@@ -1006,17 +1032,444 @@ fn test_repair_reports_and_drops_a_source_row_that_names_no_publication() {
 
     let problems = repair_metadata(&meta, &[cached_index()], &mut out).unwrap();
 
-    assert!(problems >= 1);
-    assert!(
-        String::from_utf8(out)
-            .unwrap()
-            .contains("dropped 1 download source(s) that named no publication")
-    );
+    assert!(problems.actionable >= 1);
+    assert!(String::from_utf8(out).unwrap().contains("\tfile-url\t"));
     assert_eq!(
         crate::store::drop_legacy_file_sources(&meta).unwrap(),
         0,
         "the sweep is idempotent"
     );
+}
+
+#[rstest]
+#[case::index("pypi\0i\0cached/flask", b"invalid page", "index", true)]
+#[case::unowned_index("pypi\0i\0unknown/flask", b"invalid page", "index", false)]
+#[case::file_url("pypi\0f\0legacy", b"url\ncached", "file-url", true)]
+#[case::unowned_file_url("pypi\0f\0unknown/flask/invalid", b"invalid", "file-url", false)]
+#[case::pep658("pypi\0d\0invalid", b"invalid", "pep658", true)]
+#[case::publication("pypi\0n\0cached/flask/invalid/flask.whl", b"invalid", "publication", false)]
+#[case::project("pypi\0p\0cached/flask", b"", "project", true)]
+#[case::unowned_project("pypi\0p\0invalid", b"", "project", false)]
+#[case::upload("pypi\0u\0hosted/flask/flask.whl", b"invalid", "upload", false)]
+#[case::override_row("pypi\0o\0hosted/flask/flask.whl", b"invalid", "override", false)]
+#[case::provenance("pypi\0a\0hosted/flask/invalid/flask.whl", b"invalid\n16", "provenance", false)]
+fn test_repair_assigns_each_corrupt_namespace_a_disposition(
+    #[case] key: &str,
+    #[case] value: &[u8],
+    #[case] namespace: &str,
+    #[case] actionable: bool,
+) {
+    let (_dir, meta) = store();
+    meta.put_driver_value(key, value).unwrap();
+    let indexes = [cached_index(), hosted_index()];
+    let mut preview = Vec::new();
+
+    let planned = preview_metadata_repair(&meta, &indexes, &mut preview).unwrap();
+
+    assert!(planned.actionable + planned.report_only > 0);
+    let preview = String::from_utf8(preview).unwrap();
+    let disposition = if actionable { "remove" } else { "report-only" };
+    assert!(
+        preview
+            .lines()
+            .any(|line| { line.contains(&format!("\t{namespace}\t")) && line.contains(&format!("\t{disposition}\t")) })
+    );
+
+    repair_metadata(&meta, &indexes, &mut Vec::new()).unwrap();
+
+    assert_eq!(meta.get_driver_value(key).unwrap().is_none(), actionable);
+}
+
+#[test]
+fn test_repair_reports_an_invalid_metadata_digest_for_a_valid_artifact() {
+    let (_dir, meta) = store();
+    let key = format!("pypi\0d\0{DIGEST_A}");
+    meta.put_driver_value(&key, b"invalid").unwrap();
+    let mut preview = Vec::new();
+
+    let planned = preview_metadata_repair(&meta, &[cached_index()], &mut preview).unwrap();
+
+    assert_eq!(planned.report_only, 1);
+    assert!(String::from_utf8(preview).unwrap().contains("\tpep658\t"));
+    repair_metadata(&meta, &[cached_index()], &mut Vec::new()).unwrap();
+    assert_eq!(meta.get_driver_value(&key).unwrap(), Some(b"invalid".to_vec()));
+}
+
+#[test]
+fn test_repair_accepts_an_empty_publication() {
+    let (_dir, meta) = store();
+    let key = format!("pypi\0n\0cached/flask/{DIGEST_A}/flask.whl");
+    meta.put_driver_value(&key, b"").unwrap();
+
+    let planned = preview_metadata_repair(&meta, &[cached_index()], &mut Vec::new()).unwrap();
+
+    assert_eq!(planned, peryx_driver::serving::MetadataRepairCounts::default());
+}
+
+#[rstest]
+#[case::invalid_key("invalid", upload_value(Some(DIGEST_A)))]
+#[case::missing_digest("hosted/flask/flask.whl", upload_value(None))]
+#[case::invalid_digest("hosted/flask/flask.whl", upload_value(Some("invalid")))]
+fn test_repair_reports_each_invalid_upload_field(#[case] upload_key: &str, #[case] value: Vec<u8>) {
+    let (_dir, meta) = store();
+    let key = format!("pypi\0u\0{upload_key}");
+    meta.put_driver_value(&key, &value).unwrap();
+    let mut preview = Vec::new();
+
+    let planned = preview_metadata_repair(&meta, &[hosted_index()], &mut preview).unwrap();
+
+    assert_eq!(planned.report_only, 1);
+    assert!(String::from_utf8(preview).unwrap().contains("\tupload\t"));
+    repair_metadata(&meta, &[hosted_index()], &mut Vec::new()).unwrap();
+    assert_eq!(meta.get_driver_value(&key).unwrap(), Some(value));
+}
+
+#[rstest]
+#[case::file_url(
+    format!("pypi\0f\0cached/flask/{DIGEST_A}"),
+    false
+)]
+#[case::publication(
+    format!("pypi\0n\0cached/flask/{DIGEST_A}/flask.whl"),
+    false
+)]
+#[case::project("pypi\0p\0cached/flask".to_owned(), true)]
+#[case::upload("pypi\0u\0hosted/flask/flask.whl".to_owned(), false)]
+#[case::override_row("pypi\0o\0hosted/flask/flask.whl".to_owned(), false)]
+#[case::provenance("pypi\0a\0hosted/flask/invalid/flask.whl".to_owned(), false)]
+fn test_repair_handles_non_utf8_values(#[case] key: String, #[case] actionable: bool) {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&key, &[0xff, 0xfe]).unwrap();
+    let indexes = [cached_index(), hosted_index()];
+    let mut preview = Vec::new();
+
+    preview_metadata_repair(&meta, &indexes, &mut preview).unwrap();
+
+    let disposition = if actionable { "\tremove\t" } else { "\treport-only\t" };
+    assert!(String::from_utf8(preview).unwrap().contains(disposition));
+    repair_metadata(&meta, &indexes, &mut Vec::new()).unwrap();
+    assert_eq!(meta.get_driver_value(&key).unwrap().is_none(), actionable);
+}
+
+#[rstest]
+#[case::preview(false)]
+#[case::apply(true)]
+fn test_repair_output_failure_never_reports_an_unapplied_change(#[case] apply: bool) {
+    let (_dir, meta) = store();
+    let key = "pypi\0d\0invalid";
+    meta.put_driver_value(key, b"invalid").unwrap();
+    let mut closed: &mut [u8] = &mut [];
+
+    let result = if apply {
+        repair_metadata(&meta, &[cached_index()], &mut closed)
+    } else {
+        preview_metadata_repair(&meta, &[cached_index()], &mut closed)
+    };
+
+    assert!(result.is_err());
+    assert_eq!(meta.get_driver_value(key).unwrap().is_none(), apply);
+}
+
+#[test]
+fn test_repair_preserves_an_override_from_a_newer_schema() {
+    let (_dir, meta) = store();
+    let key = "pypi\0o\0hosted/flask/flask.whl";
+    let mut value = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+        &crate::store::FileOverride::default().encode(),
+    )
+    .unwrap();
+    value.insert("future-field".to_owned(), true.into());
+    let value = serde_json::to_vec(&value).unwrap();
+    meta.put_driver_value(key, &value).unwrap();
+    let mut preview = Vec::new();
+
+    preview_metadata_repair(&meta, &[hosted_index()], &mut preview).unwrap();
+
+    assert!(String::from_utf8(preview).unwrap().contains("\toverride\t"));
+    repair_metadata(&meta, &[hosted_index()], &mut Vec::new()).unwrap();
+    assert_eq!(meta.get_driver_value(key).unwrap(), Some(value));
+}
+
+#[test]
+fn test_repair_preview_does_not_mix_a_concurrent_write_into_its_report() {
+    struct ConcurrentWriter {
+        output: Vec<u8>,
+        start: Option<std::sync::mpsc::Sender<()>>,
+        done: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for ConcurrentWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if let Some(start) = self.start.take() {
+                start.send(()).unwrap();
+                self.done.recv().unwrap();
+            }
+            self.output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let (_dir, meta) = store();
+    meta.put_driver_value("pypi\0f\0legacy", b"url\ncached").unwrap();
+    let (start_tx, start_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_meta = meta.clone();
+    let writer = std::thread::spawn(move || {
+        start_rx.recv().unwrap();
+        writer_meta.put_driver_value("pypi\0d\0invalid", b"invalid").unwrap();
+        done_tx.send(()).unwrap();
+    });
+    let mut output = ConcurrentWriter {
+        output: Vec::new(),
+        start: Some(start_tx),
+        done: done_rx,
+    };
+
+    preview_metadata_repair(&meta, &[cached_index()], &mut output).unwrap();
+    std::io::Write::flush(&mut output).unwrap();
+    writer.join().unwrap();
+
+    let output = String::from_utf8(output.output).unwrap();
+    assert!(output.contains("\tfile-url\t"));
+    assert!(!output.contains("\tpep658\t"));
+    let mut next = Vec::new();
+    preview_metadata_repair(&meta, &[cached_index()], &mut next).unwrap();
+    assert!(String::from_utf8(next).unwrap().contains("\tpep658\t"));
+}
+
+#[test]
+fn test_repair_preserves_active_rows_that_are_not_safely_derivable() {
+    let (_dir, meta) = store();
+    seed_valid_page(&meta);
+    let digest = Digest::of(b"wheel");
+    let file_key = format!("pypi\0f\0pypi/flask/{}", digest.as_str());
+    let publication_key = format!("pypi\0n\0pypi/flask/{}/flask-1.0.whl", digest.as_str());
+    meta.put_driver_value(&file_key, b"invalid").unwrap();
+    meta.put_driver_value(&publication_key, b"invalid").unwrap();
+    meta.put_driver_value("pypi\0p\0pypi/flask", b"").unwrap();
+    let mut preview = Vec::new();
+
+    let planned = preview_metadata_repair(&meta, &[cached_pypi_index()], &mut preview).unwrap();
+
+    assert_eq!(planned.report_only, 2);
+    assert!(planned.actionable >= 1);
+    assert_eq!(String::from_utf8(preview).unwrap().matches("\tremove\t").count(), 1);
+
+    repair_metadata(&meta, &[cached_pypi_index()], &mut Vec::new()).unwrap();
+
+    assert_eq!(meta.get_driver_value(&file_key).unwrap(), Some(b"invalid".to_vec()));
+    assert_eq!(
+        meta.get_driver_value(&publication_key).unwrap(),
+        Some(b"invalid".to_vec())
+    );
+    assert!(meta.get_project("pypi", "flask").unwrap().is_none());
+}
+
+#[test]
+fn test_repair_removes_only_an_invalid_cached_page() {
+    let (dir, meta) = store();
+    seed_valid_page(&meta);
+    let digest = Digest::of(b"wheel");
+    let generation = ProjectGeneration {
+        generation: 1,
+        source: "https://example.invalid/simple/".to_owned(),
+        url: "https://example.invalid/simple/flask/".to_owned(),
+        format: "json".to_owned(),
+        etag: None,
+        last_modified: None,
+        last_serial: None,
+        fetched_at_unix: 0,
+        bytes: 1,
+        files: 1,
+        versions: vec!["1.0".to_owned()],
+        project_status: None,
+        project_status_reason: None,
+    };
+    meta.put_driver_value(
+        "pypi\0m\0pypi/flask",
+        &serde_json::to_vec(&ProjectMetaState {
+            active: Some(generation),
+            staging: None,
+            retired: None,
+            next_generation: 1,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let generation_key = "pypi\0r\0pypi/flask/00000000000000000001/flask-1.0.whl";
+    let generation_value = crate::to_json(&upload_record("flask-1.0.whl", digest.as_str()).file);
+    meta.put_driver_value(generation_key, generation_value.as_bytes())
+        .unwrap();
+    let file_key = format!("pypi\0f\0pypi/flask/{}", digest.as_str());
+    let publication_key = format!("pypi\0n\0pypi/flask/{}/flask-1.0.whl", digest.as_str());
+    let file_value = meta.get_driver_value(&file_key).unwrap().unwrap();
+    let publication_value = meta.get_driver_value(&publication_key).unwrap().unwrap();
+    let project_value = meta.get_driver_value("pypi\0p\0pypi/flask").unwrap().unwrap();
+    meta.put_driver_value("pypi\0i\0pypi/flask", b"invalid").unwrap();
+
+    repair_metadata(&meta, &[cached_pypi_index()], &mut Vec::new()).unwrap();
+
+    assert!(meta.get_driver_value("pypi\0i\0pypi/flask").unwrap().is_none());
+    assert_eq!(
+        meta.get_driver_value(generation_key).unwrap(),
+        Some(generation_value.into_bytes())
+    );
+    assert_eq!(meta.get_driver_value(&file_key).unwrap(), Some(file_value));
+    assert_eq!(
+        meta.get_driver_value(&publication_key).unwrap(),
+        Some(publication_value)
+    );
+    assert_eq!(
+        meta.get_driver_value("pypi\0p\0pypi/flask").unwrap(),
+        Some(project_value)
+    );
+    assert!(meta.get_driver_value("pypi\0x\0pypi/flask").unwrap().is_none());
+    let blobs: BlobStorage = BlobStore::new(dir.path().join("blobs")).into();
+    let mut audit = Vec::new();
+    assert_eq!(
+        fsck_metadata(&meta, &blobs, &[cached_pypi_index()], &mut audit).unwrap(),
+        0
+    );
+    assert!(audit.is_empty());
+}
+
+#[rstest]
+#[case::project("pypi\0p\0foo/bar/demo", b"")]
+#[case::publication("pypi\0n\0foo/bar/demo/invalid/demo.whl", b"invalid")]
+fn test_repair_uses_the_longest_index_name_for_ownership(#[case] key: &str, #[case] value: &[u8]) {
+    let (_dir, meta) = store();
+    meta.put_driver_value(key, value).unwrap();
+    let indexes = [
+        cached_index_with_name("foo"),
+        Index {
+            name: "foo/bar".to_owned(),
+            route: "foo/bar".to_owned(),
+            ..hosted_index()
+        },
+    ];
+
+    let mut preview = Vec::new();
+    preview_metadata_repair(&meta, &indexes, &mut preview).unwrap();
+
+    assert!(String::from_utf8(preview).unwrap().contains("\treport-only\t"));
+    repair_metadata(&meta, &indexes, &mut Vec::new()).unwrap();
+    assert_eq!(meta.get_driver_value(key).unwrap(), Some(value.to_vec()));
+}
+
+#[test]
+fn test_repair_accepts_a_file_source_owned_by_a_slash_bearing_index() {
+    let (dir, meta) = store();
+    let key = format!("pypi\0f\0foo/bar/demo/{DIGEST_A}");
+    let value = b"https://files.example/demo.whl\nfoo/bar";
+    meta.put_driver_value(&key, value).unwrap();
+    let index = cached_index_with_name("foo/bar");
+    let blobs: BlobStorage = BlobStore::new(dir.path().join("blobs")).into();
+    let mut audit = Vec::new();
+
+    assert_eq!(
+        fsck_metadata(&meta, &blobs, std::slice::from_ref(&index), &mut audit).unwrap(),
+        0
+    );
+    assert!(audit.is_empty());
+    let planned = preview_metadata_repair(&meta, std::slice::from_ref(&index), &mut Vec::new()).unwrap();
+    assert_eq!(planned, peryx_driver::serving::MetadataRepairCounts::default());
+    repair_metadata(&meta, &[index], &mut Vec::new()).unwrap();
+    assert_eq!(meta.get_driver_value(&key).unwrap(), Some(value.to_vec()));
+}
+
+#[test]
+fn test_repair_leaves_a_valid_upload_with_a_missing_blob_for_operator_recovery() {
+    let (dir, meta) = store();
+    let blobs: BlobStorage = BlobStore::new(dir.path().join("blobs")).into();
+    meta.put_upload(
+        "hosted",
+        "flask",
+        "flask-1.0.whl",
+        crate::to_json(&upload_record("flask-1.0.whl", DIGEST_A)).as_bytes(),
+    )
+    .unwrap();
+    let mut fsck = Vec::new();
+    let mut preview = Vec::new();
+
+    assert_eq!(fsck_metadata(&meta, &blobs, &[hosted_index()], &mut fsck).unwrap(), 1);
+    let planned = preview_metadata_repair(&meta, &[hosted_index()], &mut preview).unwrap();
+
+    assert_eq!(planned.report_only, 0);
+    assert!(!String::from_utf8(preview).unwrap().contains("\tupload\t"));
+    assert!(meta.get_upload("hosted", "flask", "flask-1.0.whl").unwrap().is_some());
+}
+
+#[test]
+fn test_repair_can_resume_after_the_metadata_phase_fails() {
+    let observed_boundary = (0..32).any(|fail_after| {
+        let (_dir, meta) = store();
+        meta.put_driver_value("pypi\0p\0cached/flask", b"Flask").unwrap();
+        meta.put_driver_value("pypi\0f\0legacy", b"url\ncached").unwrap();
+        meta.fail_driver_prefix_scan_after(fail_after);
+        let mut output = Vec::new();
+
+        let result = repair_metadata(&meta, &[cached_index()], &mut output);
+        meta.fail_driver_prefix_scan_after(usize::MAX);
+        if result.is_err()
+            && crate::store::audit_summary_rows(
+                &meta,
+                &[crate::store::AuditedIndex {
+                    name: "cached",
+                    local: true,
+                }],
+            )
+            .unwrap()
+            .is_empty()
+            && meta.get_driver_value("pypi\0f\0legacy").unwrap().is_some()
+        {
+            assert!(output.is_empty());
+            repair_metadata(&meta, &[cached_index()], &mut output).unwrap();
+            assert!(meta.get_driver_value("pypi\0f\0legacy").unwrap().is_none());
+            true
+        } else {
+            false
+        }
+    });
+
+    assert!(observed_boundary);
+}
+
+#[test]
+fn test_repair_metadata_transaction_is_atomic_across_backend_failures() {
+    let mut failed = 0_u32;
+    for fail_after in 0..96 {
+        let (pages, fault) = peryx_test_support::fault::backend();
+        let meta = MetaStore::open_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        meta.put_driver_value("pypi\0f\0legacy", b"url\ncached").unwrap();
+        meta.put_driver_value("pypi\0d\0invalid", b"invalid").unwrap();
+        drop(meta);
+        let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        fault.arm(fail_after);
+        let repaired = repair_metadata(&meta, &[cached_index()], &mut Vec::new());
+        fault.disable();
+        drop(meta);
+
+        let meta = MetaStore::reopen_backend(peryx_test_support::fault::faulted(&pages, &fault)).unwrap();
+        let remaining = ["pypi\0f\0legacy", "pypi\0d\0invalid"]
+            .into_iter()
+            .filter(|key| meta.get_driver_value(key).unwrap().is_some())
+            .count();
+        if repaired.is_ok() {
+            assert_eq!(remaining, 0);
+        } else {
+            assert!(
+                matches!(remaining, 0 | 2),
+                "failure after {fail_after} operations committed half the repair"
+            );
+            failed += 1;
+        }
+    }
+
+    assert!(failed > 0, "no backend failure reached the repair");
 }
 
 /// The check sums problems across nine scans, so a failure in any of them must not come back as a

@@ -158,6 +158,7 @@ fn artifact_sources_use_stable_wire_names() {
         (UiArtifactSource::Hosted, "hosted"),
         (UiArtifactSource::Proxy, "proxy"),
         (UiArtifactSource::Generated, "generated"),
+        (UiArtifactSource::Unknown, "unknown"),
     ] {
         assert_eq!(source.as_str(), expected);
         assert_eq!(serde_json::to_value(source).unwrap(), expected);

@@ -1,7 +1,7 @@
 use peryx_ha::{
     ArtifactPlacement, ArtifactSource, BackendId, BackendLocation, BlobPlacementDecisionError, BlobPlacementKey,
     BlobPlacementOutcome, BlobPlacementRouting, BlobPlacementStatus, BlobPlacementTransition, CompareWrite,
-    DataCenterId, PlacementEvent, decide_blob_placement,
+    DataCenterId, decide_blob_placement,
 };
 use peryx_identity::ArtifactDigest;
 use peryx_storage::meta::{MetaError, MetaStore};
@@ -131,25 +131,24 @@ pub fn record_artifact_placement(
     Ok(placement)
 }
 
-/// Move an existing row along `event`, returning the row it settled at.
-///
-/// Returns `Ok(None)` for a digest with no row. The event names a transition, not a source, so there is
-/// nothing to create a row from, and inventing one would guess the dimension
-/// [`ArtifactPlacement`](peryx_ha::ArtifactPlacement) documents as intrinsic. A caller that knows the
-/// source records it instead, the way the blob plane does when it repairs a digest it has just confirmed.
-///
 /// # Errors
 /// Returns a store error when the placement cannot be read or written.
-pub fn apply_placement_event(
+pub fn mark_artifact_local(
     meta: &MetaStore,
     digest: &str,
-    event: PlacementEvent,
-) -> Result<Option<ArtifactPlacement>, MetaError> {
+    source: ArtifactSource,
+) -> Result<ArtifactPlacement, MetaError> {
+    meta.mark_artifact_local(digest, source)
+}
+
+/// # Errors
+/// Returns a store error when the placement cannot be read or written.
+pub fn mark_artifact_missing(meta: &MetaStore, digest: &str) -> Result<Option<ArtifactPlacement>, MetaError> {
     loop {
         let Some(current) = meta.get_artifact_placement(digest)? else {
             return Ok(None);
         };
-        let replacement = current.after(event);
+        let replacement = ArtifactPlacement::record(current.source, false);
         if replacement == current || meta.compare_and_put_artifact_placement(digest, &current, &replacement)? {
             return Ok(Some(replacement));
         }

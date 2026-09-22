@@ -5,6 +5,7 @@ use peryx_ha::{ArtifactPlacement, ReclaimGuard};
 use redb::{ReadableTable as _, TableHandle as _};
 
 use super::error::{MetaError, MetaScanError};
+use super::placement::advance_artifact_placement_revision;
 use super::policy_decision::advance_repository_generations;
 use super::{
     BLOB_RECLAIM_GUARD, DRIVER_KV, DriverBatch, DriverBlobReference, DriverMutation, JOURNAL, JOURNAL_BLOBS,
@@ -394,6 +395,11 @@ impl MetaStore {
         finalize: impl FnOnce(&redb::WriteTransaction, &T) -> Result<(), E>,
         body: impl FnOnce(&mut DriverTxn) -> Result<(T, PendingJournal), E>,
     ) -> Result<super::DriverCommit<T>, E> {
+        let reclaim_ownership = match self.reclaim_ownership.try_lock() {
+            Ok(ownership) => Some(ownership),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
         let mut txn = self.db.begin_write().map_err(MetaError::from)?;
         set_durability(&mut txn, durable);
         check_replica_serial(&txn, expected_serial)?;
@@ -423,8 +429,9 @@ impl MetaStore {
             advance_reference_revision(&txn).map_err(E::from)?;
         }
         Self::enqueue_webhook_events(&txn, &webhooks).map_err(E::from)?;
+        check_blob_reclaim_guard(&txn, expected_serial, &blobs, &self.clock, reclaim_ownership.is_none())
+            .map_err(E::from)?;
         Self::write_artifact_placements(&txn, &placements).map_err(E::from)?;
-        check_blob_reclaim_guard(&txn, expected_serial, &blobs, &self.clock).map_err(E::from)?;
         let journal_commit = commit_journal(&txn, &journal)?;
         advance_repository_generations(&txn, &policy_inputs).map_err(E::from)?;
         if let Some((repository, catalog)) = catalog_generation {
@@ -432,6 +439,7 @@ impl MetaStore {
         }
         finalize(&txn, &value)?;
         txn.commit().map_err(MetaError::from)?;
+        drop(reclaim_ownership);
         Ok(super::DriverCommit {
             value,
             journal: journal_commit,
@@ -476,9 +484,9 @@ fn finish_journal(
     }
 }
 
-/// Rejects a reference only while a collector still holds the blob's lease. A lapsed guard is the
-/// residue of a purge that died between arming and disarming, so it is dropped here rather than left
-/// to reject every later publication of that digest.
+/// Rejects a reference while a collector owns the purge or holds the blob's lease. An unowned,
+/// lapsed guard is the residue of a purge that died between arming and disarming, so it is dropped
+/// here rather than left to reject every later publication of that digest.
 ///
 /// The declared blob set is the check's input rather than the journal's, because a transaction can
 /// reference a blob without appending a replication entry and would otherwise commit straight through
@@ -491,6 +499,7 @@ fn check_blob_reclaim_guard(
     expected_serial: Option<u64>,
     blobs: &std::collections::BTreeSet<DriverBlobReference>,
     clock: &Clock,
+    collector_active: bool,
 ) -> Result<(), MetaError> {
     if expected_serial.is_some() || blobs.is_empty() {
         return Ok(());
@@ -499,20 +508,27 @@ fn check_blob_reclaim_guard(
         return Ok(());
     }
     let now = clock();
-    let mut guards = txn.open_table(BLOB_RECLAIM_GUARD)?;
-    for blob in blobs {
-        let held = guards.get(blob.sha256.as_str())?.map(|value| ReclaimGuard {
-            expires_at_unix: value.value(),
-        });
-        let Some(guard) = held else {
-            continue;
-        };
-        if !guard.is_expired_at(now) {
-            return Err(MetaError::BlobReclaiming {
-                digest: blob.sha256.clone(),
+    let mut disarmed = Vec::new();
+    {
+        let mut guards = txn.open_table(BLOB_RECLAIM_GUARD)?;
+        for blob in blobs {
+            let held = guards.get(blob.sha256.as_str())?.map(|value| ReclaimGuard {
+                expires_at_unix: value.value(),
             });
+            let Some(guard) = held else {
+                continue;
+            };
+            if collector_active || !guard.is_expired_at(now) {
+                return Err(MetaError::BlobReclaiming {
+                    digest: blob.sha256.clone(),
+                });
+            }
+            guards.remove(blob.sha256.as_str())?;
+            disarmed.push(blob.sha256.as_str());
         }
-        guards.remove(blob.sha256.as_str())?;
+    }
+    for digest in disarmed {
+        advance_artifact_placement_revision(txn, digest)?;
     }
     Ok(())
 }

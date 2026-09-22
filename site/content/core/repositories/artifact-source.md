@@ -21,6 +21,7 @@ administrator revoked the digest. A read applies those dimensions after source a
 - `proxy`: peryx cached the artifact from an upstream index. A local miss triggers an upstream fetch.
 - `generated`: this instance produced the artifact, such as a rendered index page or a derived metadata sibling. A local
   miss triggers regeneration.
+- `unknown`: repair found bytes without their source record. No upstream is assumed.
 
 **Byte availability** records whether this instance can serve the bytes now. The events below keep this projection in
 step with the content store.
@@ -86,13 +87,20 @@ upload, refuses on an absent record rather than reading it as either outcome.
 ## Repair
 
 The availability projection can drift from the content store when an operator removes a blob out of band or a fill
-crashes between writing bytes and recording them. A repair pass reads a bounded batch of placements in digest order,
-checks each digest's byte presence, and rewrites mismatched rows. Its return cursor resumes the next batch, which keeps
-the fixed-size work off the request path.
+crashes between writing bytes and recording them. Each repair run processes one bounded content page and one placement
+page. Content found without a row becomes `unknown` and `local`; missing local bytes retain their source and become
+`remote_only` for `proxy` or `unavailable` otherwise. Independent durable cursors resume each direction on the next run.
 
-Repair changes only the availability projection. It does not read or write source, admission, visibility, trash, or
-revocation, so a stale-projection repair cannot alter an access decision. The batch cap prevents a repair pass from
-holding a read span over the whole table.
+Repair does not change admission, visibility, trash, or revocation. It preserves a known source and assigns `unknown`
+only when stored bytes have no row. Each page commits its row changes and cursor together, so readers may observe the
+content page before the placement page. A failed page keeps its cursor for a later run.
+
+The batch cap bounds returned digests, presence checks, buffered rows, and metadata changes. Filesystem enumeration may
+still read more directory entries while finding that bounded set. Repair cannot fence an administrator deleting files or
+an uncoordinated writer changing a shared S3 bucket, so those changes can create fresh drift for a later pass.
+
+Older peryx versions cannot decode `unknown`. Before downgrading a node that has run placement repair, take a metadata
+backup compatible with the target version.
 
 ## Storage guarantees
 
@@ -100,8 +108,8 @@ holding a read span over the whole table.
   both without a per-artifact call into the content store.
 - **Verified-only local.** A placement reaches `local` only after its bytes are written and verified against their
   digest. The content store is content-addressed, so anything present is by construction correct.
-- **Source is intrinsic.** Caching, evicting, or repairing an artifact does not rewrite its source. Only a different
-  artifact taking the digest's place does.
+- **Known source is intrinsic.** Caching, evicting, or repairing an artifact does not rewrite a known source. A later
+  source-aware write may refine `unknown`, after which the first known source is preserved.
 - **Availability is a projection.** A repair pass can reconstruct this derived state from the content store without
   upstream coordination.
 
@@ -130,5 +138,6 @@ prose:
 }
 ```
 
-`source` is one of `hosted`, `proxy`, `generated`. `availability` is one of `local`, `remote_only`, `unavailable`. Any
-`source` pairs with any `availability` its transitions allow.
+`source` is one of `hosted`, `proxy`, `generated`, `unknown`. `availability` is one of `local`, `remote_only`,
+`unavailable`. Any source pairs with any availability its transitions allow. A recovered `unknown` row can be refined by
+a later source-aware write; after that, later writes preserve the known source.

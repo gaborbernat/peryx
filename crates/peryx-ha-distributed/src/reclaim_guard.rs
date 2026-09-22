@@ -38,8 +38,26 @@ pub fn purge_orphaned_blobs(
     blobs: &BlobStorage,
     confirmed: bool,
     now: i64,
-    mut scan_references: impl FnMut() -> Result<BTreeSet<String>, String>,
+    scan_references: impl FnMut() -> Result<BTreeSet<String>, String>,
 ) -> Result<OrphanPurgeReport, OrphanPurgeError> {
+    purge_orphaned_blobs_with_delete(meta, blobs, confirmed, now, scan_references, |digest| {
+        blobs
+            .blocking()
+            .delete(digest)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn purge_orphaned_blobs_with_delete(
+    meta: &MetaStore,
+    blobs: &BlobStorage,
+    confirmed: bool,
+    now: i64,
+    mut scan_references: impl FnMut() -> Result<BTreeSet<String>, String>,
+    mut delete: impl FnMut(&Digest) -> Result<(), String>,
+) -> Result<OrphanPurgeReport, OrphanPurgeError> {
+    let _ownership = confirmed.then(|| meta.reclaim_ownership());
     let live_digests = scan_references().map_err(OrphanPurgeError::References)?;
     let candidates = orphan_candidates(blobs, &live_digests)?;
     if !confirmed {
@@ -65,7 +83,9 @@ pub fn purge_orphaned_blobs(
             .filter(|candidate| !live_digests.contains(candidate.digest.as_str()))
             .map(|candidate| candidate.digest.as_str())
             .collect::<Vec<_>>();
-        let ReclaimGuardArm::Armed(armed) = meta.compare_and_arm_reclaim_guards(&digests, revision, now, guard)? else {
+        let ReclaimGuardArm::Armed(armed) =
+            meta.compare_and_arm_reclaim_guards_and_remove_placements(&digests, revision, now, guard)?
+        else {
             continue;
         };
         break armed.into_iter().collect::<BTreeSet<_>>();
@@ -75,15 +95,10 @@ pub fn purge_orphaned_blobs(
         .filter(|candidate| armed.contains(candidate.digest.as_str()))
         .collect::<Vec<_>>();
     for candidate in &selected {
-        // The placement goes before the bytes. An interruption between the two then leaves a digest
-        // whose row claims nothing while the bytes survive, which understates what this node holds; the
-        // other order leaves a row promising bytes that are gone, and a later reference to the same
-        // digest would read that promise and offer content no read can serve.
-        meta.delete_artifact_placement(candidate.digest.as_str())?;
-        if let Err(error) = blobs.blocking().delete(&candidate.digest) {
+        if let Err(reason) = delete(&candidate.digest) {
             return Err(OrphanPurgeError::Blob {
                 operation: "delete orphaned blob",
-                reason: error.to_string(),
+                reason,
             });
         }
         meta.compare_and_disarm_reclaim_guard(candidate.digest.as_str(), guard)?;
@@ -144,4 +159,74 @@ struct Candidate {
     digest: Digest,
     bytes: u64,
     path: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    use peryx_storage::repair_artifact_placements;
+
+    use super::*;
+
+    #[test]
+    fn active_purge_keeps_an_expired_guard_through_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let ticks = Arc::new(AtomicI64::new(10));
+        let clock = Arc::clone(&ticks);
+        let meta = MetaStore::open(directory.path().join("peryx.redb"))
+            .unwrap()
+            .with_clock(Arc::new(move || clock.load(Ordering::Relaxed)));
+        let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+        let orphan = blobs.blocking().put_bytes(b"orphan").unwrap();
+        let paused = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let purge_meta = &meta;
+            let purge_blobs = &blobs;
+            let pause_delete = Arc::clone(&paused);
+            let resume_delete = Arc::clone(&resume);
+            let purge = scope.spawn(move || {
+                purge_orphaned_blobs_with_delete(
+                    purge_meta,
+                    purge_blobs,
+                    true,
+                    10,
+                    || Ok(BTreeSet::new()),
+                    |digest| {
+                        pause_delete.wait();
+                        resume_delete.wait();
+                        purge_blobs.blocking().delete(digest).unwrap();
+                        Ok(())
+                    },
+                )
+            });
+            paused.wait();
+
+            ticks.store(10 + RECLAIM_GUARD_LEASE_SECS, Ordering::Relaxed);
+            let error = meta
+                .commit_driver_txn(|txn| {
+                    txn.reference_blob(orphan.as_str(), 6);
+                    Ok::<_, MetaError>(((), vec![b"{}".to_vec()]))
+                })
+                .unwrap_err();
+            let repair = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(repair_artifact_placements(&meta, &blobs, 1))
+                .unwrap();
+
+            assert!(matches!(error, MetaError::BlobReclaiming { digest } if digest == orphan.as_str()));
+            assert_eq!(repair.content.skipped, 1);
+            assert_eq!(meta.get_artifact_placement(orphan.as_str()).unwrap(), None);
+            resume.wait();
+            assert_eq!(purge.join().unwrap().unwrap().blobs.len(), 1);
+        });
+
+        assert!(blobs.blocking().head(&orphan).unwrap().is_none());
+        assert_eq!(meta.reclaim_guard(orphan.as_str()).unwrap(), None);
+        assert_eq!(meta.get_artifact_placement(orphan.as_str()).unwrap(), None);
+    }
 }

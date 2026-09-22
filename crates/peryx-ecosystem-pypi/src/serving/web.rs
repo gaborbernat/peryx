@@ -860,22 +860,27 @@ fn cached_availability(placement: Option<ArtifactPlacement>) -> ByteAvailability
 /// arrived. The upload path records no row for a still-present file today, so the hosted branch runs on
 /// the upload record alone for most files; [#2141](https://github.com/tox-dev/peryx/issues/2141) is
 /// where that gap closes, and closing it changes nothing here.
-pub fn resolve_file_placement(hosted: bool, placement: Option<ArtifactPlacement>) -> ArtifactPlacement {
+pub const fn resolve_file_placement(hosted: bool, placement: Option<ArtifactPlacement>) -> ArtifactPlacement {
     if hosted {
-        // A row left by a same-digest mirror describes that mirror, not this upload, so only a
-        // hosted-source row demotes it.
+        // A proxy row can describe another publication; an unknown row only records lost bytes.
         return match placement {
-            Some(placement) if matches!(placement.source, ArtifactSource::Hosted) => placement,
+            Some(placement) if matches!(placement.source, ArtifactSource::Hosted | ArtifactSource::Unknown) => {
+                ArtifactPlacement {
+                    source: ArtifactSource::Hosted,
+                    availability: placement.availability,
+                }
+            }
             _ => ArtifactPlacement {
                 source: ArtifactSource::Hosted,
                 availability: ByteAvailability::Local,
             },
         };
     }
-    placement.unwrap_or(ArtifactPlacement {
-        source: ArtifactSource::Proxy,
-        availability: ByteAvailability::RemoteOnly,
-    })
+    match placement {
+        Some(placement) if !matches!(placement.source, ArtifactSource::Unknown) => placement,
+        Some(placement) => ArtifactPlacement::record(ArtifactSource::Proxy, placement.availability.is_local()),
+        None => ArtifactPlacement::record(ArtifactSource::Proxy, false),
+    }
 }
 
 const fn ui_availability(availability: ByteAvailability) -> UiByteAvailability {

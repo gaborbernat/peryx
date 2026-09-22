@@ -135,6 +135,7 @@ pub enum UiArtifactSource {
     Hosted,
     Proxy,
     Generated,
+    Unknown,
 }
 
 impl UiArtifactSource {
@@ -144,6 +145,7 @@ impl UiArtifactSource {
             Self::Hosted => "hosted",
             Self::Proxy => "proxy",
             Self::Generated => "generated",
+            Self::Unknown => "unknown",
         }
     }
 }

@@ -3,15 +3,14 @@ use std::str::FromStr as _;
 use peryx_ha::{
     ArtifactSource, BackendId, BackendLocation, BlobPlacementFailure, BlobPlacementKey, BlobPlacementOutcome,
     BlobPlacementState, BlobPlacementTransition, DataCenterId, HomePlacementRecorder as _, MAX_PLACEMENTS_PER_DIGEST,
-    PlacementEvent,
 };
 use peryx_identity::ArtifactDigest;
 use peryx_storage::meta::MetaStore;
 
 use crate::placement_policy::DistributedHomePlacementRecorder;
 use crate::{
-    BlobPlacementError, apply_blob_placement, apply_placement_event, record_artifact_placement, record_local_placement,
-    route_blob_placements,
+    BlobPlacementError, apply_blob_placement, mark_artifact_local, mark_artifact_missing, record_artifact_placement,
+    record_local_placement, route_blob_placements,
 };
 
 fn digest(suffix: u8) -> ArtifactDigest {
@@ -394,17 +393,80 @@ fn test_apply_placement_returns_the_unchanged_decision() {
 }
 
 #[test]
-fn test_placement_event_handles_missing_and_unchanged_records() {
+fn test_artifact_placement_marks_missing_and_preserves_a_known_source() {
     let (_directory, store) = store();
-    assert_eq!(
-        apply_placement_event(&store, "missing", PlacementEvent::WriteFailed).unwrap(),
-        None
-    );
-    let original = record_artifact_placement(&store, "present", ArtifactSource::Hosted, true).unwrap();
+    assert_eq!(mark_artifact_missing(&store, "missing").unwrap(), None);
+    record_artifact_placement(&store, "present", ArtifactSource::Hosted, true).unwrap();
 
     assert_eq!(
-        apply_placement_event(&store, "present", PlacementEvent::WriteFailed).unwrap(),
-        Some(original)
+        mark_artifact_missing(&store, "present").unwrap(),
+        Some(peryx_ha::ArtifactPlacement::record(ArtifactSource::Hosted, false))
+    );
+    assert_eq!(
+        mark_artifact_local(&store, "present", ArtifactSource::Proxy).unwrap(),
+        peryx_ha::ArtifactPlacement::record(ArtifactSource::Hosted, true)
+    );
+}
+
+#[test]
+fn test_marking_artifact_local_refines_an_unknown_source() {
+    let (_directory, store) = store();
+    store
+        .put_artifact_placement(
+            "present",
+            &peryx_ha::ArtifactPlacement::record(ArtifactSource::Unknown, false),
+        )
+        .unwrap();
+
+    assert_eq!(
+        mark_artifact_local(&store, "present", ArtifactSource::Proxy).unwrap(),
+        peryx_ha::ArtifactPlacement::record(ArtifactSource::Proxy, true)
+    );
+}
+
+#[test]
+fn test_marking_artifact_local_creates_a_missing_placement() {
+    let (_directory, store) = store();
+
+    assert_eq!(
+        mark_artifact_local(&store, "present", ArtifactSource::Proxy).unwrap(),
+        peryx_ha::ArtifactPlacement::record(ArtifactSource::Proxy, true)
+    );
+    assert_eq!(
+        store.get_artifact_placement("present").unwrap(),
+        Some(peryx_ha::ArtifactPlacement::record(ArtifactSource::Proxy, true))
+    );
+    assert_eq!(
+        mark_artifact_local(&store, "present", ArtifactSource::Generated).unwrap(),
+        peryx_ha::ArtifactPlacement::record(ArtifactSource::Proxy, true)
+    );
+}
+
+#[test]
+fn test_concurrent_local_marks_converge() {
+    let (_directory, store) = store();
+    store
+        .put_artifact_placement(
+            "present",
+            &peryx_ha::ArtifactPlacement::record(ArtifactSource::Unknown, false),
+        )
+        .unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+
+    std::thread::scope(|scope| {
+        for _ in 0..32 {
+            let barrier = barrier.clone();
+            let store = &store;
+            scope.spawn(move || {
+                barrier.wait();
+                mark_artifact_local(store, "present", ArtifactSource::Proxy).unwrap();
+            });
+        }
+    });
+
+    assert_eq!(
+        store.get_artifact_placement("present").unwrap(),
+        Some(peryx_ha::ArtifactPlacement::record(ArtifactSource::Proxy, true))
     );
 }
 
@@ -437,7 +499,7 @@ fn test_concurrent_placement_writes_converge() {
 }
 
 #[test]
-fn test_concurrent_placement_events_converge() {
+fn test_concurrent_placement_marks_converge() {
     let (_directory, store) = store();
     record_artifact_placement(&store, "contended", ArtifactSource::Hosted, true).unwrap();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
@@ -449,16 +511,11 @@ fn test_concurrent_placement_events_converge() {
                 scope.spawn(move || {
                     for _ in 0..32 {
                         barrier.wait();
-                        apply_placement_event(
-                            &store,
-                            "contended",
-                            if index % 2 == 0 {
-                                PlacementEvent::BytesVerified
-                            } else {
-                                PlacementEvent::Repaired { present: false }
-                            },
-                        )
-                        .unwrap();
+                        if index % 2 == 0 {
+                            mark_artifact_local(&store, "contended", ArtifactSource::Proxy).unwrap();
+                        } else {
+                            mark_artifact_missing(&store, "contended").unwrap();
+                        }
                     }
                 })
             })

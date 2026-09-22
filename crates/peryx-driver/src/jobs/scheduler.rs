@@ -303,7 +303,10 @@ async fn execute(job: &dyn NodeJob, shared: &Shared, cancel: &CancellationToken)
     let _ = shared.completions.send(JobCompletion::new(
         kind,
         outcome,
-        result.as_ref().ok().copied().map(JobRunOutcome::report),
+        result
+            .as_ref()
+            .map(|outcome| outcome.report())
+            .map_or_else(JobError::report, Some),
     ));
     result
 }
@@ -373,12 +376,14 @@ async fn run_persisted(
             JobOutcome::succeeded(finished_at_unix, report.processed, report.changed)
                 .with_quota(report.quota_released, report.quota_remaining)
         } else {
+            let report = result.as_ref().unwrap_err().report().unwrap_or_default();
             JobOutcome::failed(
                 finished_at_unix,
-                0,
-                0,
+                report.processed,
+                report.changed,
                 error.as_deref().expect("failed job carries an error"),
             )
+            .with_quota(report.quota_released, report.quota_remaining)
         };
         if let Err(error) = shared.state.job_attempts.finish(&id, persisted) {
             return (Err(error.into()), Outcome::Failed);
@@ -628,6 +633,15 @@ enum JobError {
     Job(#[from] JobFailure),
     #[error(transparent)]
     Attempt(#[from] JobAttemptError),
+}
+
+impl JobError {
+    const fn report(&self) -> Option<JobReport> {
+        match self {
+            Self::Job(failure) => failure.report(),
+            Self::Attempt(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]

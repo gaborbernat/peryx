@@ -20,14 +20,14 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::{Mutex, watch};
 
 pub use self::client::{S3Client, S3Error};
-use self::client::{S3Get, S3Part};
+use self::client::{S3Get, S3ListPage, S3Part};
 pub use self::config::{S3Addressing, S3Config, S3ConfigError, S3Settings};
 use super::backend::filesystem_worker;
 use super::store::BlobStore;
 use super::{
-    BlobBackend, BlobCapabilities, BlobDurability, BlobError, BlobErrorKind, BlobLease, BlobMetadata, BlobOperation,
-    BlobRead, BlobReadBody, BlobStaged, BlobSupport, BlobWrite, Digest, DurabilityCapabilities, PlacementReceipt,
-    Publication,
+    BlobBackend, BlobCapabilities, BlobDigestPage, BlobDurability, BlobError, BlobErrorKind, BlobLease, BlobMetadata,
+    BlobOperation, BlobRead, BlobReadBody, BlobStaged, BlobSupport, BlobWrite, Digest, DurabilityCapabilities,
+    PlacementReceipt, Publication,
 };
 
 const MAX_MULTIPART_PARTS: u64 = 10_000;
@@ -62,6 +62,10 @@ impl S3Backend {
             staging: BlobStore::new(staging_dir),
             acquisitions: Arc::default(),
         }
+    }
+
+    pub(crate) fn repair_cursor_identity(&self) -> String {
+        self.client.config().repair_cursor_identity()
     }
 
     /// The local store the backend stages writes, downloads, and multipart journals through.
@@ -205,6 +209,22 @@ impl S3Backend {
 
     fn key_for(&self, digest: &Digest) -> String {
         self.client.config().key_for(digest.as_str())
+    }
+
+    pub(super) async fn digest_page(&self, cursor: Option<&str>, limit: usize) -> Result<BlobDigestPage, BlobError> {
+        let prefix = self.client.config().key_for("");
+        let S3ListPage { keys, next_cursor } = self
+            .client
+            .list(&prefix, cursor, i32::try_from(limit).expect("repair batch fits in i32"))
+            .await
+            .map_err(|error| blob_error(error, None))?;
+        Ok(BlobDigestPage {
+            digests: keys
+                .into_iter()
+                .filter_map(|key| key.strip_prefix(&prefix).and_then(Digest::from_hex))
+                .collect(),
+            next_cursor,
+        })
     }
 
     async fn open_inner(&self, digest: &Digest, range: Option<Range<u64>>) -> Result<BlobRead, BlobError> {
@@ -668,6 +688,7 @@ fn blob_error(error: S3Error, digest: Option<&Digest>) -> BlobError {
             || BlobError::io(std::io::Error::from(std::io::ErrorKind::NotFound)),
             BlobError::not_found,
         ),
+        S3Error::InvalidCursor => BlobError::invalid_cursor(),
         other => BlobError::io(std::io::Error::other(other.to_string())),
     }
 }

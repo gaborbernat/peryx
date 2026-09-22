@@ -923,6 +923,14 @@ fn allow_not_found<T>(result: std::io::Result<T>) -> Option<T> {
     }
 }
 
+#[test]
+fn test_allow_not_found_discards_a_missing_path() {
+    assert_eq!(
+        allow_not_found::<()>(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+        None
+    );
+}
+
 pub fn staged_usage(dir: &TempDir) -> (usize, u64) {
     allow_not_found(std::fs::read_dir(dir.path().join("blobs"))).map_or((0, 0), |entries| {
         entries

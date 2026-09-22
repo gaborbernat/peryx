@@ -27,6 +27,10 @@ fn placement(source: ArtifactSource, availability: ByteAvailability) -> Artifact
     Some(placement(ArtifactSource::Proxy, ByteAvailability::RemoteOnly)),
     ByteAvailability::Local
 )]
+#[case::unknown_row_records_lost_bytes(
+    Some(placement(ArtifactSource::Unknown, ByteAvailability::Unavailable)),
+    ByteAvailability::Unavailable
+)]
 fn test_a_hosted_file_reads_local_until_its_own_row_demotes_it(
     #[case] row: Option<ArtifactPlacement>,
     #[case] expected: ByteAvailability,
@@ -57,6 +61,16 @@ fn test_a_hosted_file_reads_local_until_its_own_row_demotes_it(
 #[case::generated(
     Some(placement(ArtifactSource::Generated, ByteAvailability::Local)),
     ArtifactSource::Generated,
+    ByteAvailability::Local
+)]
+#[case::unknown_missing_bytes_keeps_the_publication_proxy(
+    Some(placement(ArtifactSource::Unknown, ByteAvailability::Unavailable)),
+    ArtifactSource::Proxy,
+    ByteAvailability::RemoteOnly
+)]
+#[case::unknown_local_bytes_keep_the_publication_proxy(
+    Some(placement(ArtifactSource::Unknown, ByteAvailability::Local)),
+    ArtifactSource::Proxy,
     ByteAvailability::Local
 )]
 fn test_a_proxied_file_reads_remote_until_a_row_says_otherwise(

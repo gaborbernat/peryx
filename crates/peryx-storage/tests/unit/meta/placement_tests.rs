@@ -1,6 +1,6 @@
 //! What a committed placement records, and what a failed record does to the caller.
 
-use peryx_ha::{ArtifactPlacement, ArtifactSource};
+use peryx_ha::{ArtifactPlacement, ArtifactSource, ReclaimGuard, ReclaimGuardStore as _};
 
 use crate::meta::fault::initialized;
 
@@ -16,6 +16,65 @@ fn test_a_committed_placement_reads_local_under_its_source() {
         store.get_artifact_placement(DIGEST).unwrap(),
         Some(ArtifactPlacement::record(ArtifactSource::Proxy, true))
     );
+}
+
+#[test]
+fn test_a_committed_placement_refines_unknown_and_keeps_a_known_source() {
+    let (store, _inner, _fault) = initialized();
+    store
+        .put_artifact_placement(DIGEST, &ArtifactPlacement::record(ArtifactSource::Unknown, false))
+        .unwrap();
+
+    store.record_committed_placement(DIGEST, ArtifactSource::Hosted);
+
+    assert_eq!(
+        store.get_artifact_placement(DIGEST).unwrap(),
+        Some(ArtifactPlacement::record(ArtifactSource::Hosted, true))
+    );
+
+    store.record_committed_placement(DIGEST, ArtifactSource::Proxy);
+
+    assert_eq!(
+        store.get_artifact_placement(DIGEST).unwrap(),
+        Some(ArtifactPlacement::record(ArtifactSource::Hosted, true))
+    );
+}
+
+#[test]
+fn test_source_discovery_refines_unknown_without_changing_availability() {
+    let (store, _inner, _fault) = initialized();
+    store
+        .put_artifact_placement(DIGEST, &ArtifactPlacement::record(ArtifactSource::Unknown, false))
+        .unwrap();
+
+    store
+        .insert_artifact_placement(DIGEST, &ArtifactPlacement::record(ArtifactSource::Proxy, false))
+        .unwrap();
+
+    assert_eq!(
+        store.get_artifact_placement(DIGEST).unwrap(),
+        Some(ArtifactPlacement {
+            source: ArtifactSource::Proxy,
+            availability: peryx_ha::ByteAvailability::RemoteOnly,
+        })
+    );
+}
+
+#[test]
+fn test_a_reclaim_guard_blocks_a_source_aware_placement_writer() {
+    for expires_at_unix in [0, 10] {
+        let (store, _inner, _fault) = initialized();
+        store
+            .compare_and_arm_reclaim_guards(&[DIGEST], 0, 0, ReclaimGuard { expires_at_unix })
+            .unwrap();
+
+        let error = store
+            .put_artifact_placement(DIGEST, &ArtifactPlacement::record(ArtifactSource::Hosted, true))
+            .unwrap_err();
+
+        assert!(matches!(error, crate::meta::MetaError::BlobReclaiming { digest } if digest == DIGEST));
+        assert_eq!(store.get_artifact_placement(DIGEST).unwrap(), None);
+    }
 }
 
 /// The bytes are content-addressed and already durable when this runs, so a store that cannot take

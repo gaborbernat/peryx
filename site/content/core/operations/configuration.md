@@ -729,8 +729,8 @@ mismatch or a rejected commit keeps the stage, so a retry does not re-send the b
 The `[blob]` table does not hold secrets. The first S3 request resolves credentials through the AWS SDK default provider
 chain: environment variables, shared config and credentials files, web identity, ECS task credentials, or EC2 instance
 metadata. These providers cache and refresh temporary credentials. The bucket policy must allow `s3:GetObject`,
-`s3:PutObject`, `s3:DeleteObject`, and `s3:AbortMultipartUpload` on `<prefix>/*`, plus `s3:GetBucketLocation` on the
-bucket for health checks.
+`s3:PutObject`, `s3:DeleteObject`, and `s3:AbortMultipartUpload` on `<prefix>/*`, plus `s3:GetBucketLocation` and
+`s3:ListBucket` on the bucket. The placement-repair job uses `s3:ListBucket` to inventory stored digests.
 
 ### Durability capabilities
 

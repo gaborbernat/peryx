@@ -19,10 +19,10 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use super::attempts::JobAttemptError;
 use super::scheduler::{JobLimits, Submit};
 use super::{
-    CacheRefreshJob, CancelJobRun, IdleReclaimJob, IntentFinalizeJob, JobCompletionOutcome, JobContext, JobFailure,
-    JobHistoryCleanup, JobReport, JobRunOutcome, JobScheduler, LeaseScope, NodeJob, NodeJobMetadata,
-    PluginScheduledJob, RegisteredScheduledJob, Schedule, ScheduledJob, ScheduledJobFactory, SearchRebuildJob,
-    run_schedules, scheduled_job, submit_maintenance,
+    ArtifactPlacementRepairJob, CacheRefreshJob, CancelJobRun, IdleReclaimJob, IntentFinalizeJob, JobCompletionOutcome,
+    JobContext, JobFailure, JobHistoryCleanup, JobReport, JobRunOutcome, JobScheduler, LeaseScope, NodeJob,
+    NodeJobMetadata, PluginScheduledJob, RegisteredScheduledJob, Schedule, ScheduledJob, ScheduledJobFactory,
+    SearchRebuildJob, run_schedules, scheduled_job, submit_maintenance,
 };
 use crate::serving::{CacheRefresher, IdleReclaimer, IntentFinalizer, RefreshSweep, SettlingFinalizer};
 use crate::state::{
@@ -191,6 +191,7 @@ fn job_runs(meta: &MetaStore) -> Vec<peryx_storage::meta::JobRunRecord> {
 
 enum Action {
     Return(Result<JobReport, String>),
+    FailWithReport(JobReport),
     Block(Arc<Notify>),
     UntilCancelled,
     FailWhenCancelled,
@@ -277,6 +278,7 @@ impl NodeJob for TestJob {
                 .clone()
                 .map(JobRunOutcome::succeeded)
                 .map_err(|message| JobFailure::new("test", message)),
+            Action::FailWithReport(report) => Err(JobFailure::new("test", "partial failure").with_report(*report)),
             Action::Block(release) => {
                 release.notified().await;
                 Ok(JobRunOutcome::succeeded(JobReport::default()))
@@ -766,6 +768,35 @@ async fn test_cancel_job_run_preserves_an_error_after_cancellation() {
 }
 
 #[tokio::test]
+async fn test_failed_job_persists_its_partial_report() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
+
+    assert_eq!(
+        scheduler
+            .run(TestJob::persisting(
+                "probe",
+                "partial",
+                Action::FailWithReport(JobReport {
+                    processed: 3,
+                    changed: 2,
+                    ..JobReport::default()
+                }),
+            ))
+            .await
+            .unwrap_err(),
+        "test: partial failure"
+    );
+
+    let run = &job_runs(&state.meta)[0];
+    assert_eq!(
+        (run.state, run.items_processed, run.items_changed),
+        (JobState::Failed, 3, 2)
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_cancel_job_run_distinguishes_finished_and_missing_attempts() {
     let (_dir, state) = serving();
     let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));
@@ -1248,9 +1279,10 @@ async fn test_submit_maintenance_runs_each_registered_capability() {
     refresh_started.notified().await;
     scheduler.shutdown().await;
     let runs = job_runs(&state.serving.meta);
-    assert_eq!(runs.len(), 3);
+    assert_eq!(runs.len(), 4);
     assert!(
         runs.iter()
+            .filter(|run| run.kind.as_str() != "artifact_placement_repair")
             .all(|run| run.scope == "example" && run.state == JobState::Succeeded)
     );
     assert_eq!(
@@ -1258,6 +1290,7 @@ async fn test_submit_maintenance_runs_each_registered_capability() {
             .map(|run| (run.kind.as_str(), run.items_processed, run.items_changed))
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from([
+            ("artifact_placement_repair", 0, 0),
             ("cache_refresh", 2, 1),
             ("idle_reclaim", 1, 1),
             ("intent_finalize", 3, 3),
@@ -1271,6 +1304,34 @@ async fn test_submit_maintenance_runs_each_registered_capability() {
             driver.finalize_retained(state.serving.clone(), "other", "intent").await,
         ),
         (true, false)
+    );
+}
+
+#[tokio::test]
+async fn test_artifact_placement_repair_persists_a_node_local_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(directory.path().join("blobs"));
+    let state = AppState::with_clock(meta, blobs, 60, Vec::new(), Arc::new(|| 1_000));
+    let scheduler = JobScheduler::new(state.serving.clone(), JobLimits::node_local());
+
+    assert_eq!(
+        scheduler
+            .run(Arc::new(ArtifactPlacementRepairJob::new(1)))
+            .await
+            .unwrap(),
+        JobRunOutcome::succeeded(JobReport::default())
+    );
+    scheduler.shutdown().await;
+    let runs = job_runs(&state.serving.meta);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        (runs[0].kind.clone(), runs[0].scope.as_str(), runs[0].state),
+        (
+            JobKind::new("artifact_placement_repair").unwrap(),
+            "",
+            JobState::Succeeded
+        )
     );
 }
 

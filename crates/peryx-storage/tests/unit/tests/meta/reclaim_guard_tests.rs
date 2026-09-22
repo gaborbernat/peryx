@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use peryx_ha::{ReclaimGuard, ReclaimGuardArm, ReclaimGuardStore as _};
+use peryx_ha::{ArtifactPlacement, ArtifactSource, ReclaimGuard, ReclaimGuardArm, ReclaimGuardStore as _};
 use rstest::rstest;
 
 use crate::meta::{DriverBlobReference, DriverMutation, JournalEntry, MetaError, MetaStore};
@@ -87,6 +87,29 @@ fn test_lapsed_blob_reclaim_guard_admits_a_reference_and_drops_its_row(#[case] n
 }
 
 #[test]
+fn test_lapsed_guard_is_cleared_before_a_staged_placement_is_published() {
+    let (_dir, store, now) = stepped_store();
+    let digest = "orphaned-blob-digest";
+    store.compare_and_arm_reclaim_guards(&[digest], 0, 0, guard(1)).unwrap();
+    now.store(1, Ordering::Relaxed);
+
+    store
+        .commit_driver_txn(|txn| {
+            txn.put("ref/1", b"points-here")?;
+            txn.reference_blob(digest, 6);
+            txn.put_artifact_placement(digest, ArtifactPlacement::record(ArtifactSource::Hosted, true));
+            Ok::<_, MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+
+    assert_eq!(store.reclaim_guard(digest).unwrap(), None);
+    assert_eq!(
+        store.get_artifact_placement(digest).unwrap(),
+        Some(ArtifactPlacement::record(ArtifactSource::Hosted, true))
+    );
+}
+
+#[test]
 fn test_blob_reclaim_guard_on_another_digest_admits_an_unguarded_reference() {
     let (_dir, store, now) = stepped_store();
     now.store(10, Ordering::Relaxed);
@@ -104,6 +127,27 @@ fn test_blob_reclaim_guard_on_another_digest_admits_an_unguarded_reference() {
         store.reclaim_guard("guarded").unwrap(),
         Some(guard(100)),
         "an unrelated live lease survives the commit"
+    );
+}
+
+#[test]
+fn test_a_poisoned_reclaim_lock_still_serializes_references() {
+    let (_dir, store) = super::store();
+    let poisoned = store.clone();
+    assert!(
+        std::thread::spawn(move || {
+            let _ownership = poisoned.reclaim_ownership();
+            panic!("poison reclaim ownership");
+        })
+        .join()
+        .is_err()
+    );
+
+    publish_reference(&store, "present").unwrap();
+
+    assert_eq!(
+        store.get_driver_value("ref/1").unwrap().as_deref(),
+        Some(b"points-here".as_slice())
     );
 }
 

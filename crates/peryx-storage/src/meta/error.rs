@@ -19,6 +19,10 @@ pub enum MetaError {
     ReplicaSerialConflict { expected: u64, actual: u64 },
     #[error("replica incarnation counter overflowed")]
     ReplicaIncarnationOverflow,
+    #[error("artifact placement revision overflowed")]
+    ArtifactPlacementRevisionOverflow,
+    #[error("artifact repair cursor revision overflowed")]
+    ArtifactRepairCursorRevisionOverflow,
     #[error("driver precondition failed: {0}")]
     DriverPrecondition(String),
     #[error("driver record {key:?} is not UTF-8")]

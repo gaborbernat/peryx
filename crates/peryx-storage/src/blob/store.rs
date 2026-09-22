@@ -234,6 +234,10 @@ impl BlobStore {
         }
     }
 
+    pub(crate) fn repair_cursor_identity(&self) -> String {
+        format!("filesystem/v1:{}", self.root.display())
+    }
+
     /// Keeps a sweep off `path` until the returned guard drops.
     pub(crate) fn own(&self, path: PathBuf) -> OwnedPath {
         self.owners.own(path)

@@ -2,7 +2,41 @@ use peryx_ha::{ReclaimGuard, ReclaimGuardArm, ReclaimGuardStore};
 use redb::ReadableTable as _;
 
 use super::index::write_reference_revision;
-use super::{BLOB_RECLAIM_GUARD, MetaError, MetaStore, open_optional_table};
+use super::placement::advance_artifact_placement_revision;
+use super::{ARTIFACT_PLACEMENT, BLOB_RECLAIM_GUARD, MetaError, MetaStore, open_optional_table};
+
+impl MetaStore {
+    /// Arms guards and removes their placement rows in one metadata transaction.
+    ///
+    /// # Errors
+    /// Returns a store error when the transaction cannot be read or committed.
+    pub fn compare_and_arm_reclaim_guards_and_remove_placements(
+        &self,
+        digests: &[&str],
+        revision: u64,
+        now: i64,
+        replacement: ReclaimGuard,
+    ) -> Result<ReclaimGuardArm, MetaError> {
+        let txn = self.db.begin_write()?;
+        let armed = arm_reclaim_guards(&txn, digests, revision, now, replacement)?;
+        if let ReclaimGuardArm::Armed(digests) = &armed {
+            let mut removed = Vec::new();
+            {
+                let mut placements = txn.open_table(ARTIFACT_PLACEMENT)?;
+                for digest in digests {
+                    if placements.remove(digest.as_str())?.is_some() {
+                        removed.push(digest.as_str());
+                    }
+                }
+            }
+            for digest in removed {
+                advance_artifact_placement_revision(&txn, digest)?;
+            }
+        }
+        txn.commit()?;
+        Ok(armed)
+    }
+}
 
 impl ReclaimGuardStore for MetaStore {
     type Error = MetaError;
@@ -15,31 +49,9 @@ impl ReclaimGuardStore for MetaStore {
         replacement: ReclaimGuard,
     ) -> Result<ReclaimGuardArm, Self::Error> {
         let txn = self.db.begin_write()?;
-        if write_reference_revision(&txn)? != revision {
-            txn.commit()?;
-            return Ok(ReclaimGuardArm::ReferencesMoved);
-        }
-        let mut armed = Vec::new();
-        if !digests.is_empty() {
-            let mut table = txn.open_table(BLOB_RECLAIM_GUARD)?;
-            for &digest in digests {
-                let available = {
-                    let value = table.get(digest)?;
-                    value.is_none_or(|value| {
-                        ReclaimGuard {
-                            expires_at_unix: value.value(),
-                        }
-                        .is_expired_at(now)
-                    })
-                };
-                if available {
-                    table.insert(digest, replacement.expires_at_unix)?;
-                    armed.push(digest.to_owned());
-                }
-            }
-        }
+        let armed = arm_reclaim_guards(&txn, digests, revision, now, replacement)?;
         txn.commit()?;
-        Ok(ReclaimGuardArm::Armed(armed))
+        Ok(armed)
     }
 
     fn compare_and_disarm_reclaim_guard(&self, digest: &str, expected: ReclaimGuard) -> Result<bool, Self::Error> {
@@ -65,6 +77,9 @@ impl ReclaimGuardStore for MetaStore {
                 false
             }
         };
+        if removed {
+            advance_artifact_placement_revision(&txn, digest)?;
+        }
         txn.commit()?;
         Ok(removed)
     }
@@ -98,4 +113,39 @@ impl ReclaimGuardStore for MetaStore {
             })
             .collect()
     }
+}
+
+fn arm_reclaim_guards(
+    txn: &redb::WriteTransaction,
+    digests: &[&str],
+    revision: u64,
+    now: i64,
+    replacement: ReclaimGuard,
+) -> Result<ReclaimGuardArm, MetaError> {
+    if write_reference_revision(txn)? != revision {
+        return Ok(ReclaimGuardArm::ReferencesMoved);
+    }
+    let mut armed = Vec::new();
+    if !digests.is_empty() {
+        let mut table = txn.open_table(BLOB_RECLAIM_GUARD)?;
+        for &digest in digests {
+            let available = {
+                let value = table.get(digest)?;
+                value.is_none_or(|value| {
+                    ReclaimGuard {
+                        expires_at_unix: value.value(),
+                    }
+                    .is_expired_at(now)
+                })
+            };
+            if available {
+                table.insert(digest, replacement.expires_at_unix)?;
+                armed.push(digest.to_owned());
+            }
+        }
+    }
+    for digest in &armed {
+        advance_artifact_placement_revision(txn, digest)?;
+    }
+    Ok(ReclaimGuardArm::Armed(armed))
 }

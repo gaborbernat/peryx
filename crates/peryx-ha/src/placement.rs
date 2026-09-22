@@ -74,6 +74,7 @@ pub enum ArtifactSource {
     Hosted,
     Proxy,
     Generated,
+    Unknown,
 }
 
 impl ArtifactSource {
@@ -83,12 +84,18 @@ impl ArtifactSource {
             Self::Hosted => "hosted",
             Self::Proxy => "proxy",
             Self::Generated => "generated",
+            Self::Unknown => "unknown",
         }
     }
 
     #[must_use]
     pub const fn has_upstream(self) -> bool {
         matches!(self, Self::Proxy)
+    }
+
+    #[must_use]
+    pub const fn is_unknown(self) -> bool {
+        matches!(self, Self::Unknown)
     }
 
     const fn without_bytes(self) -> ByteAvailability {
@@ -122,13 +129,6 @@ impl ByteAvailability {
     pub const fn is_local(self) -> bool {
         matches!(self, Self::Local)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementEvent {
-    BytesVerified,
-    WriteFailed,
-    Repaired { present: bool },
 }
 
 /// What this instance records about one digest: where its bytes came from, and whether they can be
@@ -165,16 +165,6 @@ impl ArtifactPlacement {
             source,
             availability: Self::from_presence(source, present),
         }
-    }
-
-    #[must_use]
-    pub const fn after(self, event: PlacementEvent) -> Self {
-        let availability = match event {
-            PlacementEvent::BytesVerified => ByteAvailability::Local,
-            PlacementEvent::WriteFailed => self.availability,
-            PlacementEvent::Repaired { present } => Self::from_presence(self.source, present),
-        };
-        Self { availability, ..self }
     }
 
     const fn from_presence(source: ArtifactSource, present: bool) -> ByteAvailability {

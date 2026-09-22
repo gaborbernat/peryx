@@ -1,16 +1,20 @@
 #[cfg(feature = "container-tests")]
 use std::error::Error as _;
 use std::ffi::OsString;
+use std::io::Read as _;
 #[cfg(feature = "container-tests")]
-use std::io::{Read as _, Write as _, stdin};
+use std::io::{Write as _, stdin};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
+use peryx_ha::{ArtifactPlacement, ArtifactSource};
 use peryx_storage::blob::{
     BlobErrorKind, BlobOperation, BlobScanError, BlobStaged, BlobStorage, Digest, PlacementReceipt, S3Config,
     S3Settings, WriteEvidence,
 };
+use peryx_storage::meta::MetaStore;
+use peryx_storage::{ArtifactRepairError, repair_artifact_placements, repair_artifact_placements_cancellable};
 #[cfg(feature = "container-tests")]
 use tracing::{Event, Subscriber};
 #[cfg(feature = "container-tests")]
@@ -107,6 +111,10 @@ async fn run_integration(scenario_name: String, endpoint: String, staging_dir: P
             | "wire_interrupted_multipart"
             | "wire_present_bound"
             | "wire_present_failure"
+            | "wire_repair_content_failure"
+            | "wire_repair_cancelled_after_content"
+            | "wire_repair_cursor"
+            | "wire_repair_missing_content"
             | "recover_none"
             | "recover_one"
             | "recover_error"
@@ -526,6 +534,10 @@ impl UnitScenario {
 async fn run_child_scenario(storage: &BlobStorage, scenario: ChildScenario) {
     match scenario {
         ChildScenario::Health => storage.health().await.unwrap(),
+        ChildScenario::RepairContentFailure => run_repair_content_failure_child(storage).await,
+        ChildScenario::RepairCancelledAfterContent => run_repair_cancelled_after_content_child(storage).await,
+        ChildScenario::RepairMissingContent => run_repair_missing_content_child(storage).await,
+        ChildScenario::RepairCursor => run_repair_cursor_child(storage).await,
         #[cfg(feature = "container-tests")]
         ChildScenario::Container(scenario) => run_container_child(storage, scenario).await,
         ChildScenario::Read(scenario) => run_wire_read_child(storage, scenario).await,
@@ -534,6 +546,78 @@ async fn run_child_scenario(storage: &BlobStorage, scenario: ChildScenario) {
         ChildScenario::Multipart(scenario) => run_wire_multipart_child(storage, scenario).await,
         ChildScenario::Recover(scenario) => run_recover_child(storage, scenario).await,
     }
+}
+
+async fn run_repair_content_failure_child(storage: &BlobStorage) {
+    const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    meta.put_artifact_placement(DIGEST, &ArtifactPlacement::record(ArtifactSource::Hosted, true))
+        .unwrap();
+
+    assert!(matches!(
+        repair_artifact_placements(&meta, storage, 1).await.unwrap_err(),
+        ArtifactRepairError::Blob(_)
+    ));
+    assert_eq!(
+        meta.get_artifact_placement(DIGEST).unwrap(),
+        Some(ArtifactPlacement::record(ArtifactSource::Hosted, true))
+    );
+}
+
+async fn run_repair_cancelled_after_content_child(storage: &BlobStorage) {
+    const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    let cancel = cancelled.clone();
+    tokio::task::spawn_blocking(move || {
+        std::io::stdin().read_exact(&mut [0]).unwrap();
+        cancel.cancel();
+    });
+
+    let failure = repair_artifact_placements_cancellable(&meta, storage, 1, &cancelled)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(failure.error, ArtifactRepairError::Cancelled));
+    assert_eq!((failure.report.content.scanned, failure.report.content.changed), (1, 1));
+    assert_eq!(
+        failure.report.placement,
+        peryx_storage::ArtifactRepairDirectionReport::default()
+    );
+    assert_eq!(
+        meta.get_artifact_placement(DIGEST).unwrap(),
+        Some(ArtifactPlacement::record(ArtifactSource::Unknown, true))
+    );
+}
+
+async fn run_repair_missing_content_child(storage: &BlobStorage) {
+    const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+
+    let report = repair_artifact_placements(&meta, storage, 1).await.unwrap();
+
+    assert_eq!(report.content.scanned, 1);
+    assert_eq!(report.content.changed, 0);
+    assert_eq!(meta.get_artifact_placement(DIGEST).unwrap(), None);
+}
+
+async fn run_repair_cursor_child(storage: &BlobStorage) {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+
+    let first = repair_artifact_placements(&meta, storage, 1).await.unwrap();
+    assert!(!first.content.eof);
+    assert!(matches!(
+        repair_artifact_placements(&meta, storage, 1).await.unwrap_err(),
+        ArtifactRepairError::ContentCursorReset
+    ));
+    assert!(repair_artifact_placements(&meta, storage, 1).await.unwrap().content.eof);
 }
 
 async fn run_recover_child(storage: &BlobStorage, scenario: RecoverScenario) {
@@ -898,6 +982,10 @@ async fn run_wire_multipart_child(storage: &BlobStorage, scenario: WireMultipart
 #[derive(Clone, Copy)]
 enum ChildScenario {
     Health,
+    RepairCancelledAfterContent,
+    RepairContentFailure,
+    RepairMissingContent,
+    RepairCursor,
     #[cfg(feature = "container-tests")]
     Container(ContainerScenario),
     Read(WireReadScenario),
@@ -1004,6 +1092,10 @@ impl ChildScenario {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "health" => Ok(Self::Health),
+            "wire_repair_content_failure" => Ok(Self::RepairContentFailure),
+            "wire_repair_cancelled_after_content" => Ok(Self::RepairCancelledAfterContent),
+            "wire_repair_missing_content" => Ok(Self::RepairMissingContent),
+            "wire_repair_cursor" => Ok(Self::RepairCursor),
             #[cfg(feature = "container-tests")]
             "invalid" => Ok(Self::Container(ContainerScenario::Invalid)),
             #[cfg(feature = "container-tests")]

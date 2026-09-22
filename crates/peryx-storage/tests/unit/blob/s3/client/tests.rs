@@ -19,7 +19,7 @@ use url::Url;
 use super::super::S3Backend;
 use super::super::config::S3Settings;
 use super::{BehaviorVersion, Builder, Client, Region, S3Client, S3Config, S3Error, S3Get, S3Part};
-use crate::blob::{BlobBackend, BlobStore, Digest};
+use crate::blob::{BlobBackend, BlobDigestPage, BlobStore, Digest};
 use crate::tests::capture::Captured;
 
 const CHECKSUM: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -76,6 +76,180 @@ fn test_error_messages_cover_every_variant() {
     assert_eq!(
         S3Error::InvalidResponse("content length").to_string(),
         "s3 returned an invalid content length"
+    );
+}
+
+#[rstest]
+#[case::minimum(1)]
+#[case::maximum(1_000)]
+#[tokio::test]
+async fn test_list_preserves_the_continuation_cursor_at_batch_bounds(#[case] limit: i32) {
+    let response = http::Response::builder()
+        .status(200)
+        .body(SdkBody::from(
+            "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>cache/sha256/digest</Key></Contents></ListBucketResult>",
+        ))
+        .unwrap();
+    let (client, request) = capturing_client(S3Config::new(base_settings()).unwrap(), Some(response));
+
+    let page = client.list("cache/sha256/", Some("previous"), limit).await.unwrap();
+
+    assert_eq!(page.keys, ["cache/sha256/digest".to_owned()]);
+    assert_eq!(page.next_cursor.as_deref(), Some("next"));
+    let request = request.expect_request();
+    assert!(request.uri().contains("continuation-token=previous"));
+    assert!(request.uri().contains(&format!("max-keys={limit}")));
+}
+
+#[rstest]
+#[case("InvalidArgument")]
+#[case("InvalidToken")]
+#[tokio::test]
+async fn test_list_reports_rejected_service_cursors(#[case] code: &str) {
+    let error = get_client(xml_error(400, code))
+        .list("cache/sha256/", Some("rejected"), 2)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, S3Error::InvalidCursor));
+}
+
+#[rstest]
+#[case::zero(0)]
+#[case::above_service_limit(1_001)]
+#[tokio::test]
+async fn test_list_rejects_invalid_page_sizes(#[case] limit: i32) {
+    let error = get_client(http::Response::builder().status(200).body(SdkBody::empty()).unwrap())
+        .list("cache/sha256/", None, limit)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, S3Error::InvalidResponse("list page size")));
+}
+
+#[tokio::test]
+async fn test_list_rejects_an_empty_input_cursor() {
+    let error = get_client(http::Response::builder().status(200).body(SdkBody::empty()).unwrap())
+        .list("cache/sha256/", Some(""), 1)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, S3Error::InvalidResponse("list continuation token")));
+}
+
+#[tokio::test]
+async fn test_list_rejects_a_truncated_page_without_a_cursor() {
+    let response = http::Response::builder()
+        .status(200)
+        .body(SdkBody::from(
+            "<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>",
+        ))
+        .unwrap();
+
+    let error = get_client(response).list("cache/sha256/", None, 2).await.unwrap_err();
+
+    assert!(matches!(error, S3Error::InvalidResponse("list continuation token")));
+}
+
+#[tokio::test]
+async fn test_list_rejects_an_empty_or_repeated_continuation_cursor() {
+    let empty = get_client(
+        http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken></NextContinuationToken></ListBucketResult>",
+            ))
+            .unwrap(),
+    )
+    .list("cache/sha256/", None, 2)
+    .await
+    .unwrap_err();
+    let repeated = get_client(
+        http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>same</NextContinuationToken></ListBucketResult>",
+            ))
+            .unwrap(),
+    )
+    .list("cache/sha256/", Some("same"), 2)
+    .await
+    .unwrap_err();
+
+    assert!(matches!(empty, S3Error::InvalidResponse("list continuation token")));
+    assert!(matches!(repeated, S3Error::InvalidResponse("list continuation token")));
+}
+
+#[tokio::test]
+async fn test_list_rejects_a_cursor_on_an_eof_page_and_an_oversized_page() {
+    let cursor = get_client(
+        http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<ListBucketResult><IsTruncated>false</IsTruncated><NextContinuationToken>next</NextContinuationToken></ListBucketResult>",
+            ))
+            .unwrap(),
+    )
+    .list("cache/sha256/", None, 1)
+    .await
+    .unwrap_err();
+    let page = get_client(
+        http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>one</Key></Contents><Contents><Key>two</Key></Contents></ListBucketResult>",
+            ))
+            .unwrap(),
+    )
+    .list("cache/sha256/", None, 1)
+    .await
+    .unwrap_err();
+
+    assert!(matches!(cursor, S3Error::InvalidResponse("list continuation token")));
+    assert!(matches!(page, S3Error::InvalidResponse("list object count")));
+}
+
+#[tokio::test]
+async fn test_list_rejects_an_object_without_a_key() {
+    let error = get_client(
+        http::Response::builder()
+            .status(200)
+            .body(SdkBody::from(
+                "<ListBucketResult><IsTruncated>false</IsTruncated><Contents></Contents></ListBucketResult>",
+            ))
+            .unwrap(),
+    )
+    .list("cache/sha256/", None, 1)
+    .await
+    .unwrap_err();
+
+    assert!(matches!(error, S3Error::InvalidResponse("list object key")));
+}
+
+#[tokio::test]
+async fn test_digest_page_keeps_the_service_cursor_after_filtering_keys() {
+    let response = http::Response::builder()
+        .status(200)
+        .body(SdkBody::from(
+            "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>cache/sha256/not-a-digest</Key></Contents><Contents><Key>cache/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</Key></Contents><Contents><Key>cache/staging/upload</Key></Contents></ListBucketResult>",
+        ))
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let (client, _) = capturing_client(S3Config::new(base_settings()).unwrap(), Some(response));
+    let backend = S3Backend {
+        client,
+        staging: BlobStore::new(directory.path()),
+        acquisitions: Arc::default(),
+    };
+
+    assert_eq!(
+        backend.digest_page(None, 3).await.unwrap(),
+        BlobDigestPage {
+            digests: vec![
+                Digest::from_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+            ],
+            next_cursor: Some("next".to_owned()),
+        }
     );
 }
 

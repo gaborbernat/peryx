@@ -22,7 +22,7 @@ pub use placement::{
     ArtifactPlacementRow, ArtifactSource, BackendId, BackendLocation, BlobPlacementDecisionError, BlobPlacementFailure,
     BlobPlacementGroupPage, BlobPlacementKey, BlobPlacementOutcome, BlobPlacementPage, BlobPlacementRecord,
     BlobPlacementRouting, BlobPlacementState, BlobPlacementStatus, BlobPlacementTransition, ByteAvailability,
-    DataCenterId, MAX_PLACEMENTS_PER_DIGEST, MAX_REPAIR_BATCH, PlacementEvent, PlacementKeyError, PlacementRepairPage,
+    DataCenterId, MAX_PLACEMENTS_PER_DIGEST, MAX_REPAIR_BATCH, PlacementKeyError, PlacementRepairPage,
     decide_blob_placement,
 };
 pub use reclamation::{

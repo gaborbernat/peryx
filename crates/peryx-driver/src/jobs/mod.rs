@@ -26,6 +26,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use peryx_search::{RebuildOutcome, RebuildProgress};
 use peryx_storage::meta::JobKind;
+use peryx_storage::repair_artifact_placements_cancellable;
 
 use crate::serving::{CacheRefresher, IdleReclaimer, IntentFinalizer};
 use crate::state::{AppState, ServingState};
@@ -46,6 +47,7 @@ pub const MAINTENANCE_INTERVAL: Duration = Duration::from_mins(1);
 pub const DEFAULT_SEARCH_REBUILD_CHUNK: usize = 1_000;
 /// The CLI rejects larger chunks so one rebuild cannot buffer an unbounded batch before committing.
 pub const MAX_SEARCH_REBUILD_CHUNK: usize = 1_000_000;
+pub const DEFAULT_ARTIFACT_REPAIR_BATCH: usize = 256;
 
 /// The counts a finished job reports, for its durable run record and lifecycle metrics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +148,7 @@ impl JobCompletion {
 pub struct JobFailure {
     code: &'static str,
     message: String,
+    report: Option<JobReport>,
 }
 
 impl JobFailure {
@@ -154,7 +157,14 @@ impl JobFailure {
         Self {
             code,
             message: message.into(),
+            report: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_report(mut self, report: JobReport) -> Self {
+        self.report = Some(report);
+        self
     }
 
     #[must_use]
@@ -165,6 +175,11 @@ impl JobFailure {
     #[must_use]
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    #[must_use]
+    pub const fn report(&self) -> Option<JobReport> {
+        self.report
     }
 
     #[must_use]
@@ -207,6 +222,11 @@ impl JobContext {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+
+    #[must_use]
+    pub const fn cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancel
     }
 
     #[must_use]
@@ -555,6 +575,74 @@ fn reap_storage_result<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<
 }
 
 const SEARCH_REBUILD: &str = "search_rebuild";
+const ARTIFACT_PLACEMENT_REPAIR: &str = "artifact_placement_repair";
+
+pub struct ArtifactPlacementRepairJob {
+    batch: usize,
+}
+
+impl ArtifactPlacementRepairJob {
+    #[must_use]
+    pub const fn new(batch: usize) -> Self {
+        Self { batch }
+    }
+}
+
+#[async_trait]
+impl NodeJob for ArtifactPlacementRepairJob {
+    fn kind(&self) -> &'static str {
+        ARTIFACT_PLACEMENT_REPAIR
+    }
+
+    fn scope(&self) -> &'static str {
+        ""
+    }
+
+    fn metadata(&self) -> NodeJobMetadata<'_> {
+        NodeJobMetadata {
+            lease_scope: LeaseScope::NodeLocal,
+            repository: None,
+            persist_as: Some(JobKind::new(ARTIFACT_PLACEMENT_REPAIR).expect("static job kind is valid")),
+        }
+    }
+
+    async fn run(&self, ctx: &JobContext) -> Result<JobRunOutcome, JobFailure> {
+        if ctx.is_cancelled() {
+            return Ok(JobRunOutcome::cancelled(JobReport::default()));
+        }
+        let state = ctx.state();
+        let report = match repair_artifact_placements_cancellable(
+            &state.meta,
+            &state.blobs,
+            self.batch,
+            ctx.cancel_token(),
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(failure) => {
+                let report = artifact_repair_job_report(failure.report);
+                tracing::info!(report = ?failure.report, error = %failure.error, "artifact placement repair page stopped");
+                if matches!(failure.error, peryx_storage::ArtifactRepairError::Cancelled) {
+                    return Ok(JobRunOutcome::cancelled(report));
+                }
+                return Err(JobFailure::new("artifact_placement_repair", failure.error.to_string()).with_report(report));
+            }
+        };
+        tracing::info!(?report, "artifact placement repair page");
+        Ok(JobRunOutcome::succeeded(artifact_repair_job_report(report)))
+    }
+}
+
+fn artifact_repair_job_report(report: peryx_storage::ArtifactRepairReport) -> JobReport {
+    JobReport {
+        processed: u64::try_from(report.content.scanned + report.placement.scanned)
+            .expect("bounded repair counts fit in u64"),
+        changed: u64::try_from(report.content.changed + report.placement.changed)
+            .expect("bounded repair counts fit in u64"),
+        ..JobReport::default()
+    }
+}
 
 /// Rebuild the node's derived resource search index from authoritative metadata.
 ///
@@ -620,6 +708,7 @@ impl NodeJob for SearchRebuildJob {
 }
 
 pub fn submit_maintenance(app: &AppState, scheduler: &JobScheduler) {
+    scheduler.submit(Arc::new(ArtifactPlacementRepairJob::new(DEFAULT_ARTIFACT_REPAIR_BATCH)));
     for (ecosystem, reclaimer) in app.idle_reclaimers() {
         scheduler.submit(Arc::new(IdleReclaimJob {
             ecosystem: ecosystem.clone(),

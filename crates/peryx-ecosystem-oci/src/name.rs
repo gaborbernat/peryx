@@ -139,29 +139,15 @@ fn valid_repository(repository: &str) -> bool {
 /// A single `<name>` path component: lowercase alphanumerics with `.`/`_`/`-` separators, never a
 /// bare `.`/`..` (which would let a crafted name escape a storage-key or URL path).
 fn valid_name_component(component: &str) -> bool {
-    let bytes = component.as_bytes();
-    let alnum = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
-    if !bytes.first().is_some_and(|&b| alnum(b)) || !bytes.last().is_some_and(|&b| alnum(b)) {
-        return false;
-    }
+    let alnum = |character: char| character.is_ascii_lowercase() || character.is_ascii_digit();
     // Between two alphanumeric runs the OCI grammar allows one separator only: a single `.`, one or
-    // two `_`, or a run of `-`. A mixed or longer run (`..`, `._`, `___`) is rejected.
-    let mut index = 0;
-    while index < bytes.len() {
-        if alnum(bytes[index]) {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        while index < bytes.len() && !alnum(bytes[index]) {
-            index += 1;
-        }
-        let separator = &bytes[start..index];
-        if separator != b"." && separator != b"_" && separator != b"__" && !separator.iter().all(|&b| b == b'-') {
-            return false;
-        }
-    }
-    true
+    // two `_`, or a run of `-`. A mixed or longer run (`..`, `._`, `___`) is rejected. Adjacent
+    // alphanumerics split into an empty separator, which the all-`-` arm accepts.
+    component.starts_with(alnum)
+        && component.ends_with(alnum)
+        && component
+            .split(alnum)
+            .all(|separator| matches!(separator, "." | "_" | "__") || separator.bytes().all(|byte| byte == b'-'))
 }
 
 /// Keep colon-bearing values as digest candidates so the handler can report `DIGEST_INVALID`.
@@ -190,18 +176,15 @@ pub fn parse_image_reference(raw: &str) -> Option<ImageReference> {
             return None;
         }
         (repository, Reference::Digest(digest.to_owned()))
-    } else {
-        let component_start = raw.rfind('/').map_or(0, |index| index + 1);
-        if let Some(colon) = raw[component_start..].rfind(':') {
-            let split = component_start + colon;
-            let tag = &raw[split + 1..];
-            if !valid_tag(tag) {
-                return None;
-            }
-            (&raw[..split], Reference::Tag(tag.to_owned()))
-        } else {
-            (raw, Reference::Tag("latest".to_owned()))
+    } else if let Some((repository, tag)) = raw.rsplit_once(':') {
+        // A colon before the last `/` (a registry port) leaves a `/` in the tag, which `valid_tag`
+        // rejects, as `valid_repository` would reject the colon in the repository.
+        if !valid_tag(tag) {
+            return None;
         }
+        (repository, Reference::Tag(tag.to_owned()))
+    } else {
+        (raw, Reference::Tag("latest".to_owned()))
     };
     let has_authority = repository
         .split_once('/')

@@ -896,8 +896,14 @@ async fn test_cold_docker_list_preserves_a_missing_selected_child() {
     );
 }
 
+#[rstest]
+#[case::partial(206, LIST_TYPE)]
+#[case::other_media_type(200, INDEX_TYPE)]
 #[tokio::test]
-async fn test_cold_docker_list_rejects_a_partial_parent_response() {
+async fn test_cold_docker_list_rejects_a_parent_response_that_does_not_match_its_head(
+    #[case] status: u16,
+    #[case] content_type: &str,
+) {
     let server = MockServer::start().await;
     let child_digest = oci_digest(&DOCKER_CHILD);
     let list = amd64_docker_list(&child_digest);
@@ -916,10 +922,10 @@ async fn test_cold_docker_list_rejects_a_partial_parent_response() {
     Mock::given(method("GET"))
         .and(path(format!("/v2/library/app/manifests/{list_digest}")))
         .respond_with(
-            ResponseTemplate::new(206)
+            ResponseTemplate::new(status)
                 .insert_header("docker-content-digest", list_digest.as_str())
                 .insert_header("content-length", list.len().to_string().as_str())
-                .set_body_raw(list, LIST_TYPE),
+                .set_body_raw(list, content_type),
         )
         .expect(1)
         .mount(&server)

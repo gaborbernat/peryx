@@ -49,7 +49,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                 }
                 let mut served = None;
-                let mut checked = members.len();
+                let mut consulted = members.as_slice();
                 for (position, member) in members.iter().enumerate() {
                     if store::tag_is_trashed(&state.meta, &member.name, repo, tag)? {
                         return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
@@ -58,11 +58,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                         .member_tag(state, member, repo, tag, head, accept.as_deref())
                         .await?;
                     if served.is_some() {
-                        checked = position + 1;
+                        consulted = &members[..=position];
                         break;
                     }
                 }
-                for member in members.iter().take(checked) {
+                for member in consulted {
                     if store::tag_is_trashed(&state.meta, &member.name, repo, tag)? {
                         return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                     }
@@ -72,7 +72,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                         .headers()
                         .get(DOCKER_CONTENT_DIGEST)
                         .and_then(|value| value.to_str().ok())
-                }) && manifest_trashed_in(state, &members[..checked], repo, digest)?
+                }) && manifest_trashed_in(state, consulted, repo, digest)?
                 {
                     return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
                 }
@@ -255,7 +255,7 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
             return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
         }
         let mut served = None;
-        let mut checked = members.len();
+        let mut consulted = members;
         for (position, member) in members.iter().enumerate() {
             if store::manifest_is_trashed(&state.meta, &member.name, repo, digest)? {
                 return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
@@ -270,11 +270,11 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
                     .await?;
             }
             if served.is_some() {
-                checked = position + 1;
+                consulted = &members[..=position];
                 break;
             }
         }
-        for member in members.iter().take(checked) {
+        for member in consulted {
             if store::manifest_is_trashed(&state.meta, &member.name, repo, digest)? {
                 return Ok(error_response(ErrorCode::ManifestUnknown, "manifest unknown"));
             }

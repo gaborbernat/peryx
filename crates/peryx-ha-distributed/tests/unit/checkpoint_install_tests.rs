@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use peryx_storage::meta::{CheckpointIdentity, CheckpointManifest, MetaStore};
+use rstest::rstest;
 
 use crate::peer::{BatchFrame, BatchRequest, CheckpointWindow, PeerTransport};
 use crate::protocol::PROTOCOL_VERSION;
@@ -96,10 +97,11 @@ impl PeerTransport for CheckpointPeer {
             *remaining -= 1;
         }
         drop(budget);
-        let cursor = peryx_storage::meta::CheckpointCursor::from_token(cursor).ok_or(TransportError::Malformed)?;
+        let (generation, cursor) =
+            peryx_storage::meta::CheckpointCursor::from_generation_token(cursor).ok_or(TransportError::Malformed)?;
         let chunk = self
             .meta
-            .checkpoint_chunk(&cursor, CHUNK)
+            .checkpoint_chunk_at_generation(generation, &cursor, CHUNK)
             .map_err(|_| TransportError::Malformed)?;
         let mut bytes = chunk.bytes;
         if self.corrupt && !bytes.is_empty() {
@@ -107,7 +109,7 @@ impl PeerTransport for CheckpointPeer {
         }
         Ok(CheckpointWindow {
             bytes,
-            next: chunk.next.token(),
+            next: chunk.next.generation_token(generation),
         })
     }
 }
@@ -150,6 +152,50 @@ async fn test_a_replica_below_the_floor_installs_and_stands_at_the_manifest_seri
         replica.get_driver_value("pypi\u{0}p\u{0}hosted/pkg0000").unwrap(),
         writer.get_driver_value("pypi\u{0}p\u{0}hosted/pkg0000").unwrap()
     );
+}
+
+#[rstest]
+#[case::empty_source("", PROTOCOL_VERSION, 1, "replication page has an empty source identity")]
+#[case::wrong_source(
+    "primary-b",
+    PROTOCOL_VERSION,
+    1,
+    "replica follows source \"primary-a\", received \"primary-b\""
+)]
+#[case::protocol(
+    SOURCE,
+    PROTOCOL_VERSION + 1,
+    1,
+    "unsupported replication protocol version 2; expected 1"
+)]
+#[case::schema(SOURCE, PROTOCOL_VERSION, 2, "unsupported checkpoint schema version 2; expected 1")]
+#[tokio::test]
+async fn test_checkpoint_identity_is_verified_before_staging(
+    #[case] manifest_source: &str,
+    #[case] protocol_version: u16,
+    #[case] schema_version: u32,
+    #[case] expected: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = store(&dir, "writer.redb");
+    rows(&writer, 1);
+    writer
+        .publish_checkpoint(CheckpointIdentity {
+            source: manifest_source.to_owned(),
+            protocol_version,
+            schema_version,
+        })
+        .unwrap();
+    let replica = store(&dir, "replica.redb");
+
+    let error = Replica::new(&replica, ONE)
+        .install_checkpoint(&CheckpointPeer::serving(writer), SOURCE)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), expected);
+    assert_eq!(replica.current_serial().unwrap(), 0);
+    assert_eq!(replica.staged_checkpoint().unwrap(), None);
 }
 
 /// The serial a replica resumes from is the one it installed. A floor that advanced between the refusal
@@ -289,17 +335,18 @@ impl PeerTransport for RefusingFromScratch {
     }
 
     async fn checkpoint_chunk(&self, cursor: &str) -> Result<CheckpointWindow, TransportError> {
-        if cursor == peryx_storage::meta::CheckpointCursor::start().token() {
+        let (generation, cursor) =
+            peryx_storage::meta::CheckpointCursor::from_generation_token(cursor).ok_or(TransportError::Malformed)?;
+        if cursor == peryx_storage::meta::CheckpointCursor::start() {
             return Err(TransportError::Disconnected);
         }
-        let cursor = peryx_storage::meta::CheckpointCursor::from_token(cursor).ok_or(TransportError::Malformed)?;
         let chunk = self
             .0
-            .checkpoint_chunk(&cursor, CHUNK)
+            .checkpoint_chunk_at_generation(generation, &cursor, CHUNK)
             .map_err(|_| TransportError::Malformed)?;
         Ok(CheckpointWindow {
             bytes: chunk.bytes,
-            next: chunk.next.token(),
+            next: chunk.next.generation_token(generation),
         })
     }
 }
@@ -492,7 +539,7 @@ async fn test_a_window_that_overruns_the_manifest_drops_the_staging() {
             let manifest = self.checkpoint_manifest().await?;
             Ok(CheckpointWindow {
                 bytes: vec![0; usize::try_from(manifest.bytes).expect("a test checkpoint fits a pointer") + 1],
-                next: "done".to_owned(),
+                next: peryx_storage::meta::CheckpointCursor::Done.generation_token(manifest.generation),
             })
         }
     }
@@ -516,6 +563,7 @@ async fn test_a_window_that_overruns_the_manifest_drops_the_staging() {
 
 fn fake_manifest(bytes: u64) -> CheckpointManifest {
     CheckpointManifest {
+        generation: 1,
         identity: identity(),
         serial: 1,
         rows: 0,
@@ -550,7 +598,7 @@ impl PeerTransport for ExactByteCountPeer {
             next: peryx_storage::meta::CheckpointCursor::Rows {
                 after: Some("more".to_owned()),
             }
-            .token(),
+            .generation_token(self.manifest.generation),
         })
     }
 }
@@ -595,7 +643,7 @@ impl PeerTransport for ShortDonePeer {
         *self.calls.lock().unwrap() += 1;
         Ok(CheckpointWindow {
             bytes: vec![0; 3],
-            next: peryx_storage::meta::CheckpointCursor::Done.token(),
+            next: peryx_storage::meta::CheckpointCursor::Done.generation_token(self.manifest.generation),
         })
     }
 }

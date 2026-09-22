@@ -17,8 +17,8 @@ use crate::outbox::{self, OciMutation};
 /// The driver-KV prefix every manifest is keyed under, its digest following.
 mod descriptors;
 pub use descriptors::{
-    Descriptors, blob_digest, document_descriptors, linux_amd64_child, manifest_descriptors, referenced_blob_digests,
-    validated_descriptors,
+    Descriptors, blob_digest, checkpoint_blob_digests, document_descriptors, linux_amd64_child, manifest_descriptors,
+    referenced_blob_digests, validated_descriptors,
 };
 mod fsck;
 pub use fsck::fsck_metadata;

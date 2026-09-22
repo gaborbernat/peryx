@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroUsize};
+use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use axum::routing::get;
 use axum::{Json, Router, http::StatusCode};
+use peryx_driver::AppState;
 use peryx_ha::{ReplicaPage, ReplicaViewApplier};
+use peryx_identity::{ArtifactDigest, DigestDecision, RevocationReason, UserId};
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
 
@@ -40,6 +43,13 @@ impl ReplicaViewApplier for Views {
             .extend_from_slice(committed);
     }
 
+    fn invalidate_checkpoint(&self) {}
+
+    fn replace_checkpoint(&self, serial: u64) -> Result<(), String> {
+        self.frontier.store(serial, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn readable_frontier(&self) -> u64 {
         self.frontier.load(Ordering::Relaxed)
     }
@@ -61,6 +71,12 @@ impl ReplicaViewApplier for PausedViews {
 
     fn apply_blob_commit(&self, _committed: &[peryx_ha::BlobCommit]) {}
 
+    fn invalidate_checkpoint(&self) {}
+
+    fn replace_checkpoint(&self, _serial: u64) -> Result<(), String> {
+        Ok(())
+    }
+
     fn readable_frontier(&self) -> u64 {
         self.arrived.send(()).expect("the reader waits for the frontier read");
         self.release
@@ -68,6 +84,26 @@ impl ReplicaViewApplier for PausedViews {
             .expect("the release channel is usable")
             .recv()
             .expect("the reader releases the cycle");
+        0
+    }
+
+    fn publish_applied_frontier(&self, _serial: u64) {}
+}
+
+struct FailingCheckpointViews;
+
+impl ReplicaViewApplier for FailingCheckpointViews {
+    fn apply(&self, _page: ReplicaPage, _changed_keys: &[String]) {}
+
+    fn apply_blob_commit(&self, _committed: &[peryx_ha::BlobCommit]) {}
+
+    fn invalidate_checkpoint(&self) {}
+
+    fn replace_checkpoint(&self, _serial: u64) -> Result<(), String> {
+        Err("search unavailable".to_owned())
+    }
+
+    fn readable_frontier(&self) -> u64 {
         0
     }
 
@@ -576,9 +612,8 @@ async fn test_a_committed_blob_its_record_cannot_name_reports_no_keys() {
     );
 }
 
-/// A source that has installed a checkpoint holds no records below its serial, which is what a pruned
-/// writer will look like. A replica reading from it is refused, recovers through the checkpoint, and
-/// stands at the serial the manifest named.
+/// A replica below a pruned writer's floor recovers through its checkpoint and stands at the serial
+/// the manifest named.
 #[tokio::test]
 async fn test_a_cycle_recovers_through_a_checkpoint_when_the_source_refuses_the_cursor() {
     let source_dir = tempfile::tempdir().unwrap();
@@ -597,42 +632,158 @@ async fn test_a_cycle_recovers_through_a_checkpoint_when_the_source_refuses_the_
         schema_version: 1,
     };
     let manifest = source_meta.publish_checkpoint(identity.clone()).unwrap();
-    // The source becomes a node that installed the checkpoint, so its journal starts above the cursor
-    // a fresh replica asks from.
-    let installed_dir = tempfile::tempdir().unwrap();
-    let (installed, _installed_blobs) = stores(&installed_dir);
-    installed.begin_checkpoint_transfer(&manifest).unwrap();
-    let whole = source_meta
-        .checkpoint_chunk(&peryx_storage::meta::CheckpointCursor::start(), 1 << 20)
-        .unwrap();
-    installed
-        .stage_checkpoint_chunk(&manifest, 0, &whole.bytes, "done")
-        .unwrap()
-        .unwrap();
-    installed
-        .install_staged_checkpoint("replication\u{0}state", br#"{"source":"primary","serial":6}"#)
-        .unwrap();
-    let server = TestServer::start(primary_router("primary", TOKEN, installed, source_blobs).unwrap()).await;
+    assert_eq!(source_meta.prune_journal_batch(3).unwrap(), 3);
+    assert_eq!(source_meta.prune_journal_batch(3).unwrap(), 3);
+    let server = TestServer::start(primary_router("primary", TOKEN, source_meta, source_blobs).unwrap()).await;
 
     let target_dir = tempfile::tempdir().unwrap();
     let (meta, blobs) = stores(&target_dir);
+    let views = Arc::new(Views::default());
     let mut replica = replica(
         meta.clone(),
         blobs,
         metadata(&server.url),
         blob_transport(&server.url),
-        Arc::new(Views::default()),
+        views.clone(),
         Arc::new(ReplicaMonitor::new(0)),
     );
 
     replica.cycle().await.unwrap();
 
     assert_eq!(meta.current_serial().unwrap(), manifest.serial);
+    assert_eq!(views.readable_frontier(), manifest.serial);
+    assert!(
+        meta.checkpoint_blob_recovery_page(NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         meta.get_driver_value("pypi\u{0}p\u{0}hosted/pkg0000")
             .unwrap()
             .as_deref(),
         Some(&b"display"[..])
+    );
+}
+
+#[tokio::test]
+async fn test_a_failed_checkpoint_view_rebuild_keeps_the_recovery_marker() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let (source, _) = stores(&source_dir);
+    source
+        .commit_driver_txn(|txn| {
+            txn.put("row", b"value")?;
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    let manifest = source
+        .publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
+            source: "primary".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            schema_version: 1,
+        })
+        .unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let (meta, blobs) = stores(&target_dir);
+    meta.begin_checkpoint_transfer(&manifest).unwrap();
+    let chunk = source
+        .checkpoint_chunk(&peryx_storage::meta::CheckpointCursor::start(), usize::MAX)
+        .unwrap();
+    meta.stage_checkpoint_chunk(
+        &manifest,
+        0,
+        &chunk.bytes,
+        &chunk.next.generation_token(manifest.generation),
+    )
+    .unwrap()
+    .unwrap();
+    meta.install_staged_checkpoint("replica/state", b"state").unwrap();
+    let replica = replica(
+        meta.clone(),
+        blobs,
+        PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default()),
+        blob_transport("http://127.0.0.1:1/"),
+        Arc::new(FailingCheckpointViews),
+        Arc::new(ReplicaMonitor::new(0)),
+    );
+
+    let error = replica.pull_blobs().await.unwrap_err();
+
+    assert!(matches!(error, crate::SyncError::CheckpointView(reason) if reason == "search unavailable"));
+    assert!(
+        meta.checkpoint_blob_recovery_page(NonZeroUsize::new(1).unwrap())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_pending_checkpoint_invalidates_a_cached_clear_decision() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let (source, source_blobs) = stores(&source_dir);
+    let revoked_blob = source_blobs.put_bytes(b"revoked").await.unwrap();
+    let pending_blob = source_blobs.put_bytes(b"pending").await.unwrap();
+    source
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(revoked_blob.as_str(), 7);
+            txn.reference_blob(pending_blob.as_str(), 7);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    let digest = ArtifactDigest::from_str(&format!("sha256:{}", revoked_blob.as_str())).unwrap();
+    source
+        .put_digest_revocation(
+            &digest,
+            &RevocationReason::new("incident").unwrap(),
+            &UserId::random(),
+            1,
+        )
+        .unwrap();
+    let manifest = source
+        .publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
+            source: "primary".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            schema_version: 1,
+        })
+        .unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let (meta, blobs) = stores(&target_dir);
+    blobs.put_bytes(b"revoked").await.unwrap();
+    let state = Arc::new(AppState::new(meta.clone(), blobs.clone(), 60, Vec::new()));
+    let before = state.serving.revocations.decision(&digest).unwrap();
+    meta.begin_checkpoint_transfer(&manifest).unwrap();
+    let chunk = source
+        .checkpoint_chunk(&peryx_storage::meta::CheckpointCursor::start(), usize::MAX)
+        .unwrap();
+    meta.stage_checkpoint_chunk(
+        &manifest,
+        0,
+        &chunk.bytes,
+        &chunk.next.generation_token(manifest.generation),
+    )
+    .unwrap()
+    .unwrap();
+    meta.install_staged_checkpoint("replica/state", b"state").unwrap();
+    let replica = replica(
+        meta.clone(),
+        blobs,
+        PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default()),
+        blob_transport("http://127.0.0.1:1/"),
+        state.clone(),
+        Arc::new(ReplicaMonitor::new(0)),
+    );
+
+    let blocked = replica.pull_blobs().await.map_or(true, |report| report.pending > 0);
+
+    assert_eq!(
+        (
+            before,
+            state.serving.revocations.decision(&digest).unwrap(),
+            blocked,
+            meta.checkpoint_blob_recovery_page(NonZeroUsize::new(1).unwrap())
+                .unwrap()
+                .is_some(),
+        ),
+        (DigestDecision::Clear, DigestDecision::Revoked, true, true)
     );
 }
 

@@ -8,6 +8,7 @@ use peryx_storage::meta::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::SCHEMA_VERSION;
 use crate::error::SyncError;
 use crate::peer::PeerTransport;
 use crate::protocol::{ChangePage, MetadataMutation, PROTOCOL_VERSION, Primary};
@@ -92,6 +93,28 @@ impl<'store> Replica<'store> {
     /// Returns a transport error, a store error, or the reason the transfer failed verification.
     pub async fn install_checkpoint<T: PeerTransport>(&self, peer: &T, source: &str) -> Result<u64, SyncError> {
         let manifest = peer.checkpoint_manifest().await.map_err(SyncError::primary)?;
+        if manifest.identity.source.is_empty() {
+            return Err(SyncError::EmptySource);
+        }
+        if manifest.identity.source != source {
+            return Err(SyncError::SourceChanged {
+                expected: source.to_owned(),
+                actual: manifest.identity.source.clone(),
+            });
+        }
+        if manifest.identity.protocol_version != PROTOCOL_VERSION {
+            return Err(SyncError::UnsupportedVersion {
+                actual: manifest.identity.protocol_version,
+                expected: PROTOCOL_VERSION,
+            });
+        }
+        let schema = u32::from(SCHEMA_VERSION.0);
+        if manifest.identity.schema_version != schema {
+            return Err(SyncError::UnsupportedCheckpointSchema {
+                actual: manifest.identity.schema_version,
+                expected: schema,
+            });
+        }
         let resumed = self
             .meta
             .staged_checkpoint()?
@@ -100,7 +123,7 @@ impl<'store> Replica<'store> {
             (staged.received, staged.cursor)
         } else {
             self.meta.begin_checkpoint_transfer(&manifest)?;
-            (0, CheckpointCursor::start().token())
+            (0, CheckpointCursor::start().generation_token(manifest.generation))
         };
         self.stage_and_install(peer, &manifest, source, offset, cursor).await
     }
@@ -115,7 +138,7 @@ impl<'store> Replica<'store> {
         cursor: String,
     ) -> Result<u64, SyncError> {
         let (mut offset, mut cursor) = (offset, cursor);
-        while offset < manifest.bytes && cursor != CheckpointCursor::Done.token() {
+        while offset < manifest.bytes && cursor != CheckpointCursor::Done.generation_token(manifest.generation) {
             let window = peer.checkpoint_chunk(&cursor).await.map_err(SyncError::primary)?;
             match self
                 .meta

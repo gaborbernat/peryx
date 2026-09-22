@@ -138,6 +138,15 @@ impl RevocationService {
         drop(guard);
     }
 
+    pub fn invalidate_all(&self) {
+        let _guard = self
+            .cache_gate
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.active.store(ACTIVE_UNKNOWN, Ordering::Release);
+        self.decisions.invalidate_all();
+    }
+
     /// # Errors
     /// Returns a store error when the row cannot be read.
     pub fn inspect(&self, digest: &ArtifactDigest) -> Result<Option<DigestRevocation>, MetaError> {

@@ -1,8 +1,8 @@
 use peryx_storage::meta::{MetaStore, QuotaLimit, QuotaLimits, QuotaReservationState, QuotaUsage};
 
 use super::{
-    ManifestCheckpoint, ManifestCommit, ManifestOperation, ReserveOutcome, commit_blob_membership, finalize,
-    manifest_already_published, publish_manifest, quota_reservation, release_blob_membership, reserve,
+    BlobDescriptor, ManifestCheckpoint, ManifestCommit, ManifestOperation, ReserveOutcome, commit_blob_membership,
+    finalize, manifest_already_published, publish_manifest, quota_reservation, release_blob_membership, reserve,
 };
 use crate::name::Reference;
 use crate::registry::ServeError;
@@ -98,12 +98,27 @@ fn test_blob_commits_one_of_two_prechecked_reservations() {
         .unwrap();
     meta.begin_upload("loser", "store", "app", 2).unwrap();
 
-    commit_blob_membership(&meta, "store", "app", "sha256:a", Some(first), None, false).unwrap();
     commit_blob_membership(
         &meta,
         "store",
         "app",
-        "sha256:a",
+        BlobDescriptor {
+            digest: "sha256:a",
+            bytes: 4,
+        },
+        Some(first),
+        None,
+        false,
+    )
+    .unwrap();
+    commit_blob_membership(
+        &meta,
+        "store",
+        "app",
+        BlobDescriptor {
+            digest: "sha256:a",
+            bytes: 4,
+        },
         Some(second.clone()),
         Some("loser"),
         false,

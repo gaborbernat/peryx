@@ -393,6 +393,13 @@ impl BlobReferenceDriver for PypiServing {
     ) -> Result<std::collections::BTreeSet<String>, String> {
         crate::admin::referenced_blob_digests(meta)
     }
+
+    fn checkpoint_blob_digests(
+        &self,
+        state: &peryx_storage::meta::CheckpointState,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        crate::admin::checkpoint_blob_digests(state)
+    }
 }
 
 impl FsckDriver for PypiServing {

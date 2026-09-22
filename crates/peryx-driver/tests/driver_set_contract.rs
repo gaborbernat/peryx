@@ -25,6 +25,13 @@ impl BlobReferenceDriver for References {
     fn referenced_blob_digests(&self, _meta: &peryx_storage::meta::MetaStore) -> Result<BTreeSet<String>, String> {
         Ok(BTreeSet::from([self.digest.to_owned()]))
     }
+
+    fn checkpoint_blob_digests(
+        &self,
+        _state: &peryx_storage::meta::CheckpointState,
+    ) -> Result<BTreeSet<String>, String> {
+        Ok(BTreeSet::from([self.digest.to_owned()]))
+    }
 }
 
 impl EcosystemDriver for Driver {
@@ -55,6 +62,13 @@ impl BlobReferenceDriver for Driver {
     fn referenced_blob_digests(
         &self,
         _meta: &peryx_storage::meta::MetaStore,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        Err("blob references".to_owned())
+    }
+
+    fn checkpoint_blob_digests(
+        &self,
+        _state: &peryx_storage::meta::CheckpointState,
     ) -> Result<std::collections::BTreeSet<String>, String> {
         Err("blob references".to_owned())
     }

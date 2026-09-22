@@ -1,5 +1,6 @@
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::Context as _;
 use axum::serve::ListenerExt as _;
@@ -15,6 +16,12 @@ use crate::{app, logging, operator};
 type BoxedLayer = Box<dyn Layer<Registry> + Send + Sync>;
 const PUBLIC_LISTENER_FD_ENV: &str = "PERYX_INHERITED_PUBLIC_LISTENER_FD";
 const AVAILABILITY_LISTENER_FD_ENV: &str = "PERYX_INHERITED_AVAILABILITY_LISTENER_FD";
+const JOURNAL_RETENTION_INTERVAL: Duration = Duration::from_mins(1);
+const JOURNAL_PRUNE_BATCH: usize = 256;
+const LOCAL_CHECKPOINT_SOURCE: &str = "local";
+type CheckpointBlobScan = Arc<
+    dyn Fn(&peryx_storage::meta::CheckpointState) -> Result<std::collections::BTreeSet<String>, String> + Send + Sync,
+>;
 
 #[cfg(unix)]
 struct ShutdownSignals {
@@ -229,6 +236,7 @@ struct ProcessTasks {
     cancellation: tokio_util::sync::CancellationToken,
     webhooks: Option<peryx_events::webhook::WebhookHandle>,
     scheduler: Option<tokio::task::JoinHandle<()>>,
+    journal_retention: Option<tokio::task::JoinHandle<()>>,
     cache_warming: Vec<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
@@ -238,6 +246,7 @@ impl ProcessTasks {
             cancellation,
             webhooks: None,
             scheduler: None,
+            journal_retention: None,
             cache_warming: Vec::new(),
         }
     }
@@ -255,7 +264,10 @@ impl ProcessTasks {
 
     async fn shutdown(self) -> anyhow::Result<()> {
         let mut results = Vec::with_capacity(
-            self.cache_warming.len() + usize::from(self.scheduler.is_some()) + usize::from(self.webhooks.is_some()),
+            self.cache_warming.len()
+                + usize::from(self.scheduler.is_some())
+                + usize::from(self.journal_retention.is_some())
+                + usize::from(self.webhooks.is_some()),
         );
         if let Some(webhooks) = self.webhooks {
             let result = webhooks.shutdown().await.map_err(anyhow::Error::from);
@@ -267,6 +279,11 @@ impl ProcessTasks {
             let result = scheduler.await.context("join local scheduler");
             log_shutdown_result("local scheduler", &result);
             results.push(("local scheduler", result));
+        }
+        if let Some(retention) = self.journal_retention {
+            let result = retention.await.context("join journal retention task");
+            log_shutdown_result("journal retention", &result);
+            results.push(("journal retention", result));
         }
         for warming in self.cache_warming {
             let result = warming
@@ -437,6 +454,31 @@ fn start_process_tasks(
             tasks.cancellation.child_token(),
         )));
     }
+    if !state.serving.read_only && !is_replica {
+        let source = match config.availability.replication() {
+            Some(config::ReplicationConfig::Primary { source, .. }) => Some(source.clone()),
+            Some(config::ReplicationConfig::Replica { .. }) => None,
+            None => Some(LOCAL_CHECKPOINT_SOURCE.to_owned()),
+        };
+        if let Some(source) = source {
+            let scanners = Arc::clone(state);
+            tasks.journal_retention = Some(tokio::spawn(run_journal_retention(
+                state.serving.meta.clone(),
+                state.serving.blobs.clone(),
+                peryx_storage::meta::CheckpointIdentity {
+                    source,
+                    protocol_version: peryx_ha_distributed::PROTOCOL_VERSION,
+                    schema_version: u32::from(peryx_ha_distributed::SCHEMA_VERSION.0),
+                },
+                Arc::new(move |checkpoint| {
+                    scanners
+                        .checkpoint_blob_digests(checkpoint)
+                        .map_err(|error| error.to_string())
+                }),
+                tasks.cancellation.child_token(),
+            )));
+        }
+    }
     for index in (!state.serving.read_only && !is_replica)
         .then_some(&state.serving.indexes)
         .into_iter()
@@ -450,6 +492,75 @@ fn start_process_tasks(
             });
         }
     }
+}
+
+async fn run_journal_retention(
+    meta: peryx_storage::meta::MetaStore,
+    blobs: peryx_storage::blob::BlobStorage,
+    identity: peryx_storage::meta::CheckpointIdentity,
+    scan: CheckpointBlobScan,
+    cancellation: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        if let Err(error) = retain_journal(&meta, &blobs, &identity, &scan, &cancellation).await {
+            tracing::error!(%error, "journal retention failed");
+        }
+        tokio::select! {
+            () = tokio::time::sleep(JOURNAL_RETENTION_INTERVAL) => {}
+            () = cancellation.cancelled() => return,
+        }
+    }
+}
+
+async fn retain_journal(
+    meta: &peryx_storage::meta::MetaStore,
+    blobs: &peryx_storage::blob::BlobStorage,
+    identity: &peryx_storage::meta::CheckpointIdentity,
+    scan: &CheckpointBlobScan,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> anyhow::Result<usize> {
+    let mut supplemental = BTreeMap::new();
+    loop {
+        let store = meta.clone();
+        let checkpoint = identity.clone();
+        let scan = Arc::clone(scan);
+        let sizes = supplemental.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            store.publish_checkpoint_with_sizes(checkpoint, &sizes, |state| scan(state))
+        })
+        .await
+        .context("join checkpoint publication")?;
+        let missing = match result {
+            Ok(_) => break,
+            Err(peryx_storage::meta::MetaError::CheckpointBlobSizesMissing { digests }) => digests,
+            Err(error) => return Err(error.into()),
+        };
+        for digest in missing {
+            if cancellation.is_cancelled() {
+                return Ok(0);
+            }
+            let parsed = peryx_storage::blob::Digest::from_hex(&digest)
+                .ok_or_else(|| anyhow::anyhow!("checkpoint scanner returned invalid sha256 {digest}"))?;
+            let metadata = blobs
+                .head(&parsed)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("checkpoint blob {digest} is missing"))?;
+            supplemental.insert(digest, metadata.bytes);
+        }
+    }
+    let mut pruned = 0;
+    while !cancellation.is_cancelled() {
+        let store = meta.clone();
+        let batch = tokio::task::spawn_blocking(move || store.prune_journal_batch(JOURNAL_PRUNE_BATCH))
+            .await
+            .context("join journal prune")??;
+        pruned += batch;
+        if batch < JOURNAL_PRUNE_BATCH {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(pruned)
 }
 
 type ShutdownFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;

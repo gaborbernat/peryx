@@ -4,7 +4,7 @@ use std::convert::Infallible;
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{Policy, PolicyConfig};
 use peryx_storage::blob::{BlobStorage, BlobStore, Digest};
-use peryx_storage::meta::{MetaError, MetaScanError, MetaStore};
+use peryx_storage::meta::{DriverMutation, MetaError, MetaScanError, MetaStore};
 use rstest::rstest;
 
 use super::*;
@@ -201,6 +201,49 @@ fn test_referenced_blob_digests_rejects_a_corrupt_file_url_record() {
     meta.put_driver_value("pypi\u{0}f\u{0}pypi/flask/not-hex", b"https://files/x\npypi")
         .unwrap();
     assert!(referenced_blob_digests(&meta).is_err());
+}
+
+#[test]
+fn test_checkpoint_blob_digests_reads_the_folded_rows() {
+    let mut state = CheckpointState::default();
+    state
+        .apply(
+            vec![
+                DriverMutation::Put {
+                    key: format!("pypi\0f\0pypi/flask/{DIGEST_A}"),
+                    value: b"https://files/flask.whl\npypi".to_vec(),
+                },
+                DriverMutation::Put {
+                    key: format!("pypi\0d\0{DIGEST_A}"),
+                    value: DIGEST_B.as_bytes().to_vec(),
+                },
+            ],
+            Vec::new(),
+            b"{}",
+        )
+        .unwrap();
+
+    assert_eq!(
+        checkpoint_blob_digests(&state).unwrap(),
+        std::collections::BTreeSet::from([DIGEST_A.to_owned(), DIGEST_B.to_owned()])
+    );
+}
+
+#[test]
+fn test_checkpoint_blob_digests_rejects_a_corrupt_folded_row() {
+    let mut state = CheckpointState::default();
+    state
+        .apply(
+            vec![DriverMutation::Put {
+                key: "pypi\0f\0invalid".to_owned(),
+                value: b"invalid".to_vec(),
+            }],
+            Vec::new(),
+            b"{}",
+        )
+        .unwrap();
+
+    assert!(checkpoint_blob_digests(&state).is_err());
 }
 
 #[test]

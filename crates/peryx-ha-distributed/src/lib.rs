@@ -114,8 +114,9 @@ pub use blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 pub use blob_http::{HttpBlobError, HttpBlobTransport};
 pub use blob_placement::{FetchPlan, plan_blob_fetch};
 pub use blob_plane::{
-    BLOB_VIEW, BlobPlaneReport, BlobSources, PeerBlobEvidence, advance_blob_frontier,
-    advance_blob_frontier_with_evidence, pull_outstanding, pull_outstanding_with_evidence, pull_referenced,
+    BLOB_VIEW, BlobPlaneReport, BlobSources, CheckpointBlobRecovery, PeerBlobEvidence, advance_blob_frontier,
+    advance_blob_frontier_with_evidence, pull_checkpoint_blobs, pull_outstanding, pull_outstanding_with_evidence,
+    pull_referenced,
 };
 pub use blob_pull::{ChunkFailure, ChunkUnavailable, chunk_ranges};
 pub use blob_routing::RoutingBlobTransport;

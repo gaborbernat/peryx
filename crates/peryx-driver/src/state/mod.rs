@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 
 mod app;
 mod build;
@@ -68,6 +70,25 @@ impl peryx_ha::ReplicaViewApplier for AppState {
         if let Some(block) = self.retire_views(&keys, unnamed) {
             tracing::warn!(view = %block.view, "replica view rebuild blocked after a blob commit");
         }
+    }
+
+    fn invalidate_checkpoint(&self) {
+        self.serving.cache.invalidate_all();
+        self.serving.revocations.invalidate_all();
+        self.serving.bump_search_epoch();
+    }
+
+    fn replace_checkpoint(&self, serial: u64) -> Result<(), String> {
+        self.serving
+            .search
+            .rebuild(
+                &self.serving.indexer_ctx(),
+                NonZeroUsize::new(crate::jobs::DEFAULT_SEARCH_REBUILD_CHUNK).expect("rebuild chunk is non-zero"),
+                &mut |_| ControlFlow::Continue(()),
+            )
+            .map_err(|error| error.to_string())?;
+        self.publish_applied_frontier(serial);
+        Ok(())
     }
 
     fn readable_frontier(&self) -> u64 {

@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use crate::meta::{DriverMutation, JournalRecord, MetaError, MetaStore};
+use crate::meta::{CheckpointIdentity, CheckpointManifest, DriverMutation, JournalRecord, MetaError, MetaStore};
 
 use super::store;
 
@@ -226,6 +226,76 @@ fn test_journal_snapshot_honors_a_zero_limit() {
     let snapshot = store.journal_snapshot(0, 0).unwrap();
     assert_eq!(snapshot.current_serial, 1);
     assert!(snapshot.records.is_empty());
+}
+
+#[test]
+fn test_checkpoint_publication_advances_the_floor_before_bounded_pruning() {
+    let (_dir, store) = journaled(&[b"one", b"two", b"three"]);
+
+    let manifest = store
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-a".to_owned(),
+            protocol_version: 1,
+            schema_version: 1,
+        })
+        .unwrap();
+
+    assert_eq!((manifest.serial, store.journal_floor().unwrap()), (3, Some(4)));
+    assert_eq!(store.prune_journal_batch(2).unwrap(), 2);
+    assert_eq!(store.journal_after(0, 10).unwrap(), vec![record(3, b"three")],);
+    assert_eq!(store.prune_journal_batch(2).unwrap(), 1);
+    assert!(store.journal_after(0, 10).unwrap().is_empty());
+    assert_eq!(store.prune_journal_batch(2).unwrap(), 0);
+}
+
+#[test]
+fn test_zero_prune_budget_changes_nothing() {
+    let (_dir, store) = journaled(&[b"one"]);
+    store
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-a".to_owned(),
+            protocol_version: 1,
+            schema_version: 1,
+        })
+        .unwrap();
+
+    assert_eq!(store.prune_journal_batch(0).unwrap(), 0);
+    assert_eq!(store.journal_after(0, 10).unwrap(), vec![record(1, b"one")]);
+}
+
+#[test]
+fn test_opening_an_older_checkpoint_initializes_its_retained_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    let database = redb::Database::create(&path).unwrap();
+    let write = database.begin_write().unwrap();
+    write
+        .open_table(redb::TableDefinition::<&str, &[u8]>::new("checkpoint_meta"))
+        .unwrap()
+        .insert(
+            "manifest",
+            serde_json::to_vec(&CheckpointManifest {
+                generation: 1,
+                identity: CheckpointIdentity {
+                    source: "primary-a".to_owned(),
+                    protocol_version: 1,
+                    schema_version: 1,
+                },
+                serial: 41,
+                rows: 0,
+                revocations: 0,
+                blobs: 0,
+                bytes: 0,
+                digest: String::new(),
+            })
+            .unwrap()
+            .as_slice(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+    drop(database);
+
+    assert_eq!(MetaStore::open(path).unwrap().journal_floor().unwrap(), Some(42));
 }
 
 #[test]

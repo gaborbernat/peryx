@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rstest::rstest;
 
@@ -151,6 +151,117 @@ async fn test_start_process_tasks_warms_the_cache_only_when_writable_and_primary
         );
         tasks.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn test_start_process_tasks_retains_journal_only_when_writable_and_not_a_replica() {
+    let directory = tempfile::tempdir().unwrap();
+    let plugins = plugins();
+    for (read_only, is_replica, expected) in [(false, false, true), (true, false, false), (false, true, false)] {
+        let mut config = local_config(&directory, &plugins);
+        config.read_only = read_only;
+        let active = crate::server::activate_plugins(&config, &plugins).unwrap();
+        let state = crate::server::build_state_with_active_plugins(&config, &active).unwrap();
+        let mut tasks = ProcessTasks::new(tokio_util::sync::CancellationToken::new());
+
+        start_process_tasks(&config, &state, is_replica, &mut tasks);
+
+        assert_eq!(
+            tasks.journal_retention.is_some(),
+            expected,
+            "read_only={read_only} is_replica={is_replica}"
+        );
+        tasks.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_journal_retention_publishes_then_prunes_every_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(directory.path().join("meta.redb")).unwrap();
+    let blobs = peryx_storage::blob::BlobStorage::filesystem(directory.path().join("blobs"));
+    meta.commit_driver_txn(|_| {
+        Ok::<_, peryx_storage::meta::MetaError>((
+            (),
+            (0..=JOURNAL_PRUNE_BATCH)
+                .map(|serial| serial.to_string().into_bytes())
+                .collect(),
+        ))
+    })
+    .unwrap();
+    let identity = peryx_storage::meta::CheckpointIdentity {
+        source: "primary-a".to_owned(),
+        protocol_version: peryx_ha_distributed::PROTOCOL_VERSION,
+        schema_version: u32::from(peryx_ha_distributed::SCHEMA_VERSION.0),
+    };
+
+    let scan: CheckpointBlobScan = Arc::new(|state| Ok(state.blobs().iter().map(|blob| blob.sha256.clone()).collect()));
+    let pruned = retain_journal(
+        &meta,
+        &blobs,
+        &identity,
+        &scan,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let expected_serial = u64::try_from(JOURNAL_PRUNE_BATCH).unwrap() + 1;
+
+    assert_eq!(pruned, JOURNAL_PRUNE_BATCH + 1);
+    assert!(meta.journal_after(0, 10).unwrap().is_empty());
+    assert_eq!(meta.journal_floor().unwrap(), Some(expected_serial + 1));
+    let checkpoint = meta.checkpoint_manifest().unwrap().unwrap();
+    assert_eq!(checkpoint.serial, expected_serial);
+    assert_eq!(
+        retain_journal(
+            &meta,
+            &blobs,
+            &identity,
+            &scan,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(meta.checkpoint_manifest().unwrap(), Some(checkpoint));
+}
+
+#[tokio::test]
+async fn test_journal_retention_resolves_a_legacy_blob_size() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(directory.path().join("meta.redb")).unwrap();
+    let blobs = peryx_storage::blob::BlobStorage::filesystem(directory.path().join("blobs"));
+    let digest = blobs.put_bytes(b"legacy").await.unwrap();
+    meta.commit_driver_txn(|txn| {
+        txn.put("oci\u{0}bm\u{0}store\u{0}app\u{0}legacy", b"")?;
+        Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+    })
+    .unwrap();
+    let expected = digest.as_str().to_owned();
+    let scan: CheckpointBlobScan = Arc::new(move |_| Ok(BTreeSet::from([expected.clone()])));
+
+    retain_journal(
+        &meta,
+        &blobs,
+        &peryx_storage::meta::CheckpointIdentity {
+            source: "local".to_owned(),
+            protocol_version: peryx_ha_distributed::PROTOCOL_VERSION,
+            schema_version: u32::from(peryx_ha_distributed::SCHEMA_VERSION.0),
+        },
+        &scan,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        meta.checkpoint().unwrap().unwrap().state.blobs(),
+        &BTreeSet::from([peryx_storage::meta::DriverBlobReference {
+            sha256: digest.as_str().to_owned(),
+            size: 6,
+        }])
+    );
 }
 
 /// The file sink's directory is whatever the configured path's parent is, as long as that parent

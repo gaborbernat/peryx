@@ -32,6 +32,48 @@ pub struct BlobPlaneReport {
     pub pending: usize,
 }
 
+pub struct CheckpointBlobRecovery {
+    pub report: BlobPlaneReport,
+    pub complete: bool,
+    pub after: String,
+    pub serial: u64,
+}
+
+/// Recovers one bounded page of an installed checkpoint before the journal tail is eligible.
+///
+/// # Errors
+/// Returns a malformed digest, fetch, blob, placement, or store error.
+pub async fn pull_checkpoint_blobs<T: BlobTransport>(
+    transport: &T,
+    blobs: &BlobStorage,
+    meta: &MetaStore,
+    batch: NonZeroUsize,
+    concurrency: NonZeroUsize,
+) -> Result<Option<CheckpointBlobRecovery>, SyncError> {
+    let Some(page) = meta.checkpoint_blob_recovery_page(batch)? else {
+        return Ok(None);
+    };
+    let referenced = page
+        .references
+        .iter()
+        .map(|reference| {
+            Digest::from_hex(&reference.sha256)
+                .map(|digest| (digest, reference.size))
+                .ok_or_else(|| SyncError::InvalidDigest(reference.sha256.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let report = pull_referenced(transport, blobs, meta, &referenced, concurrency).await?;
+    if report.pending == 0 && page.next.is_some() {
+        meta.advance_checkpoint_blob_recovery(&page.after, page.next.as_deref(), BLOB_VIEW, page.serial)?;
+    }
+    Ok(Some(CheckpointBlobRecovery {
+        complete: report.pending == 0 && page.next.is_none(),
+        report,
+        after: page.after,
+        serial: page.serial,
+    }))
+}
+
 /// Repairs placement records after an interrupted commit and fetches missing blobs.
 ///
 /// Retryable losses remain [pending](BlobPlaneReport::pending); terminal losses fail the pass.

@@ -13,12 +13,13 @@ use bytes::Bytes;
 use peryx_ha::{ArtifactSource, BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId};
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, ChunkedDigest, Digest};
-use peryx_storage::meta::{DriverBlobReference, JournalEntry, MetaStore};
+use peryx_storage::meta::{CheckpointCursor, CheckpointIdentity, DriverBlobReference, JournalEntry, MetaStore};
 
 use crate::blob::{BlobRequest, BlobTransport, CapacityLimited, LoopbackBlobSource};
 use crate::blob_http::HttpBlobTransport;
 use crate::blob_plane::{
-    BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_outstanding, pull_referenced,
+    BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_checkpoint_blobs, pull_outstanding,
+    pull_referenced,
 };
 use crate::error::SyncError;
 use crate::peer::{TransferLimits, TransportError};
@@ -146,6 +147,49 @@ async fn test_pull_referenced_fetches_absent_blobs_over_http_and_marks_them_loca
     assert!(blobs.verify(&digest).await.unwrap());
     let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
     assert!(placement.availability.is_local());
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_fetches_blobs_before_advancing_its_frontier() {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let bytes = b"checkpoint artifact";
+    let digest = Digest::of(bytes);
+    writer
+        .commit_driver_txn(|txn| {
+            txn.put("artifact/live", b"one")?;
+            txn.reference_blob(digest.as_str(), bytes.len() as u64);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    let manifest = writer
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-a".to_owned(),
+            protocol_version: crate::PROTOCOL_VERSION,
+            schema_version: u32::from(crate::SCHEMA_VERSION.0),
+        })
+        .unwrap();
+    meta.begin_checkpoint_transfer(&manifest).unwrap();
+    let chunk = writer.checkpoint_chunk(&CheckpointCursor::start(), 1 << 20).unwrap();
+    meta.stage_checkpoint_chunk(&manifest, 0, &chunk.bytes, &chunk.next.token())
+        .unwrap()
+        .unwrap();
+    meta.install_staged_checkpoint("replica/state", b"state").unwrap();
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(manifest.serial - 1));
+
+    let recovered = pull_checkpoint_blobs(&loopback(&digest, bytes), &blobs, &meta, nz(1), nz(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(recovered.complete);
+    assert_eq!(recovered.report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(manifest.serial - 1));
+    meta.advance_checkpoint_blob_recovery(&recovered.after, None, BLOB_VIEW, recovered.serial)
+        .unwrap();
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(manifest.serial));
 }
 
 #[tokio::test]

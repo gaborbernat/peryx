@@ -659,7 +659,10 @@ pub(super) async fn commit_blob(context: BlobCommitContext<'_>, pending: BlobWri
                     &state.meta,
                     &index.name,
                     repo,
-                    digest,
+                    crate::quota::BlobDescriptor {
+                        digest,
+                        bytes: receipt.size,
+                    },
                     reservation.clone(),
                     None,
                     journal,
@@ -789,7 +792,10 @@ pub(super) async fn commit_staged_upload(
                     &state.meta,
                     &index.name,
                     repo,
-                    digest,
+                    crate::quota::BlobDescriptor {
+                        digest,
+                        bytes: receipt.size,
+                    },
                     reservation.clone(),
                     Some(session),
                     journal,

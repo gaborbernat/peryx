@@ -63,6 +63,14 @@ pub enum MetaError {
     },
     #[error("blob {digest} is being reclaimed; publish the reference again once its deletion finishes")]
     BlobReclaiming { digest: String },
+    #[error("checkpoint generation {requested} is stale; current generation is {current}")]
+    StaleCheckpointGeneration { requested: u64, current: u64 },
+    #[error("checkpoint generation {generation} exceeded its transfer lifetime")]
+    CheckpointGenerationExpired { generation: u64 },
+    #[error("checkpoint blob references are invalid: {0}")]
+    CheckpointReferences(String),
+    #[error("checkpoint blob sizes are missing for {digests:?}")]
+    CheckpointBlobSizesMissing { digests: Vec<String> },
 }
 
 impl MetaError {

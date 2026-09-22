@@ -158,6 +158,28 @@ impl DriverSet {
         })
     }
 
+    /// # Errors
+    /// Returns the first ecosystem scanner error.
+    pub fn checkpoint_blob_digests(
+        &self,
+        state: &peryx_storage::meta::CheckpointState,
+    ) -> Result<BTreeSet<String>, BlobReferenceScanError> {
+        let mut drivers = self.blob_references.iter().collect::<Vec<_>>();
+        drivers.sort_unstable_by_key(|(ecosystem, _)| ecosystem.as_str());
+        let mut digests = BTreeSet::new();
+        for (ecosystem, driver) in drivers {
+            digests.extend(
+                driver
+                    .checkpoint_blob_digests(state)
+                    .map_err(|reason| BlobReferenceScanError::Driver {
+                        ecosystem: ecosystem.clone(),
+                        reason,
+                    })?,
+            );
+        }
+        Ok(digests)
+    }
+
     pub fn trash_drivers(&self) -> impl Iterator<Item = (&Ecosystem, &Arc<dyn TrashDriver>)> {
         self.trash.iter()
     }

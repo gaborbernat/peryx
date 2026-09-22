@@ -33,6 +33,14 @@ impl BlobReferenceDriver for References {
             Ok(BTreeSet::from(["base".to_owned()]))
         }
     }
+
+    fn checkpoint_blob_digests(&self, _: &peryx_storage::meta::CheckpointState) -> Result<BTreeSet<String>, String> {
+        if matches!(self.blobs, Capability::Failing) {
+            Err("references unavailable".to_owned())
+        } else {
+            Ok(BTreeSet::from(["base".to_owned()]))
+        }
+    }
 }
 
 impl TrashDriver for References {

@@ -263,7 +263,7 @@ async fn mount_blob(state: &ServingState, request: MountRequest<'_>) -> Result<R
             &state.meta,
             &index.name,
             repo,
-            mount,
+            crate::quota::BlobDescriptor { digest: mount, bytes },
             reservation.clone(),
             None,
             journal,

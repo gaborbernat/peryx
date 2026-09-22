@@ -163,11 +163,17 @@ fn describe(violations: &[QuotaLimit]) -> String {
 /// Reports the journal serial the membership committed at, which the write's acknowledgement waits on
 /// as its metadata evidence. A membership that journaled nothing - a re-push of a digest this
 /// repository already serves - reports `None`, leaving only the byte dimension to prove.
+#[derive(Clone, Copy)]
+pub struct BlobDescriptor<'a> {
+    pub digest: &'a str,
+    pub bytes: u64,
+}
+
 pub fn commit_blob_membership(
     meta: &MetaStore,
     index: &str,
     repo: &str,
-    digest: &str,
+    blob: BlobDescriptor<'_>,
     reservation: Option<QuotaReservationRecord>,
     session: Option<&str>,
     journal: crate::outbox::Outbox,
@@ -178,11 +184,14 @@ pub fn commit_blob_membership(
         session,
         |inserted| *inserted,
         |txn| {
-            let inserted = txn.upsert(&store::blob_membership_key(index, repo, digest), &[])?;
+            let inserted = txn.upsert(&store::blob_membership_key(index, repo, blob.digest), &[])?;
+            if inserted && let Some(storage) = store::blob_digest(blob.digest) {
+                txn.reference_blob(storage.as_str(), blob.bytes);
+            }
             let entries = crate::outbox::record(journal, || crate::outbox::OciMutation::MountBlob {
                 index: index.to_owned(),
                 repo: repo.to_owned(),
-                digest: digest.to_owned(),
+                digest: blob.digest.to_owned(),
             });
             Ok((inserted, entries))
         },

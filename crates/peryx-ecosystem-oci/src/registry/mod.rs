@@ -422,6 +422,13 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> BlobReferenceDriver for O
     ) -> Result<std::collections::BTreeSet<String>, String> {
         Ok(crate::referenced_blob_digests(meta).map_err(ServeError::from)?)
     }
+
+    fn checkpoint_blob_digests(
+        &self,
+        state: &peryx_storage::meta::CheckpointState,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        Ok(crate::checkpoint_blob_digests(state))
+    }
 }
 
 impl<S: BuildHasher + Default + Send + Sync + 'static> FsckDriver for OciRegistryWithHasher<S> {

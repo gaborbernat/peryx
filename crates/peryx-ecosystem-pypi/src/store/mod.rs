@@ -91,22 +91,22 @@ const FRESHNESS_PREFIX: &str = "pypi\u{0}h\u{0}";
 /// correct about a different upstream. Keying by digest alone made the last writer decide whose
 /// upstream and whose credentials every cold download used. The artifact blob itself still
 /// deduplicates by verified digest, because the bytes really are shared.
-const FILE_PREFIX: &str = "pypi\u{0}f\u{0}";
+pub(crate) const FILE_PREFIX: &str = "pypi\u{0}f\u{0}";
 /// Metadata peryx derived from an artifact's own verified bytes - extracted from the archive, or
 /// uploaded alongside it - keyed by artifact digest. The bytes are a function of the digest, so this
 /// record is immutable and every publication of that digest shares it.
-const METADATA_PREFIX: &str = "pypi\u{0}d\u{0}";
+pub(crate) const METADATA_PREFIX: &str = "pypi\u{0}d\u{0}";
 /// One cached index's publication of one file, keyed by `{index}/{normalized}/{sha256}/{filename}`,
 /// holding the PEP 658 sidecar that publication advertised (empty when it advertised none). A claim
 /// is scoped this way because it is the publisher's word about its own URL, not a property of the
 /// artifact bytes: two indexes serving the same wheel must not inherit each other's sidecar.
-const PUBLICATION_PREFIX: &str = "pypi\u{0}n\u{0}";
+pub(crate) const PUBLICATION_PREFIX: &str = "pypi\u{0}n\u{0}";
 /// One hosted publication's PEP 740 provenance bundle, keyed by
 /// `{index}/{normalized}/{sha256}/{filename}`, holding the bundle blob's digest and byte length.
 /// A bundle is what one publisher attested about its own release, not a property of the artifact
 /// bytes, so two hosted indexes carrying the same wheel keep separate bundles; the blob store
 /// deduplicates the bytes underneath when they happen to be identical.
-const PROVENANCE_PREFIX: &str = "pypi\u{0}a\u{0}";
+pub(crate) const PROVENANCE_PREFIX: &str = "pypi\u{0}a\u{0}";
 /// Mutable provenance objects advertised by upstream indexes, keyed by source, artifact digest,
 /// filename, and owning project.
 const UPSTREAM_ATTESTATION_PREFIX: &str = "pypi\u{0}t\u{0}";
@@ -131,7 +131,7 @@ const PROJECT_STATUS_PREFIX: &str = "pypi\u{0}s\u{0}";
 /// those rows so the root list stops naming the project until a `200` republishes it.
 const RETIRED_PREFIX: &str = "pypi\u{0}x\u{0}";
 /// The former `uploads` table: hosted file records, keyed by `{index}/{normalized}/{filename}`.
-const UPLOAD_PREFIX: &str = "pypi\u{0}u\u{0}";
+pub(crate) const UPLOAD_PREFIX: &str = "pypi\u{0}u\u{0}";
 /// Release-wide import declaration constraints, keyed by `{index}/{normalized}/{canonical version}`.
 const RELEASE_IMPORTS_PREFIX: &str = "pypi\u{0}q\u{0}";
 /// Marks hosted projects whose existing upload rows have been projected into release constraints.

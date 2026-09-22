@@ -456,6 +456,30 @@ async fn test_a_writer_that_retains_its_whole_journal_never_answers_below_the_fl
 }
 
 #[tokio::test]
+async fn test_an_interrupted_prune_exposes_neither_the_removed_prefix_nor_a_false_gap() {
+    let (_dir, meta) = journaled(&[b"one", b"two", b"three"]);
+    meta.publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
+        source: "primary-a".to_owned(),
+        protocol_version: PROTOCOL_VERSION,
+        schema_version: 1,
+    })
+    .unwrap();
+    assert_eq!(meta.prune_journal_batch(2).unwrap(), 2);
+
+    let below = served(build_change_page(&meta, "primary-a", 0, 10, &ScanCancellation::new())).await;
+    let retained = served(build_change_page(&meta, "primary-a", 3, 10, &ScanCancellation::new())).await;
+
+    assert_eq!(below.0, StatusCode::GONE);
+    assert_eq!(retained.0, StatusCode::OK);
+    assert!(
+        serde_json::from_slice::<ChangePage>(&retained.1)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn test_the_primary_handler_answers_below_the_floor() {
     let dir = tempfile::tempdir().unwrap();
     let router = primary_router_with_limits(
@@ -532,7 +556,7 @@ async fn test_a_checkpoint_window_is_refused_while_every_build_slot_is_taken() {
     let saturated = SaturatedPages::start(&pages, 1).await;
 
     let response = router
-        .oneshot(authenticated("/+replication/v1/checkpoint/chunk"))
+        .oneshot(authenticated("/+replication/v1/checkpoint/chunk?cursor=g1:r"))
         .await
         .unwrap();
     let status = response.status();

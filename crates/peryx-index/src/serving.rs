@@ -178,6 +178,11 @@ impl ResourceTickets {
             self.charged_bytes -= usize::try_from(resource_ticket_weight(&key)).unwrap();
         }
     }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.charged_bytes = 0;
+    }
 }
 
 pub struct ServingCache {
@@ -287,6 +292,14 @@ impl ServingCache {
             .lock()
             .expect("resource ticket lock")
             .invalidate(&format!("{route}\u{0}{resource}"));
+    }
+
+    /// # Panics
+    /// Panics if the resource ticket mutex was poisoned.
+    pub fn invalidate_all(&self) {
+        self.hot.invalidate_all();
+        self.negative.invalidate_all();
+        self.resource_tickets.lock().expect("resource ticket lock").clear();
     }
 }
 

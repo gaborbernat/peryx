@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use peryx_storage::blob::BlobStorage;
-use peryx_storage::meta::{CheckpointIdentity, MetaStore};
+use peryx_storage::meta::{CheckpointCursor, CheckpointIdentity, MetaStore};
 
 use crate::peer::{BatchRequest, PeerTransport, TransferLimits};
 use crate::protocol::PROTOCOL_VERSION;
@@ -62,9 +62,9 @@ async fn test_the_endpoints_carry_a_whole_checkpoint_to_the_transport_that_reads
     let (_server, peer) = served(&dir, writer.clone()).await;
 
     assert_eq!(peer.checkpoint_manifest().await.unwrap(), manifest);
-    let mut cursor = "r".to_owned();
+    let mut cursor = CheckpointCursor::start().generation_token(manifest.generation);
     let mut received = Vec::new();
-    while cursor != "done" {
+    while cursor != CheckpointCursor::Done.generation_token(manifest.generation) {
         let window = peer.checkpoint_chunk(&cursor).await.unwrap();
         received.extend_from_slice(&window.bytes);
         cursor = window.next;
@@ -113,7 +113,10 @@ async fn test_the_checkpoint_endpoints_refuse_an_unauthenticated_reader() {
     let (server, _peer) = served(&dir, writer.clone()).await;
 
     let client = reqwest::Client::new();
-    for path in ["+replication/v1/checkpoint", "+replication/v1/checkpoint/chunk"] {
+    for path in [
+        "+replication/v1/checkpoint",
+        "+replication/v1/checkpoint/chunk?cursor=g1:r",
+    ] {
         let response = client.get(format!("{}{path}", server.url)).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
     }
@@ -164,9 +167,9 @@ async fn test_a_window_from_a_writer_with_nothing_published_is_an_empty_transfer
     rows(&writer, 2);
     let (_server, peer) = served(&dir, writer.clone()).await;
 
-    let window = peer.checkpoint_chunk("r").await.unwrap();
+    let window = peer.checkpoint_chunk("g0:r").await.unwrap();
 
-    assert_eq!((window.bytes, window.next), (Vec::new(), "done".to_owned()));
+    assert_eq!((window.bytes, window.next), (Vec::new(), "g0:done".to_owned()));
 }
 
 /// A store that has published a checkpoint and whose next read fails, so both endpoints answer the
@@ -186,7 +189,10 @@ async fn test_a_store_that_cannot_be_read_fails_both_checkpoint_endpoints() {
     let (server, _peer) = served(&dir, failing_after_publish()).await;
 
     let client = reqwest::Client::new();
-    for path in ["+replication/v1/checkpoint", "+replication/v1/checkpoint/chunk"] {
+    for path in [
+        "+replication/v1/checkpoint",
+        "+replication/v1/checkpoint/chunk?cursor=g1:r",
+    ] {
         let response = client
             .get(format!("{}{path}", server.url))
             .bearer_auth(TOKEN)

@@ -31,6 +31,13 @@ impl ReplicaViewApplier for Views {
         );
     }
 
+    fn invalidate_checkpoint(&self) {}
+
+    fn replace_checkpoint(&self, serial: u64) -> Result<(), String> {
+        self.frontier.store(serial, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn readable_frontier(&self) -> u64 {
         self.frontier.load(Ordering::Relaxed)
     }

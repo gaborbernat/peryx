@@ -98,7 +98,7 @@ impl RaftStartup {
         {
             Ok(node) => Ok(StartedRaft::new(node, self.executor)),
             Err(error) => {
-                self.executor.shutdown();
+                drop(self.executor);
                 Err(error)
             }
         }
@@ -126,12 +126,6 @@ impl RaftExecutor {
         if let Some((cancellation, _)) = &self.state {
             cancellation.cancel();
         }
-    }
-
-    pub(crate) fn shutdown(mut self) {
-        let (cancellation, thread) = self.state.take().expect("raft executor exists until shutdown");
-        cancellation.cancel();
-        spawn_raft_reaper(thread);
     }
 
     pub(crate) fn shutdown_and_join(mut self) -> anyhow::Result<()> {

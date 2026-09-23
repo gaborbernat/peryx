@@ -1252,6 +1252,53 @@ async fn test_idle_tag_page_sweep_drops_invalid_and_oversized_rows() {
     );
 }
 
+#[rstest]
+#[case::empty_index("oci\0tp\0\0app\0n=1&last=a")]
+#[case::empty_repo("oci\0tp\0hub\0\0n=1&last=a")]
+#[tokio::test]
+async fn test_idle_tag_page_sweep_drops_a_row_with_an_empty_key_field(#[case] key: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let body = br#"{"name":"app","tags":[]}"#;
+    state
+        .serving
+        .meta
+        .put_driver_value(
+            key,
+            &[&1_000i64.to_be_bytes()[..], &0u32.to_be_bytes()[..], body].concat(),
+        )
+        .unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 1);
+    assert!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_idle_tag_page_sweep_keeps_a_body_of_exactly_the_tags_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&dir, "http://127.0.0.1:1/", false);
+    let prefix = r#"{"name":"app","tags":[],"pad":""#;
+    let suffix = "\"}";
+    let padding = 4 * 1024 * 1024 - prefix.len() - suffix.len();
+    let body = format!("{prefix}{}{suffix}", "x".repeat(padding));
+    store::set_tag_page(
+        &state.serving.meta,
+        "hub",
+        "app",
+        "n=1&last=a",
+        1_000,
+        None,
+        body.as_bytes(),
+    )
+    .unwrap();
+
+    assert_eq!(reclaim_idle(&state).await, 0);
+    assert_eq!(
+        state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap(),
+        vec!["oci\0tp\0hub\0app\0n=1&last=a".to_owned()]
+    );
+}
+
 #[tokio::test]
 async fn test_idle_tag_page_sweep_enforces_the_row_cap() {
     let dir = tempfile::tempdir().unwrap();

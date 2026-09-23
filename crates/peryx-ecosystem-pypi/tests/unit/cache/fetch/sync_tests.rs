@@ -732,6 +732,16 @@ fn test_file_batcher_admits_exactly_max_files_before_refusing_the_next() {
     assert_eq!(admitted, 2);
 }
 
+fn project_file_rows(meta: &MetaStore) -> usize {
+    let mut rows = 0;
+    meta.scan_project_file_records(|_, _| {
+        rows += 1;
+        Ok::<_, std::convert::Infallible>(())
+    })
+    .unwrap();
+    rows
+}
+
 /// Files wait in the batch until it fills, so a sync writes one transaction per batch rather than one
 /// per file.
 #[test]
@@ -743,14 +753,9 @@ fn test_file_batcher_holds_files_until_the_batch_fills() {
 
     batcher.file(file("a.whl", &"a".repeat(64))).unwrap();
 
-    let mut written = 0;
-    meta.scan_project_file_records(|_, _| {
-        written += 1;
-        Ok::<_, std::convert::Infallible>(())
-    })
-    .unwrap();
-    assert_eq!(written, 0);
-    assert_eq!(batcher.finish().unwrap(), 1);
+    assert_eq!(project_file_rows(&meta), 0);
+    batcher.finish().unwrap();
+    assert_eq!(project_file_rows(&meta), 1);
 }
 
 #[test]

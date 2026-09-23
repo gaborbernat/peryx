@@ -1335,6 +1335,38 @@ async fn test_artifact_placement_repair_persists_a_node_local_run() {
     );
 }
 
+/// The report sums the content page and the placement page. Two new blobs fill the content page and a
+/// local placement whose blob is gone gives the placement page a demotion, so each page contributes a
+/// different count and a report taking either page alone, or combining them any other way, is off.
+#[tokio::test]
+async fn test_artifact_placement_repair_reports_both_pages() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStore::new(directory.path().join("blobs"));
+    let state = AppState::with_clock(meta, blobs, 60, Vec::new(), Arc::new(|| 1_000)).serving;
+    for body in [b"first".as_slice(), b"second"] {
+        state.blobs.put_bytes(body).await.unwrap();
+    }
+    state
+        .meta
+        .put_artifact_placement(
+            &"a".repeat(64),
+            &peryx_ha::ArtifactPlacement::record(peryx_ha::ArtifactSource::Hosted, true),
+        )
+        .unwrap();
+    let job = ArtifactPlacementRepairJob::new(8);
+
+    assert_eq!(
+        job.run(&context(state, CancellationToken::new())).await.unwrap(),
+        JobRunOutcome::succeeded(JobReport {
+            processed: 5,
+            changed: 3,
+            ..JobReport::default()
+        })
+    );
+    assert_eq!(job.kind(), "artifact_placement_repair");
+}
+
 struct BareJob {
     scope: String,
 }

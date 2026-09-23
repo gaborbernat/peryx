@@ -281,6 +281,46 @@ async fn test_repair_resets_a_rejected_s3_cursor_for_the_next_run() {
 }
 
 #[tokio::test]
+async fn test_repair_restarts_the_s3_content_scan_when_the_prefix_changes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .and(query_param("prefix", "cache/sha256/"))
+        .and(query_param_is_missing("continuation-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>cache-page</NextContinuationToken><Contents><Key>cache/sha256/not-a-digest</Key></Contents></ListBucketResult>",
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("list-type", "2"))
+        .and(query_param("prefix", "moved/sha256/"))
+        .and(query_param_is_missing("continuation-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+            "application/xml",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let staging = tempfile::tempdir().unwrap();
+
+    assert_child_succeeded(
+        &child(
+            &server.uri(),
+            staging.path(),
+            "wire_repair_backend_switch",
+            ROOT_ACCESS_KEY,
+            ROOT_SECRET_KEY,
+        )
+        .await,
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn test_repair_does_not_project_s3_content_that_disappeared_after_listing() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

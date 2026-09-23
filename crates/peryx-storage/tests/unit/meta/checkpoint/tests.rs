@@ -274,6 +274,19 @@ fn test_an_unjournaled_live_blob_refuses_publication_without_moving_the_floor() 
 }
 
 #[test]
+fn test_missing_blob_sizes_are_reported_in_bounded_batches() {
+    let store = store();
+    let digests = (0..=256).map(|index| format!("{index:064x}")).collect::<BTreeSet<_>>();
+
+    let error = store
+        .publish_checkpoint_with_sizes(identity(), &BTreeMap::new(), |_| Ok(digests.clone()))
+        .unwrap_err();
+
+    let first_batch = digests.iter().take(256).cloned().collect::<Vec<_>>();
+    assert!(matches!(error, MetaError::CheckpointBlobSizesMissing { digests } if digests == first_batch));
+}
+
+#[test]
 fn test_legacy_blob_sizes_resolve_across_multiple_batches() {
     let store = store();
     let digests = (0..=256).map(|index| format!("{index:064x}")).collect::<BTreeSet<_>>();

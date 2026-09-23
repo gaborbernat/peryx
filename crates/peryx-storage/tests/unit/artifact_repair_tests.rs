@@ -4,7 +4,9 @@ use rstest::rstest;
 use crate::blob::BlobStorage;
 use crate::meta::MetaStore;
 use crate::repair_artifact_placements;
-use crate::{ArtifactRepairError, ArtifactRepairFailure, repair_artifact_placements_cancellable};
+use crate::{
+    ArtifactRepairDirectionReport, ArtifactRepairError, ArtifactRepairFailure, repair_artifact_placements_cancellable,
+};
 
 fn stores() -> (tempfile::TempDir, MetaStore, BlobStorage) {
     let directory = tempfile::tempdir().unwrap();
@@ -63,14 +65,19 @@ async fn repair_resets_content_progress_when_the_backend_changes() {
             .eof
     );
     let second_blobs = BlobStorage::filesystem(directory.path().join("second"));
-    let digest = second_blobs.put_bytes(b"replacement").await.unwrap();
+    second_blobs.put_bytes(b"first").await.unwrap();
+    second_blobs.put_bytes(b"second").await.unwrap();
 
     let report = repair_artifact_placements(&meta, &second_blobs, 1).await.unwrap();
 
-    assert_eq!(report.content.changed, 1);
     assert_eq!(
-        meta.get_artifact_placement(digest.as_str()).unwrap(),
-        Some(ArtifactPlacement::record(ArtifactSource::Unknown, true))
+        report.content,
+        ArtifactRepairDirectionReport {
+            scanned: 1,
+            changed: 0,
+            skipped: 0,
+            eof: false,
+        }
     );
 }
 

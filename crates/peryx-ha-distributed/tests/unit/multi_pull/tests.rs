@@ -341,7 +341,6 @@ async fn test_a_peer_on_an_unsupported_version_is_reported_not_applied() {
 
     assert_eq!(round.incompatible, Some(PROTOCOL_VERSION + 1));
     assert_eq!((round.serial, round.applied), (0, 0));
-    assert_eq!(set.version(), PROTOCOL_VERSION);
     assert_eq!(set.buffered("a"), Some(0));
     assert_eq!(round.retired[0].reason, "unsupported_version");
 }

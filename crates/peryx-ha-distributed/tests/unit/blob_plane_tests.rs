@@ -267,6 +267,108 @@ async fn test_checkpoint_recovery_fetches_a_blob_from_its_configured_delegate() 
     assert!(blobs.verify(&digest).await.unwrap());
 }
 
+fn install_checkpoint_referencing(meta: &MetaStore, digest: &Digest, size: u64) {
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), size);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    install_checkpoint(&writer, meta);
+}
+
+#[rstest::rstest]
+#[case::unplaced(None)]
+#[case::placed_outside_the_delegates(Some("dc-c"))]
+#[tokio::test]
+async fn test_checkpoint_recovery_falls_back_to_a_delegate_without_a_usable_placement(#[case] placed: Option<&str>) {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"fallback checkpoint artifact";
+    let digest = Digest::of(bytes);
+    install_checkpoint_referencing(&meta, &digest, bytes.len() as u64);
+    if let Some(data_center) = placed {
+        seed_verified_placement(&meta, &digest, data_center, bytes.len() as u64);
+    }
+    let simple = empty_source();
+    let delegates = HashMap::from([("dc-a".to_owned(), loopback(&digest, bytes))]);
+
+    let recovered = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(recovered.report, BlobPlaneReport { fetched: 1, pending: 0 });
+}
+
+struct Counting {
+    source: LoopbackBlobSource,
+    fetches: AtomicUsize,
+}
+
+impl Counting {
+    fn new(source: LoopbackBlobSource) -> Self {
+        Self {
+            source,
+            fetches: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl BlobTransport for Counting {
+    async fn fetch_blob(&self, request: BlobRequest) -> Result<Vec<u8>, TransportError> {
+        self.fetches.fetch_add(1, Ordering::SeqCst);
+        self.source.fetch_blob(request).await
+    }
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_asks_the_placed_data_center_before_other_delegates() {
+    let (_dir, meta, blobs) = stores();
+    let bytes = b"placed checkpoint artifact";
+    let digest = Digest::of(bytes);
+    install_checkpoint_referencing(&meta, &digest, bytes.len() as u64);
+    seed_verified_placement(&meta, &digest, "dc-z", bytes.len() as u64);
+    let simple = Counting::new(empty_source());
+    let delegates = HashMap::from([
+        ("dc-a".to_owned(), Counting::new(loopback(&digest, bytes))),
+        ("dc-z".to_owned(), Counting::new(loopback(&digest, bytes))),
+    ]);
+
+    pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-z",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        (
+            delegates["dc-a"].fetches.load(Ordering::SeqCst),
+            delegates["dc-z"].fetches.load(Ordering::SeqCst)
+        ),
+        (0, 1)
+    );
+}
+
 #[tokio::test]
 async fn test_checkpoint_recovery_ranges_a_blob_larger_than_the_http_response_cap() {
     let (_dir, meta, blobs) = stores();

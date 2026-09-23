@@ -252,7 +252,7 @@ impl ReplicaLoop {
         let checkpoint: Pin<Box<dyn Future<Output = Result<Option<CheckpointBlobRecovery>, SyncError>> + Send + '_>> =
             Box::pin(pull_checkpoint_blobs(&sources, &self.blobs, &self.meta, self.page_size));
         let checkpoint = checkpoint.await?;
-        let checkpoint_report = match checkpoint {
+        let checkpoint_fetched = match checkpoint {
             Some(checkpoint) if !checkpoint.complete => return Ok(checkpoint.report),
             Some(checkpoint) => {
                 let serial = checkpoint.serial;
@@ -267,9 +267,9 @@ impl ReplicaLoop {
                     peryx_ha::AVAILABILITY_BLOB_VIEW,
                     serial,
                 )?;
-                Some(checkpoint.report)
+                checkpoint.report.fetched
             }
-            None => None,
+            None => 0,
         };
         let mut committed = Vec::new();
         let pulled = pull_outstanding_with_evidence(
@@ -284,10 +284,7 @@ impl ReplicaLoop {
         // Before the error, so a pass that failed after committing some blobs still retires their views.
         self.views.apply_blob_commit(&committed);
         let (mut report, served_by_peer) = pulled?;
-        if let Some(checkpoint) = checkpoint_report {
-            report.fetched += checkpoint.fetched;
-            report.pending += checkpoint.pending;
-        }
+        report.fetched += checkpoint_fetched;
         advance_blob_frontier_with_evidence(&self.meta, &self.blobs, self.page_size, &served_by_peer).await?;
         Ok(report)
     }

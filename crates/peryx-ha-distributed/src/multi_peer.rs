@@ -147,7 +147,6 @@ pub struct PeerSet<T: PeerTransport> {
     cursor: usize,
     source: Option<String>,
     head: u64,
-    version: u16,
 }
 
 impl<T: PeerTransport> PeerSet<T> {
@@ -160,14 +159,7 @@ impl<T: PeerTransport> PeerSet<T> {
             cursor: 0,
             source: None,
             head: 0,
-            version: crate::protocol::PROTOCOL_VERSION,
         }
-    }
-
-    /// The driver must propagate this version so apply rejects unsupported peer protocols.
-    #[must_use]
-    pub const fn version(&self) -> u16 {
-        self.version
     }
 
     /// Returns the authoritative writer identity advertised by peers, or `None` before a response.
@@ -247,7 +239,7 @@ impl<T: PeerTransport> PeerSet<T> {
                 .source
                 .clone()
                 .expect("buffered changes come from the set's writer"),
-            version: self.version,
+            version: crate::protocol::PROTOCOL_VERSION,
             changes,
         })
     }
@@ -344,7 +336,7 @@ impl<T: PeerTransport> PeerSet<T> {
             }
         }
         if let Some(&last) = selected.last() {
-            self.cursor = (last + 1) % count;
+            self.cursor = last + 1;
         }
         selected
     }

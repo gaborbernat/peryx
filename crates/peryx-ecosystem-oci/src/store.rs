@@ -107,6 +107,12 @@ pub enum ManifestWriteError {
     MediaTypeTooLong(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MirroredManifestWrite {
+    Published,
+    Hidden,
+}
+
 impl Manifest {
     fn encode(&self) -> Result<Vec<u8>, ManifestWriteError> {
         let media_type = self.media_type.as_bytes();
@@ -158,7 +164,6 @@ fn tag_trash_prefix(index: &str, repo: &str) -> String {
 /// index or manifest list - each child it names. A by-digest read authorizes against this per-repository
 /// membership, not the digest's presence in the global content store the bytes dedupe into, so a
 /// manifest one repository cached is not readable by digest under another.
-///
 /// # Errors
 /// Returns an error if the media type is too long or a write fails.
 pub fn record_manifest(
@@ -171,6 +176,51 @@ pub fn record_manifest(
     meta.commit_driver_txn(|txn| {
         record_manifest_txn(txn, index, repo, digest, manifest)?;
         Ok(((), Vec::new()))
+    })
+}
+
+/// Publish a mirrored manifest only while no member already consulted by a virtual index hides its
+/// reference. The guard and publication share one metadata transaction, so a concurrent soft delete
+/// cannot be overwritten by a mirror response that started earlier.
+pub struct MirroredManifest<'a> {
+    pub consulted: &'a [&'a str],
+    pub index: &'a str,
+    pub repo: &'a str,
+    pub tag: Option<&'a str>,
+    pub digest: &'a str,
+    pub manifest: &'a Manifest,
+    pub fetched_at: i64,
+}
+
+///
+/// # Errors
+/// Returns an error if the media type is too long or a store operation fails.
+pub fn record_mirrored_manifest(
+    meta: &MetaStore,
+    mirrored: &MirroredManifest<'_>,
+) -> Result<MirroredManifestWrite, ManifestWriteError> {
+    meta.commit_driver_txn(|txn| {
+        for member in mirrored.consulted {
+            let tag_hidden = match mirrored.tag {
+                Some(tag) => txn.get(&tag_trash_key(member, mirrored.repo, tag))?.is_some(),
+                None => false,
+            };
+            if tag_hidden
+                || txn
+                    .get(&manifest_trash_key(member, mirrored.repo, mirrored.digest))?
+                    .is_some()
+            {
+                return Ok((MirroredManifestWrite::Hidden, Vec::new()));
+            }
+        }
+        record_manifest_txn(txn, mirrored.index, mirrored.repo, mirrored.digest, mirrored.manifest)?;
+        if let Some(tag) = mirrored.tag {
+            put_tag_txn(txn, mirrored.index, mirrored.repo, tag, mirrored.digest)?;
+            let mut freshness = mirrored.fetched_at.to_be_bytes().to_vec();
+            freshness.extend_from_slice(mirrored.digest.as_bytes());
+            txn.put(&tag_freshness_key(mirrored.index, mirrored.repo, tag), &freshness)?;
+        }
+        Ok((MirroredManifestWrite::Published, Vec::new()))
     })
 }
 

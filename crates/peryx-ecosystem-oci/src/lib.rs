@@ -574,11 +574,17 @@ impl<S: std::hash::BuildHasher + Send + Sync> MirrorDriver for registry::OciRegi
             MirrorAction::Sync => MirrorMode::Sync,
             MirrorAction::Verify => MirrorMode::Verify,
         };
-        let settings = IndexSettings::compile(request.settings)?;
-        let rows = mirror(&state.serving, index, settings, &images, mode)
-            .boxed()
-            .await
-            .map_err(error_message)?;
+        let overrides = IndexSettings::compile(request.settings)?;
+        let rows = mirror::mirror_with_settings(&state.serving, index, &images, mode, |member| {
+            if index.name == member {
+                overrides.clone()
+            } else {
+                self.index_settings(member)
+            }
+        })
+        .boxed()
+        .await
+        .map_err(error_message)?;
         let mut errors = 0_u64;
         for row in rows {
             // The closing summary carries the run's verdict, so counting its status too would tell

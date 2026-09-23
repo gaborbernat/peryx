@@ -1239,7 +1239,7 @@ async fn test_fetch_token_reports_a_redirect_without_a_location() {
         )
         .await;
 
-    assert!(matches!(result, Err(UpstreamError::Status(StatusCode::FOUND))));
+    assert!(matches!(result, Err(UpstreamError::TokenStatus(StatusCode::FOUND))));
 }
 
 #[tokio::test]
@@ -1422,7 +1422,10 @@ async fn test_token_realm_401_stops_when_refresh_is_disabled() {
         )
         .await;
 
-    assert!(matches!(result, Err(UpstreamError::Status(StatusCode::UNAUTHORIZED))));
+    assert!(matches!(
+        result,
+        Err(UpstreamError::TokenStatus(StatusCode::UNAUTHORIZED))
+    ));
 }
 
 #[tokio::test]
@@ -2091,7 +2094,12 @@ async fn test_send_reelects_a_leader_after_a_failed_exchange() {
                 .count(),
             outcomes
                 .iter()
-                .filter(|outcome| matches!(outcome, Err(UpstreamError::Status(StatusCode::INTERNAL_SERVER_ERROR))))
+                .filter(|outcome| {
+                    matches!(
+                        outcome,
+                        Err(UpstreamError::TokenStatus(StatusCode::INTERNAL_SERVER_ERROR))
+                    )
+                })
                 .count(),
         ),
         (2, 1, 1)

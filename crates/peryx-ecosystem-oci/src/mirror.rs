@@ -10,7 +10,8 @@ use futures_util::{StreamExt as _, stream};
 use parking_lot::Mutex;
 use peryx_driver::ServingState;
 use peryx_driver::rate_limit::UpstreamLimits;
-use peryx_index::Index;
+use peryx_identity::DigestDecision;
+use peryx_index::{Index, IndexKind};
 use peryx_storage::blob::{BlobErrorKind, Digest};
 use peryx_upstream::UpstreamClient;
 use serde::Serialize;
@@ -125,24 +126,40 @@ pub enum MirrorMode {
     Verify,
 }
 
-/// The read-only context for one mirror run: the stores, the upstream client, where to pull from, and
-/// the ceiling every transfer of the run shares.
-struct Mirror<'a> {
+struct MirrorRun<'a> {
     state: &'a Arc<ServingState>,
     upstream: &'a Upstream,
-    client: &'a UpstreamClient,
-    index: &'a str,
-    settings: IndexSettings,
+    members: Vec<MirrorMember<'a>>,
     mode: MirrorMode,
-    /// One permit per transfer in flight, held by every reference of the run, so nesting blobs inside
-    /// a manifest and manifests inside a root cannot multiply the ceiling.
-    transfers: Semaphore,
-    concurrency: usize,
     /// One transfer at a time per blob digest. Manifests that share a layer are the common case a
     /// mirror run meets - platform manifests over one base, two tags of one image - and overlapping
     /// them would otherwise pull those bytes once per manifest. The second arrival waits for the
     /// first and then reads the store, which is the `cached` row a serial run reported.
     blob_locks: Mutex<HashMap<String, Arc<Semaphore>>>,
+}
+
+struct MirrorMember<'a> {
+    index: &'a Index,
+    client: Option<&'a UpstreamClient>,
+    settings: IndexSettings,
+    transfers: Semaphore,
+    concurrency: usize,
+}
+
+enum ManifestOutcome {
+    Missing,
+    Rejected,
+    Found(Descriptors),
+}
+
+#[derive(Clone, Copy)]
+struct ManifestRequest<'a> {
+    position: usize,
+    consulted: &'a [&'a str],
+    repo: &'a str,
+    reference: &'a str,
+    tag: Option<&'a str>,
+    allow_missing: bool,
 }
 
 /// One manifest the walk reached: the rows it produced and the children it names, carried with the
@@ -185,24 +202,40 @@ pub async fn mirror(
     refs: &[String],
     mode: MirrorMode,
 ) -> anyhow::Result<Vec<MirrorRow>> {
+    mirror_with_settings(state, index, refs, mode, |_| settings.clone()).await
+}
+
+pub async fn mirror_with_settings(
+    state: &Arc<ServingState>,
+    index: &Index,
+    refs: &[String],
+    mode: MirrorMode,
+    settings: impl Fn(&str) -> IndexSettings,
+) -> anyhow::Result<Vec<MirrorRow>> {
     let mut rows = Vec::new();
-    let Some((cached_index, client)) = serving_members(state, index)
+    let members = serving_members(state, index)
         .into_iter()
-        .find_map(|member| member.proxy_client().map(|client| (member.name.clone(), client)))
-    else {
+        .map(|member| {
+            let concurrency = mirror_ceiling(&state.upstream_limits, &member.name);
+            MirrorMember {
+                index: member,
+                client: member.proxy_client(),
+                settings: settings(&member.name),
+                transfers: Semaphore::new(concurrency),
+                concurrency,
+            }
+        })
+        .collect::<Vec<_>>();
+    if !matches!(index.kind, IndexKind::Virtual { .. }) && members.iter().all(|member| member.client.is_none()) {
         anyhow::bail!("index {:?} has no cached upstream", index.name);
-    };
+    }
+    let concurrency = members.iter().map(|member| member.concurrency).max().unwrap_or(1);
     let upstream = Upstream::new();
-    let concurrency = mirror_ceiling(&state.upstream_limits, &cached_index);
-    let context = Mirror {
+    let context = MirrorRun {
         state,
         upstream: &upstream,
-        client,
-        index: &index.name,
-        settings,
+        members,
         mode,
-        transfers: Semaphore::new(concurrency),
-        concurrency,
         blob_locks: Mutex::default(),
     };
     // `buffered` hands references back in the order they were selected however they finish, so a
@@ -317,11 +350,12 @@ const fn reference_scoped(err: &DownloadError) -> bool {
     }
 }
 
-impl Mirror<'_> {
+impl MirrorRun<'_> {
     /// The name `repo` is spelled with upstream. What lands in the store keeps the operator's spelling,
     /// so a mirrored image serves under the name it was asked for.
-    fn upstream_repo<'a>(&self, repo: &'a str) -> std::borrow::Cow<'a, str> {
-        upstream_repo(self.settings.library_prefix, self.client.base_url(), repo)
+    fn upstream_repo<'a>(member: &MirrorMember<'_>, repo: &'a str) -> std::borrow::Cow<'a, str> {
+        let client = member.client.expect("only online members have an upstream repository");
+        upstream_repo(member.settings.library_prefix, client.base_url(), repo)
     }
 
     /// Mirror one selected reference into its own slice of the report, so references that overlap
@@ -342,25 +376,167 @@ impl Mirror<'_> {
             Reference::Tag(tag) => (tag.as_str(), Some(tag.as_str())),
             Reference::Digest(digest) => (digest.as_str(), None),
         };
-        if let Some(descriptors) = self.manifest_of(&image.repository, reference, tag, &mut rows).await? {
-            self.walk_manifest(&image.repository, descriptors, &mut rows).await?;
+        let mut consulted = Vec::with_capacity(self.members.len());
+        for position in 0..self.members.len() {
+            consulted.push(self.members[position].index.name.as_str());
+            let outcome = self
+                .root_manifest(position, &consulted, &image.repository, reference, tag, &mut rows)
+                .await?;
+            match outcome {
+                ManifestOutcome::Missing => {}
+                ManifestOutcome::Rejected => return Ok(rows),
+                ManifestOutcome::Found(descriptors) => {
+                    self.walk_manifest(position, &consulted, &image.repository, descriptors, &mut rows)
+                        .await?;
+                    return Ok(rows);
+                }
+            }
         }
+        rows.push(MirrorRow::error(
+            "manifest",
+            &image.repository,
+            reference,
+            "",
+            if tag.is_some() {
+                "tag not mirrored".to_owned()
+            } else {
+                "manifest missing".to_owned()
+            },
+        ));
         Ok(rows)
+    }
+
+    fn manifest_blocked(
+        &self,
+        consulted: &[&str],
+        repo: &str,
+        reference: &str,
+        tag: Option<&str>,
+        rows: &mut Vec<MirrorRow>,
+    ) -> anyhow::Result<bool> {
+        if tag.is_none() && self.revoked(reference)? {
+            rows.push(MirrorRow::error(
+                "manifest",
+                repo,
+                reference,
+                reference,
+                "manifest digest is revoked".to_owned(),
+            ));
+            return Ok(true);
+        }
+        if self.reference_hidden(consulted, repo, reference, tag)? {
+            rows.push(MirrorRow::error(
+                "manifest",
+                repo,
+                reference,
+                "",
+                "manifest hidden by a deleted reference".to_owned(),
+            ));
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn root_manifest(
+        &self,
+        position: usize,
+        consulted: &[&str],
+        repo: &str,
+        reference: &str,
+        tag: Option<&str>,
+        rows: &mut Vec<MirrorRow>,
+    ) -> anyhow::Result<ManifestOutcome> {
+        if self.manifest_blocked(consulted, repo, reference, tag, rows)? {
+            return Ok(ManifestOutcome::Rejected);
+        }
+        let member = &self.members[position];
+        if let Some(tag) = tag
+            && let Some(digest) = store::get_tag(&self.state.meta, &member.index.name, repo, tag)?
+            && self.revoked(&digest)?
+        {
+            rows.push(MirrorRow::error(
+                "manifest",
+                repo,
+                reference,
+                &digest,
+                "manifest digest is revoked".to_owned(),
+            ));
+            return Ok(ManifestOutcome::Rejected);
+        }
+        if self.mode == MirrorMode::Verify || member.client.is_none() {
+            return self.verify_manifest(position, consulted, repo, reference, tag, rows);
+        }
+        gated(
+            &member.transfers,
+            self.pull_manifest(
+                ManifestRequest {
+                    position,
+                    consulted,
+                    repo,
+                    reference,
+                    tag,
+                    allow_missing: true,
+                },
+                rows,
+            ),
+        )
+        .await
     }
 
     /// Pull one manifest and hand back what it depends on. `None` is a reference this run reported on
     /// and will not walk.
     async fn manifest_of(
         &self,
+        position: usize,
+        consulted: &[&str],
         repo: &str,
         reference: &str,
         tag: Option<&str>,
         rows: &mut Vec<MirrorRow>,
     ) -> anyhow::Result<Option<Descriptors>> {
-        if self.mode == MirrorMode::Verify {
-            return self.verify_manifest(repo, reference, tag, rows);
+        if self.manifest_blocked(consulted, repo, reference, tag, rows)? {
+            return Ok(None);
         }
-        gated(&self.transfers, self.pull_manifest(repo, reference, tag, rows)).await
+        let member = &self.members[position];
+        if self.mode == MirrorMode::Verify || member.client.is_none() {
+            return Ok(
+                match self.verify_manifest(position, consulted, repo, reference, tag, rows)? {
+                    ManifestOutcome::Found(descriptors) => Some(descriptors),
+                    ManifestOutcome::Missing => {
+                        rows.push(MirrorRow::error(
+                            "manifest",
+                            repo,
+                            reference,
+                            reference,
+                            "manifest not mirrored for this repository".to_owned(),
+                        ));
+                        None
+                    }
+                    ManifestOutcome::Rejected => None,
+                },
+            );
+        }
+        Ok(
+            match gated(
+                &member.transfers,
+                self.pull_manifest(
+                    ManifestRequest {
+                        position,
+                        consulted,
+                        repo,
+                        reference,
+                        tag,
+                        allow_missing: false,
+                    },
+                    rows,
+                ),
+            )
+            .await?
+            {
+                ManifestOutcome::Found(descriptors) => Some(descriptors),
+                ManifestOutcome::Missing | ManifestOutcome::Rejected => None,
+            },
+        )
     }
 
     /// Fetch a manifest from upstream and record it. Held under the run's gate for the whole
@@ -368,43 +544,48 @@ impl Mirror<'_> {
     /// stream more manifests at once than the ceiling allows.
     async fn pull_manifest(
         &self,
-        repo: &str,
-        reference: &str,
-        tag: Option<&str>,
+        request: ManifestRequest<'_>,
         rows: &mut Vec<MirrorRow>,
-    ) -> anyhow::Result<Option<Descriptors>> {
+    ) -> anyhow::Result<ManifestOutcome> {
+        let ManifestRequest {
+            position,
+            consulted: _,
+            repo,
+            reference,
+            tag,
+            allow_missing,
+        } = request;
+        let member = &self.members[position];
+        let client = member.client.expect("only online members pull manifests");
         let response = match self
             .upstream
             .manifest(
-                self.client,
-                &self.upstream_repo(repo),
+                client,
+                &Self::upstream_repo(member, repo),
                 reference,
-                &self.settings.token_realms,
+                &member.settings.token_realms,
             )
             .await
         {
             Ok(response) => response,
+            Err(crate::upstream::UpstreamError::Status(reqwest::StatusCode::NOT_FOUND)) if allow_missing => {
+                return Ok(ManifestOutcome::Missing);
+            }
             Err(err) => {
                 rows.push(MirrorRow::error("manifest", repo, reference, "", err.to_string()));
-                return Ok(None);
+                return Ok(ManifestOutcome::Rejected);
             }
         };
-        let media_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or(DEFAULT_MANIFEST_TYPE)
-            .to_owned();
-        let bytes = match bounded_body(response, MAX_MANIFEST_BYTES).await {
-            Ok(bytes) => bytes,
+        let (advertised, manifest) = match Self::read_manifest(response).await {
+            Ok(pulled) => pulled,
             // Nothing local has been written yet, so a body over the ceiling or a connection that
             // drops mid-stream costs this reference and leaves the rest of the run sound to report.
             Err(fault) => {
-                rows.push(MirrorRow::error("manifest", repo, reference, "", String::from(fault)));
-                return Ok(None);
+                rows.push(MirrorRow::error("manifest", repo, reference, "", fault));
+                return Ok(ManifestOutcome::Rejected);
             }
         };
-        let digest = format!("sha256:{}", Digest::of(&bytes).as_str());
+        let digest = format!("sha256:{}", Digest::of(&manifest.bytes).as_str());
         // A by-sha256-digest reference (no tag) pins the exact bytes; if the upstream, or a proxy
         // between, returns something else, storing it under the computed digest would report `synced`
         // while the requested manifest was never mirrored. A digest in another algorithm the spec
@@ -419,25 +600,39 @@ impl Mirror<'_> {
                 "",
                 format!("upstream digest {digest} does not match requested {reference}"),
             ));
-            return Ok(None);
+            return Ok(ManifestOutcome::Rejected);
         }
-        let manifest = Manifest {
-            media_type,
-            bytes: bytes.to_vec(),
-        };
+        if let Some(advertised) = advertised
+            && advertised.starts_with("sha256:")
+            && advertised != digest
+        {
+            rows.push(MirrorRow::error(
+                "manifest",
+                repo,
+                reference,
+                "",
+                format!("upstream digest {advertised} does not match manifest content {digest}"),
+            ));
+            return Ok(ManifestOutcome::Rejected);
+        }
         // Storing first and walking after would cache bytes no client can use under a digest the run
         // then reports complete, because a document that does not parse names no dependencies.
         let Some(descriptors) = descriptors_of(&manifest, repo, reference, &digest, rows) else {
-            return Ok(None);
+            return Ok(ManifestOutcome::Rejected);
         };
-        store::record_manifest(&self.state.meta, self.index, repo, &digest, &manifest)?;
-        store::record_content_placement(&self.state.meta, &digest, store::OciArtifactOrigin::Mirrored, true)?;
-        let search_invalidation = crate::search_oci::SearchInvalidationGuard::arm(self.state, repo);
-        if let Some(tag) = tag {
-            store::put_tag(&self.state.meta, self.index, repo, tag, &digest)?;
-            store::set_tag_freshness(&self.state.meta, self.index, repo, tag, &digest, (self.state.clock)())?;
+        if self.revoked(&digest)? {
+            rows.push(MirrorRow::error(
+                "manifest",
+                repo,
+                reference,
+                &digest,
+                "manifest digest is revoked".to_owned(),
+            ));
+            return Ok(ManifestOutcome::Rejected);
         }
-        drop(search_invalidation);
+        if !self.record_manifest(request, &digest, &manifest, rows)? {
+            return Ok(ManifestOutcome::Rejected);
+        }
         rows.push(MirrorRow::synced(
             "manifest",
             repo,
@@ -445,32 +640,121 @@ impl Mirror<'_> {
             &digest,
             manifest.bytes.len() as u64,
         ));
-        Ok(Some(descriptors))
+        Ok(ManifestOutcome::Found(descriptors))
+    }
+
+    async fn read_manifest(response: reqwest::Response) -> Result<(Option<String>, Manifest), String> {
+        let advertised = response
+            .headers()
+            .get("docker-content-digest")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let media_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or(DEFAULT_MANIFEST_TYPE)
+            .to_owned();
+        let bytes = bounded_body(response, MAX_MANIFEST_BYTES).await.map_err(String::from)?;
+        Ok((
+            advertised,
+            Manifest {
+                media_type,
+                bytes: bytes.to_vec(),
+            },
+        ))
+    }
+
+    fn record_manifest(
+        &self,
+        request: ManifestRequest<'_>,
+        digest: &str,
+        manifest: &Manifest,
+        rows: &mut Vec<MirrorRow>,
+    ) -> anyhow::Result<bool> {
+        let member = &self.members[request.position];
+        match store::record_mirrored_manifest(
+            &self.state.meta,
+            &store::MirroredManifest {
+                consulted: request.consulted,
+                index: &member.index.name,
+                repo: request.repo,
+                tag: request.tag,
+                digest,
+                manifest,
+                fetched_at: (self.state.clock)(),
+            },
+        ) {
+            Ok(store::MirroredManifestWrite::Published) => {}
+            Ok(store::MirroredManifestWrite::Hidden) => {
+                rows.push(MirrorRow::error(
+                    "manifest",
+                    request.repo,
+                    request.reference,
+                    digest,
+                    "manifest hidden by a deleted reference".to_owned(),
+                ));
+                return Ok(false);
+            }
+            Err(store::ManifestWriteError::MediaTypeTooLong(_)) => {
+                rows.push(MirrorRow::error(
+                    "manifest",
+                    request.repo,
+                    request.reference,
+                    digest,
+                    "manifest media type exceeds the storage limit".to_owned(),
+                ));
+                return Ok(false);
+            }
+            Err(store::ManifestWriteError::Store(err)) => return Err(err.into()),
+        }
+        let search_invalidation = crate::search_oci::SearchInvalidationGuard::arm(self.state, request.repo);
+        store::record_content_placement(&self.state.meta, digest, store::OciArtifactOrigin::Mirrored, true)?;
+        drop(search_invalidation);
+        Ok(true)
     }
 
     fn verify_manifest(
         &self,
+        position: usize,
+        consulted: &[&str],
         repo: &str,
         reference: &str,
         tag: Option<&str>,
         rows: &mut Vec<MirrorRow>,
-    ) -> anyhow::Result<Option<Descriptors>> {
-        let digest = match tag {
-            Some(tag) => {
-                let Some(digest) = store::get_tag(&self.state.meta, self.index, repo, tag)? else {
+    ) -> anyhow::Result<ManifestOutcome> {
+        let member = &self.members[position];
+        let digest = if let Some(tag) = tag {
+            let Some(digest) = store::get_tag(&self.state.meta, &member.index.name, repo, tag)? else {
+                return Ok(ManifestOutcome::Missing);
+            };
+            digest
+        } else {
+            if !store::manifest_is_member(&self.state.meta, &member.index.name, repo, reference)? {
+                if self.members.len() == 1 && store::get_manifest(&self.state.meta, reference)?.is_some() {
                     rows.push(MirrorRow::error(
                         "manifest",
                         repo,
                         reference,
-                        "",
-                        "tag not mirrored".to_owned(),
+                        reference,
+                        "manifest not mirrored for this repository".to_owned(),
                     ));
-                    return Ok(None);
-                };
-                digest
+                    return Ok(ManifestOutcome::Rejected);
+                }
+                return Ok(ManifestOutcome::Missing);
             }
-            None => reference.to_owned(),
+            reference.to_owned()
         };
+        if self.reference_hidden(consulted, repo, &digest, None)? || self.revoked(&digest)? {
+            rows.push(MirrorRow::error(
+                "manifest",
+                repo,
+                reference,
+                &digest,
+                "manifest is not available".to_owned(),
+            ));
+            return Ok(ManifestOutcome::Rejected);
+        }
         let Some(manifest) = store::get_manifest(&self.state.meta, &digest)? else {
             rows.push(MirrorRow::error(
                 "manifest",
@@ -479,13 +763,13 @@ impl Mirror<'_> {
                 &digest,
                 "manifest missing".to_owned(),
             ));
-            return Ok(None);
+            return Ok(ManifestOutcome::Rejected);
         };
         // Manifest bytes dedupe into one content-addressed store, so holding them is not proof this
         // repository serves them. A tag read is already keyed by repository; a digest names the shared
         // store, and a by-digest pull authorizes against membership, so counting another repository's
         // cached bytes would call an image ready for offline use that a pull answers `manifest unknown`.
-        if tag.is_none() && !store::manifest_is_member(&self.state.meta, self.index, repo, &digest)? {
+        if !store::manifest_is_member(&self.state.meta, &member.index.name, repo, &digest)? {
             rows.push(MirrorRow::error(
                 "manifest",
                 repo,
@@ -493,15 +777,42 @@ impl Mirror<'_> {
                 &digest,
                 "manifest not mirrored for this repository".to_owned(),
             ));
-            return Ok(None);
+            return Ok(ManifestOutcome::Rejected);
         }
         // A stored manifest that no longer parses cannot be reported cached: its empty descriptor list
         // would pass verification for an image whose layers were never mirrored.
         let Some(descriptors) = descriptors_of(&manifest, repo, reference, &digest, rows) else {
-            return Ok(None);
+            return Ok(ManifestOutcome::Rejected);
         };
         rows.push(MirrorRow::cached("manifest", repo, reference, &digest));
-        Ok(Some(descriptors))
+        Ok(ManifestOutcome::Found(descriptors))
+    }
+
+    fn reference_hidden(
+        &self,
+        consulted: &[&str],
+        repo: &str,
+        reference: &str,
+        tag: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        for member in consulted {
+            if let Some(tag) = tag
+                && store::tag_is_trashed(&self.state.meta, member, repo, tag)?
+            {
+                return Ok(true);
+            }
+            if store::manifest_is_trashed(&self.state.meta, member, repo, reference)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn revoked(&self, digest: &str) -> anyhow::Result<bool> {
+        let Ok(digest) = digest.parse() else {
+            return Ok(false);
+        };
+        Ok(self.state.revocations.decision(&digest)? == DigestDecision::Revoked)
     }
 
     /// Follow a manifest to the blobs it needs, one level of the graph at a time: an image index
@@ -517,6 +828,8 @@ impl Mirror<'_> {
     /// upstream keeps growing stops on a stable error row without the fetch that would follow.
     async fn walk_manifest(
         &self,
+        position: usize,
+        consulted: &[&str],
         repo: &str,
         descriptors: Descriptors,
         rows: &mut Vec<MirrorRow>,
@@ -524,14 +837,14 @@ impl Mirror<'_> {
         let mut visited: HashSet<String> = HashSet::new();
         let mut pending: Vec<(String, usize)> = Vec::new();
         let (children, blobs) = descriptors;
-        self.blobs(repo, blobs, rows).await?;
+        self.blobs(position, repo, blobs, rows).await?;
         if schedule_children(repo, children, 1, &mut visited, &mut pending, rows) {
             return Ok(());
         }
         while !pending.is_empty() {
             let mut walked = stream::iter(std::mem::take(&mut pending))
-                .map(|(digest, depth)| self.node(repo, digest, depth))
-                .buffered(self.concurrency);
+                .map(|(digest, depth)| self.node(position, consulted, repo, digest, depth))
+                .buffered(self.members[position].concurrency);
             let mut level = Vec::new();
             while let Some(step) = walked.next().await {
                 level.push(step?);
@@ -548,11 +861,21 @@ impl Mirror<'_> {
 
     /// Pull one scheduled manifest and the blobs it names. A failure here is a row of this step, so a
     /// sibling that cannot be reached leaves the rest of its level running.
-    async fn node(&self, repo: &str, digest: String, depth: usize) -> anyhow::Result<WalkStep> {
+    async fn node(
+        &self,
+        position: usize,
+        consulted: &[&str],
+        repo: &str,
+        digest: String,
+        depth: usize,
+    ) -> anyhow::Result<WalkStep> {
         let mut rows = Vec::new();
-        let children = match self.manifest_of(repo, &digest, None, &mut rows).await? {
+        let children = match self
+            .manifest_of(position, consulted, repo, &digest, None, &mut rows)
+            .await?
+        {
             Some((children, blobs)) => {
-                self.blobs(repo, blobs, &mut rows).await?;
+                self.blobs(position, repo, blobs, &mut rows).await?;
                 children
             }
             None => Vec::new(),
@@ -564,10 +887,16 @@ impl Mirror<'_> {
     /// them in descriptor order. A level is drained before a store fault is raised, so the transfers
     /// already in flight finish and the fault the run ends on is the first in descriptor order rather
     /// than whichever future happened to fail first.
-    async fn blobs(&self, repo: &str, blobs: Vec<String>, rows: &mut Vec<MirrorRow>) -> anyhow::Result<()> {
+    async fn blobs(
+        &self,
+        position: usize,
+        repo: &str,
+        blobs: Vec<String>,
+        rows: &mut Vec<MirrorRow>,
+    ) -> anyhow::Result<()> {
         let mut pulled = stream::iter(blobs)
-            .map(|digest| self.blob(repo, digest))
-            .buffered(self.concurrency);
+            .map(|digest| self.blob(position, repo, digest))
+            .buffered(self.members[position].concurrency);
         let mut fault = None;
         while let Some(pull) = pulled.next().await {
             match pull {
@@ -589,7 +918,7 @@ impl Mirror<'_> {
         )
     }
 
-    async fn blob(&self, repo: &str, descriptor: String) -> anyhow::Result<MirrorRow> {
+    async fn blob(&self, position: usize, repo: &str, descriptor: String) -> anyhow::Result<MirrorRow> {
         let digest = descriptor.as_str();
         let Some(storage) = store::blob_digest(digest) else {
             return Ok(MirrorRow::error(
@@ -605,13 +934,40 @@ impl Mirror<'_> {
             .acquire()
             .await
             .expect("a mirror blob claim outlives the run that waits on it");
-        gated(&self.transfers, self.transfer_blob(repo, digest, &storage)).await
+        let member = &self.members[position];
+        gated(&member.transfers, self.transfer_blob(position, repo, digest, &storage)).await
     }
 
-    async fn transfer_blob(&self, repo: &str, digest: &str, storage: &Digest) -> anyhow::Result<MirrorRow> {
+    async fn transfer_blob(
+        &self,
+        position: usize,
+        repo: &str,
+        digest: &str,
+        storage: &Digest,
+    ) -> anyhow::Result<MirrorRow> {
+        let member = &self.members[position];
+        if self.revoked(digest)? {
+            return Ok(MirrorRow::error(
+                "blob",
+                repo,
+                digest,
+                digest,
+                "blob digest is revoked".to_owned(),
+            ));
+        }
+        let member_holds = store::blob_is_member(&self.state.meta, &member.index.name, repo, digest)?;
         match self.state.blobs.head(storage).await {
-            Ok(Some(_)) => return Ok(MirrorRow::cached("blob", repo, digest, digest)),
-            Ok(None) => {}
+            Ok(Some(_)) if member_holds => return Ok(MirrorRow::cached("blob", repo, digest, digest)),
+            Ok(Some(_)) if self.mode == MirrorMode::Verify => {
+                return Ok(MirrorRow::error(
+                    "blob",
+                    repo,
+                    digest,
+                    digest,
+                    "blob not mirrored for this repository".to_owned(),
+                ));
+            }
+            Ok(Some(_) | None) => {}
             // Asking the store what it holds is peryx's own side. Once that fails the run no longer
             // knows what is cached, which is what a `cached` row claims.
             Err(err) => anyhow::bail!("blob store error: {err}"),
@@ -625,18 +981,37 @@ impl Mirror<'_> {
                 "blob missing".to_owned(),
             ));
         }
+        let Some(client) = member.client else {
+            return Ok(MirrorRow::error(
+                "blob",
+                repo,
+                digest,
+                digest,
+                "blob missing from the selected index member".to_owned(),
+            ));
+        };
         match self
             .upstream
             .blob(
-                self.client,
-                &self.upstream_repo(repo),
+                client,
+                &Self::upstream_repo(member, repo),
                 digest,
-                &self.settings.token_realms,
+                &member.settings.token_realms,
             )
             .await
         {
             Ok(response) => match download_blob(&self.state.meta, &self.state.blobs, storage, response).await {
-                Ok(bytes) => Ok(MirrorRow::synced("blob", repo, digest, digest, bytes)),
+                Ok(_) if self.revoked(digest)? => Ok(MirrorRow::error(
+                    "blob",
+                    repo,
+                    digest,
+                    digest,
+                    "blob digest was revoked during download".to_owned(),
+                )),
+                Ok(bytes) => {
+                    store::record_blob_membership(&self.state.meta, &member.index.name, repo, digest)?;
+                    Ok(MirrorRow::synced("blob", repo, digest, digest, bytes))
+                }
                 Err(err) if reference_scoped(&err) => {
                     Ok(MirrorRow::error("blob", repo, digest, digest, err.to_string()))
                 }

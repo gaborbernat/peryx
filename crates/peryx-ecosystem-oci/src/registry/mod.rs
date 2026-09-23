@@ -195,6 +195,13 @@ pub struct OciRegistryWithHasher<S> {
     journal_outbox: crate::outbox::Outbox,
 }
 
+impl<S: BuildHasher> OciRegistryWithHasher<S> {
+    /// An index the composition root compiled no `[index.settings]` table for takes the defaults.
+    pub(crate) fn index_settings(&self, index: &str) -> IndexSettings {
+        self.settings.get(index).cloned().unwrap_or_default()
+    }
+}
+
 /// A per-session async lock registry. A session's lock is created on first use and dropped once no
 /// writer holds it, so the map tracks only in-flight sessions.
 #[derive(Default)]
@@ -280,11 +287,6 @@ impl<S: BuildHasher + Default + Send + Sync + 'static> OciRegistryWithHasher<S> 
     /// The token-realm origins the index `index` discloses its upstream credentials to.
     fn token_realms(&self, index: &str) -> crate::TokenRealms {
         self.index_settings(index).token_realms
-    }
-
-    /// An index the composition root compiled no `[index.settings]` table for takes the defaults.
-    fn index_settings(&self, index: &str) -> IndexSettings {
-        self.settings.get(index).cloned().unwrap_or_default()
     }
 
     fn random_session() -> Result<String, ServeError> {
@@ -1270,10 +1272,12 @@ fn upstream_error_response(err: &UpstreamError, what: &str) -> Response {
             }
             response
         }
-        UpstreamError::Status(StatusCode::UNAUTHORIZED) => error_response(
-            ErrorCode::Unauthorized,
-            &format!("upstream registry refused authentication for this {what}"),
-        ),
+        UpstreamError::Status(StatusCode::UNAUTHORIZED) | UpstreamError::TokenStatus(StatusCode::UNAUTHORIZED) => {
+            error_response(
+                ErrorCode::Unauthorized,
+                &format!("upstream registry refused authentication for this {what}"),
+            )
+        }
         _ => gateway_error(&format!("upstream {what} fetch failed: {err}")),
     }
 }

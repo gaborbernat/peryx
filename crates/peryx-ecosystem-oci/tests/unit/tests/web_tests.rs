@@ -742,3 +742,12 @@ async fn test_browse_driver_error_answers_a_refusal_with_the_drivers_own_body() 
         )
     );
 }
+
+#[test]
+fn test_browse_driver_error_preserves_an_authorization_denial() {
+    let response = crate::browse_driver_error(peryx_driver::serving::BrowseError::Denied(
+        peryx_identity::Denial::Forbidden,
+    ));
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}

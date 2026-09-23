@@ -98,6 +98,9 @@ pub enum UpstreamError {
     Timeout,
     /// The registry answered, but with a non-success status (forwarded to the client's error).
     Status(StatusCode),
+    /// The bearer-token endpoint answered with a non-success status. This stays distinct from the
+    /// registry object's status so callers never treat an authentication failure as missing content.
+    TokenStatus(StatusCode),
     /// The registry throttled the pull (`429`), carrying its `Retry-After` when it sent one. Kept
     /// distinct from [`Self::Status`] so the client sees a `429` and the backoff hint, not a `502`.
     RateLimited(Option<String>),
@@ -114,6 +117,7 @@ impl std::fmt::Display for UpstreamError {
         match self {
             Self::Timeout => f.write_str(TIMEOUT_MESSAGE),
             Self::Status(status) => write!(f, "upstream returned {status}"),
+            Self::TokenStatus(status) => write!(f, "upstream token endpoint returned {status}"),
             Self::RateLimited(_) => write!(f, "upstream rate limit reached"),
             Self::InvalidContentLength => write!(f, "upstream blob HEAD has invalid content-length"),
             Self::InvalidManifestHead => write!(f, "upstream manifest HEAD has invalid metadata"),
@@ -474,11 +478,11 @@ impl Upstream {
             .fetch_token(client, exchange.challenge, scope, auth, exchange.realms)
             .await
         {
-            Err(UpstreamError::Status(StatusCode::UNAUTHORIZED)) => {
+            Err(UpstreamError::TokenStatus(StatusCode::UNAUTHORIZED)) => {
                 let generation = credential.generation();
                 credential = exchange.credentials.refresh_after_unauthorized(generation).await?;
                 if credential.generation() == generation {
-                    return Err(UpstreamError::Status(StatusCode::UNAUTHORIZED));
+                    return Err(UpstreamError::TokenStatus(StatusCode::UNAUTHORIZED));
                 }
                 auth = credential.auth();
                 self.fetch_token(client, exchange.challenge, scope, auth, exchange.realms)
@@ -571,7 +575,7 @@ impl Upstream {
                 )));
             }
             if !status.is_success() {
-                return Err(UpstreamError::Status(status));
+                return Err(UpstreamError::TokenStatus(status));
             }
             let body: TokenResponse = serde_json::from_slice(&read_capped(response).await?)?;
             let lifetime = declared_lifetime(body.expires_in.as_ref());

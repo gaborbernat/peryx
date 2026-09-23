@@ -682,6 +682,31 @@ async fn test_blob_upstream_401_reports_the_auth_failure() {
     assert!(body_has_code(&body, "UNAUTHORIZED"), "{body:?}");
 }
 #[tokio::test]
+async fn test_blob_token_endpoint_401_reports_the_auth_failure() {
+    let server = MockServer::start().await;
+    let digest = format!("sha256:{}", "e".repeat(64));
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/app/blobs/{digest}")))
+        .respond_with(ResponseTemplate::new(401).insert_header(
+            "www-authenticate",
+            format!("Bearer realm=\"{}/token\",service=\"registry\"", server.uri()),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (_state, app) = proxy(&dir, &format!("{}/", server.uri()), false);
+
+    let (status, _, body) = send(&app, Method::GET, &format!("/v2/hub/app/blobs/{digest}")).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body_has_code(&body, "UNAUTHORIZED"), "{body:?}");
+}
+#[tokio::test]
 async fn test_blob_upstream_digest_mismatch_is_rejected() {
     let server = MockServer::start().await;
     let claimed = format!("sha256:{}", "f".repeat(64));

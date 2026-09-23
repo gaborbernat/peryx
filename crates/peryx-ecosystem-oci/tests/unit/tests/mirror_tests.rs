@@ -1,14 +1,19 @@
 use axum::http::{Method, StatusCode};
+use peryx_identity::{ArtifactDigest, RevocationReason, UserId};
 use peryx_storage::blob::Digest;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{oci_digest, proxy, proxy_pair, search_total, send};
-use crate::mirror::{MirrorMode, MirrorRow, mirror as mirror_with};
-use crate::settings::IndexSettings;
-use crate::store::{MAX_MEDIA_TYPE_BYTES, Manifest};
+use super::{
+    GatedResponse, app_with_indexes, oci_digest, oci_index, proxy, proxy_pair, response_gate, search_total, send,
+    virtual_stack,
+};
+use crate::mirror::{MirrorMode, MirrorRow, mirror as mirror_with, mirror_with_settings};
+use crate::settings::{IndexSettings, LibraryPrefix};
+use crate::store::{self, MAX_MEDIA_TYPE_BYTES, Manifest};
 use peryx_driver::ServingState;
-use peryx_index::Index;
+use peryx_index::{Index, IndexKind};
+use peryx_upstream::UpstreamClient;
 use std::sync::Arc;
 
 async fn mirror(
@@ -48,6 +53,656 @@ fn empty_index() -> Vec<u8> {
 
 fn image_manifest(config: &[u8], layer: &[u8]) -> Vec<u8> {
     image_manifest_with_layers(config, &[layer])
+}
+
+fn virtual_proxies(dir: &tempfile::TempDir, upstreams: [&str; 2]) -> Arc<peryx_driver::AppState> {
+    virtual_proxies_with_offline(dir, upstreams, false)
+}
+
+fn virtual_proxies_with_offline(
+    dir: &tempfile::TempDir,
+    upstreams: [&str; 2],
+    offline: bool,
+) -> Arc<peryx_driver::AppState> {
+    let cached = |upstream: &str| IndexKind::Cached {
+        client: UpstreamClient::new(upstream).unwrap(),
+        offline,
+    };
+    app_with_indexes(
+        dir,
+        vec![
+            oci_index("first", "first", cached(upstreams[0])),
+            oci_index("second", "second", cached(upstreams[1])),
+            oci_index(
+                "virtual",
+                "virtual",
+                IndexKind::Virtual {
+                    layers: vec![0, 1],
+                    write_target: None,
+                },
+            ),
+        ],
+    )
+    .0
+}
+
+fn trash_latest(state: &Arc<peryx_driver::AppState>, index: &str) {
+    let manifest = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: empty_index(),
+    };
+    let digest = oci_digest(&manifest.bytes);
+    store::record_manifest(&state.serving.meta, index, "library/app", &digest, &manifest).unwrap();
+    store::put_tag(&state.serving.meta, index, "library/app", "latest", &digest).unwrap();
+    store::trash_tag(
+        &state.serving.meta,
+        index,
+        "library/app",
+        "latest",
+        &store::TrashInfo {
+            deleted_at_unix: 1,
+            actor: None,
+            reason: None,
+        },
+        false,
+        |_| None,
+    )
+    .unwrap();
+}
+
+fn revoke(state: &ServingState, digest: &str) {
+    state
+        .revocations
+        .put(
+            &digest.parse::<ArtifactDigest>().unwrap(),
+            &RevocationReason::new("compromised builder").unwrap(),
+            &UserId::random(),
+            1,
+        )
+        .unwrap();
+}
+
+fn remove_blob_membership(state: &ServingState, index: &str, digest: &str) {
+    state
+        .meta
+        .commit_driver_txn(|txn| {
+            txn.remove(&store::blob_membership_key(index, "library/app", digest))?;
+            Ok::<_, peryx_storage::meta::MetaError>(((), Vec::new()))
+        })
+        .unwrap();
+}
+
+fn remove_manifest_membership(state: &ServingState, index: &str, digest: &str) {
+    state
+        .meta
+        .commit_driver_txn(|txn| {
+            txn.remove(&format!("oci\0mm\0{index}\0library/app\0{digest}"))?;
+            Ok::<_, peryx_storage::meta::MetaError>(((), Vec::new()))
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_falls_through_a_missing_member() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    let config = b"{}";
+    let layer = b"virtual-layer";
+    let child = image_manifest(config, layer);
+    let child_digest = oci_digest(&child);
+    let root = index_over(&[&child_digest], "root");
+    let root_digest = oci_digest(&root);
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(StatusCode::NOT_FOUND))
+        .expect(1)
+        .mount(&first)
+        .await;
+    for (reference, body, media_type) in [
+        ("latest", root.as_slice(), INDEX_TYPE),
+        (child_digest.as_str(), child.as_slice(), MANIFEST_TYPE),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/app/manifests/{reference}")))
+            .respond_with(ResponseTemplate::new(StatusCode::OK).set_body_raw(body.to_vec(), media_type))
+            .expect(1)
+            .mount(&second)
+            .await;
+    }
+    for blob in [config.as_slice(), layer.as_slice()] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/app/blobs/{}", oci_digest(blob))))
+            .respond_with(ResponseTemplate::new(StatusCode::OK).set_body_bytes(blob))
+            .expect(1)
+            .mount(&second)
+            .await;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let upstreams = [format!("{}/", first.uri()), format!("{}/", second.uri())];
+    let state = virtual_proxies(&directory, [&upstreams[0], &upstreams[1]]);
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "synced");
+    assert_eq!(
+        store::get_tag(&state.serving.meta, "second", "library/app", "latest").unwrap(),
+        Some(root_digest.clone())
+    );
+    assert!(
+        store::get_tag(&state.serving.meta, "first", "library/app", "latest")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store::get_tag(&state.serving.meta, "virtual", "library/app", "latest")
+            .unwrap()
+            .is_none()
+    );
+    let upstream_requests = [
+        first.received_requests().await.unwrap().len(),
+        second.received_requests().await.unwrap().len(),
+    ];
+    drop(state);
+    let offline = virtual_proxies_with_offline(&directory, [&upstreams[0], &upstreams[1]], true);
+    let app = peryx_http::router(offline);
+    for (reference, expected) in [
+        ("latest", root.as_slice()),
+        (root_digest.as_str(), root.as_slice()),
+        (child_digest.as_str(), child.as_slice()),
+    ] {
+        let (status, _, body) = send(
+            &app,
+            Method::GET,
+            &format!("/v2/virtual/library/app/manifests/{reference}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_ref(), expected);
+    }
+    for blob in [config.as_slice(), layer.as_slice()] {
+        let (status, _, body) = send(
+            &app,
+            Method::GET,
+            &format!("/v2/virtual/library/app/blobs/{}", oci_digest(blob)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_ref(), blob);
+    }
+    assert_eq!(
+        [
+            first.received_requests().await.unwrap().len(),
+            second.received_requests().await.unwrap().len(),
+        ],
+        upstream_requests
+    );
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_does_not_fall_through_a_rejected_member() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(StatusCode::FORBIDDEN))
+        .mount(&first)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(empty_index(), INDEX_TYPE))
+        .expect(0)
+        .mount(&second)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "error");
+    assert!(rows[0].reason.contains("403"));
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_does_not_fall_through_a_missing_token() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(StatusCode::UNAUTHORIZED).insert_header(
+            "www-authenticate",
+            format!("Bearer realm=\"{}/token\",service=\"registry\"", first.uri()),
+        ))
+        .mount(&first)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(StatusCode::NOT_FOUND))
+        .mount(&first)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(empty_index(), INDEX_TYPE))
+        .expect(0)
+        .mount(&second)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "error");
+    assert!(rows[0].reason.contains("token endpoint returned 404"));
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_keeps_the_selected_member_for_the_graph() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    let child = empty_index();
+    let child_digest = oci_digest(&child);
+    let root = index_over(&[&child_digest], "root");
+    mount_manifest(&first, "library/app", "latest", &root, INDEX_TYPE).await;
+    for (reference, body) in [("latest", root.as_slice()), (child_digest.as_str(), child.as_slice())] {
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/app/manifests/{reference}")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body.to_vec(), INDEX_TYPE))
+            .expect(0)
+            .mount(&second)
+            .await;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        rows.iter()
+            .any(|row| row.reference == child_digest && row.status == "error")
+    );
+    assert_eq!(rows.last().unwrap().status, "partial");
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_honors_a_higher_member_tombstone() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(empty_index(), INDEX_TYPE))
+        .expect(0)
+        .mount(&second)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+    trash_latest(&state, "first");
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "error");
+    assert!(rows[0].reason.contains("deleted"));
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_ignores_a_lower_member_tombstone_after_selection() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    mount_manifest(&first, "library/app", "latest", &empty_index(), INDEX_TYPE).await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+    trash_latest(&state, "second");
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "synced");
+    assert!(
+        store::get_tag(&state.serving.meta, "first", "library/app", "latest")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_uses_each_members_library_prefix() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(StatusCode::NOT_FOUND))
+        .mount(&first)
+        .await;
+    mount_manifest(&second, "library/app", "latest", &empty_index(), INDEX_TYPE).await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+
+    let rows = mirror_with_settings(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["app:latest".to_owned()],
+        MirrorMode::Sync,
+        |member| IndexSettings {
+            library_prefix: if member == "first" {
+                LibraryPrefix::Never
+            } else {
+                LibraryPrefix::Always
+            },
+            ..IndexSettings::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "synced");
+}
+
+#[tokio::test]
+async fn test_verify_virtual_index_reads_the_selected_members_membership() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+    let manifest = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: empty_index(),
+    };
+    let digest = oci_digest(&manifest.bytes);
+    store::record_manifest(&state.serving.meta, "second", "library/app", &digest, &manifest).unwrap();
+    store::put_tag(&state.serving.meta, "second", "library/app", "latest", &digest).unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Verify,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "cached");
+    assert!(rows.iter().all(|row| row.index == "virtual"));
+}
+
+#[tokio::test]
+async fn test_verify_virtual_index_reports_a_child_missing_from_the_selected_member() {
+    let first = MockServer::start().await;
+    let second = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let state = virtual_proxies(
+        &directory,
+        [&format!("{}/", first.uri()), &format!("{}/", second.uri())],
+    );
+    let child = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: empty_index(),
+    };
+    let child_digest = oci_digest(&child.bytes);
+    let root = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: index_over(&[&child_digest], "root"),
+    };
+    let root_digest = oci_digest(&root.bytes);
+    store::record_manifest(&state.serving.meta, "first", "library/app", &root_digest, &root).unwrap();
+    store::put_tag(&state.serving.meta, "first", "library/app", "latest", &root_digest).unwrap();
+    store::record_manifest(&state.serving.meta, "second", "library/app", &child_digest, &child).unwrap();
+    remove_manifest_membership(&state.serving, "first", &child_digest);
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Verify,
+    )
+    .await
+    .unwrap();
+
+    assert!(rows.iter().any(|row| {
+        row.reference == child_digest
+            && row.status == "error"
+            && row.reason == "manifest not mirrored for this repository"
+    }));
+    assert_eq!(rows.last().unwrap().status, "partial");
+}
+
+#[tokio::test]
+async fn test_mirror_virtual_index_selects_a_hosted_member_without_using_the_proxy() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(StatusCode::INTERNAL_SERVER_ERROR))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = virtual_stack(&directory, &format!("{}/", server.uri()));
+    let manifest = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: empty_index(),
+    };
+    let digest = oci_digest(&manifest.bytes);
+    store::record_manifest(&state.serving.meta, "images", "library/app", &digest, &manifest).unwrap();
+    store::put_tag(&state.serving.meta, "images", "library/app", "latest", &digest).unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[2],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "cached");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mirror_does_not_restore_a_tag_deleted_during_the_upstream_response() {
+    let server = MockServer::start().await;
+    let gate = response_gate();
+    let manifest = index_over(&[], "new");
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(GatedResponse {
+            gate: gate.clone(),
+            response: ResponseTemplate::new(200).set_body_raw(manifest.clone(), INDEX_TYPE),
+        })
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+    let previous = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: index_over(&[], "old"),
+    };
+    let previous_digest = oci_digest(&previous.bytes);
+    store::record_manifest(&state.serving.meta, "hub", "library/app", &previous_digest, &previous).unwrap();
+    store::put_tag(&state.serving.meta, "hub", "library/app", "latest", &previous_digest).unwrap();
+    let running = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            mirror(
+                &state.serving,
+                &state.serving.indexes[0],
+                &["library/app:latest".to_owned()],
+                MirrorMode::Sync,
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let release = gate.entered().await;
+    store::trash_tag(
+        &state.serving.meta,
+        "hub",
+        "library/app",
+        "latest",
+        &store::TrashInfo {
+            deleted_at_unix: 1,
+            actor: None,
+            reason: None,
+        },
+        false,
+        |_| None,
+    )
+    .unwrap();
+    drop(release);
+
+    let rows = running.await.unwrap();
+    let digest = oci_digest(&manifest);
+    assert_eq!(rows[0].status, "error");
+    assert!(
+        store::get_tag(&state.serving.meta, "hub", "library/app", "latest")
+            .unwrap()
+            .is_none()
+    );
+    assert!(!store::manifest_is_member(&state.serving.meta, "hub", "library/app", &digest).unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mirror_rejects_a_manifest_revoked_during_the_upstream_response() {
+    let server = MockServer::start().await;
+    let gate = response_gate();
+    let manifest = empty_index();
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(GatedResponse {
+            gate: gate.clone(),
+            response: ResponseTemplate::new(200).set_body_raw(manifest.clone(), INDEX_TYPE),
+        })
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+    let running = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            mirror(
+                &state.serving,
+                &state.serving.indexes[0],
+                &["library/app:latest".to_owned()],
+                MirrorMode::Sync,
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let release = gate.entered().await;
+    let digest = oci_digest(&manifest);
+    revoke(&state.serving, &digest);
+    drop(release);
+
+    let rows = running.await.unwrap();
+
+    assert_eq!(rows[0].reason, "manifest digest is revoked");
+    assert!(!store::manifest_is_member(&state.serving.meta, "hub", "library/app", &digest).unwrap());
+}
+
+#[rstest::rstest]
+#[case::digest(false)]
+#[case::tag(true)]
+#[tokio::test]
+async fn test_mirror_rejects_a_revoked_reference_before_network_access(#[case] tag: bool) {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(StatusCode::INTERNAL_SERVER_ERROR))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+    let bytes = empty_index();
+    let digest = oci_digest(&bytes);
+    if tag {
+        store::record_manifest(
+            &state.serving.meta,
+            "hub",
+            "library/app",
+            &digest,
+            &Manifest {
+                media_type: INDEX_TYPE.to_owned(),
+                bytes,
+            },
+        )
+        .unwrap();
+        store::put_tag(&state.serving.meta, "hub", "library/app", "latest", &digest).unwrap();
+    }
+    revoke(&state.serving, &digest);
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &[if tag {
+            "library/app:latest".to_owned()
+        } else {
+            format!("library/app@{digest}")
+        }],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].status, "error");
+    assert!(rows[0].reason.contains("revoked"));
 }
 
 pub(super) fn image_manifest_with_layers(config: &[u8], layers: &[&[u8]]) -> Vec<u8> {
@@ -122,16 +777,18 @@ async fn test_mirror_rejects_a_manifest_media_type_over_the_storage_limit() {
     let dir = tempfile::tempdir().unwrap();
     let (state, _app) = proxy(&dir, &format!("{}/", server.uri()), false);
 
-    let error = mirror(
+    let rows = mirror(
         &state.serving,
         &state.serving.indexes[0],
         &["library/app:latest".to_owned()],
         MirrorMode::Sync,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("over the 65535-byte record limit"));
+    assert_eq!(rows[0].status, "error");
+    assert!(rows[0].reason.contains("storage limit"));
+    assert_eq!(rows.last().unwrap().status, "error");
     assert_eq!(
         (
             crate::store::get_manifest(&state.serving.meta, &oci_digest(body)).unwrap(),
@@ -281,6 +938,73 @@ async fn test_mirror_by_digest_rejects_bytes_that_hash_to_something_else() {
 }
 
 #[tokio::test]
+async fn test_mirror_rejects_an_advertised_sha256_that_does_not_match_the_body() {
+    let server = MockServer::start().await;
+    let manifest = empty_index();
+    let advertised = format!("sha256:{}", "0".repeat(64));
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("docker-content-digest", advertised.as_str())
+                .set_body_raw(manifest.clone(), INDEX_TYPE),
+        )
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        rows[0].reason,
+        format!(
+            "upstream digest {advertised} does not match manifest content {}",
+            oci_digest(&manifest)
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_mirror_reports_a_read_only_metadata_store() {
+    let server = MockServer::start().await;
+    let manifest = empty_index();
+    mount_manifest(&server, "library/app", "latest", &manifest, INDEX_TYPE).await;
+    let directory = tempfile::tempdir().unwrap();
+    let meta_path = directory.path().join("peryx.redb");
+    drop(peryx_storage::meta::MetaStore::open(&meta_path).unwrap());
+    let meta = peryx_storage::meta::MetaStore::open_existing_read_only(&meta_path).unwrap();
+    let blobs = peryx_storage::blob::BlobStorage::filesystem(directory.path().join("blobs"));
+    let index = oci_index(
+        "hub",
+        "hub",
+        IndexKind::Cached {
+            client: UpstreamClient::new(&format!("{}/", server.uri())).unwrap(),
+            offline: false,
+        },
+    );
+    let state = peryx_driver::AppState::with_clock(meta, blobs, 60, vec![index], Arc::new(|| 1000));
+
+    let error = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(error.to_string().contains("read-only"));
+}
+
+#[tokio::test]
 async fn test_mirror_by_digest_accepts_a_non_sha256_algorithm() {
     let server = MockServer::start().await;
     let config = b"{}";
@@ -356,6 +1080,35 @@ async fn test_mirror_follows_a_manifest_list() {
         2
     );
     assert_eq!(rows.last().unwrap().status, "synced");
+}
+
+#[tokio::test]
+async fn test_mirror_rejects_a_revoked_child_manifest_before_fetching_it() {
+    let server = MockServer::start().await;
+    let child = image_manifest(b"{}", &[]);
+    let child_digest = oci_digest(&child);
+    let index = index_over(&[&child_digest], "revoked-child");
+    mount_manifest(&server, "library/multi", "latest", &index, INDEX_TYPE).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/multi/manifests/{child_digest}")))
+        .respond_with(ResponseTemplate::new(StatusCode::INTERNAL_SERVER_ERROR))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+    revoke(&state.serving, &child_digest);
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/multi:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert!(rows.iter().any(|row| row.reason == "manifest digest is revoked"));
 }
 
 /// The marker gives diamond parents distinct digests.
@@ -835,6 +1588,161 @@ async fn test_mirror_reports_a_missing_blob() {
         verify
             .iter()
             .any(|row| row.kind == "blob" && row.reason == "blob missing")
+    );
+}
+
+#[tokio::test]
+async fn test_mirror_rejects_a_revoked_blob_before_fetching_it() {
+    let server = MockServer::start().await;
+    let config = b"{}";
+    let manifest = image_manifest(config, &[]);
+    mount_manifest(&server, "library/app", "latest", &manifest, MANIFEST_TYPE).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/blobs/{}", oci_digest(config))))
+        .respond_with(ResponseTemplate::new(StatusCode::INTERNAL_SERVER_ERROR))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+    revoke(&state.serving, &oci_digest(config));
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert!(rows.iter().any(|row| row.reason == "blob digest is revoked"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mirror_does_not_publish_blob_membership_when_revoked_during_download() {
+    let server = MockServer::start().await;
+    let gate = response_gate();
+    let config = b"{}";
+    let digest = oci_digest(config);
+    let manifest = image_manifest(config, &[]);
+    mount_manifest(&server, "library/app", "latest", &manifest, MANIFEST_TYPE).await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v2/library/app/blobs/{digest}")))
+        .respond_with(GatedResponse {
+            gate: gate.clone(),
+            response: ResponseTemplate::new(200).set_body_raw(config.to_vec(), "application/octet-stream"),
+        })
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+    let running = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            mirror(
+                &state.serving,
+                &state.serving.indexes[0],
+                &["library/app:latest".to_owned()],
+                MirrorMode::Sync,
+            )
+            .await
+            .unwrap()
+        }
+    });
+    let release = gate.entered().await;
+    remove_blob_membership(&state.serving, "hub", &digest);
+    revoke(&state.serving, &digest);
+    drop(release);
+
+    let rows = running.await.unwrap();
+
+    assert!(
+        rows.iter()
+            .any(|row| row.reason == "blob digest was revoked during download")
+    );
+    assert!(!store::blob_is_member(&state.serving.meta, "hub", "library/app", &digest).unwrap());
+}
+
+#[tokio::test]
+async fn test_verify_rejects_local_blob_bytes_without_repository_membership() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, "http://127.0.0.1:1/", false);
+    let config = b"{}";
+    let digest = oci_digest(config);
+    let manifest = Manifest {
+        media_type: MANIFEST_TYPE.to_owned(),
+        bytes: image_manifest(config, &[]),
+    };
+    let manifest_digest = oci_digest(&manifest.bytes);
+    store::record_manifest(&state.serving.meta, "hub", "library/app", &manifest_digest, &manifest).unwrap();
+    store::put_tag(&state.serving.meta, "hub", "library/app", "latest", &manifest_digest).unwrap();
+    remove_blob_membership(&state.serving, "hub", &digest);
+    state.serving.blobs.put_bytes(config).await.unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Verify,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        rows.iter()
+            .any(|row| row.reason == "blob not mirrored for this repository")
+    );
+}
+
+#[tokio::test]
+async fn test_sync_reports_a_blob_missing_from_a_hosted_member() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = app_with_indexes(
+        &directory,
+        vec![
+            oci_index("hosted", "hosted", IndexKind::Hosted { volatile: false }),
+            oci_index(
+                "virtual",
+                "virtual",
+                IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: None,
+                },
+            ),
+        ],
+    );
+    let config = b"{}";
+    let digest = oci_digest(config);
+    let manifest = Manifest {
+        media_type: MANIFEST_TYPE.to_owned(),
+        bytes: image_manifest(config, &[]),
+    };
+    let manifest_digest = oci_digest(&manifest.bytes);
+    store::record_manifest(
+        &state.serving.meta,
+        "hosted",
+        "library/app",
+        &manifest_digest,
+        &manifest,
+    )
+    .unwrap();
+    store::put_tag(&state.serving.meta, "hosted", "library/app", "latest", &manifest_digest).unwrap();
+    remove_blob_membership(&state.serving, "hosted", &digest);
+    state.serving.blobs.put_bytes(config).await.unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[1],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Sync,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        rows.iter()
+            .any(|row| row.reason == "blob missing from the selected index member")
     );
 }
 
@@ -1426,6 +2334,120 @@ async fn test_verify_rejects_a_digest_cached_under_another_repository() {
     .unwrap();
 
     assert_eq!(rows, unscoped_rows("hub", "library/other", &digest));
+}
+
+#[tokio::test]
+async fn test_verify_rejects_a_tag_whose_manifest_belongs_to_another_repository() {
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, &format!("{}/", server.uri()), false);
+    let digest = cache_under_app(&server, &state.serving, &state.serving.indexes[0]).await;
+    store::put_tag(&state.serving.meta, "hub", "library/other", "latest", &digest).unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/other:latest".to_owned()],
+        MirrorMode::Verify,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].reason, "manifest not mirrored for this repository");
+}
+
+#[tokio::test]
+async fn test_verify_reports_a_tag_whose_manifest_bytes_are_missing() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, "http://127.0.0.1:1/", false);
+    let digest = format!("sha256:{}", "0".repeat(64));
+    store::put_tag(&state.serving.meta, "hub", "library/app", "latest", &digest).unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Verify,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].reason, "manifest missing");
+}
+
+#[tokio::test]
+async fn test_verify_rejects_a_trashed_manifest_by_digest() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, "http://127.0.0.1:1/", false);
+    let manifest = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: empty_index(),
+    };
+    let digest = oci_digest(&manifest.bytes);
+    store::record_manifest(&state.serving.meta, "hub", "library/app", &digest, &manifest).unwrap();
+    store::trash_manifest(
+        &state.serving.meta,
+        "hub",
+        "library/app",
+        &digest,
+        &store::TrashInfo {
+            deleted_at_unix: 1,
+            actor: None,
+            reason: None,
+        },
+        false,
+        None,
+    )
+    .unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &[format!("library/app@{digest}")],
+        MirrorMode::Verify,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].reason, "manifest hidden by a deleted reference");
+}
+
+#[tokio::test]
+async fn test_verify_rejects_a_tag_pointing_to_a_trashed_manifest() {
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = proxy(&directory, "http://127.0.0.1:1/", false);
+    let manifest = Manifest {
+        media_type: INDEX_TYPE.to_owned(),
+        bytes: empty_index(),
+    };
+    let digest = oci_digest(&manifest.bytes);
+    store::record_manifest(&state.serving.meta, "hub", "library/app", &digest, &manifest).unwrap();
+    store::trash_manifest(
+        &state.serving.meta,
+        "hub",
+        "library/app",
+        &digest,
+        &store::TrashInfo {
+            deleted_at_unix: 1,
+            actor: None,
+            reason: None,
+        },
+        false,
+        None,
+    )
+    .unwrap();
+    store::put_tag(&state.serving.meta, "hub", "library/app", "latest", &digest).unwrap();
+
+    let rows = mirror(
+        &state.serving,
+        &state.serving.indexes[0],
+        &["library/app:latest".to_owned()],
+        MirrorMode::Verify,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(rows[0].reason, "manifest is not available");
 }
 
 #[tokio::test]

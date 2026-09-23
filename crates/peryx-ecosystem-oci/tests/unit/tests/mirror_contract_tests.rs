@@ -3,8 +3,9 @@ use peryx_index::IndexKind;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{app_with, oci_digest, oci_index, proxy};
+use super::{app_with, app_with_indexes, oci_digest, oci_index, proxy};
 use crate::registry::OciRegistry;
+use crate::{IndexSettings, LibraryPrefix};
 
 #[rstest::rstest]
 #[case::configured_requirements("requirements", false)]
@@ -259,6 +260,70 @@ async fn mirror_reports_stable_columns_across_actions() {
         let rows = report_rows(std::str::from_utf8(&output).unwrap());
         assert_eq!(rows, [expected_detail, expected_summary]);
     }
+}
+
+#[tokio::test]
+async fn mirror_virtual_index_uses_member_settings() {
+    let server = MockServer::start().await;
+    let index_type = "application/vnd.oci.image.index.v1+json";
+    let manifest = format!(r#"{{"schemaVersion":2,"mediaType":"{index_type}","manifests":[]}}"#).into_bytes();
+    Mock::given(method("GET"))
+        .and(path("/v2/library/app/manifests/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(manifest, index_type))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    let (state, _) = app_with_indexes(
+        &directory,
+        vec![
+            oci_index(
+                "member",
+                "member",
+                IndexKind::Cached {
+                    client: peryx_upstream::UpstreamClient::new(&format!("{}/", server.uri())).unwrap(),
+                    offline: false,
+                },
+            ),
+            oci_index(
+                "virtual",
+                "virtual",
+                IndexKind::Virtual {
+                    layers: vec![0],
+                    write_target: None,
+                },
+            ),
+        ],
+    );
+    let driver = OciRegistry::new(
+        [(
+            "member".to_owned(),
+            IndexSettings {
+                library_prefix: LibraryPrefix::Always,
+                ..IndexSettings::default()
+            },
+        )],
+        false,
+    );
+    let configured = images(&["app:latest"]);
+    let settings = toml::Table::from_iter([("library_prefix".to_owned(), toml::Value::Boolean(false))]);
+    let mut output = Vec::new();
+
+    driver
+        .mirror(
+            state,
+            MirrorRequest {
+                action: MirrorAction::Sync,
+                index: "virtual",
+                settings: &settings,
+                configured: &configured,
+                overrides: &toml::Table::new(),
+            },
+            &mut output,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report_rows(std::str::from_utf8(&output).unwrap())[0][7], "synced");
 }
 
 #[tokio::test]

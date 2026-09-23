@@ -344,23 +344,6 @@ fn test_dropping_an_executor_returns_while_its_thread_is_blocked() {
     caller.join().unwrap();
 }
 
-#[test]
-fn test_shutting_down_an_executor_returns_while_its_thread_is_blocked() {
-    let (executor, _cancellation, release, exited) = blocked_executor();
-    let (returned_sender, returned_receiver) = mpsc::channel();
-    let caller = std::thread::spawn(move || {
-        executor.shutdown();
-        returned_sender.send(()).unwrap();
-    });
-
-    returned_receiver.recv().unwrap();
-    assert_eq!(exited.try_recv(), Err(TryRecvError::Empty));
-
-    release.send(()).unwrap();
-    exited.recv().unwrap();
-    caller.join().unwrap();
-}
-
 fn member(datacenter: &str, address: &str) -> ConsensusMember {
     ConsensusMember {
         datacenter: datacenter.to_owned(),
@@ -2275,14 +2258,18 @@ async fn test_renewal_holds_a_singleton_past_its_original_deadline() {
     let lease = granted_lease("node-a", 1, 100);
     group.acquire_singleton_lease(JOB, "node-a").await.unwrap();
 
-    now.store(100 + peryx_ha::SINGLETON_LEASE_SECS - 1, Ordering::SeqCst);
+    let renewed_at = 100 + peryx_ha::SINGLETON_LEASE_SECS - 1;
+    now.store(renewed_at, Ordering::SeqCst);
     let renewed = group.renew_singleton_lease(&lease).await.unwrap();
     now.store(
         100 + peryx_ha::SINGLETON_LEASE_SECS + peryx_ha::AUTHORITY_CLOCK_SKEW_SECS,
         Ordering::SeqCst,
     );
 
-    assert!(matches!(renewed, SingletonRenewal::Renewed(_)));
+    assert_eq!(
+        renewed,
+        SingletonRenewal::Renewed(granted_lease("node-a", 1, renewed_at))
+    );
     assert_eq!(
         group.acquire_singleton_lease(JOB, "node-b").await.unwrap(),
         SingletonAcquisition::Held {

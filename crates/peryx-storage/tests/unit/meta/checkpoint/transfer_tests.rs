@@ -157,10 +157,9 @@ fn test_an_installed_checkpoint_holds_the_rows_the_writer_replicated() {
     assert!(replica.has_active_digest_revocation().unwrap());
 }
 
-#[test]
-fn test_checkpoint_blob_recovery_advances_only_after_the_last_bounded_page() {
+fn recovering_replica(blobs: u64) -> (MetaStore, CheckpointManifest) {
     let writer = store();
-    for index in 1..=3 {
+    for index in 1..=blobs {
         commit(&writer, |txn| {
             txn.reference_blob(&format!("{index:064x}"), index);
             Ok(())
@@ -173,6 +172,12 @@ fn test_checkpoint_blob_recovery_advances_only_after_the_last_bounded_page() {
         .unwrap();
     transfer(&writer, &replica, &manifest, 4096);
     replica.install_staged_checkpoint(CURSOR_KEY, CURSOR_VALUE).unwrap();
+    (replica, manifest)
+}
+
+#[test]
+fn test_checkpoint_blob_recovery_advances_only_after_the_last_bounded_page() {
+    let (replica, manifest) = recovering_replica(3);
     let limit = NonZeroUsize::new(2).unwrap();
 
     let first = replica.checkpoint_blob_recovery_page(limit).unwrap().unwrap();
@@ -213,6 +218,19 @@ fn test_checkpoint_blob_recovery_advances_only_after_the_last_bounded_page() {
         replica.view_frontier(peryx_ha::AVAILABILITY_BLOB_VIEW).unwrap(),
         Some(manifest.serial)
     );
+}
+
+#[test]
+fn test_checkpoint_blob_recovery_ends_on_an_exactly_full_page() {
+    let (replica, _manifest) = recovering_replica(2);
+
+    let page = replica
+        .checkpoint_blob_recovery_page(NonZeroUsize::new(2).unwrap())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(page.references.len(), 2);
+    assert_eq!(page.next, None);
 }
 
 #[test]

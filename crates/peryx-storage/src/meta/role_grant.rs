@@ -263,12 +263,12 @@ impl MetaStore {
                 next_cursor: None,
             });
         }
-        let start: Bound<&str> = match (query.cursor.as_deref(), prefix.as_deref()) {
-            (Some(cursor), Some(prefix)) if cursor < prefix => Bound::Included(prefix),
-            (Some(cursor), _) => Bound::Excluded(cursor),
-            (None, Some(prefix)) => Bound::Included(prefix),
-            (None, None) => Bound::Unbounded,
-        };
+        // Every stored key extends its filter prefix, so no key equals the prefix and excluding it skips nothing.
+        let start: Bound<&str> = query
+            .cursor
+            .as_deref()
+            .max(prefix.as_deref())
+            .map_or(Bound::Unbounded, Bound::Excluded);
         let end: Bound<&str> = prefix_end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
         let mut page = Vec::new();
         let mut has_overflow = false;

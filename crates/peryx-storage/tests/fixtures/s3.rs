@@ -114,6 +114,7 @@ async fn run_integration(scenario_name: String, endpoint: String, staging_dir: P
             | "wire_repair_content_failure"
             | "wire_repair_cancelled_after_content"
             | "wire_repair_cursor"
+            | "wire_repair_backend_switch"
             | "wire_repair_missing_content"
             | "recover_none"
             | "recover_one"
@@ -140,6 +141,18 @@ async fn run_integration(scenario_name: String, endpoint: String, staging_dir: P
     #[cfg(feature = "container-tests")]
     if scenario_name == "cancel" {
         tracing::subscriber::set_global_default(tracing_subscriber::registry().with(JournalSignal)).unwrap();
+    }
+    if scenario_name == "wire_repair_backend_switch" {
+        let moved = S3Settings {
+            prefix: "moved".to_owned(),
+            ..settings.clone()
+        };
+        run_repair_backend_switch_child(
+            &BlobStorage::s3(S3Config::new(settings).unwrap(), staging_dir.clone()),
+            &BlobStorage::s3(S3Config::new(moved).unwrap(), staging_dir),
+        )
+        .await;
+        return Ok(());
     }
     run_child_scenario(
         &BlobStorage::s3(S3Config::new(settings).map_err(|error| error.to_string())?, staging_dir),
@@ -618,6 +631,14 @@ async fn run_repair_cursor_child(storage: &BlobStorage) {
         ArtifactRepairError::ContentCursorReset
     ));
     assert!(repair_artifact_placements(&meta, storage, 1).await.unwrap().content.eof);
+}
+
+async fn run_repair_backend_switch_child(storage: &BlobStorage, moved: &BlobStorage) {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+
+    assert!(!repair_artifact_placements(&meta, storage, 1).await.unwrap().content.eof);
+    assert!(repair_artifact_placements(&meta, moved, 1).await.unwrap().content.eof);
 }
 
 async fn run_recover_child(storage: &BlobStorage, scenario: RecoverScenario) {

@@ -840,7 +840,7 @@ fn prepared_acme(
     let state = rustls_acme::AcmeConfig::new(acme.domains.clone())
         .contact([format!("mailto:{}", acme.contact)])
         .cache(rustls_acme::caches::DirCache::new(acme.cache_dir.clone()))
-        .directory_lets_encrypt(!acme.staging)
+        .directory(acme_directory(acme.staging))
         .state();
     let acceptor = state.axum_acceptor(state.default_rustls_config());
     let handle = axum_server::Handle::new();
@@ -861,6 +861,14 @@ fn prepared_acme(
         )
         .await
     }))
+}
+
+const fn acme_directory(staging: bool) -> &'static str {
+    if staging {
+        rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY
+    } else {
+        rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY
+    }
 }
 
 async fn supervise_acme(

@@ -19,9 +19,17 @@ async fn fleet_workload_records_successful_and_failed_servers() {
     let (directory, context) = benchmark();
     let servers = [server("good", fleet_good_base), server("bad", fleet_bad_base)];
 
-    fleet_package(&context, &servers, 1, &http_client(), "sample-pkg", "python3", 1)
-        .await
-        .unwrap();
+    fleet_package(
+        &context,
+        &servers,
+        &Schedule::new(servers.len(), 1, 1),
+        &http_client(),
+        "sample-pkg",
+        "python3",
+        1,
+    )
+    .await
+    .unwrap();
 
     let report = load_report(&directory.path().join("report.toml")).unwrap();
     let rows = &report.tables["parallel-install"].rows;

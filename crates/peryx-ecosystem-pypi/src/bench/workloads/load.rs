@@ -1,11 +1,13 @@
 use anyhow::bail;
 use hdrhistogram::Histogram;
+use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant as TokioInstant, sleep_until};
 
 use super::super::packages::TOP_PACKAGES;
+use super::super::schedule::Schedule;
 use super::Rounds;
 use peryx_bench_core::context::BenchmarkContext;
-use peryx_bench_core::report::{Absent, Metric, baseline, cost_rows_per_request, row, summarize, table};
+use peryx_bench_core::report::{Absent, Metric, baseline, complete_row, cost_rows_per_request, table};
 use peryx_bench_core::servers::Server;
 use peryx_bench_core::usage::{Cost, Usage};
 
@@ -18,17 +20,17 @@ pub async fn load(
     context: &BenchmarkContext,
     servers: &[Server],
     users: &[usize],
-    rounds: usize,
+    schedule: &Schedule,
     http: &reqwest::Client,
 ) -> anyhow::Result<()> {
-    load_with_windows(context, servers, users, rounds, http, &LoadWindows::default()).await
+    load_with_windows(context, servers, users, schedule, http, &LoadWindows::default()).await
 }
 
 async fn load_with_windows(
     context: &BenchmarkContext,
     servers: &[Server],
     users: &[usize],
-    rounds: usize,
+    schedule: &Schedule,
     http: &reqwest::Client,
     windows: &LoadWindows,
 ) -> anyhow::Result<()> {
@@ -40,40 +42,44 @@ async fn load_with_windows(
         .iter()
         .map(|_| users.iter().map(|_| Vec::new()).collect())
         .collect();
-    let mut costs: Vec<Option<Vec<Cost>>> = Vec::new();
+    let mut costs = servers.iter().map(|_| Rounds::new()).collect::<Vec<_>>();
     // One request total per round, aligned with that round's cost, so CPU can be priced per request.
-    let mut served: Vec<Option<Vec<u64>>> = Vec::new();
-    for (index, server) in servers.iter().enumerate() {
-        let mut collected = Rounds::new();
-        let mut round_requests: Vec<u64> = Vec::new();
-        for attempt in 1..=rounds {
-            let scratch = tempfile::tempdir_in(context.scratch())?;
-            let state = scratch.path().join("state");
-            std::fs::create_dir(&state)?;
-            let active = server.start(context, &state, http).await?;
-            let usage = Usage::watch(active.pid())?;
-            println!("[load] {} round {attempt}/{rounds}", server.name);
-            match load_round(&active.url, users, http, windows).await {
-                Ok(outcomes) => {
-                    let mut total = 0;
-                    for (slot, outcome) in outcomes.into_iter().enumerate() {
-                        rps[index][slot].push(outcome.requests_per_second);
-                        p95[index][slot].push(outcome.p95_seconds);
-                        total += outcome.requests;
-                    }
-                    round_requests.push(total);
+    let mut round_requests: Vec<Vec<u64>> = servers.iter().map(|_| Vec::new()).collect();
+    for entry in schedule.entries() {
+        tokio::time::sleep(windows.drain).await;
+        let server = &servers[entry.server];
+        let scratch = tempfile::tempdir_in(context.scratch())?;
+        let state = scratch.path().join("state");
+        std::fs::create_dir(&state)?;
+        let active = server.start(context, &state, http).await?;
+        let usage = Usage::watch(active.pid())?;
+        println!("[load] {} round {}/{}", server.name, entry.round, schedule.rounds);
+        match tokio::time::timeout(windows.round, load_round(&active.url, users, http, windows))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("the round did not finish within {:?}", windows.round)))
+        {
+            Ok(outcomes) => {
+                let mut total = 0;
+                for (slot, outcome) in outcomes.into_iter().enumerate() {
+                    rps[entry.server][slot].push(outcome.requests_per_second);
+                    p95[entry.server][slot].push(outcome.p95_seconds);
+                    total += outcome.requests;
                 }
-                Err(error) => {
-                    println!("[load] {} round {attempt}: failed ({error:#})", server.name);
-                    round_requests.push(0);
-                }
+                round_requests[entry.server].push(total);
             }
-            collected.record_cost(usage)?;
+            Err(error) => {
+                println!("[load] {} round {}: failed ({error:#})", server.name, entry.round);
+                round_requests[entry.server].push(0);
+            }
         }
-        let ran = collected.costs();
-        served.push(requests_if_server_ran(ran.is_some(), round_requests));
-        costs.push(ran);
+        costs[entry.server].record_cost(usage)?;
     }
+    let costs = costs.into_iter().map(Rounds::costs).collect::<Vec<Option<Vec<Cost>>>>();
+    let served = costs
+        .iter()
+        .zip(round_requests)
+        .map(|(costs, requests)| requests_if_server_ran(costs.is_some(), requests))
+        .collect::<Vec<_>>();
     let base = baseline(servers);
     let mut rows = Vec::new();
     for (slot, &count) in users.iter().enumerate() {
@@ -84,16 +90,18 @@ async fn load_with_windows(
         };
         let rps_slot: Vec<Vec<f64>> = rps.iter().map(|server| server[slot].clone()).collect();
         let p95_slot: Vec<Vec<f64>> = p95.iter().map(|server| server[slot].clone()).collect();
-        rows.push(row(
+        rows.push(complete_row(
             &format!("{label}: requests/s"),
-            &summarize(&rps_slot),
+            &rps_slot,
+            schedule.rounds,
             base,
             Metric::Rate("req/s"),
             Absent::Failed,
         ));
-        rows.push(row(
+        rows.push(complete_row(
             &format!("{label}: p95 latency"),
-            &summarize(&p95_slot),
+            &p95_slot,
+            schedule.rounds,
             base,
             Metric::Seconds,
             Absent::Failed,
@@ -155,6 +163,17 @@ struct SwarmResult {
 /// How long the closed-loop capacity probe and the open-loop latency window each run.
 const CAPACITY_WINDOW: Duration = Duration::from_secs(5);
 const LATENCY_WINDOW: Duration = Duration::from_secs(15);
+/// A request past this counts as failed. Without a bound, one request the server never answers stalls the
+/// whole run instead of costing that server its round.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A healthy round (warm-up plus two 20 s measurement windows) takes under a minute. A round past this deadline stalled
+/// somewhere no request timeout covers, and becomes that server's error cell.
+const ROUND_TIMEOUT: Duration = Duration::from_mins(5);
+/// gunicorn's sync workers and pypiserver's wsgiref close every connection, so a swarm leaves thousands of loopback
+/// sockets in `TIME_WAIT` (2 × MSL, 30 s on macOS). Starting the next round before they expire exhausts the ephemeral
+/// ports and fails that round on connect errors the server never caused. Linux holds them for 60 s but reuses them for
+/// loopback connects, which is why the wait follows macOS.
+const TIME_WAIT_DRAIN: Duration = Duration::from_secs(30);
 
 /// The latency probe drives at this fraction of the measured peak. Below capacity the fixed send
 /// schedule keeps pace, so the tail reflects real per-request latency; at or above capacity the
@@ -164,6 +183,9 @@ const LOAD_FRACTION: f64 = 0.7;
 struct LoadWindows {
     capacity: Duration,
     latency: Duration,
+    request: Duration,
+    round: Duration,
+    drain: Duration,
 }
 
 impl Default for LoadWindows {
@@ -171,6 +193,9 @@ impl Default for LoadWindows {
         Self {
             capacity: CAPACITY_WINDOW,
             latency: LATENCY_WINDOW,
+            request: REQUEST_TIMEOUT,
+            round: ROUND_TIMEOUT,
+            drain: TIME_WAIT_DRAIN,
         }
     }
 }
@@ -186,12 +211,11 @@ impl Default for LoadWindows {
 /// understates p99 by orders of magnitude); driving open-loop at or above capacity would instead
 /// inflate every latency to the window length, which is why the schedule sits below the ceiling.
 async fn swarm(index_url: &str, users: usize, windows: &LoadWindows) -> anyhow::Result<SwarmResult> {
-    let (requests_per_second, burst) = measure_capacity(index_url, users, windows.capacity).await?;
+    let (requests_per_second, burst) = measure_capacity(index_url, users, windows).await?;
     if requests_per_second == 0.0 {
         bail!("the swarm completed no requests");
     }
-    let (p95_seconds, paced) =
-        measure_tail(index_url, users, requests_per_second * LOAD_FRACTION, windows.latency).await?;
+    let (p95_seconds, paced) = measure_tail(index_url, users, requests_per_second * LOAD_FRACTION, windows).await?;
     Ok(SwarmResult {
         requests_per_second,
         p95_seconds,
@@ -201,12 +225,13 @@ async fn swarm(index_url: &str, users: usize, windows: &LoadWindows) -> anyhow::
 
 /// Closed-loop peak: `users` clients each refetch as fast as responses return for [`CAPACITY_WINDOW`];
 /// the completed count over the window is the sustained request rate.
-async fn measure_capacity(index_url: &str, users: usize, window: Duration) -> anyhow::Result<(f64, u64)> {
-    let mut tasks = Vec::new();
+async fn measure_capacity(index_url: &str, users: usize, windows: &LoadWindows) -> anyhow::Result<(f64, u64)> {
+    let window = windows.capacity;
+    let mut tasks = JoinSet::new();
     for user in 0..users {
         let index_url = index_url.to_owned();
-        tasks.push(tokio::spawn(async move {
-            let client = reqwest::Client::builder().build().expect("client builds");
+        let client = load_client(windows.request);
+        tasks.spawn(async move {
             let deadline = TokioInstant::now() + window;
             let mut completed = 0u64;
             let mut page = user;
@@ -220,11 +245,11 @@ async fn measure_capacity(index_url: &str, users: usize, window: Duration) -> an
                 page += 1;
             }
             completed
-        }));
+        });
     }
     let mut completed = 0u64;
-    for task in tasks {
-        completed += task.await.expect("capacity client never panics");
+    while let Some(task) = tasks.join_next().await {
+        completed += task.expect("capacity client never panics");
     }
     #[expect(clippy::cast_precision_loss, reason = "request counts fit f64 exactly here")]
     Ok((completed as f64 / window.as_secs_f64(), completed))
@@ -234,20 +259,25 @@ async fn measure_capacity(index_url: &str, users: usize, window: Duration) -> an
 /// schedule regardless of when responses return, over [`LATENCY_WINDOW`]. Latency is timed from the
 /// intended send time so a stall is charged its full delay. Returns the p95 in seconds and the
 /// number of requests it recorded.
-async fn measure_tail(index_url: &str, users: usize, target_rate: f64, window: Duration) -> anyhow::Result<(f64, u64)> {
+async fn measure_tail(
+    index_url: &str,
+    users: usize,
+    target_rate: f64,
+    windows: &LoadWindows,
+) -> anyhow::Result<(f64, u64)> {
     #[expect(clippy::cast_precision_loss, reason = "user counts fit f64 exactly here")]
     let interval = Duration::from_secs_f64(users as f64 / target_rate);
-    let mut tasks = Vec::new();
+    let mut tasks = JoinSet::new();
     for user in 0..users {
         let index_url = index_url.to_owned();
-        tasks.push(tokio::spawn(async move {
-            tail_client(&index_url, user, interval, window).await
-        }));
+        let client = load_client(windows.request);
+        let window = windows.latency;
+        tasks.spawn(async move { tail_client(&client, &index_url, user, interval, window).await });
     }
     let mut merged: Histogram<u64> = Histogram::new(3).expect("histogram bounds are valid");
-    for task in tasks {
+    while let Some(task) = tasks.join_next().await {
         merged
-            .add(task.await.expect("tail client never panics"))
+            .add(task.expect("tail client never panics"))
             .expect("histograms share bounds");
     }
     if merged.is_empty() {
@@ -259,8 +289,13 @@ async fn measure_tail(index_url: &str, users: usize, target_rate: f64, window: D
 
 /// One open-loop client: fetch on the `interval` schedule for [`LATENCY_WINDOW`], recording each
 /// latency from its intended send time.
-async fn tail_client(index_url: &str, user: usize, interval: Duration, window: Duration) -> Histogram<u64> {
-    let client = reqwest::Client::builder().build().expect("client builds");
+async fn tail_client(
+    client: &reqwest::Client,
+    index_url: &str,
+    user: usize,
+    interval: Duration,
+    window: Duration,
+) -> Histogram<u64> {
     let mut histogram: Histogram<u64> = Histogram::new(3).expect("histogram bounds are valid");
     let start = TokioInstant::now();
     let deadline = start + window;
@@ -269,7 +304,7 @@ async fn tail_client(index_url: &str, user: usize, interval: Duration, window: D
     while TokioInstant::now() < deadline {
         intended += interval;
         sleep_until(intended).await;
-        if fetch_page(&client, &format!("{index_url}{}/", TOP_PACKAGES[page % 10]))
+        if fetch_page(client, &format!("{index_url}{}/", TOP_PACKAGES[page % 10]))
             .await
             .is_ok()
         {
@@ -279,6 +314,13 @@ async fn tail_client(index_url: &str, user: usize, interval: Duration, window: D
         page += 1;
     }
     histogram
+}
+
+fn load_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("client builds")
 }
 
 async fn fetch_page(client: &reqwest::Client, target: &str) -> anyhow::Result<()> {

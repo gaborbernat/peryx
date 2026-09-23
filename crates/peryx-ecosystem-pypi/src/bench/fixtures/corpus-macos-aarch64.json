@@ -1,0 +1,820 @@
+{
+  "schema": 1,
+  "pip_version": "26.2.1",
+  "python": "3.14.7",
+  "platform": "macos-aarch64",
+  "roots": [
+    "boto3==1.43.100",
+    "urllib3==2.8.0",
+    "botocore==1.43.100",
+    "requests==2.34.2",
+    "certifi==2026.7.22",
+    "idna==3.20",
+    "charset-normalizer==3.5.1",
+    "typing-extensions==4.16.0",
+    "python-dateutil==2.9.0.post0",
+    "s3transfer==0.19.2",
+    "six==1.17.0",
+    "packaging==26.3",
+    "pyyaml==6.0.3",
+    "numpy==2.5.3",
+    "setuptools==81.0.0",
+    "fsspec==2026.9.0",
+    "wheel==0.48.0",
+    "cryptography==50.0.1",
+    "jmespath==1.1.0",
+    "cffi==2.1.1",
+    "pandas==3.0.6",
+    "attrs==26.1.0",
+    "click==8.5.0",
+    "pycparser==3.0",
+    "protobuf==7.36.2",
+    "jinja2==3.1.6",
+    "markupsafe==3.0.3",
+    "rsa==4.9.1",
+    "pytz==2026.3.post1",
+    "colorama==0.4.6",
+    "pyasn1==0.6.4",
+    "googleapis-common-protos==1.75.3",
+    "importlib-metadata==9.0.1",
+    "zipp==4.1.0",
+    "pydantic==2.13.5",
+    "pyjwt==2.14.0",
+    "requests-oauthlib==2.0.0",
+    "oauthlib==3.3.1",
+    "cachetools==7.2.0",
+    "google-auth==2.58.0",
+    "pyparsing==3.3.3",
+    "tzdata==2026.4",
+    "platformdirs==4.11.12",
+    "filelock==4.0.1",
+    "virtualenv==21.11.0",
+    "tomli==2.4.1",
+    "grpcio==1.84.0",
+    "sqlalchemy==2.0.54",
+    "greenlet==3.5.6",
+    "requests-toolbelt==1.0.0",
+    "torch==2.11.0",
+    "polars==1.44.2"
+  ],
+  "artifacts": [
+    {
+      "project": "annotated-types",
+      "version": "0.8.0",
+      "filename": "annotated_types-0.8.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl",
+      "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": false,
+      "size": 13427
+    },
+    {
+      "project": "attrs",
+      "version": "26.1.0",
+      "filename": "attrs-26.1.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl",
+      "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 67548
+    },
+    {
+      "project": "boto3",
+      "version": "1.43.100",
+      "filename": "boto3-1.43.100-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/98/37/0ffe0ceb6227381f852f51777c9338115958d24d436bef990c73b6660bf4/boto3-1.43.100-py3-none-any.whl",
+      "sha256": "49785c310057c2c650d62ca3ba28e88ad87c3827b490312711e81968a9d21fd8",
+      "requires_python": ">= 3.10",
+      "dependencies": [
+        "botocore",
+        "jmespath",
+        "s3transfer"
+      ],
+      "requested": true,
+      "size": 140042
+    },
+    {
+      "project": "botocore",
+      "version": "1.43.100",
+      "filename": "botocore-1.43.100-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c4/f2/93ce07251665ed422d4ae175b65741d3c02495acbc183b84df6ca5a850c8/botocore-1.43.100-py3-none-any.whl",
+      "sha256": "34c3232bc0f895091a15249903b3cab1148f5787f12389caa2d54a9175428d51",
+      "requires_python": ">= 3.10",
+      "dependencies": [
+        "jmespath",
+        "python-dateutil",
+        "urllib3"
+      ],
+      "requested": true,
+      "size": 15860706
+    },
+    {
+      "project": "cachetools",
+      "version": "7.2.0",
+      "filename": "cachetools-7.2.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/cc/bb/1c6e7a89b11da19f137e4ef5a5c5fe47a5bb686449ba343944ccf8fb34b2/cachetools-7.2.0-py3-none-any.whl",
+      "sha256": "3045213f186b89fdd95d94441354c4bd87c570b7a38d8c3fd1d9dd37f6dc90d8",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 16918
+    },
+    {
+      "project": "certifi",
+      "version": "2026.7.22",
+      "filename": "certifi-2026.7.22-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl",
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+      "requires_python": ">=3.7",
+      "dependencies": [],
+      "requested": true,
+      "size": 136983
+    },
+    {
+      "project": "cffi",
+      "version": "2.1.1",
+      "filename": "cffi-2.1.1-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/b3/a9/9db617d05d7367c1ad0ab00b3aa6e6f9281edd689b4ee9ea0e5a84e89c97/cffi-2.1.1-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "661c298b4821edebead0c91edd2b00374d67ad7c5a1f7a91d4442633b79d6a72",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "pycparser"
+      ],
+      "requested": true,
+      "size": 184962
+    },
+    {
+      "project": "charset-normalizer",
+      "version": "3.5.1",
+      "filename": "charset_normalizer-3.5.1-cp314-cp314-macosx_10_15_universal2.whl",
+      "url": "https://files.pythonhosted.org/packages/e9/40/095ce62fa078483cccc1fa2b36e6bc9580b85422a20ee9f925341c50e44f/charset_normalizer-3.5.1-cp314-cp314-macosx_10_15_universal2.whl",
+      "sha256": "c428c6c31eb5f4277d7f8eccaf767fbd548ddd5ce3c8b4f4cbbfab3d96b5904c",
+      "requires_python": ">=3.7",
+      "dependencies": [],
+      "requested": true,
+      "size": 341823
+    },
+    {
+      "project": "click",
+      "version": "8.5.0",
+      "filename": "click-8.5.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl",
+      "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 125251
+    },
+    {
+      "project": "colorama",
+      "version": "0.4.6",
+      "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+      "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6",
+      "requires_python": "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,>=2.7",
+      "dependencies": [],
+      "requested": true,
+      "size": 25335
+    },
+    {
+      "project": "cryptography",
+      "version": "50.0.1",
+      "filename": "cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/ba/19/797e2aaac9df6a66f1550f49979dc1b1e39ecd2077501c30efa81e8d5d67/cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl",
+      "sha256": "b8f852c65863251b9e3a1b8c150ce21e59b522dbb6a7d4bc80e680d38388e986",
+      "requires_python": ">=3.9, !=3.9.0, !=3.9.1",
+      "dependencies": [
+        "cffi"
+      ],
+      "requested": true,
+      "size": 4010153
+    },
+    {
+      "project": "distlib",
+      "version": "0.4.3",
+      "filename": "distlib-0.4.3-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/02/08/9c41fb51ab5b43eb21674aff13df270e8ba6c4b29c8624e328dc7a9482af/distlib-0.4.3-py2.py3-none-any.whl",
+      "sha256": "4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b",
+      "requires_python": null,
+      "dependencies": [],
+      "requested": false,
+      "size": 470628
+    },
+    {
+      "project": "filelock",
+      "version": "4.0.1",
+      "filename": "filelock-4.0.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/29/33/af0635ab07fe83b1788a1dbe370ff3e226062495a998335cb18a1cac81aa/filelock-4.0.1-py3-none-any.whl",
+      "sha256": "481a321a27bef441e23c53371c6abc8d7d16e26b97090074ba44f7538a3fd55a",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 106219
+    },
+    {
+      "project": "fsspec",
+      "version": "2026.9.0",
+      "filename": "fsspec-2026.9.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl",
+      "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 221738
+    },
+    {
+      "project": "google-auth",
+      "version": "2.58.0",
+      "filename": "google_auth-2.58.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/59/13/477d90d09591b3938b45c4e11f4d8a51291682112cb5efcac961e815d562/google_auth-2.58.0-py3-none-any.whl",
+      "sha256": "8a9c4645bb4c8e91668fb1934b95ae6a8687084232753639220ba9bf04a1610d",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "cryptography",
+        "pyasn1-modules"
+      ],
+      "requested": true,
+      "size": 262404
+    },
+    {
+      "project": "googleapis-common-protos",
+      "version": "1.75.3",
+      "filename": "googleapis_common_protos-1.75.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/1a/7a/7d79170c6ce6f12e109df2b3879d6b934010cf4f99aea8de8b7e5408c174/googleapis_common_protos-1.75.3-py3-none-any.whl",
+      "sha256": "a018d2bf098ca9fb6faa08d5bb780e2a2c2f73c566f069761331386c9596d3f2",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "protobuf"
+      ],
+      "requested": true,
+      "size": 306984
+    },
+    {
+      "project": "greenlet",
+      "version": "3.5.6",
+      "filename": "greenlet-3.5.6-cp314-cp314-macosx_11_0_universal2.whl",
+      "url": "https://files.pythonhosted.org/packages/66/c0/d254544ae2b8bdd311aef000fafc02828c2771b17d994b3075620ea7cc6e/greenlet-3.5.6-cp314-cp314-macosx_11_0_universal2.whl",
+      "sha256": "8cddea1b8339451c2fb3388e138347b6126744f33b611bdb55b7357361cfef46",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 295221
+    },
+    {
+      "project": "grpcio",
+      "version": "1.84.0",
+      "filename": "grpcio-1.84.0-cp314-cp314-macosx_11_0_universal2.whl",
+      "url": "https://files.pythonhosted.org/packages/cd/b4/6b76b429f3f9b901cdbc306c81364d708bc957f847a05cbd1046cd2d05d8/grpcio-1.84.0-cp314-cp314-macosx_11_0_universal2.whl",
+      "sha256": "3de427b05f244ba2c2a9bdc67e7a6731c8340811524ecc4435466549f8af1d17",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "typing-extensions"
+      ],
+      "requested": true,
+      "size": 12342420
+    },
+    {
+      "project": "idna",
+      "version": "3.20",
+      "filename": "idna-3.20-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl",
+      "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 69583
+    },
+    {
+      "project": "importlib_metadata",
+      "version": "9.0.1",
+      "filename": "importlib_metadata-9.0.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b3/55/ecca97ae19075f1fac62def77731e7f535e6c1fb8f92ff08160c5e6dade8/importlib_metadata-9.0.1-py3-none-any.whl",
+      "sha256": "bba5600596a7e21f3eef53281cf28d6a5195634d2f2b78ff9501a3272c6eaab0",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "zipp"
+      ],
+      "requested": true,
+      "size": 27920
+    },
+    {
+      "project": "Jinja2",
+      "version": "3.1.6",
+      "filename": "jinja2-3.1.6-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "requires_python": ">=3.7",
+      "dependencies": [
+        "markupsafe"
+      ],
+      "requested": true,
+      "size": 134899
+    },
+    {
+      "project": "jmespath",
+      "version": "1.1.0",
+      "filename": "jmespath-1.1.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl",
+      "sha256": "a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 20419
+    },
+    {
+      "project": "MarkupSafe",
+      "version": "3.0.3",
+      "filename": "markupsafe-3.0.3-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/b5/64/7660f8a4a8e53c924d0fa05dc3a55c9cee10bbd82b11c5afb27d44b096ce/markupsafe-3.0.3-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "c47a551199eb8eb2121d4f0f15ae0f923d31350ab9280078d1e5f12b249e0026",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 12029
+    },
+    {
+      "project": "mpmath",
+      "version": "1.3.0",
+      "filename": "mpmath-1.3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl",
+      "sha256": "a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c",
+      "requires_python": null,
+      "dependencies": [],
+      "requested": false,
+      "size": 536198
+    },
+    {
+      "project": "networkx",
+      "version": "3.7",
+      "filename": "networkx-3.7-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/7e/cd/fe58041e9011f307c490e3e17dd48cc516448f7c698a3f2d9d9d65d7e6a8/networkx-3.7-py3-none-any.whl",
+      "sha256": "e3fd2c13a7814cee3746340d8d7f8598a67f16a58bf47fb7f8793fab6efca1b0",
+      "requires_python": "!=3.14.1,>=3.12",
+      "dependencies": [],
+      "requested": false,
+      "size": 2142205
+    },
+    {
+      "project": "numpy",
+      "version": "2.5.3",
+      "filename": "numpy-2.5.3-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/9e/59/abcc2d8def4fd60eec7d87f92d27c13448ffd9ab14339bcc63a0d7a2fdea/numpy-2.5.3-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "012e66aca395d795496446e52aeeb5866312a5d4d3f27da270e5a0b43f70dc5c",
+      "requires_python": ">=3.12",
+      "dependencies": [],
+      "requested": true,
+      "size": 12013862
+    },
+    {
+      "project": "oauthlib",
+      "version": "3.3.1",
+      "filename": "oauthlib-3.3.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/be/9c/92789c596b8df838baa98fa71844d84283302f7604ed565dafe5a6b5041a/oauthlib-3.3.1-py3-none-any.whl",
+      "sha256": "88119c938d2b8fb88561af5f6ee0eec8cc8d552b7bb1f712743136eb7523b7a1",
+      "requires_python": ">=3.8",
+      "dependencies": [],
+      "requested": true,
+      "size": 160065
+    },
+    {
+      "project": "packaging",
+      "version": "26.3",
+      "filename": "packaging-26.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl",
+      "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 129956
+    },
+    {
+      "project": "pandas",
+      "version": "3.0.6",
+      "filename": "pandas-3.0.6-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/35/61/47ae13476995cc8a40cd609e93e7cf11f273d8692925c2903cb6d38aa0d1/pandas-3.0.6-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "ff51a4459ed036e93d1eb1bb5e6e7b28685d3cb6b7c12b91c05b31024e234729",
+      "requires_python": ">=3.11",
+      "dependencies": [
+        "numpy",
+        "python-dateutil"
+      ],
+      "requested": true,
+      "size": 10156618
+    },
+    {
+      "project": "platformdirs",
+      "version": "4.11.12",
+      "filename": "platformdirs-4.11.12-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ec/2b/69de6317fbf48865bb12aa56c9cfcfff46b3add0cd45250725d96146dce0/platformdirs-4.11.12-py3-none-any.whl",
+      "sha256": "b1ba966ac76153d9985a0787ffab951e7c18416189873d4e4ddb2c8a04a0a254",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 24976
+    },
+    {
+      "project": "polars",
+      "version": "1.44.2",
+      "filename": "polars-1.44.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/51/6d/3014112c7f717d1253223faa13b6db3ac3a64ed00ab2a3bc1b942bc9cdd4/polars-1.44.2-py3-none-any.whl",
+      "sha256": "1bb331f17a40d9d931101533dcd33637b66edc61eb377b07020dac16a0f0377b",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "polars-runtime-32"
+      ],
+      "requested": true,
+      "size": 865768
+    },
+    {
+      "project": "polars-runtime-32",
+      "version": "1.44.2",
+      "filename": "polars_runtime_32-1.44.2-cp310-abi3-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/c2/e0/f3dc93fce4b4e99370db6a89001a1b8d3c606e3560d0d91dda809d6c6324/polars_runtime_32-1.44.2-cp310-abi3-macosx_11_0_arm64.whl",
+      "sha256": "e0fd43720c8222ae39919c8ff891636d53b352706087120e62f83544dd3ff782",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": false,
+      "size": 43331099
+    },
+    {
+      "project": "protobuf",
+      "version": "7.36.2",
+      "filename": "protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl",
+      "url": "https://files.pythonhosted.org/packages/32/72/98342feb672507c8f3a69e34b4fa8961f608edba5c1a48a6f47156d92cb5/protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl",
+      "sha256": "cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 456039
+    },
+    {
+      "project": "pyasn1",
+      "version": "0.6.4",
+      "filename": "pyasn1-0.6.4-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/9a/3b/6163796d69c3977d1e4287bea4a6979161cbbdd170ebb430511e8e1999ce/pyasn1-0.6.4-py3-none-any.whl",
+      "sha256": "deda9277cfd454080ec40b207fb6df82206a3a2688735233cdcd8d3d565f088b",
+      "requires_python": ">=3.8",
+      "dependencies": [],
+      "requested": true,
+      "size": 84410
+    },
+    {
+      "project": "pyasn1_modules",
+      "version": "0.4.2",
+      "filename": "pyasn1_modules-0.4.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl",
+      "sha256": "29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a",
+      "requires_python": ">=3.8",
+      "dependencies": [
+        "pyasn1"
+      ],
+      "requested": false,
+      "size": 181259
+    },
+    {
+      "project": "pycparser",
+      "version": "3.0",
+      "filename": "pycparser-3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 48172
+    },
+    {
+      "project": "pydantic",
+      "version": "2.13.5",
+      "filename": "pydantic-2.13.5-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl",
+      "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
+      "requires_python": ">=3.9",
+      "dependencies": [
+        "annotated-types",
+        "pydantic-core",
+        "typing-extensions",
+        "typing-inspection"
+      ],
+      "requested": true,
+      "size": 472589
+    },
+    {
+      "project": "pydantic_core",
+      "version": "2.46.5",
+      "filename": "pydantic_core-2.46.5-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/ae/d5/d8a4eb6d6c7f66b91dd37c576d76e9e60fba900caf5372c17bcf949febc2/pydantic_core-2.46.5-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "1a353f84de772f423b5ffb11d7ae352fbbef0f446f3c0b0af0f8236d7233606e",
+      "requires_python": ">=3.9",
+      "dependencies": [
+        "typing-extensions"
+      ],
+      "requested": false,
+      "size": 1920497
+    },
+    {
+      "project": "PyJWT",
+      "version": "2.14.0",
+      "filename": "pyjwt-2.14.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/9c/97/672cb32ce0dfea44b740cb7b4f97038463b9cf7c0ead1aacf595572851d6/pyjwt-2.14.0-py3-none-any.whl",
+      "sha256": "ad0cef71c756a56e74863c2919cf0985f72decbcfcb550ee2f422e7c62b5eedc",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 32896
+    },
+    {
+      "project": "pyparsing",
+      "version": "3.3.3",
+      "filename": "pyparsing-3.3.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl",
+      "sha256": "ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 126420
+    },
+    {
+      "project": "python-dateutil",
+      "version": "2.9.0.post0",
+      "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427",
+      "requires_python": "!=3.0.*,!=3.1.*,!=3.2.*,>=2.7",
+      "dependencies": [
+        "six"
+      ],
+      "requested": true,
+      "size": 229892
+    },
+    {
+      "project": "python-discovery",
+      "version": "1.6.1",
+      "filename": "python_discovery-1.6.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/16/7d/e9ffbadfbf89c93848412d04594135c4ae8c1d37d9e053b9c3ed718fabc4/python_discovery-1.6.1-py3-none-any.whl",
+      "sha256": "d43fcdef879fe795352bd13ccf8d185ba5a9f86f36cfcd00529f596e737442b3",
+      "requires_python": ">=3.8",
+      "dependencies": [
+        "filelock"
+      ],
+      "requested": false,
+      "size": 38664
+    },
+    {
+      "project": "pytz",
+      "version": "2026.3.post1",
+      "filename": "pytz-2026.3.post1-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/0f/7b/39c34ca613b0b198cb866466651b26b045e2009864c5183c979a3b83f383/pytz-2026.3.post1-py2.py3-none-any.whl",
+      "sha256": "dd95840dd199baea12d9cc096a1d452caa6596a1c1e4b5f3dbd1541855d5e815",
+      "requires_python": null,
+      "dependencies": [],
+      "requested": true,
+      "size": 508283
+    },
+    {
+      "project": "PyYAML",
+      "version": "6.0.3",
+      "filename": "pyyaml-6.0.3-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/bd/9c/4d95bb87eb2063d20db7b60faa3840c1b18025517ae857371c4dd55a6b3a/pyyaml-6.0.3-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "34d5fcd24b8445fadc33f9cf348c1047101756fd760b4dacb5c3e99755703310",
+      "requires_python": ">=3.8",
+      "dependencies": [],
+      "requested": true,
+      "size": 173809
+    },
+    {
+      "project": "requests",
+      "version": "2.34.2",
+      "filename": "requests-2.34.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "certifi",
+        "charset-normalizer",
+        "idna",
+        "urllib3"
+      ],
+      "requested": true,
+      "size": 73075
+    },
+    {
+      "project": "requests-oauthlib",
+      "version": "2.0.0",
+      "filename": "requests_oauthlib-2.0.0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/3b/5d/63d4ae3b9daea098d5d6f5da83984853c1bbacd5dc826764b249fe119d24/requests_oauthlib-2.0.0-py2.py3-none-any.whl",
+      "sha256": "7dd8a5c40426b779b0868c404bdef9768deccf22749cde15852df527e6269b36",
+      "requires_python": ">=3.4",
+      "dependencies": [
+        "oauthlib",
+        "requests"
+      ],
+      "requested": true,
+      "size": 24179
+    },
+    {
+      "project": "requests-toolbelt",
+      "version": "1.0.0",
+      "filename": "requests_toolbelt-1.0.0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/3f/51/d4db610ef29373b879047326cbf6fa98b6c1969d6f6dc423279de2b1be2c/requests_toolbelt-1.0.0-py2.py3-none-any.whl",
+      "sha256": "cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06",
+      "requires_python": ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*",
+      "dependencies": [
+        "requests"
+      ],
+      "requested": true,
+      "size": 54481
+    },
+    {
+      "project": "rsa",
+      "version": "4.9.1",
+      "filename": "rsa-4.9.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/64/8d/0133e4eb4beed9e425d9a98ed6e081a55d195481b7632472be1af08d2f6b/rsa-4.9.1-py3-none-any.whl",
+      "sha256": "68635866661c6836b8d39430f97a996acbd61bfa49406748ea243539fe239762",
+      "requires_python": ">=3.6,<4",
+      "dependencies": [
+        "pyasn1"
+      ],
+      "requested": true,
+      "size": 34696
+    },
+    {
+      "project": "s3transfer",
+      "version": "0.19.2",
+      "filename": "s3transfer-0.19.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/bc/e7/5c595c75e9f41a44f30e526eda465ea0b4eec93470e074e4a111b253f13a/s3transfer-0.19.2-py3-none-any.whl",
+      "sha256": "d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25",
+      "requires_python": ">= 3.10",
+      "dependencies": [
+        "botocore"
+      ],
+      "requested": true,
+      "size": 90216
+    },
+    {
+      "project": "setuptools",
+      "version": "81.0.0",
+      "filename": "setuptools-81.0.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/e1/e3/c164c88b2e5ce7b24d667b9bd83589cf4f3520d97cad01534cd3c4f55fdb/setuptools-81.0.0-py3-none-any.whl",
+      "sha256": "fdd925d5c5d9f62e4b74b30d6dd7828ce236fd6ed998a08d81de62ce5a6310d6",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 1062021
+    },
+    {
+      "project": "six",
+      "version": "1.17.0",
+      "filename": "six-1.17.0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl",
+      "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+      "requires_python": ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*",
+      "dependencies": [],
+      "requested": true,
+      "size": 11050
+    },
+    {
+      "project": "SQLAlchemy",
+      "version": "2.0.54",
+      "filename": "sqlalchemy-2.0.54-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/ab/c0/4a6503c9d22d6d00a5631082ab1484222ecf7d573db791e0f53161bf7745/sqlalchemy-2.0.54-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "abd6b21bc58e91c1932eb5d6d7f1bd44a551dfec7b6a7f517c3638ccd67233a0",
+      "requires_python": ">=3.7",
+      "dependencies": [
+        "typing-extensions"
+      ],
+      "requested": true,
+      "size": 2185899
+    },
+    {
+      "project": "sympy",
+      "version": "1.14.0",
+      "filename": "sympy-1.14.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl",
+      "sha256": "e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5",
+      "requires_python": ">=3.9",
+      "dependencies": [
+        "mpmath"
+      ],
+      "requested": false,
+      "size": 6299353
+    },
+    {
+      "project": "tomli",
+      "version": "2.4.1",
+      "filename": "tomli-2.4.1-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/62/05/d2f816630cc771ad836af54f5001f47a6f611d2d39535364f148b6a92d6b/tomli-2.4.1-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "a120733b01c45e9a0c34aeef92bf0cf1d56cfe81ed9d47d562f9ed591a9828ac",
+      "requires_python": ">=3.8",
+      "dependencies": [],
+      "requested": true,
+      "size": 149859
+    },
+    {
+      "project": "torch",
+      "version": "2.11.0",
+      "filename": "torch-2.11.0-cp314-cp314-macosx_11_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/26/0d/8603382f61abd0db35841148ddc1ffd607bf3100b11c6e1dab6d2fc44e72/torch-2.11.0-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "01018087326984a33b64e04c8cb5c2795f9120e0d775ada1f6638840227b04d7",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "filelock",
+        "fsspec",
+        "jinja2",
+        "networkx",
+        "setuptools",
+        "sympy",
+        "typing-extensions"
+      ],
+      "requested": true,
+      "size": 80573442
+    },
+    {
+      "project": "typing_extensions",
+      "version": "4.16.0",
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "requires_python": ">=3.9",
+      "dependencies": [],
+      "requested": true,
+      "size": 45571
+    },
+    {
+      "project": "typing-inspection",
+      "version": "0.4.4",
+      "filename": "typing_inspection-0.4.4-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl",
+      "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+      "requires_python": ">=3.10",
+      "dependencies": [
+        "typing-extensions"
+      ],
+      "requested": false,
+      "size": 14750
+    },
+    {
+      "project": "tzdata",
+      "version": "2026.4",
+      "filename": "tzdata-2026.4-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/f9/bc/8737e8d54cf51106118039b83f485a4783112fab49ea9d044b234978a46e/tzdata-2026.4-py2.py3-none-any.whl",
+      "sha256": "c2169a8b0a7a5e9674da5a135ccdfb2b3e671b333ed9fed17b41f73c34476e81",
+      "requires_python": ">=2",
+      "dependencies": [],
+      "requested": true,
+      "size": 347494
+    },
+    {
+      "project": "urllib3",
+      "version": "2.8.0",
+      "filename": "urllib3-2.8.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 135717
+    },
+    {
+      "project": "virtualenv",
+      "version": "21.11.0",
+      "filename": "virtualenv-21.11.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a3/ba/324de21687982db37a65fa1ef9d32d4a07bbcc47081ab35291480bfd1c75/virtualenv-21.11.0-py3-none-any.whl",
+      "sha256": "15be2e0b4a5c35f2bec284b11ef025f2b80e0d907b0ab9bbae3c4f835f6bf1e8",
+      "requires_python": ">=3.9",
+      "dependencies": [
+        "distlib",
+        "filelock",
+        "platformdirs",
+        "python-discovery"
+      ],
+      "requested": true,
+      "size": 5485008
+    },
+    {
+      "project": "wheel",
+      "version": "0.48.0",
+      "filename": "wheel-0.48.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/2e/29/69cfbb602cd91690c55d38ba9fe53e6a7e76a6fa647bf38f19c138d25449/wheel-0.48.0-py3-none-any.whl",
+      "sha256": "3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab",
+      "requires_python": ">=3.9",
+      "dependencies": [
+        "packaging"
+      ],
+      "requested": true,
+      "size": 33320
+    },
+    {
+      "project": "zipp",
+      "version": "4.1.0",
+      "filename": "zipp-4.1.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/3a/13/547360d81e6d88d58492968ffda9f9542854f11310ee556fef14260cc886/zipp-4.1.0-py3-none-any.whl",
+      "sha256": "25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f",
+      "requires_python": ">=3.10",
+      "dependencies": [],
+      "requested": true,
+      "size": 10238
+    }
+  ]
+}

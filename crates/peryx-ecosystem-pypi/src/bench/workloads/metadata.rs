@@ -3,9 +3,10 @@ use std::time::Instant;
 use anyhow::{Context as _, bail};
 
 use super::super::packages::METADATA_PROJECT;
+use super::super::schedule::Schedule;
 use super::{Rounds, median_or_dash_rate};
 use peryx_bench_core::context::BenchmarkContext;
-use peryx_bench_core::report::{Absent, Metric, baseline, cost_rows, network_row, row, summarize, table};
+use peryx_bench_core::report::{Absent, Metric, baseline, complete_row, cost_rows, table};
 use peryx_bench_core::servers::Server;
 use peryx_bench_core::usage::{Cost, Usage};
 
@@ -17,57 +18,60 @@ use peryx_bench_core::usage::{Cost, Usage};
 pub async fn metadata(
     context: &BenchmarkContext,
     servers: &[Server],
-    rounds: usize,
+    schedule: &Schedule,
     http: &reqwest::Client,
 ) -> anyhow::Result<()> {
     let mut cold: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
     let mut hot: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
     let mut rate: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
-    let mut costs: Vec<Option<Vec<Cost>>> = Vec::new();
-    for (index, server) in servers.iter().enumerate() {
-        let mut collected = Rounds::new();
-        for attempt in 1..=rounds {
-            let scratch = tempfile::tempdir_in(context.scratch())?;
-            let state = scratch.path().join("state");
-            std::fs::create_dir(&state)?;
-            let active = server.start(context, &state, http).await?;
-            let usage = Usage::watch(active.pid())?;
-            match metadata_round(&active.url, http).await {
-                Ok((cold_seconds, hot_seconds, docs)) => {
-                    cold[index].push(cold_seconds);
-                    hot[index].push(hot_seconds);
-                    rate[index].push(docs);
-                }
-                Err(error) => println!("[metadata] {} round {attempt}: failed ({error:#})", server.name),
+    let mut costs = servers.iter().map(|_| Rounds::new()).collect::<Vec<_>>();
+    for entry in schedule.entries() {
+        let server = &servers[entry.server];
+        let scratch = tempfile::tempdir_in(context.scratch())?;
+        let state = scratch.path().join("state");
+        std::fs::create_dir(&state)?;
+        let active = server.start(context, &state, http).await?;
+        let usage = Usage::watch(active.pid())?;
+        match metadata_round(&active.url, http).await {
+            Ok((cold_seconds, hot_seconds, docs)) => {
+                cold[entry.server].push(cold_seconds);
+                hot[entry.server].push(hot_seconds);
+                rate[entry.server].push(docs);
             }
-            collected.record_cost(usage)?;
+            Err(error) => println!("[metadata] {} round {}: failed ({error:#})", server.name, entry.round),
         }
+        costs[entry.server].record_cost(usage)?;
+    }
+    for (index, server) in servers.iter().enumerate() {
         println!(
             "[metadata] {}: hot {} docs/s",
             server.name,
             median_or_dash_rate(&rate[index])
         );
-        costs.push(collected.costs());
     }
+    let costs = costs.into_iter().map(Rounds::costs).collect::<Vec<Option<Vec<Cost>>>>();
     let base = baseline(servers);
     let mut rows = vec![
-        network_row(
+        complete_row(
             "cold metadata siblings",
-            &summarize(&cold),
+            &cold,
+            schedule.rounds,
             base,
             Metric::Seconds,
             Absent::Failed,
         ),
-        row(
+        complete_row(
             "hot metadata siblings",
-            &summarize(&hot),
+            &hot,
+            schedule.rounds,
             base,
             Metric::Seconds,
             Absent::Failed,
         ),
-        row(
+        complete_row(
             "hot metadata throughput",
-            &summarize(&rate),
+            &rate,
+            schedule.rounds,
             base,
             Metric::Rate("docs/s"),
             Absent::Failed,

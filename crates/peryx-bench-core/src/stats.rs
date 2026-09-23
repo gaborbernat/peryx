@@ -16,6 +16,7 @@ const NOISY_CV: f64 = 0.05;
 /// different number).
 #[derive(Debug, PartialEq)]
 pub struct Summary {
+    pub samples: Vec<f64>,
     pub median: f64,
     pub min: f64,
     pub max: f64,
@@ -41,6 +42,7 @@ impl Summary {
         let mut data = Data::new(samples.to_vec());
         let (low, high) = tukey_fences(&mut data);
         Some(Self {
+            samples: samples.to_vec(),
             median: data.median(),
             min: samples.iter().copied().fold(f64::INFINITY, f64::min),
             max: samples.iter().copied().fold(f64::NEG_INFINITY, f64::max),

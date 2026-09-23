@@ -3,7 +3,7 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -113,6 +113,10 @@ fn setup(port: u16, state: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn configure(url: &str, state: &Path) -> anyhow::Result<()> {
+    Ok(std::fs::write(state.join("configure"), url)?)
+}
+
 static TORN_DOWN_PORT: AtomicU16 = AtomicU16::new(0);
 
 fn teardown(port: u16) {
@@ -123,10 +127,12 @@ fn server(command: Option<fn(&BenchmarkContext, u16, &Path) -> Command>) -> Serv
     Server {
         name: "fixture",
         homepage: "https://example.invalid",
-        base_url,
-        probe,
-        command,
+        version: "1.0.0",
+        base_url: Arc::new(base_url),
+        probe: Arc::new(probe),
+        command: command.map(|command| Arc::new(command) as _),
         setup: None,
+        configure: None,
         teardown: None,
     }
 }
@@ -223,7 +229,8 @@ async fn server_runs_setup_and_teardown() {
     let fixture_thread = FixtureThreadGuard::new(directory.path());
     std::fs::write(directory.path().join("index.html"), "ready").expect("fixture writes");
     let mut fixture = server(Some(test_server));
-    fixture.setup = Some(setup);
+    fixture.setup = Some(Arc::new(setup));
+    fixture.configure = Some(Arc::new(configure));
     fixture.teardown = Some(teardown);
     let active = fixture
         .start(
@@ -240,8 +247,11 @@ async fn server_runs_setup_and_teardown() {
         .next()
         .expect("URL has port");
     assert_eq!(
-        std::fs::read_to_string(directory.path().join("setup")).expect("setup marker exists"),
-        port
+        (
+            std::fs::read_to_string(directory.path().join("setup")).expect("setup marker exists"),
+            std::fs::read_to_string(directory.path().join("configure")).expect("configure marker exists"),
+        ),
+        (port.to_owned(), active.url.clone())
     );
     let expected: u16 = port.parse().expect("port parses");
     drop(active);

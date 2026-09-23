@@ -1,10 +1,13 @@
 //! The concrete servers under test and their index-URL shapes are per-ecosystem definitions; this
 //! module only spawns, health-checks, and tears them down.
 
+use std::ops::Range;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
@@ -39,19 +42,40 @@ impl Default for StartupPolicy {
 /// # Errors
 /// Returns an error when reqwest cannot build the client.
 pub fn http_client() -> anyhow::Result<reqwest::Client> {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    Ok(reqwest::Client::builder().build()?)
+    client_with_timeouts(CONNECT_TIMEOUT, READ_TIMEOUT)
 }
+
+/// A loopback connect that takes longer than this is a server that will not answer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The timer restarts with every body chunk, so a large wheel can stream for minutes while a connection that stays
+/// silent this long fails.
+const READ_TIMEOUT: Duration = Duration::from_mins(1);
+
+fn client_with_timeouts(connect: Duration, read: Duration) -> anyhow::Result<reqwest::Client> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    Ok(reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(read)
+        .build()?)
+}
+
+pub type BaseUrl = Arc<dyn Fn(u16) -> String + Send + Sync>;
+pub type Probe = Arc<dyn Fn(&str) -> String + Send + Sync>;
+pub type ServerCommand = Arc<dyn Fn(&BenchmarkContext, u16, &Path) -> Command + Send + Sync>;
+pub type ServerSetup = Arc<dyn Fn(u16, &Path) -> anyhow::Result<()> + Send + Sync>;
+pub type ServerConfigure = Arc<dyn Fn(&str, &Path) -> anyhow::Result<()> + Send + Sync>;
 
 /// One index server under test; every field is filled in by a per-ecosystem definition.
 pub struct Server {
     pub name: &'static str,
     pub homepage: &'static str,
-    pub base_url: fn(u16) -> String,
+    pub version: &'static str,
+    pub base_url: BaseUrl,
     /// The readiness URL derived from the base, hit until any HTTP status answers.
-    pub probe: fn(&str) -> String,
-    pub command: Option<fn(&BenchmarkContext, u16, &Path) -> Command>,
-    pub setup: Option<fn(u16, &Path) -> anyhow::Result<()>>,
+    pub probe: Probe,
+    pub command: Option<ServerCommand>,
+    pub setup: Option<ServerSetup>,
+    pub configure: Option<ServerConfigure>,
     /// Teardown after the spawned process is killed, keyed by port. A container competitor detaches
     /// from the process that launched it, so killing that process is not enough; this removes it.
     pub teardown: Option<fn(u16)>,
@@ -129,7 +153,7 @@ impl Server {
         let port = free_port()?;
         let url = (self.base_url)(port);
         let probe_url = (self.probe)(&url);
-        let Some(command) = self.command else {
+        let Some(command) = &self.command else {
             return Ok(Active {
                 url,
                 process: None,
@@ -139,7 +163,7 @@ impl Server {
                 teardown: None,
             });
         };
-        if let Some(setup) = self.setup {
+        if let Some(setup) = &self.setup {
             setup(port, state)?;
         }
         let log = state.join("server.log");
@@ -168,6 +192,9 @@ impl Server {
                 .unwrap_or_default();
             format!("{}; server log tail:\n{}", self.name, last_chars(&tail, 2000))
         })?;
+        if let Some(configure) = &self.configure {
+            configure(&active.url, state)?;
+        }
         Ok(active)
     }
 }
@@ -204,9 +231,29 @@ impl Active {
     }
 }
 
+/// Outgoing connections draw source ports from the ephemeral range (from 32768 on Linux, 49152 on macOS and Windows),
+/// so a probed port below it stays free until the server binds it. The range also avoids peryx's 20000-29999 test band.
+const SERVER_PORTS: Range<u16> = 10_000..20_000;
+
+/// Seeded from the pid, scattered by a large odd multiplier: nextest gives consecutive tests consecutive pids, which
+/// would otherwise start probing at adjacent ports and hand out the same one.
+static NEXT_PORT: LazyLock<AtomicUsize> =
+    LazyLock::new(|| AtomicUsize::new((std::process::id() as usize).wrapping_mul(0x9E37_79B9)));
+
 fn free_port() -> anyhow::Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    Ok(listener.local_addr()?.port())
+    free_port_in(SERVER_PORTS)
+}
+
+fn free_port_in(ports: Range<u16>) -> anyhow::Result<u16> {
+    // Every probe claims its own cursor value, so no two callers are ever handed the same port.
+    (0..ports.len())
+        .map(|_| {
+            ports.start
+                + u16::try_from(NEXT_PORT.fetch_add(1, Ordering::Relaxed) % ports.len())
+                    .expect("the offset fits the range")
+        })
+        .find(|&port| std::net::TcpListener::bind(("127.0.0.1", port)).is_ok())
+        .with_context(|| format!("no free port in {ports:?}"))
 }
 
 fn last_chars(text: &str, count: usize) -> &str {

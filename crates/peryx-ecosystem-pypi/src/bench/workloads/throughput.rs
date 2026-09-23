@@ -3,9 +3,10 @@ use std::time::Instant;
 use anyhow::Context as _;
 
 use super::super::packages::STRESS_PROJECT;
+use super::super::schedule::Schedule;
 use super::{Rounds, median_or_dash_rate};
 use peryx_bench_core::context::BenchmarkContext;
-use peryx_bench_core::report::{Absent, Metric, baseline, cost_rows, network_row, row, summarize, table};
+use peryx_bench_core::report::{Absent, Metric, baseline, complete_row, cost_rows, table};
 use peryx_bench_core::servers::{Active, Server};
 use peryx_bench_core::usage::{Cost, Usage};
 
@@ -27,56 +28,47 @@ const STRESS_TAGS: &[&str] = &["manylinux", "x86_64"];
 pub async fn throughput(
     context: &BenchmarkContext,
     servers: &[Server],
-    rounds: usize,
-    http: &reqwest::Client,
-) -> anyhow::Result<()> {
-    throughput_from(context, servers, rounds, http, "https://pypi.org/simple/").await
-}
-
-async fn throughput_from(
-    context: &BenchmarkContext,
-    servers: &[Server],
-    rounds: usize,
+    schedule: &Schedule,
     http: &reqwest::Client,
     source_index: &str,
 ) -> anyhow::Result<()> {
-    if servers.is_empty() || rounds == 0 {
+    if servers.is_empty() || schedule.rounds == 0 {
         let empty = vec![Vec::new(); servers.len()];
-        return publish_throughput(context, servers, &empty, &empty, &empty, &[]);
+        return publish_throughput(context, servers, &empty, &empty, &empty, schedule.rounds, &[]);
     }
     let filename = stress_wheel_filename(source_index, http).await?;
     println!("[throughput] measuring with {filename}");
     let mut cold4: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
     let mut hot1: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
     let mut hot8: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
-    let mut costs: Vec<Option<Vec<Cost>>> = Vec::new();
-    for (index, server) in servers.iter().enumerate() {
-        let mut collected = Rounds::new();
-        for attempt in 1..=rounds {
-            let scratch = tempfile::tempdir_in(context.scratch())?;
-            let state = scratch.path().join("state");
-            std::fs::create_dir(&state)?;
-            let active = server.start(context, &state, http).await?;
-            let usage = Usage::watch(active.pid())?;
-            match transfer_round(&active, &filename, http).await {
-                Ok((cold, single, eight)) => {
-                    cold4[index].push(cold);
-                    hot1[index].push(single);
-                    hot8[index].push(eight);
-                }
-                Err(error) => println!("[throughput] {} round {attempt}: failed ({error:#})", server.name),
+    let mut costs = servers.iter().map(|_| Rounds::new()).collect::<Vec<_>>();
+    for entry in schedule.entries() {
+        let server = &servers[entry.server];
+        let scratch = tempfile::tempdir_in(context.scratch())?;
+        let state = scratch.path().join("state");
+        std::fs::create_dir(&state)?;
+        let active = server.start(context, &state, http).await?;
+        let usage = Usage::watch(active.pid())?;
+        match transfer_round(&active, &filename, http).await {
+            Ok((cold, single, eight)) => {
+                cold4[entry.server].push(cold);
+                hot1[entry.server].push(single);
+                hot8[entry.server].push(eight);
             }
-            collected.record_cost(usage)?;
+            Err(error) => println!("[throughput] {} round {}: failed ({error:#})", server.name, entry.round),
         }
+        costs[entry.server].record_cost(usage)?;
+    }
+    for (index, server) in servers.iter().enumerate() {
         println!(
             "[throughput] {}: hot {} MB/s, hot-8 {} MB/s",
             server.name,
             median_or_dash_rate(&hot1[index]),
             median_or_dash_rate(&hot8[index]),
         );
-        costs.push(collected.costs());
     }
-    publish_throughput(context, servers, &cold4, &hot1, &hot8, &costs)
+    let costs = costs.into_iter().map(Rounds::costs).collect::<Vec<Option<Vec<Cost>>>>();
+    publish_throughput(context, servers, &cold4, &hot1, &hot8, schedule.rounds, &costs)
 }
 
 fn publish_throughput(
@@ -85,27 +77,31 @@ fn publish_throughput(
     cold4: &[Vec<f64>],
     hot1: &[Vec<f64>],
     hot8: &[Vec<f64>],
+    rounds: usize,
     costs: &[Option<Vec<Cost>>],
 ) -> anyhow::Result<()> {
     let base = baseline(servers);
     let mut rows = vec![
-        network_row(
+        complete_row(
             "cold cache: 4 clients, one wheel",
-            &summarize(cold4),
+            cold4,
+            rounds,
             base,
             Metric::Seconds,
             Absent::Failed,
         ),
-        row(
+        complete_row(
             "hot cache: single download",
-            &summarize(hot1),
+            hot1,
+            rounds,
             base,
             Metric::Rate("MB/s"),
             Absent::Failed,
         ),
-        row(
+        complete_row(
             "hot cache: 8 parallel downloads",
-            &summarize(hot8),
+            hot8,
+            rounds,
             base,
             Metric::Rate("MB/s"),
             Absent::Failed,
@@ -138,7 +134,7 @@ async fn transfer_round(active: &Active, filename: &str, http: &reqwest::Client)
     ))
 }
 
-/// The concrete wheel every server moves, resolved once from `PyPI` so all parties match.
+/// The concrete wheel every server moves, resolved once from the source index so all parties match.
 async fn stress_wheel_filename(source_index: &str, http: &reqwest::Client) -> anyhow::Result<String> {
     let body = http
         .get(format!("{source_index}{STRESS_PROJECT}/"))

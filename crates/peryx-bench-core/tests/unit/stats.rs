@@ -7,6 +7,7 @@ fn summary_reduces_rounds() {
     assert_eq!(
         Summary::of(&[1.0, 2.0, 3.0, 4.0, 100.0]),
         Some(Summary {
+            samples: vec![1.0, 2.0, 3.0, 4.0, 100.0],
             median: 3.0,
             min: 1.0,
             max: 100.0,
@@ -24,6 +25,7 @@ fn summary_handles_empty_single_and_zero_samples() {
         (
             None,
             Some(Summary {
+                samples: vec![4.0],
                 median: 4.0,
                 min: 4.0,
                 max: 4.0,
@@ -32,6 +34,7 @@ fn summary_handles_empty_single_and_zero_samples() {
                 n: 1,
             }),
             Some(Summary {
+                samples: vec![0.0, 0.0],
                 median: 0.0,
                 min: 0.0,
                 max: 0.0,
@@ -57,8 +60,9 @@ fn geometric_mean_uses_positive_ratios() {
     );
 }
 
-const fn spread(cv: f64) -> Summary {
+fn spread(cv: f64) -> Summary {
     Summary {
+        samples: vec![1.0, 1.0],
         median: 1.0,
         min: 1.0,
         max: 1.0,

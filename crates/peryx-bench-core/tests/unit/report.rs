@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 
 use super::{
-    Absent, Cell, Metric, Party, Report, Row, Table, anchor, baseline, cost_rows, cost_rows_per_request, load,
-    network_row, publish_to, repo_root, report_path, row, summarize, table, thousands,
+    Absent, Cell, Metric, Party, Report, Row, Table, anchor, baseline, complete_row, cost_rows, cost_rows_per_request,
+    load, network_row, publish_to, repo_root, report_path, row, summarize, table, thousands,
 };
 use crate::context::BenchmarkContext;
 use crate::servers::Server;
@@ -27,10 +28,12 @@ fn server(name: &'static str) -> Server {
     Server {
         name,
         homepage: "https://example.invalid",
-        base_url,
-        probe,
-        command: Some(command),
+        version: "1.0.0",
+        base_url: Arc::new(base_url),
+        probe: Arc::new(probe),
+        command: Some(Arc::new(command)),
         setup: None,
+        configure: None,
         teardown: None,
     }
 }
@@ -179,6 +182,27 @@ fn rows_format_measurements_and_absence() {
 }
 
 #[test]
+fn incomplete_measurements_fail_without_discarding_samples() {
+    let result = complete_row(
+        "latency",
+        &[vec![1.0, 2.0], vec![3.0]],
+        2,
+        0,
+        Metric::Seconds,
+        Absent::Failed,
+    );
+
+    assert_eq!(
+        result
+            .cells
+            .iter()
+            .map(|cell| (cell.text.as_str(), cell.value, cell.samples.as_slice()))
+            .collect::<Vec<_>>(),
+        vec![("1.5 s", Some(1.5), &[1.0, 2.0][..]), ("error", None, &[3.0][..]),]
+    );
+}
+
+#[test]
 fn rows_format_ranges_units_and_missing_baselines() {
     let values = summarize(&[
         vec![61.0, 62.0],
@@ -225,14 +249,17 @@ fn server_selection_and_table_follow_named_parties() {
                 Party {
                     name: "other".to_owned(),
                     url: "https://example.invalid".to_owned(),
+                    version: "1.0.0".to_owned(),
                 },
                 Party {
                     name: "direct".to_owned(),
                     url: "https://example.invalid".to_owned(),
+                    version: "1.0.0".to_owned(),
                 },
                 Party {
                     name: "peryx".to_owned(),
                     url: "https://example.invalid".to_owned(),
+                    version: "1.0.0".to_owned(),
                 },
             ],
             rows: Vec::new(),
@@ -283,6 +310,7 @@ fn public_report_types_preserve_serialized_fields() {
             noisy: false,
             outliers: 0,
             value: Some(1.0),
+            samples: vec![1.0],
         }],
         network_bound: false,
         higher_is_better: false,
@@ -296,6 +324,7 @@ fn summaries_keep_each_partys_distribution() {
         summarize(&[vec![1.0], Vec::new()]),
         vec![
             Some(Summary {
+                samples: vec![1.0],
                 median: 1.0,
                 min: 1.0,
                 max: 1.0,

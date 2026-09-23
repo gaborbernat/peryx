@@ -50,6 +50,10 @@ exclude_re = [
   # already returns. No test can tell the two apart; the mutants that return anything else are caught.
   'peryx-http/src/response_framing\.rs.*Ended>::poll_frame .* with Poll::from\(None\)$',
 
+  # PyPI claims no absolute prefix, so `absolute_prefixes` returns `&[]`, and `Vec::leak(Vec::new())` is that same
+  # empty slice. No test can tell the two apart; the replacements that return a prefix are caught.
+  'peryx-ecosystem-pypi/src/lib\.rs.*PypiPlugin>::absolute_prefixes .* with Vec::leak\(Vec::new\(\)\)$',
+
   # Exports the wasm coverage counters, and exists only in the `wasm32` coverage build.
   'peryx-web/src/lib\.rs.*replace capture_coverage ',
 

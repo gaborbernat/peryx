@@ -17,9 +17,7 @@ use peryx_storage::meta::{
 use peryx_upstream::Auth;
 use rstest::rstest;
 use tower::ServiceExt as _;
-#[cfg(unix)]
-use wiremock::matchers::header;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::config::{
@@ -1627,6 +1625,56 @@ async fn test_build_state_reuses_the_exec_credential_provider_for_the_artifact_m
         ),
     );
     let state = build_state(&config).unwrap();
+    let source = state.serving.upstream_routes["cache"].source("primary").unwrap();
+
+    let artifact = source
+        .artifacts()
+        .stream_bytes("https://artifacts.example/artifact.bin")
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    assert_eq!(artifact, b"artifact");
+}
+
+/// A refreshing token must reach the artifact mirror too: a mirror holding its own fixed copy of
+/// the token would keep sending the rotated-out value after the metadata client refreshed.
+#[tokio::test]
+async fn test_build_state_shares_the_refreshing_token_with_the_artifact_mirror() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/artifact.bin"))
+        .and(header("authorization", "Bearer new"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"artifact".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    std::fs::write(&token, "old").unwrap();
+    let state = build_state(&parsed_config(
+        &dir,
+        &format!(
+            "[[index]]\nname = \"cache\"\n[[index.upstream]]\nname = \"primary\"\nurl = \
+             \"https://metadata.example/catalog/\"\nartifact_url = {:?}\ntrusted_hosts = [\"localhost\"]\n\
+             token_file = {:?}\ncredential_refresh_secs = 3600\n",
+            server.uri(),
+            token.display().to_string()
+        ),
+    ))
+    .unwrap();
+    let generation = cache_client(&state.serving).current_credential().unwrap().generation();
+    std::fs::write(&token, "new").unwrap();
+    cache_client(&state.serving)
+        .auth()
+        .refresh_after_unauthorized(generation)
+        .await
+        .unwrap();
     let source = state.serving.upstream_routes["cache"].source("primary").unwrap();
 
     let artifact = source

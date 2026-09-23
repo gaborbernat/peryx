@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use rstest::rstest;
+
 use super::*;
 use crate::config::{
     AcmeConfig, AvailabilityConfig, AvailabilityListenerConfig, AvailabilityListenerTls, DcMember, DcMembership,
@@ -349,6 +351,13 @@ async fn test_acme_entrypoint_stops_on_cancellation() {
     .serve()
     .await
     .unwrap();
+}
+
+#[rstest]
+#[case::staging(true, "https://acme-staging-v02.api.letsencrypt.org/directory")]
+#[case::production(false, "https://acme-v02.api.letsencrypt.org/directory")]
+fn test_acme_directory_follows_the_staging_setting(#[case] staging: bool, #[case] expected: &str) {
+    assert_eq!(acme_directory(staging), expected);
 }
 
 #[test]

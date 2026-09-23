@@ -37,7 +37,13 @@ use tower::ServiceExt as _;
 use detail::project_detail;
 
 const LARGE: usize = 400;
-const NEAR_PROJECT_FILE_LIMIT: usize = if cfg!(debug_assertions) { 64 } else { 1_800_000 };
+const PROJECT_UI_FILES: usize = if cfg!(debug_assertions) {
+    64
+} else if cfg!(codspeed) {
+    10_000
+} else {
+    1_800_000
+};
 const PAGE_WRITE_BATCH: usize = 10_000;
 const JSON: &str = "application/vnd.pypi.simple.v1+json";
 const HTML: &str = "text/html";
@@ -84,32 +90,38 @@ fn bench_serve(criterion: &mut Criterion) {
 }
 
 fn bench_project_ui_sources(criterion: &mut Criterion) {
-    let fixture = ui_read_fixture(NEAR_PROJECT_FILE_LIMIT);
+    let fixture = ui_read_fixture(PROJECT_UI_FILES);
     let lookups = fixture.lookups();
     let runtime = runtime();
     let mut group = criterion.benchmark_group("project_ui_sources");
-    group.throughput(Throughput::Elements(NEAR_PROJECT_FILE_LIMIT as u64));
+    group.throughput(Throughput::Elements(PROJECT_UI_FILES as u64));
     // Reopening redb clears process-local database state without evicting the operating system's page cache.
-    group.bench_function("cold-reopen-os-cache-warm", |bencher| {
-        bencher.iter(|| {
-            let meta = MetaStore::open(&fixture.database).unwrap();
-            black_box(read_file_ui_records(&meta, black_box(&lookups)).unwrap())
-        });
-    });
+    group.bench_function(
+        BenchmarkId::new("cold-reopen-os-cache-warm", PROJECT_UI_FILES),
+        |bencher| {
+            bencher.iter(|| {
+                let meta = MetaStore::open(&fixture.database).unwrap();
+                black_box(read_file_ui_records(&meta, black_box(&lookups)).unwrap())
+            });
+        },
+    );
     let meta = MetaStore::open(&fixture.database).unwrap();
-    group.bench_function("warm", |bencher| {
+    group.bench_function(BenchmarkId::new("warm", PROJECT_UI_FILES), |bencher| {
         bencher.iter(|| black_box(read_file_ui_records(&meta, black_box(&lookups)).unwrap()));
     });
     drop(meta);
-    group.bench_function("cold-page-reopen-os-cache-warm", |bencher| {
-        bencher.to_async(&runtime).iter(|| async {
-            let app = ui_app(&fixture);
-            serve(app, "/+ui/browse?index=pypi&project=flask", JSON).await;
-        });
-    });
+    group.bench_function(
+        BenchmarkId::new("cold-page-reopen-os-cache-warm", PROJECT_UI_FILES),
+        |bencher| {
+            bencher.to_async(&runtime).iter(|| async {
+                let app = ui_app(&fixture);
+                serve(app, "/+ui/browse?index=pypi&project=flask", JSON).await;
+            });
+        },
+    );
     let app = ui_app(&fixture);
     runtime.block_on(serve(app.clone(), "/+ui/browse?index=pypi&project=flask", JSON));
-    group.bench_function("warm-page", |bencher| {
+    group.bench_function(BenchmarkId::new("warm-page", PROJECT_UI_FILES), |bencher| {
         bencher
             .to_async(&runtime)
             .iter(|| serve(app.clone(), "/+ui/browse?index=pypi&project=flask", JSON));

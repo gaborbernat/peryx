@@ -181,3 +181,56 @@ fn test_a_page_holding_only_versions_still_falls_back_to_them() {
         "a version peryx holds is something to serve"
     );
 }
+
+/// Peryx derives metadata only for a wheel or an sdist, so a digest stored against any other artifact
+/// never reaches the served page, even when the upstream page claims no metadata of its own.
+#[test]
+fn test_a_whole_page_advertises_stored_metadata_only_for_a_wheel_or_sdist() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _) = stale_flask_state(&dir, "https://example.invalid/simple/", 1000);
+    let metadata = peryx_storage::blob::Digest::of(b"metadata");
+    let files = ["flask-1.0-py3-none-any.whl", "flask-1.0.zip"].map(|filename| {
+        let digest = peryx_storage::blob::Digest::of(filename.as_bytes());
+        state.meta.put_metadata(digest.as_str(), metadata.as_str()).unwrap();
+        serde_json::json!({
+            "filename": filename,
+            "url": format!("https://files.example/{filename}"),
+            "hashes": {"sha256": digest.as_str()},
+        })
+    });
+    let record = CachedIndex {
+        source: None,
+        last_modified: None,
+        etag: None,
+        last_serial: None,
+        fetched_at_unix: 1000,
+        content_type: None,
+        fresh_secs: None,
+        body: serde_json::to_vec(&serde_json::json!({"meta": {"api-version": "1.0"}, "name": "flask", "files": files}))
+            .unwrap(),
+    };
+
+    let PageOutcome::Ready(bytes, _) =
+        transform_whole(&state, "pypi/flask", &record, context_holding(Vec::new())).unwrap()
+    else {
+        panic!("a cached page transforms whole");
+    };
+
+    let page = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+    let advertised = page["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| (file["filename"].as_str().unwrap(), &file["core-metadata"]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        advertised,
+        [
+            (
+                "flask-1.0-py3-none-any.whl",
+                &serde_json::json!({"sha256": metadata.as_str()})
+            ),
+            ("flask-1.0.zip", &serde_json::json!(false)),
+        ]
+    );
+}

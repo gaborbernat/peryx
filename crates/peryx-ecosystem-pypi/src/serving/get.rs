@@ -434,7 +434,7 @@ async fn legacy_release_metadata(
                 && file.matches_version(&version)
                 && page
                     .owner(&file.filename)
-                    .is_some_and(|candidate| candidate.is_hosted() && candidate.leaf() == owner.leaf())
+                    .is_some_and(|candidate| candidate.leaf() == owner.leaf())
         }) else {
             return Ok(None);
         };

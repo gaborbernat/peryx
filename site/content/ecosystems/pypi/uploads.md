@@ -268,6 +268,13 @@ Storing the attestation next to the file lets a client confirm that the provenan
 keeps the certificate, log proofs, and predicate intact. Serving stored provenance does not depend on the current trust
 root; verification happens once, before publication.
 
+Each served bundle identifies its verified publisher. The publisher `kind` is the certificate's verified issuer URI; its
+`claims` contain the verified SAN under `identity` plus every certificate extension the publisher policy required.
+Attestations share a bundle only when both fields match.
+
+Records written before publisher verification remain stored for recovery, but peryx does not advertise or serve them.
+They cannot satisfy an attestation policy or follow a release through promotion.
+
 ### Publish is all-or-nothing
 
 The attestation and the distribution publish in one transaction, so a bad bundle takes both down with it. A failed

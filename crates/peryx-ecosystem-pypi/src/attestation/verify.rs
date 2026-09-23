@@ -16,6 +16,12 @@ use x509_cert::der::asn1::Utf8StringRef;
 
 const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub(super) struct Publisher {
+    pub kind: String,
+    pub claims: BTreeMap<String, String>,
+}
+
 #[derive(Clone)]
 pub struct VerificationContext {
     verifier: Arc<Verifier>,
@@ -39,7 +45,7 @@ impl VerificationContext {
         }
     }
 
-    pub(super) fn verify(&self, attestation: &Value, sha256: &str) -> Result<(), ()> {
+    pub(super) fn verify(&self, attestation: &Value, sha256: &str) -> Result<Publisher, ()> {
         let input: Attestation = serde_json::from_value(attestation.clone()).map_err(|_| ())?;
         let certificate = STANDARD
             .decode(input.verification_material.certificate)
@@ -56,7 +62,8 @@ impl VerificationContext {
         for entry in input.verification_material.transparency_entries {
             bundle = bundle.with_tlog_entry(serde_json::from_value::<TransparencyLogEntry>(entry).map_err(|_| ())?);
         }
-        self.verifier
+        let verified = self
+            .verifier
             .verify(
                 Sha256Hash::from_hex(sha256).map_err(|_| ())?,
                 &bundle.into_bundle(),
@@ -65,10 +72,15 @@ impl VerificationContext {
                     .require_issuer(&self.issuer),
             )
             .map_err(|_| ())?;
-        self.verify_claims(&certificate)
+        let mut claims = self.verify_claims(&certificate)?;
+        claims.insert("identity".to_owned(), verified.identity.ok_or(())?);
+        Ok(Publisher {
+            kind: verified.issuer.ok_or(())?,
+            claims,
+        })
     }
 
-    fn verify_claims(&self, certificate: &[u8]) -> Result<(), ()> {
+    fn verify_claims(&self, certificate: &[u8]) -> Result<BTreeMap<String, String>, ()> {
         let certificate = Certificate::from_der(certificate).map_err(|_| ())?;
         let mut actual = BTreeMap::new();
         for extension in certificate.tbs_certificate.extensions.iter().flatten() {
@@ -80,7 +92,7 @@ impl VerificationContext {
                 actual.insert(oid, value).is_none().then_some(()).ok_or(())?;
             }
         }
-        (actual == self.claims).then_some(()).ok_or(())
+        (actual == self.claims).then_some(actual).ok_or(())
     }
 }
 

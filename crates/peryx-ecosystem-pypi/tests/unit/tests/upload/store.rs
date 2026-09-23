@@ -231,6 +231,28 @@ async fn test_commit_publish_adds_the_provenance_placement() {
 }
 
 #[tokio::test]
+async fn test_commit_publish_failure_exposes_no_provenance_reference() {
+    let wheel = wheel_metadata("Flask", "1.0");
+    let (_staged_dir, staged) = super::support::staged_upload(&wheel);
+    let sha256 = staged.blob.digest().as_str().to_owned();
+    let mut form = staged_form(&wheel);
+    form.attestations = Some(attestations_field(FILENAME, &sha256));
+    let mut prepared = prepare(form, staged, "root/hosted", 1000).unwrap();
+    prepared.prepare_attestations_unverified_for_storage_test().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+    let publish = stage_publish(&blobs, prepared).await.unwrap();
+    meta.put_upload("hosted", "flask", FILENAME, b"invalid-json").unwrap();
+
+    assert!(matches!(
+        commit_publish(&meta, "hosted", publish, None, true, None),
+        Err(UploadStoreError::Parse(_))
+    ));
+    assert_eq!(meta.get_provenance("hosted", "flask", &sha256, FILENAME).unwrap(), None);
+}
+
+#[tokio::test]
 async fn test_store_prepared_quota_releases_after_blob_storage_fails() {
     let wheel = wheel_metadata("Flask", "1.0");
     let (_staged_dir, staged) = super::support::staged_upload(&wheel);

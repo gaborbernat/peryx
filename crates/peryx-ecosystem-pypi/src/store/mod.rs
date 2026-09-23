@@ -1,5 +1,7 @@
 //! Stores `PyPI` records in neutral driver key-value namespaces.
 
+use std::collections::BTreeMap;
+
 mod attestations;
 mod files;
 mod imports;
@@ -12,6 +14,8 @@ mod release_metadata;
 mod repair;
 mod summary;
 mod uploads;
+
+const PROVENANCE_REFERENCE_VERSION: u64 = 1;
 
 /// A hosted upload write failed in storage or release-wide import admission.
 #[derive(Debug, thiserror::Error)]
@@ -374,11 +378,66 @@ fn publication_value(metadata: Option<&(String, String)>, source: &str, upstream
 }
 
 fn provenance_value(provenance_sha256: &str, size: u64) -> String {
-    format!("{provenance_sha256}\n{size}")
+    serde_json::to_string(&VersionedProvenanceReference {
+        version: PROVENANCE_REFERENCE_VERSION,
+        sha256: provenance_sha256,
+        size,
+    })
+    .expect("a provenance reference of strings and integers always serializes")
 }
 
-/// Split a provenance record into `(bundle sha256, byte length)`, rejecting one missing either field.
-fn split_provenance_value<'a>(key: &str, value: &'a str) -> Result<(&'a str, u64), peryx_storage::meta::MetaError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredProvenanceReference<'a> {
+    Verified { sha256: &'a str, size: u64 },
+    Legacy { sha256: &'a str, size: u64 },
+}
+
+impl<'a> StoredProvenanceReference<'a> {
+    pub(crate) const fn sha256(self) -> &'a str {
+        match self {
+            Self::Verified { sha256, .. } | Self::Legacy { sha256, .. } => sha256,
+        }
+    }
+
+    pub(crate) const fn verified(self) -> Option<(&'a str, u64)> {
+        match self {
+            Self::Verified { sha256, size } => Some((sha256, size)),
+            Self::Legacy { .. } => None,
+        }
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct VersionedProvenanceReference<'a> {
+    version: u64,
+    #[serde(borrow)]
+    sha256: &'a str,
+    size: u64,
+}
+
+/// Parse a provenance record while retaining whether peryx verified its publisher identity.
+pub(crate) fn split_provenance_value<'a>(
+    key: &str,
+    value: &'a str,
+) -> Result<StoredProvenanceReference<'a>, peryx_storage::meta::MetaError> {
+    if value.starts_with('{') {
+        let reference: VersionedProvenanceReference<'_> =
+            serde_json::from_str(value).map_err(|source| peryx_storage::meta::MetaError::DriverRecordMalformed {
+                key: key.to_owned(),
+                source,
+            })?;
+        if reference.version != PROVENANCE_REFERENCE_VERSION {
+            return Err(peryx_storage::meta::MetaError::DriverRecordSchema {
+                key: key.to_owned(),
+                field: format!("version {}", reference.version),
+            });
+        }
+        return Ok(StoredProvenanceReference::Verified {
+            sha256: reference.sha256,
+            size: reference.size,
+        });
+    }
     let (sha256, size) = value
         .split_once('\n')
         .ok_or_else(|| peryx_storage::meta::MetaError::DriverRecordMissing {
@@ -392,7 +451,7 @@ fn split_provenance_value<'a>(key: &str, value: &'a str) -> Result<(&'a str, u64
             field: "size",
             source,
         })?;
-    Ok((sha256, size))
+    Ok(StoredProvenanceReference::Legacy { sha256, size })
 }
 
 /// Decode a stored record that the namespace defines as UTF-8 text.
@@ -658,6 +717,14 @@ pub trait PypiStore {
         artifact_sha256: &str,
         filename: &str,
     ) -> Result<Option<(String, u64)>, peryx_storage::meta::MetaError>;
+
+    /// # Errors
+    /// Returns a store error if a matching provenance record is unreadable.
+    fn list_verified_provenance(
+        &self,
+        index: &str,
+        normalized: &str,
+    ) -> Result<BTreeMap<String, String>, peryx_storage::meta::MetaError>;
 
     /// # Errors
     /// Returns a store or decode error when the record cannot be read.
@@ -1029,6 +1096,14 @@ impl PypiStore for peryx_storage::meta::MetaStore {
         filename: &str,
     ) -> Result<Option<(String, u64)>, peryx_storage::meta::MetaError> {
         files::get_provenance(self, index, normalized, artifact_sha256, filename)
+    }
+
+    fn list_verified_provenance(
+        &self,
+        index: &str,
+        normalized: &str,
+    ) -> Result<BTreeMap<String, String>, peryx_storage::meta::MetaError> {
+        files::list_verified_provenance(self, index, normalized)
     }
 
     fn list_upstream_attestations(

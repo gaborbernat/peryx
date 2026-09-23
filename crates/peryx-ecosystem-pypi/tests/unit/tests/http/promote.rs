@@ -1062,6 +1062,46 @@ async fn test_promote_reads_the_stored_bundle_for_the_target_attestation_rule() 
     assert_eq!((status, body.as_str()), (StatusCode::OK, "promoted 1 file(s)"));
 }
 
+#[tokio::test]
+async fn test_promote_rejects_legacy_provenance_for_an_attestation_rule() {
+    let h = promotion_harness_with_target_policy(policy(|_neutral, pypi| {
+        pypi.required_attestations = vec!["https://docs.pypi.org/attestations/publish/v1".to_owned()];
+    }))
+    .await;
+    assert_eq!(
+        super::attestations::upload_signed_attestation(
+            &h.state,
+            "/staging/",
+            &super::attestations::signed_attestations_field(),
+        )
+        .await,
+        StatusCode::OK
+    );
+    let sha256 = peryx_storage::blob::Digest::of(&super::attestations::signed_distribution());
+    super::attestations::mark_provenance_legacy(
+        &h.state,
+        "staging",
+        super::attestations::SIGNED_PROJECT,
+        sha256.as_str(),
+        super::attestations::SIGNED_FILENAME,
+    );
+
+    let (status, body) = request_response(
+        &h.state,
+        "PUT",
+        "/prod/circleci-sign-publish-example/0.0.1.dev137/promote?from=staging",
+        Some(&upload_auth()),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let denial: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        denial["reason"],
+        "upload is missing a required attestation predicate type: https://docs.pypi.org/attestations/publish/v1"
+    );
+}
+
 /// A record written without a size still names bytes peryx holds, so the blob answers for it and the
 /// target accounts for the file rather than refusing it.
 #[tokio::test]

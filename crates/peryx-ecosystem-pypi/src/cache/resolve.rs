@@ -604,12 +604,22 @@ pub fn local_detail(state: &ServingState, name: &str, project: &str) -> Result<O
     if entries.is_empty() {
         return Ok(None);
     }
+    let verified_provenance = state.meta.list_verified_provenance(name, project)?;
     let mut files = Vec::with_capacity(entries.len());
     let mut versions = BTreeSet::new();
     for (_filename, bytes) in entries {
         let mut uploaded: Uploaded = serde_json::from_slice(&bytes)?;
         if uploaded.trashed.is_some() {
             continue;
+        }
+        if matches!(uploaded.file.provenance, crate::Provenance::Url(_))
+            && uploaded.file.sha256().is_none_or(|sha256| {
+                verified_provenance
+                    .get(&uploaded.file.filename)
+                    .is_none_or(|verified| verified != sha256)
+            })
+        {
+            uploaded.file.provenance = crate::Provenance::Absent;
         }
         uploaded.file.authoritative_version = Some(uploaded.version.clone());
         versions.insert(uploaded.version);

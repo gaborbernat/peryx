@@ -60,6 +60,14 @@ fn test_signed_attestation_verifies() {
         built.predicate_types,
         BTreeSet::from(["https://docs.pypi.org/attestations/publish/v1".to_owned()])
     );
+    let document: Value = serde_json::from_slice(&built.document).unwrap();
+    assert_eq!(
+        document["attestation_bundles"][0]["publisher"],
+        json!({
+            "kind": "https://token.actions.githubusercontent.com",
+            "claims": {"identity": SIGNED_IDENTITY},
+        })
+    );
 }
 
 #[test]
@@ -342,9 +350,57 @@ fn test_build_provenance_wraps_a_bound_attestation() {
 
     assert_eq!(document["version"], 1);
     let bundle = &document["attestation_bundles"][0];
-    assert_eq!(bundle["publisher"], Value::Null);
+    assert_eq!(
+        bundle["publisher"],
+        json!({"kind": "test", "claims": {"identity": "test"}})
+    );
     assert_eq!(bundle["attestations"].as_array().unwrap().len(), 1);
     assert_eq!(bundle["attestations"][0]["version"], 1);
+}
+
+fn publisher(kind: &str, identity: &str) -> Publisher {
+    Publisher {
+        kind: kind.to_owned(),
+        claims: BTreeMap::from([("identity".to_owned(), identity.to_owned())]),
+    }
+}
+
+#[test]
+fn test_provenance_groups_attestations_from_the_same_publisher() {
+    let publisher = publisher("issuer", "identity");
+    let first = attestation("first", SHA);
+    let second = attestation("second", SHA);
+    let document: Value = serde_json::from_slice(&provenance_document_from_attestations([
+        (publisher.clone(), first.clone()),
+        (publisher.clone(), second.clone()),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        document["attestation_bundles"],
+        json!([{"publisher": publisher, "attestations": [first, second]}])
+    );
+}
+
+#[rstest]
+#[case::kind(publisher("issuer-a", "identity"), publisher("issuer-b", "identity"))]
+#[case::claims(publisher("issuer", "identity-a"), publisher("issuer", "identity-b"))]
+fn test_provenance_separates_distinct_publishers(#[case] first: Publisher, #[case] second: Publisher) {
+    let first_attestation = attestation("first", SHA);
+    let second_attestation = attestation("second", SHA);
+    let document: Value = serde_json::from_slice(&provenance_document_from_attestations([
+        (second.clone(), second_attestation.clone()),
+        (first.clone(), first_attestation.clone()),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        document["attestation_bundles"],
+        json!([
+            {"publisher": first, "attestations": [first_attestation]},
+            {"publisher": second, "attestations": [second_attestation]},
+        ])
+    );
 }
 
 #[test]
@@ -909,6 +965,20 @@ fn test_summarize_provenance_rejects_a_non_provenance_document() {
         summarize_provenance(br#"{"version":1,"attestation_bundles":[]}"#, SHA, FILENAME),
         None
     );
+}
+
+#[rstest]
+#[case::missing(json!({"attestations": [attestation(FILENAME, SHA)]}))]
+#[case::null(json!({"publisher": null, "attestations": [attestation(FILENAME, SHA)]}))]
+#[case::missing_identity(json!({
+    "publisher": {"kind": "issuer", "claims": {}},
+    "attestations": [attestation(FILENAME, SHA)],
+}))]
+fn test_stored_provenance_rejects_an_unverified_publisher(#[case] bundle: Value) {
+    let document = serde_json::to_vec(&json!({"version": 1, "attestation_bundles": [bundle]})).unwrap();
+
+    assert_eq!(summarize_provenance(&document, SHA, FILENAME), None);
+    assert!(stored_predicate_types(&document, SHA, FILENAME).is_empty());
 }
 
 #[test]

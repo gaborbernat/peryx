@@ -675,7 +675,7 @@ async fn test_ui_nested_browse_keeps_the_selected_collision_owner(
 
     let (status, body) = get(&router, uri).await;
     assert_eq!(status, StatusCode::OK);
-    assert_ui_file(&body, filename, "hosted", None, "local", "hosted provenance");
+    assert_ui_file(&body, filename, "hosted", None, "local");
 
     assert_eq!(
         peryx_ecosystem_pypi::cache::remove_files(
@@ -703,7 +703,6 @@ async fn test_ui_nested_browse_keeps_the_selected_collision_owner(
         "proxy",
         Some("https://upstream.example/simple/veloxdemo/"),
         cached_availability,
-        "upstream provenance",
     );
 
     assert_eq!(
@@ -714,7 +713,7 @@ async fn test_ui_nested_browse_keeps_the_selected_collision_owner(
     );
     let (status, body) = get(&router, uri).await;
     assert_eq!(status, StatusCode::OK);
-    assert_ui_file(&body, filename, "hosted", None, "local", "hosted provenance");
+    assert_ui_file(&body, filename, "hosted", None, "local");
 }
 
 #[tokio::test]
@@ -748,7 +747,6 @@ async fn test_ui_nested_browse_uses_cached_owner_after_hosted_policy_filters_fil
         "proxy",
         Some("https://upstream.example/simple/veloxdemo/"),
         "local",
-        "upstream provenance",
     );
 
     let request = Request::builder()
@@ -814,26 +812,12 @@ async fn test_ui_nested_browse_uses_cached_owner_after_hosted_policy_filters_fil
     assert!(rendered_file_rows(&body).is_empty());
 }
 
-fn assert_ui_file(
-    body: &str,
-    filename: &str,
-    source: &str,
-    upstream: Option<&str>,
-    availability: &str,
-    provenance: &str,
-) {
+fn assert_ui_file(body: &str, filename: &str, source: &str, upstream: Option<&str>, availability: &str) {
     let row = rendered_file_rows(body).into_iter().next().unwrap();
     assert_eq!(row["cells"][0]["text"], filename);
     assert_eq!(row["cells"][4]["text"], source);
     assert_eq!(row["cells"][4]["href"].as_str(), upstream);
     assert_eq!(row["cells"][5]["text"], availability);
-    assert!(
-        row["badges"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|badge| badge["label"] == provenance)
-    );
 }
 
 fn rendered_file_cells(body: &str) -> Vec<(String, String, String)> {

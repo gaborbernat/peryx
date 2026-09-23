@@ -14,6 +14,7 @@ use crate::{
 
 mod verify;
 
+use verify::Publisher;
 pub(crate) use verify::VerificationContext;
 
 /// The media type PEP 740 assigns the served provenance object.
@@ -152,13 +153,14 @@ pub(crate) fn build_provenance(
     let attestations = parse_attestations(raw)?;
     let verification = verification.ok_or(AttestationError::MissingVerificationPolicy)?;
     let mut predicate_types = BTreeSet::new();
-    for (index, attestation) in attestations.iter().enumerate() {
-        if let Some(predicate_type) = validate_attestation(index, attestation, sha256, filename, verification)? {
-            predicate_types.insert(predicate_type);
-        }
+    let mut verified = Vec::with_capacity(attestations.len());
+    for (index, attestation) in attestations.into_iter().enumerate() {
+        let (predicate_type, publisher) = validate_attestation(index, &attestation, sha256, filename, verification)?;
+        predicate_types.insert(predicate_type);
+        verified.push((publisher, attestation));
     }
     Ok(BuiltProvenance {
-        document: provenance_document(&attestations),
+        document: provenance_document_from_attestations(verified),
         predicate_types,
     })
 }
@@ -207,7 +209,7 @@ const MAX_PREDICATE_TYPE_CHARS: usize = 256;
 #[must_use]
 pub fn summarize_provenance(document: &[u8], sha256: &str, filename: &str) -> Option<Vec<AttestationView>> {
     let stored: StoredProvenance = serde_json::from_slice(document).ok()?;
-    if stored.version != SUPPORTED_VERSION {
+    if !stored.verified() {
         return None;
     }
     let summaries: Vec<AttestationView> = stored
@@ -230,7 +232,7 @@ pub fn stored_predicate_types(document: &[u8], sha256: &str, filename: &str) -> 
     let Ok(stored) = serde_json::from_slice::<StoredProvenance>(document) else {
         return BTreeSet::new();
     };
-    if stored.version != SUPPORTED_VERSION {
+    if !stored.verified() {
         return BTreeSet::new();
     }
     stored
@@ -296,23 +298,54 @@ struct StoredProvenance {
     attestation_bundles: Vec<StoredBundle>,
 }
 
+impl StoredProvenance {
+    fn verified(&self) -> bool {
+        self.version == SUPPORTED_VERSION
+            && !self.attestation_bundles.is_empty()
+            && self
+                .attestation_bundles
+                .iter()
+                .all(|bundle| bundle.publisher.verified())
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct StoredBundle {
-    #[serde(default)]
+    publisher: Publisher,
     attestations: Vec<Value>,
 }
 
-fn provenance_document(attestations: &[Value]) -> Vec<u8> {
-    let document = json!({
-        "version": SUPPORTED_VERSION,
-        "attestation_bundles": [{
-            // Peryx does not resolve the uploader to a Trusted Publisher identity, so the bundle
-            // carries no publisher. PEP 740 makes the field nullable for exactly this case.
-            "publisher": Value::Null,
-            "attestations": attestations,
-        }],
-    });
+impl Publisher {
+    fn verified(&self) -> bool {
+        !self.kind.is_empty() && self.claims.get("identity").is_some_and(|identity| !identity.is_empty())
+    }
+}
+
+fn provenance_document_from_attestations(attestations: impl IntoIterator<Item = (Publisher, Value)>) -> Vec<u8> {
+    let mut bundles = BTreeMap::<Publisher, Vec<Value>>::new();
+    for (publisher, attestation) in attestations {
+        bundles.entry(publisher).or_default().push(attestation);
+    }
+    let bundles = bundles
+        .into_iter()
+        .map(|(publisher, attestations)| json!({ "publisher": publisher, "attestations": attestations }))
+        .collect::<Vec<_>>();
+    let document = json!({ "version": SUPPORTED_VERSION, "attestation_bundles": bundles });
     serde_json::to_vec(&document).expect("a provenance document of owned JSON always serializes")
+}
+
+#[cfg(test)]
+fn provenance_document(attestations: &[Value]) -> Vec<u8> {
+    let publisher = Publisher {
+        kind: "test".to_owned(),
+        claims: BTreeMap::from([("identity".to_owned(), "test".to_owned())]),
+    };
+    provenance_document_from_attestations(
+        attestations
+            .iter()
+            .cloned()
+            .map(|attestation| (publisher.clone(), attestation)),
+    )
 }
 
 fn parse_attestations(raw: &str) -> Result<Vec<Value>, AttestationError> {
@@ -344,7 +377,7 @@ fn validate_attestation(
     sha256: &str,
     filename: &str,
     verification: &VerificationContext,
-) -> Result<Option<String>, AttestationError> {
+) -> Result<(String, Publisher), AttestationError> {
     match &attestation["version"] {
         Value::Number(version) if version.as_u64() == Some(SUPPORTED_VERSION) => {}
         version => {
@@ -356,10 +389,10 @@ fn validate_attestation(
     }
     let statement = decode_statement(index, attestation)?;
     bind_subject(index, &statement, sha256, filename)?;
-    verification
+    let publisher = verification
         .verify(attestation, sha256)
         .map_err(|()| AttestationError::VerificationFailed(index))?;
-    Ok(Some(statement.predicate_type))
+    Ok((statement.predicate_type, publisher))
 }
 
 fn decode_statement(index: usize, attestation: &Value) -> Result<UploadStatement, AttestationError> {

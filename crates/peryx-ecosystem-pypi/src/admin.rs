@@ -143,8 +143,8 @@ fn claimed_sidecar(value: &str) -> ClaimedSidecar<'_> {
 }
 
 fn valid_provenance(value: &str) -> Option<&str> {
-    let (provenance_digest, size) = value.split_once('\n')?;
-    (Digest::from_hex(provenance_digest).is_some() && size.parse::<u64>().is_ok()).then_some(provenance_digest)
+    let reference = crate::store::split_provenance_value("provenance", value).ok()?;
+    Digest::from_hex(reference.sha256()).map(|_| reference.sha256())
 }
 
 /// This driver's cached index pages, each key split into `(index, project)`, for `cache list`/`cache

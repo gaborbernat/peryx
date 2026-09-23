@@ -147,7 +147,9 @@ fn plan(snapshot: &RepairSnapshot, indexes: &[Index]) -> Vec<MetadataRepairFindi
     findings.extend(report_only_text(
         PypiRecords::Provenance,
         &snapshot.provenance,
-        |_, value| !super::split_provenance_value("provenance", value).is_ok_and(|(digest, _)| valid_digest(digest)),
+        |_, value| {
+            !super::split_provenance_value("provenance", value).is_ok_and(|reference| valid_digest(reference.sha256()))
+        },
     ));
     findings.sort_by(|left, right| (left.namespace, &left.key).cmp(&(right.namespace, &right.key)));
     findings

@@ -200,7 +200,7 @@ const MAX_PREDICATE_TYPE_CHARS: usize = 256;
 ///
 /// This reads the document peryx already stored - it fetches nothing and verifies no signature. It
 /// decodes each DSSE statement only far enough to read its `predicateType` and check that a subject
-/// digest binds to `sha256`, mirroring the binding [`build_provenance`] enforced at upload.
+/// digest binds to `sha256`, mirroring the binding `build_provenance` enforced at upload.
 ///
 /// Returns `None` when the document does not parse as a version-1 provenance object or carries no
 /// attestation, so a caller renders it as an unreadable record rather than an empty panel.

@@ -905,6 +905,7 @@ async fn test_proxy_tag_list_ignores_empty_link_members() {
 #[case::unterminated_parameter_target("</v2/app/tags/list?n=1&last=a>; rel=next; title=<x")]
 #[case::unterminated_quote("</v2/app/tags/list?n=1&last=a>; rel=\"next")]
 #[case::quote_in_target("</v2/app/tags/list?n=1&last=a>; title=<\"x>; rel=next")]
+#[case::quote_closed_only_inside_a_parameter_target("</v2/app/tags/list?n=1&last=a>; title=<\">; rel=next; x=\"")]
 #[case::quoted_relation_suffix("</v2/app/tags/list?n=1&last=a>; rel=\"next\"junk")]
 #[case::split_quoted_relation("</v2/app/tags/list?n=1&last=a>; rel=\"ne\"\"xt\"")]
 #[tokio::test]
@@ -1026,8 +1027,16 @@ async fn test_proxy_tag_list_rejects_a_page_larger_than_n() {
     );
 }
 
+/// A page as long as the 1000-tag cap is complete when the client asked for exactly that many, but
+/// truncated when the request was clamped down to the cap and upstream sent no continuation.
+#[rstest]
+#[case::at_the_cap("1000", StatusCode::OK)]
+#[case::clamped_to_the_cap("1001", StatusCode::BAD_GATEWAY)]
 #[tokio::test]
-async fn test_proxy_tag_list_rejects_an_unmarked_clamped_page() {
+async fn test_proxy_tag_list_checks_an_unmarked_full_page_against_the_request(
+    #[case] requested: &str,
+    #[case] status: StatusCode,
+) {
     let server = MockServer::start().await;
     let tags = (0..1_000).map(|number| format!("tag-{number:04}")).collect::<Vec<_>>();
     Mock::given(method("GET"))
@@ -1048,8 +1057,10 @@ async fn test_proxy_tag_list_rejects_an_unmarked_clamped_page() {
     let (_, app) = proxy(&dir, &format!("{}/", server.uri()), false);
 
     assert_eq!(
-        send(&app, Method::GET, "/v2/hub/app/tags/list?n=1001").await.0,
-        StatusCode::BAD_GATEWAY
+        send(&app, Method::GET, &format!("/v2/hub/app/tags/list?n={requested}"))
+            .await
+            .0,
+        status
     );
 }
 

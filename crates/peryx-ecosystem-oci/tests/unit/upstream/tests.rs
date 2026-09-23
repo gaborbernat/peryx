@@ -54,6 +54,14 @@ fn test_parse_bearer_rejects_non_bearer_scheme() {
 }
 
 #[test]
+fn test_parse_bearer_ignores_a_bearer_word_inside_another_challenge() {
+    assert_eq!(
+        parse_bearer(&header(r#"Custom Bearer realm="https://auth.example/token""#)),
+        None
+    );
+}
+
+#[test]
 fn test_parse_bearer_requires_a_realm() {
     assert_eq!(parse_bearer(&header(r#"Bearer service="registry.docker.io""#)), None);
 }

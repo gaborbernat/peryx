@@ -1740,10 +1740,8 @@ async fn test_sync_reports_a_blob_missing_from_a_hosted_member() {
     .await
     .unwrap();
 
-    assert!(
-        rows.iter()
-            .any(|row| row.reason == "blob missing from the selected index member")
-    );
+    let config_row = rows.iter().find(|row| row.digest == digest).unwrap();
+    assert_eq!(config_row.reason, "blob missing from the selected index member");
 }
 
 #[tokio::test]

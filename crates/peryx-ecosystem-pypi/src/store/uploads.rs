@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use peryx_storage::meta::{DriverTxn, MetaError, MetaScanError, MetaStore, QuotaError, QuotaReservationRecord};
 use uuid::Uuid;
@@ -6,6 +6,9 @@ use uuid::Uuid;
 use super::imports::validate_upload_projection;
 use super::journal::JournalEntry;
 use super::overrides::{FileOverride, OverrideMutation};
+use super::release_metadata::{
+    select_promoted_files, select_published_file, selection_from_metadata_digest, selection_from_promoted_record,
+};
 use super::{
     OVERRIDE_PREFIX, UPLOAD_PREFIX, UploadWriteError, admit_upload_row, announced_release_key, metadata_key,
     override_key, provenance_key, provenance_prefix, provenance_value, put_project_row, put_upload_row, record_str,
@@ -220,6 +223,18 @@ pub fn publish_file_in_txn<E: From<MetaError> + From<UploadWriteError>>(
                 txn.reference_blob(sibling.provenance_sha256, sibling.size);
             }
             admit_upload_row(txn, file.index, file.normalized, file.filename, file.record)?;
+            select_published_file(
+                txn,
+                file.index,
+                file.normalized,
+                file.version,
+                selection_from_metadata_digest(
+                    file.filename,
+                    file.artifact_sha256,
+                    file.metadata.as_ref().map(|metadata| metadata.metadata_sha256),
+                ),
+                file.submitted_at_unix,
+            )?;
             put_project_row(txn, file.index, file.normalized, file.display)?;
             let mut journal = Vec::new();
             if outbox {
@@ -320,6 +335,8 @@ pub fn promote_files_checked<E: From<MetaError> + From<UploadWriteError>>(
             let mut written = 0;
             let mut committed = Vec::new();
             let mut journal = Vec::new();
+            let mut metadata_candidates = Vec::new();
+            let mut metadata_filenames = BTreeSet::new();
             for (filename, token, record) in release.records {
                 let key = upload_key(release.index, release.normalized, filename);
                 match guard(filename, token, txn.get(&key)?.as_deref()).map_err(PublishError::Body)? {
@@ -333,6 +350,10 @@ pub fn promote_files_checked<E: From<MetaError> + From<UploadWriteError>>(
                             txn.reference_blob(token, *size);
                         }
                         copy_provenance_in_txn(txn, release, filename, token)?;
+                        let (version, selection) =
+                            selection_from_promoted_record(filename, token, record).map_err(PublishError::from)?;
+                        metadata_candidates.push((version, selection));
+                        metadata_filenames.insert(filename.clone());
                         written += 1;
                         if outbox {
                             journal.extend(promoted_file_journal(txn, release, filename, record)?);
@@ -343,6 +364,14 @@ pub fn promote_files_checked<E: From<MetaError> + From<UploadWriteError>>(
             if written == 0 {
                 return Ok(((0, Vec::new()), Vec::new()));
             }
+            select_promoted_files(
+                txn,
+                release.index,
+                release.normalized,
+                metadata_candidates,
+                release.submitted_at_unix,
+                &metadata_filenames,
+            )?;
             put_project_row(txn, release.index, release.normalized, release.display)?;
             Ok(((written, committed), journal))
         },

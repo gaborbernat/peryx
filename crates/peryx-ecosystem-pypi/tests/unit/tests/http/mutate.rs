@@ -15,6 +15,7 @@ fn store_ambiguous_sdist(state: &AppState, index: &str) -> (&'static str, Digest
         Some(payload.len() as u64),
     );
     uploaded.imports = Some(crate::upload::ImportDeclarations::Before25);
+    uploaded.file.upload_time = Some("2025-01-01T00:00:00Z".to_owned());
     state
         .serving
         .meta
@@ -466,8 +467,8 @@ async fn test_ambiguous_stored_sdist_keeps_its_release_through_promotion() {
         Some("1.0-1")
     );
     let (status, _, body) = get(&h.state, "/staging/peryxpkg/json", None).await;
-    let legacy: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(status, StatusCode::OK);
+    let legacy: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(legacy["releases"]["1.0-1"][0]["filename"], filename);
     assert_eq!(
         legacy["releases"]["1.0-1"][0]["url"],

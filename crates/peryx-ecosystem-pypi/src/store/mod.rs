@@ -8,6 +8,7 @@ mod journal;
 mod overrides;
 mod projects;
 mod record;
+mod release_metadata;
 mod repair;
 mod summary;
 mod uploads;
@@ -59,6 +60,9 @@ pub use projects::{
 pub use record::{
     AttestationAvailability, CachedIndex, CachedIndexPage, CachedIndexSummary, FreshnessOverlay, ProjectGeneration,
     ProjectMetaState, ProjectStatusRecord, UpstreamAttestation,
+};
+pub use release_metadata::{
+    ReleaseMetadataLocator, ReleaseMetadataSelection, release_metadata_selection, stored_release_metadata_selection,
 };
 pub use repair::{MetadataRepairFinding, apply_metadata_repair, plan_metadata_repair, repair_counts};
 pub use summary::{
@@ -137,6 +141,9 @@ pub(crate) const UPLOAD_PREFIX: &str = "pypi\u{0}u\u{0}";
 const RELEASE_IMPORTS_PREFIX: &str = "pypi\u{0}q\u{0}";
 /// Marks hosted projects whose existing upload rows have been projected into release constraints.
 const RELEASE_IMPORTS_INIT_PREFIX: &str = "pypi\u{0}z\u{0}";
+/// The artifact whose core metadata defines one hosted release's legacy JSON response, keyed by
+/// `{index}/{normalized}/{canonical version}`.
+const RELEASE_METADATA_PREFIX: &str = "pypi\u{0}b\u{0}";
 /// How many upload records a hosted project holds and how many of those are untrashed, keyed by
 /// `{index}/{normalized}`. Maintained by every write that adds or removes an upload row, in that
 /// write's own transaction.
@@ -261,9 +268,9 @@ pub(crate) fn project_of_key(key: &str) -> Option<(&str, &str)> {
             return split_index_project(rest);
         }
     }
-    for prefix in [UPLOAD_PREFIX, OVERRIDE_PREFIX] {
+    for prefix in [UPLOAD_PREFIX, OVERRIDE_PREFIX, RELEASE_METADATA_PREFIX] {
         if let Some(rest) = key.strip_prefix(prefix) {
-            let (head, _filename) = rest.rsplit_once('/')?;
+            let (head, _leaf) = rest.rsplit_once('/')?;
             return split_index_project(head);
         }
     }

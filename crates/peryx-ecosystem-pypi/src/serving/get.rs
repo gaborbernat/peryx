@@ -308,35 +308,178 @@ async fn legacy_json_route(state: &Arc<ServingState>, index: &Index, rest: &str)
     if let Some((bytes, last_serial)) = hot {
         return Some(legacy_bytes_response(bytes, last_serial));
     }
-    let detail = cache::resolve_detail_page(state, index, &target.project, &index.route)
-        .boxed()
-        .await;
-    if let Ok(Some(found)) = &detail
-        && let Some(body) = crate::legacy_json::render_legacy_json_with_serial(
-            &found.detail,
-            target.version.as_deref(),
-            None,
-            found.last_serial,
-        )
-    {
-        let body = bytes::Bytes::from(body);
-        remember_rendered(
-            state,
-            index,
+    let mut retry = false;
+    loop {
+        let representation_key = state.representation_key(&index.route, &target.project, &variant);
+        let resolved = cache::resolve_detail_for_ui(state, index, &target.project, &index.route)
+            .boxed()
+            .await;
+        let metadata = match &resolved {
+            Ok(Some(found)) => {
+                match legacy_release_metadata(state, &target.project, target.version.as_deref(), found)
+                    .boxed()
+                    .await
+                {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        return Some(legacy_json_response(
+                            Err(error),
+                            &index.route,
+                            &target.project,
+                            target.version.as_deref(),
+                        ));
+                    }
+                }
+            }
+            _ => None,
+        };
+        if state.representation_key(&index.route, &target.project, &variant) != representation_key {
+            if retry {
+                return Some(cache_error_response(
+                    &CacheError::ConcurrentChange("the selected release changed while reading its metadata".to_owned()),
+                    CacheContext::project(&index.route, &target.project),
+                ));
+            }
+            retry = true;
+            continue;
+        }
+        if let Ok(Some(found)) = &resolved
+            && let Some(body) = crate::legacy_json::render_legacy_json_with_serial(
+                &found.detail,
+                target.version.as_deref(),
+                metadata.as_ref(),
+                found.last_serial,
+            )
+        {
+            let body = bytes::Bytes::from(body);
+            remember_rendered_at_key(
+                state,
+                index,
+                &target.project,
+                &representation_key,
+                &body,
+                found.last_serial,
+                found.revoked_files_removed,
+            );
+            return Some(legacy_bytes_response(body, found.last_serial));
+        }
+        return Some(legacy_json_response(
+            resolved.map(|found| {
+                found.map(|found| cache::DetailPage {
+                    detail: found.detail,
+                    last_serial: found.last_serial,
+                    revoked_files_removed: found.revoked_files_removed,
+                })
+            }),
+            &index.route,
             &target.project,
-            &variant,
-            &body,
-            found.last_serial,
-            found.revoked_files_removed,
-        );
-        return Some(legacy_bytes_response(body, found.last_serial));
+            target.version.as_deref(),
+        ));
     }
-    Some(legacy_json_response(
-        detail,
-        &index.route,
-        &target.project,
-        target.version.as_deref(),
-    ))
+}
+
+async fn legacy_release_metadata(
+    state: &Arc<ServingState>,
+    project: &str,
+    requested: Option<&str>,
+    page: &cache::ResolvedPage,
+) -> Result<Option<crate::CoreMetadataDoc>, CacheError> {
+    let Some(version) = crate::legacy_json::selected_release_version(&page.detail, requested) else {
+        return Ok(None);
+    };
+    let Some(first) = page
+        .detail
+        .files
+        .iter()
+        .filter(|file| file.matches_version(&version))
+        .min_by_key(|file| {
+            (
+                file.upload_time
+                    .as_deref()
+                    .and_then(crate::policy::parse_upload_time)
+                    .unwrap_or(i64::MAX),
+                file.filename.as_str(),
+            )
+        })
+    else {
+        return Ok(None);
+    };
+    let owner = page
+        .owner(&first.filename)
+        .expect("resolved files retain their leaf owner");
+    let owner_index = state
+        .indexes
+        .iter()
+        .find(|candidate| candidate.name == owner.leaf())
+        .expect("resolved owners name configured leaf indexes");
+    if first.metadata().is_absent() && matches!(owner_index.kind, IndexKind::Cached { .. }) {
+        return Ok(None);
+    }
+    let (selected, selected_metadata_digest) = if owner.is_hosted() {
+        let normalized = normalize_name(project);
+        let selection = if state.read_only {
+            crate::store::stored_release_metadata_selection(&state.meta, owner.leaf(), normalized.as_ref(), &version)?
+                .ok_or(CacheError::Unavailable)?
+        } else {
+            let Some(selection) =
+                crate::store::release_metadata_selection(&state.meta, owner.leaf(), normalized.as_ref(), &version)?
+            else {
+                return Ok(None);
+            };
+            selection
+        };
+        let Some(file) = page.detail.files.iter().find(|file| {
+            file.filename == selection.filename
+                && file.sha256() == Some(selection.artifact_sha256.as_str())
+                && file.matches_version(&version)
+                && page
+                    .owner(&file.filename)
+                    .is_some_and(|candidate| candidate.is_hosted() && candidate.leaf() == owner.leaf())
+        }) else {
+            return Ok(None);
+        };
+        let selected_metadata_digest = match selection.metadata {
+            crate::store::ReleaseMetadataLocator::Absent => return Ok(None),
+            crate::store::ReleaseMetadataLocator::Generated => None,
+            crate::store::ReleaseMetadataLocator::Digest(digest) => Some(
+                Digest::from_hex(&digest)
+                    .ok_or_else(|| CacheError::InvalidMetadata("the selected metadata digest is invalid".to_owned()))?,
+            ),
+        };
+        (file, selected_metadata_digest)
+    } else {
+        (first, None)
+    };
+    let digest = Digest::from_hex(
+        selected
+            .sha256()
+            .expect("selected metadata files have a canonical sha256"),
+    )
+    .expect("simple file digests are canonical");
+    let bytes = cache::metadata_bytes_for_project(
+        state,
+        owner_index,
+        project,
+        &digest,
+        &owner_index.route,
+        &format!("{}.metadata", selected.filename),
+    )
+    .await?;
+    if selected_metadata_digest.is_some_and(|digest| Digest::of(&bytes) != digest) {
+        return Err(CacheError::InvalidMetadata(
+            "the selected document does not match its persisted digest".to_owned(),
+        ));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| CacheError::InvalidMetadata("the selected document is not UTF-8".to_owned()))?;
+    let metadata = crate::parse_metadata(text).map_err(|error| CacheError::InvalidMetadata(error.to_string()))?;
+    if normalize_name(&metadata.name) != normalize_name(project) || !crate::versions_match(&metadata.version, &version)
+    {
+        return Err(CacheError::InvalidMetadata(
+            "the selected document names another project or release".to_owned(),
+        ));
+    }
+    Ok(Some(metadata))
 }
 
 fn simple_index_response(state: &ServingState, index: &Index, headers: &HeaderMap) -> Response {
@@ -838,14 +981,33 @@ fn remember_rendered(
     last_serial: Option<u64>,
     revoked_files_removed: bool,
 ) {
+    remember_rendered_at_key(
+        state,
+        index,
+        project,
+        &state.representation_key(&index.route, project, variant),
+        body,
+        last_serial,
+        revoked_files_removed,
+    );
+}
+
+fn remember_rendered_at_key(
+    state: &ServingState,
+    index: &Index,
+    project: &str,
+    key: &str,
+    body: &bytes::Bytes,
+    last_serial: Option<u64>,
+    revoked_files_removed: bool,
+) {
     if revoked_files_removed {
         return;
     }
     if let Ok(Some(expires_at)) = cache::rendered_expiry(state, index, project) {
-        let key = state.representation_key(&index.route, project, variant);
         state
             .cache
-            .store_hot_versioned(key, body.clone(), expires_at, last_serial);
+            .store_hot_versioned(key.to_owned(), body.clone(), expires_at, last_serial);
     }
 }
 

@@ -21,6 +21,7 @@ fn resolved(detail: ProjectDetail) -> ResolvedPage {
     ResolvedPage {
         detail,
         last_serial: None,
+        revoked_files_removed: false,
         owners: BTreeMap::new(),
     }
 }
@@ -77,6 +78,7 @@ fn test_merge_candidates_keeps_the_first_file_owner() {
             }],
         },
         last_serial: None,
+        revoked_files_removed: false,
         owners: BTreeMap::from([(
             filename.to_owned(),
             ResolvedFileOwner {

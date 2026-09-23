@@ -17,6 +17,7 @@ fn test_project_of_key_maps_every_project_scoped_key() {
             "pypi\u{0}o\u{0}hosted/flask/flask-1.0.tar.gz",
             Some(("hosted", "flask")),
         ),
+        ("pypi\u{0}b\u{0}hosted/flask/1", Some(("hosted", "flask"))),
         ("pypi\u{0}i\u{0}root-pypi/flask", Some(("root-pypi", "flask"))),
         ("pypi\u{0}h\u{0}root-pypi/flask", Some(("root-pypi", "flask"))),
         ("pypi\u{0}p\u{0}team/flask", Some(("team", "flask"))),

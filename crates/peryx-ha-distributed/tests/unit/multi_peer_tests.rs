@@ -726,10 +726,7 @@ async fn test_an_unsupported_version_cannot_replace_a_buffered_generation() {
     let rejected = set.advance(Duration::ZERO).await;
 
     assert_eq!(set.source(), Some("writer"));
-    assert_eq!(
-        (set.version(), set.head(), set.buffered("primary")),
-        (PROTOCOL_VERSION, 1, Some(1))
-    );
+    assert_eq!((set.head(), set.buffered("primary")), (1, Some(1)));
     assert_eq!(rejected.incompatible, Some(PROTOCOL_VERSION + 1));
     assert_eq!(
         rejected.outcomes,

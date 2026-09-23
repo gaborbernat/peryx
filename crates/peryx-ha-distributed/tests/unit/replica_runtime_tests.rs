@@ -165,6 +165,10 @@ fn installed_checkpoint() -> (tempfile::TempDir, MetaStore, BlobStorage, u64) {
             Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
         })
         .unwrap();
+    install_checkpoint_of(&source)
+}
+
+fn install_checkpoint_of(source: &MetaStore) -> (tempfile::TempDir, MetaStore, BlobStorage, u64) {
     let manifest = source
         .publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
             source: "primary".to_owned(),
@@ -741,6 +745,34 @@ async fn test_a_completed_checkpoint_view_rebuild_advances_its_frontier() {
     assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
     assert_eq!(views.readable_frontier(), serial);
     assert!(meta.checkpoint_blob_recovery_page(NonZeroUsize::MIN).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_a_completed_checkpoint_counts_the_blobs_it_fetched() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let (source_meta, source_blobs) = stores(&source_dir);
+    let bytes = b"checkpoint-artifact";
+    let digest = source_blobs.put_bytes(bytes).await.unwrap();
+    source_meta
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), bytes.len() as u64);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    let (_directory, meta, blobs, _serial) = install_checkpoint_of(&source_meta);
+    let server = TestServer::start(primary_router("primary", TOKEN, source_meta, source_blobs).unwrap()).await;
+    let replica = replica(
+        meta,
+        blobs,
+        PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default()),
+        blob_transport(&server.url),
+        Arc::new(Views::default()),
+        Arc::new(ReplicaMonitor::new(0)),
+    );
+
+    let report = replica.pull_blobs().await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 1, pending: 0 });
 }
 
 #[tokio::test]

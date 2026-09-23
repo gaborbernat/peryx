@@ -855,10 +855,8 @@ const fn bounded_singleton_lease(now_unix: i64, expires_at_unix: i64) -> bool {
     expires_at_unix > now_unix && expires_at_unix.saturating_sub(now_unix) <= SINGLETON_LEASE_SECS
 }
 
-fn expire_writes(record: &mut AuthorityRecord, now_unix: i64) -> usize {
-    let before = record.writes.len();
+fn expire_writes(record: &mut AuthorityRecord, now_unix: i64) {
     record
         .writes
         .retain(|_, lease| lease.expires_at_unix.saturating_add(AUTHORITY_CLOCK_SKEW_SECS) > now_unix);
-    before - record.writes.len()
 }

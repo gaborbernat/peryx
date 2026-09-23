@@ -409,6 +409,19 @@ fn test_artifact_placement_marks_missing_and_preserves_a_known_source() {
 }
 
 #[test]
+fn test_marking_an_artifact_missing_persists_its_absence() {
+    let (_directory, store) = store();
+    record_artifact_placement(&store, "present", ArtifactSource::Hosted, true).unwrap();
+
+    mark_artifact_missing(&store, "present").unwrap();
+
+    assert_eq!(
+        store.get_artifact_placement("present").unwrap(),
+        Some(peryx_ha::ArtifactPlacement::record(ArtifactSource::Hosted, false))
+    );
+}
+
+#[test]
 fn test_marking_artifact_local_refines_an_unknown_source() {
     let (_directory, store) = store();
     store

@@ -52,6 +52,13 @@ async fn test_collect_capped_rejects_an_unbounded_body_without_reading_it_all() 
     ));
 }
 
+#[test]
+fn test_loopback_advertises_its_byte_cap_as_the_response_limit() {
+    let digest = Digest::of(b"capped");
+
+    assert_eq!(source(&digest, b"capped", 7).max_response_bytes(), NonZeroU64::new(7));
+}
+
 #[tokio::test]
 async fn test_fetch_returns_and_verifies_a_whole_blob() {
     let digest = Digest::of(b"hello world");

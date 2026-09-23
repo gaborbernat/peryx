@@ -1659,7 +1659,7 @@ async fn test_a_roster_rewrite_of_an_unknown_learner_is_rejected() {
                 }
             )
             .await,
-        Err(ControlError::Unavailable(_))
+        Err(ControlError::Unavailable(message)) if message == r#"datacenter "west" is not a registered learner"#
     ));
 }
 

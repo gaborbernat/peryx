@@ -210,27 +210,28 @@ fn test_a_whole_page_advertises_stored_metadata_only_for_a_wheel_or_sdist() {
             .unwrap(),
     };
 
-    let PageOutcome::Ready(bytes, _) =
-        transform_whole(&state, "pypi/flask", &record, context_holding(Vec::new())).unwrap()
-    else {
-        panic!("a cached page transforms whole");
-    };
+    let outcome = transform_whole(&state, "pypi/flask", &record, context_holding(Vec::new())).unwrap();
 
-    let page = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
-    let advertised = page["files"]
+    let expected = [
+        (
+            "flask-1.0-py3-none-any.whl".to_owned(),
+            serde_json::json!({"sha256": metadata.as_str()}),
+        ),
+        ("flask-1.0.zip".to_owned(), serde_json::json!(false)),
+    ];
+    assert!(matches!(outcome, PageOutcome::Ready(bytes, _) if advertised_metadata(&bytes) == expected));
+}
+
+fn advertised_metadata(page: &[u8]) -> Vec<(String, serde_json::Value)> {
+    serde_json::from_slice::<serde_json::Value>(page).unwrap()["files"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|file| (file["filename"].as_str().unwrap(), &file["core-metadata"]))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        advertised,
-        [
+        .map(|file| {
             (
-                "flask-1.0-py3-none-any.whl",
-                &serde_json::json!({"sha256": metadata.as_str()})
-            ),
-            ("flask-1.0.zip", &serde_json::json!(false)),
-        ]
-    );
+                file["filename"].as_str().unwrap().to_owned(),
+                file["core-metadata"].clone(),
+            )
+        })
+        .collect()
 }

@@ -374,6 +374,10 @@ fn test_put_and_get_provenance_roundtrips_the_bundle() {
         meta.get_provenance("hosted", "pkg", "wheelsha", "pkg-1.0.whl").unwrap(),
         Some(("provsha".to_owned(), 16))
     );
+    assert_eq!(
+        meta.list_verified_provenance("hosted", "pkg").unwrap(),
+        BTreeMap::from([("pkg-1.0.whl".to_owned(), "wheelsha".to_owned())])
+    );
 }
 
 #[test]
@@ -391,6 +395,31 @@ fn test_get_provenance_reads_only_the_publication_it_was_written_for() {
         meta.get_provenance("hosted", "pkg", "wheelsha", "pkg-2.0.whl").unwrap(),
         None,
         "a second filename over the same bytes inherits no bundle"
+    );
+}
+
+#[test]
+fn test_get_provenance_suppresses_a_legacy_reference() {
+    let (_dir, meta) = store();
+    let key = super::provenance_key("hosted", "pkg", "wheelsha", "pkg-1.0.whl");
+    meta.put_driver_value(&key, b"provsha\n16").unwrap();
+
+    assert_eq!(
+        meta.get_provenance("hosted", "pkg", "wheelsha", "pkg-1.0.whl").unwrap(),
+        None
+    );
+    assert!(meta.list_verified_provenance("hosted", "pkg").unwrap().is_empty());
+}
+
+#[test]
+fn test_list_verified_provenance_rejects_a_malformed_reference() {
+    let (_dir, meta) = store();
+    let key = super::provenance_key("hosted", "pkg", "wheelsha", "pkg-1.0.whl");
+    meta.put_driver_value(&key, b"{").unwrap();
+
+    assert_eq!(
+        meta.list_verified_provenance("hosted", "pkg").unwrap_err().to_string(),
+        format!("driver record {key:?} does not decode")
     );
 }
 
@@ -427,6 +456,36 @@ fn test_get_provenance_rejects_a_record_whose_size_is_not_a_number() {
 }
 
 #[test]
+fn test_get_provenance_rejects_an_unknown_reference_version() {
+    let (_dir, meta) = store();
+    let key = super::provenance_key("hosted", "pkg", "wheelsha", "pkg-1.0.whl");
+    meta.put_driver_value(&key, br#"{"version":2,"sha256":"provsha","size":16}"#)
+        .unwrap();
+
+    let error = meta
+        .get_provenance("hosted", "pkg", "wheelsha", "pkg-1.0.whl")
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!("driver record {key:?} carries unknown field \"version 2\" and needs a newer peryx")
+    );
+}
+
+#[test]
+fn test_get_provenance_rejects_a_malformed_versioned_reference() {
+    let (_dir, meta) = store();
+    let key = super::provenance_key("hosted", "pkg", "wheelsha", "pkg-1.0.whl");
+    meta.put_driver_value(&key, b"{").unwrap();
+
+    let error = meta
+        .get_provenance("hosted", "pkg", "wheelsha", "pkg-1.0.whl")
+        .unwrap_err();
+
+    assert_eq!(error.to_string(), format!("driver record {key:?} does not decode"));
+}
+
+#[test]
 fn test_scan_provenance_records_visits_each_record() {
     let (_dir, meta) = store();
     meta.put_provenance("hosted", "pkg", "good", "pkg-1.0.whl", bundle("provsha"))
@@ -437,9 +496,11 @@ fn test_scan_provenance_records_visits_each_record() {
         Ok::<(), std::io::Error>(())
     })
     .unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0, "hosted/pkg/good/pkg-1.0.whl");
     assert_eq!(
-        seen,
-        vec![("hosted/pkg/good/pkg-1.0.whl".to_owned(), "provsha\n16".to_owned())]
+        serde_json::from_str::<serde_json::Value>(&seen[0].1).unwrap(),
+        serde_json::json!({"version": 1, "sha256": "provsha", "size": 16})
     );
 }
 

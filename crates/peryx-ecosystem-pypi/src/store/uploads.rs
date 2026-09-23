@@ -29,9 +29,9 @@ pub struct MetadataSibling<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProvenanceSibling<'a> {
     /// The provenance blob's own sha256, which serving and the blob reference both key on.
-    pub provenance_sha256: &'a str,
+    pub(crate) provenance_sha256: &'a str,
     /// The provenance blob's byte length.
-    pub size: u64,
+    pub(crate) size: u64,
 }
 
 /// Everything one published file writes to the store.
@@ -199,7 +199,7 @@ pub fn publish_file_in_txn<E: From<MetaError> + From<UploadWriteError>>(
         .get(&provenance)?
         .map(|raw| {
             let value = record_str(&provenance, raw)?;
-            split_provenance_value(&provenance, &value).map(|(digest, _size)| digest.to_owned())
+            split_provenance_value(&provenance, &value).map(|reference| reference.sha256().to_owned())
         })
         .transpose()?;
     match guard(PublishedState {
@@ -397,7 +397,10 @@ fn copy_provenance_in_txn(
         return Ok(());
     };
     let value = record_str(&source, raw.clone())?;
-    let (bundle, size) = split_provenance_value(&source, &value)?;
+    let reference = split_provenance_value(&source, &value)?;
+    let Some((bundle, size)) = reference.verified() else {
+        return Ok(());
+    };
     txn.reference_blob(bundle, size);
     txn.put(
         &provenance_key(release.index, release.normalized, artifact_sha256, filename),

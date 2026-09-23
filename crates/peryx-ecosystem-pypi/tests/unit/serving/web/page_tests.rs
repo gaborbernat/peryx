@@ -368,7 +368,7 @@ fn padded_provenance(artifact: &str) -> Vec<u8> {
     let mut bundle = serde_json::to_value(serde_json::json!({
         "version": 1,
         "attestation_bundles": [{
-            "publisher": null,
+            "publisher": publisher(),
             "attestations": [attestation(Some(&statement(FILENAME, artifact, "matched")))],
         }],
     }))
@@ -480,7 +480,7 @@ fn stored_provenance(artifact: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "version": 1,
         "attestation_bundles": [{
-            "publisher": null,
+            "publisher": publisher(),
             "attestations": [
                 attestation(Some(&statement(FILENAME, artifact, "matched"))),
                 attestation(Some(&statement("other.whl", artifact, "mismatched"))),
@@ -489,6 +489,10 @@ fn stored_provenance(artifact: &str) -> Vec<u8> {
         }],
     }))
     .unwrap()
+}
+
+fn publisher() -> serde_json::Value {
+    serde_json::json!({"kind": "issuer", "claims": {"identity": "publisher"}})
 }
 
 fn attestation(statement: Option<&str>) -> serde_json::Value {

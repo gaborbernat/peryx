@@ -325,7 +325,11 @@ pub async fn promote_release(
         if let Some(size) = size {
             blob_sizes.insert(digest.clone(), size);
         }
-        let predicate_types = promoted_predicate_types(state, source, normalized, &parsed, &filename).await?;
+        let stored_predicates = promoted_predicate_types(state, source, normalized, &parsed, &filename).await?;
+        if stored_predicates.is_none() {
+            uploaded.file.provenance = crate::Provenance::Absent;
+        }
+        let predicate_types = stored_predicates.unwrap_or_default();
         if let Some(denial) = promotion_denial(route, hosted, normalized, &uploaded.file, &predicate_types) {
             return Err(CacheError::Policy(denial));
         }
@@ -810,7 +814,7 @@ async fn promoted_predicate_types(
     normalized: &str,
     sha256: &peryx_storage::blob::Digest,
     filename: &str,
-) -> Result<BTreeSet<String>, CacheError> {
+) -> Result<Option<BTreeSet<String>>, CacheError> {
     // No row and a row peryx cannot look up are one answer here: there is no document to read, so the
     // file carries no predicate type for a rule to match.
     let bundle = state
@@ -818,17 +822,17 @@ async fn promoted_predicate_types(
         .get_provenance(source, normalized, sha256.as_str(), filename)?
         .and_then(|(bundle, _)| peryx_storage::blob::Digest::from_hex(&bundle));
     let Some(bundle) = bundle else {
-        return Ok(BTreeSet::new());
+        return Ok(None);
     };
     let document = state
         .blobs
         .read_bytes(&bundle, super::provenance::MAX_PROVENANCE_BYTES as u64)
         .await?;
-    Ok(crate::attestation::stored_predicate_types(
+    Ok(Some(crate::attestation::stored_predicate_types(
         &document,
         sha256.as_str(),
         filename,
-    ))
+    )))
 }
 
 /// Hold one target allocation per promoted file.

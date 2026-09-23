@@ -433,9 +433,34 @@ pub fn get_provenance(
     meta.get_driver_value(&key)?
         .map(|raw| {
             let value = record_str(&key, raw)?;
-            split_provenance_value(&key, &value).map(|(sha256, size)| (sha256.to_owned(), size))
+            split_provenance_value(&key, &value)
+                .map(|reference| reference.verified().map(|(sha256, size)| (sha256.to_owned(), size)))
         })
         .transpose()
+        .map(Option::flatten)
+}
+
+/// Return artifact digests with verified provenance by filename.
+///
+/// # Errors
+/// Returns a store error if a matching record is unreadable.
+pub fn list_verified_provenance(
+    meta: &MetaStore,
+    index: &str,
+    normalized: &str,
+) -> Result<BTreeMap<String, String>, MetaError> {
+    let prefix = super::provenance_prefix(index, normalized);
+    let mut verified = BTreeMap::new();
+    meta.scan_driver_prefix(&prefix, |key, raw| {
+        let value = record_str(key, raw.to_vec())?;
+        if split_provenance_value(key, &value)?.verified().is_some()
+            && let Some((sha256, filename)) = key[prefix.len()..].split_once('/')
+        {
+            verified.insert(filename.to_owned(), sha256.to_owned());
+        }
+        Ok::<(), MetaError>(())
+    })?;
+    Ok(verified)
 }
 
 /// # Errors

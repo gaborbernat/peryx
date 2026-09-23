@@ -68,6 +68,29 @@ pub(super) async fn upload_signed_attestation(state: &Arc<AppState>, route: &str
     upload_signed_attestation_response(state, route, field).await.0
 }
 
+pub(super) fn mark_provenance_legacy(
+    state: &Arc<AppState>,
+    index: &str,
+    project: &str,
+    artifact_sha256: &str,
+    filename: &str,
+) {
+    let (provenance_sha256, size) = state
+        .serving
+        .meta
+        .get_provenance(index, project, artifact_sha256, filename)
+        .unwrap()
+        .unwrap();
+    state
+        .serving
+        .meta
+        .put_driver_value(
+            &format!("pypi\0a\0{index}/{project}/{artifact_sha256}/{filename}"),
+            format!("{provenance_sha256}\n{size}").as_bytes(),
+        )
+        .unwrap();
+}
+
 async fn upload_signed_attestation_response(state: &Arc<AppState>, route: &str, field: &str) -> (StatusCode, String) {
     let route_resource = route.trim_matches('/');
     let resource = format!("{route_resource}/{SIGNED_PROJECT}");
@@ -199,13 +222,53 @@ async fn test_upload_with_attestation_publishes_and_serves_provenance() {
     assert_eq!(headers["x-peryx-provenance-availability"], "cached");
     let document: serde_json::Value = serde_json::from_str(&provenance).unwrap();
     assert_eq!(document["version"], 1);
-    assert_eq!(document["attestation_bundles"][0]["publisher"], serde_json::Value::Null);
+    assert_eq!(
+        document["attestation_bundles"][0]["publisher"],
+        serde_json::json!({
+            "kind": "https://oidc.circleci.com",
+            "claims": {
+                "identity": "https://circleci.com/api/v2/projects/fdd9283f-e619-46af-8f9c-851f7d3e8b2b/pipeline-definitions/8e4f8ab2-8d7c-4827-9f15-de076d6d647f",
+                "1.3.6.1.4.1.57264.1.12": "github.com/CircleCI-Public/sign-and-publish-examples",
+            },
+        })
+    );
     assert_eq!(
         document["attestation_bundles"][0]["attestations"]
             .as_array()
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn test_legacy_hosted_provenance_is_not_advertised_or_served() {
+    let harness = harness().await;
+    let sha256 = Digest::of(&signed_distribution()).as_str().to_owned();
+    assert_eq!(
+        upload_signed_attestation(&harness.state, "/root/pypi/", &signed_attestations_field()).await,
+        StatusCode::OK
+    );
+    mark_provenance_legacy(&harness.state, "hosted", SIGNED_PROJECT, &sha256, SIGNED_FILENAME);
+
+    let (_, _, json) = get(
+        &harness.state,
+        &format!("/root/pypi/simple/{SIGNED_PROJECT}/"),
+        Some("application/json"),
+    )
+    .await;
+    let detail: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(detail["files"][0].get("provenance").is_none());
+    let (_, _, html) = get(
+        &harness.state,
+        &format!("/root/pypi/simple/{SIGNED_PROJECT}/"),
+        Some("text/html"),
+    )
+    .await;
+    assert!(!html.contains("data-provenance"));
+    assert_eq!(
+        get(&harness.state, &signed_provenance_uri(&sha256), None).await.0,
+        StatusCode::NOT_FOUND
     );
 }
 
@@ -617,6 +680,47 @@ async fn test_promotion_carries_the_bundle_onto_the_target_publication() {
         detail["files"][0]["provenance"],
         serde_json::json!(format!("/prod/files/{sha256}/{SIGNED_FILENAME}.provenance")),
         "the promoted page points at the target's own bundle route"
+    );
+}
+
+#[tokio::test]
+async fn test_promotion_omits_legacy_provenance_from_the_target() {
+    let h = authority_promotion_harness().await;
+    let sha256 = Digest::of(&signed_distribution()).as_str().to_owned();
+    assert_eq!(
+        upload_signed_attestation(&h.state, "/staging/", &signed_attestations_field()).await,
+        StatusCode::OK
+    );
+    mark_provenance_legacy(&h.state, "staging", SIGNED_PROJECT, &sha256, SIGNED_FILENAME);
+
+    assert_eq!(
+        request(
+            &h.state,
+            "PUT",
+            &format!("/prod/{SIGNED_PROJECT}/{SIGNED_VERSION}/promote?from=staging"),
+            Some(&upload_auth()),
+        )
+        .await,
+        StatusCode::OK
+    );
+
+    let (_, _, page) = get(
+        &h.state,
+        &format!("/prod/simple/{SIGNED_PROJECT}/"),
+        Some("application/json"),
+    )
+    .await;
+    let detail: serde_json::Value = serde_json::from_str(&page).unwrap();
+    assert!(detail["files"][0].get("provenance").is_none());
+    assert_eq!(
+        get(
+            &h.state,
+            &format!("/prod/files/{sha256}/{SIGNED_FILENAME}.provenance"),
+            None,
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
     );
 }
 

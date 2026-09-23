@@ -344,6 +344,39 @@ fn test_dropping_an_executor_returns_while_its_thread_is_blocked() {
     caller.join().unwrap();
 }
 
+/// A consensus thread failure that reports which thread dropped it: the joiner takes the outcome and drops it,
+/// while a detached thread drops its own outcome when it exits.
+#[derive(Debug, thiserror::Error)]
+#[error("consensus thread failed")]
+struct DroppedOn(Sender<Option<String>>);
+
+impl Drop for DroppedOn {
+    fn drop(&mut self) {
+        self.0.send(std::thread::current().name().map(str::to_owned)).unwrap();
+    }
+}
+
+#[test]
+fn test_dropping_an_executor_hands_its_thread_outcome_to_the_reaper() {
+    let (release_sender, release_receiver) = mpsc::channel::<()>();
+    let (dropped_sender, dropped_receiver) = mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name("failed-raft-executor".to_owned())
+        .spawn(move || {
+            release_receiver.recv().unwrap();
+            Err(anyhow::Error::new(DroppedOn(dropped_sender)))
+        })
+        .unwrap();
+
+    drop(RaftExecutor::new(tokio_util::sync::CancellationToken::new(), thread));
+    release_sender.send(()).unwrap();
+
+    assert_eq!(
+        dropped_receiver.recv().unwrap().as_deref(),
+        Some("peryx-resource-reaper")
+    );
+}
+
 fn member(datacenter: &str, address: &str) -> ConsensusMember {
     ConsensusMember {
         datacenter: datacenter.to_owned(),

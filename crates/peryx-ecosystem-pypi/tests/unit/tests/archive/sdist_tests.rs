@@ -380,6 +380,7 @@ fn test_validate_sdist_path_rejects_metadata_version_problems() {
         ("2", "invalid Metadata-Version \"2\""),
         ("2.", "invalid Metadata-Version \"2.\""),
         ("x.2", "invalid Metadata-Version \"x.2\""),
+        ("+2.2", "invalid Metadata-Version \"+2.2\""),
         (
             "999999999999999999999999999999999999999999.0",
             "invalid Metadata-Version \"999999999999999999999999999999999999999999.0\"",

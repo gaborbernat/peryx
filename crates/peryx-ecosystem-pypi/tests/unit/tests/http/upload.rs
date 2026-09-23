@@ -959,6 +959,39 @@ async fn test_backfill_rejects_a_conflicting_classification_race() {
     assert!(body.contains("changed during metadata backfill"), "{body}");
 }
 
+fn trash(uploaded: &mut crate::upload::Uploaded) {
+    uploaded.trashed = Some(TrashInfo {
+        deleted_at_unix: 1000,
+        actor: None,
+        reason: None,
+    });
+}
+
+fn move_to_another_release(uploaded: &mut crate::upload::Uploaded) {
+    uploaded.version = "2.0".to_owned();
+}
+
+/// A legacy row that leaves the release while it is being classified no longer takes part in the
+/// release's import check, so whatever imports it carries by then cannot conflict with the upload.
+#[rstest]
+#[case::trashed(trash)]
+#[case::moved_to_another_release(move_to_another_release)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_backfill_accepts_a_legacy_row_that_leaves_the_release_during_classification(
+    #[case] leave: fn(&mut crate::upload::Uploaded),
+) {
+    let h = authority_harness().await;
+    let paused = start_paused_backfill(&h, false).await;
+    rewrite_legacy_upload(&h, |uploaded| {
+        leave(uploaded);
+        uploaded.imports = Some(shared_imports("peryxpkg"));
+    });
+
+    paused.first_release.notify_one();
+
+    assert_eq!(paused.upload.await.unwrap().0, StatusCode::OK);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_backfill_rejects_a_corrupt_concurrent_record() {
     let h = authority_harness().await;

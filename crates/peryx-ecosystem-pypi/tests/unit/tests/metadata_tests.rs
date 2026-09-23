@@ -127,16 +127,25 @@ fn test_ui_project_from_detail_associates_files_with_one_declared_release(
     assert_eq!(project.files[0].release.as_deref(), expected);
 }
 
-#[test]
-fn test_ui_project_from_detail_prefers_an_authoritative_declared_spelling() {
+/// An authoritative version names the file's release only when the page declares it; one the page
+/// does not declare leaves the file to the filename's release, if that one is declared.
+#[rstest]
+#[case::declared_spelling(&["1.0", "1.0.0"], "veloxdemo-1.0-1.tar.gz", "1.0", Some("1.0"))]
+#[case::undeclared(&["1.0"], "veloxdemo-2.0.tar.gz", "2.0", None)]
+fn test_ui_project_from_detail_honours_only_a_declared_authoritative_version(
+    #[case] versions: &[&str],
+    #[case] filename: &str,
+    #[case] authoritative: &str,
+    #[case] expected: Option<&str>,
+) {
     let mut detail = detail(serde_json::json!({
         "name": "veloxdemo",
-        "versions": ["1.0", "1.0.0"],
-        "files": [{"filename": "veloxdemo-1.0-1.tar.gz"}],
+        "versions": versions,
+        "files": [{"filename": filename}],
     }));
-    detail.files[0].authoritative_version = Some("1.0".to_owned());
+    detail.files[0].authoritative_version = Some(authoritative.to_owned());
 
-    assert_eq!(ui_project_from_detail(&detail).files[0].release.as_deref(), Some("1.0"));
+    assert_eq!(ui_project_from_detail(&detail).files[0].release.as_deref(), expected);
 }
 
 #[rstest]

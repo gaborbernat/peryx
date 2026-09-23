@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,8 +13,6 @@ use crate::{
     DistributionFilename, DistributionFilenameError, DistributionKind, Version, normalize_name,
     parse_distribution_filename, parse_metadata, parse_version,
 };
-
-const BUFFER_BYTES: usize = 1024 * 1024;
 
 /// # Errors
 /// Returns a message when the directory or a staged file cannot be read.
@@ -122,12 +120,7 @@ fn import_file(
     }
     let version = parsed.version.to_string();
     let normalized = &parsed.normalized_name;
-    match upload::prepare(
-        upload_form(&filename, &parsed, &staged),
-        staged,
-        target.route,
-        unix_now(),
-    ) {
+    match upload::prepare(upload_form(&filename, &parsed), staged, target.route, unix_now()) {
         Ok(prepared) => match upload::store_prepared_blocking(meta, blobs, target.name, prepared) {
             Ok(true) => {
                 counts.imported += 1;
@@ -170,7 +163,7 @@ fn stage_file(path: &Path, blobs: &BlobStorage) -> std::io::Result<StagedUpload>
     let mut blake2 = Blake2bVar::new(32).expect("blake2b-256 output size is valid");
     let blob = {
         let mut input = HashingReader {
-            inner: BufReader::with_capacity(BUFFER_BYTES, File::open(path)?),
+            inner: File::open(path)?,
             blake2: &mut blake2,
         };
         blobs
@@ -197,14 +190,12 @@ impl<Reader: std::io::Read> std::io::Read for HashingReader<'_, Reader> {
     }
 }
 
-fn upload_form(filename: &str, parsed: &DistributionFilename, staged: &StagedUpload) -> UploadForm {
+fn upload_form(filename: &str, parsed: &DistributionFilename) -> UploadForm {
     UploadForm {
         action: Some("file_upload".to_owned()),
         name: Some(parsed.name.clone()),
         version: Some(parsed.version.to_string()),
         filetype: Some(parsed.kind.upload_filetype().to_owned()),
-        sha256_digest: Some(staged.blob.digest().as_str().to_owned()),
-        blake2_256_digest: Some(staged.blake2_256.clone()),
         filename: Some(filename.to_owned()),
         ..UploadForm::default()
     }

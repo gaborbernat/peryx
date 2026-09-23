@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tantivy::collector::{Count, TopDocs};
 use tantivy::directory::MmapDirectory;
-use tantivy::query::{AllQuery, BooleanQuery, EmptyQuery, Query, RegexQuery, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Query, RegexQuery, TermQuery};
 use tantivy::schema::document::{TantivyDocument, Value as _};
 use tantivy::schema::{FAST, Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions};
 use tantivy::tokenizer::{NgramTokenizer, TextAnalyzer, TokenizerManager};
@@ -408,7 +408,7 @@ impl SearchIndex {
     }
 
     fn access_query(&self, access: &SearchAccess) -> Result<Box<dyn Query>, SearchError> {
-        let mut queries = access
+        let queries = access
             .patterns
             .iter()
             .collect::<BTreeSet<_>>()
@@ -423,11 +423,9 @@ impl SearchIndex {
                 })
             })
             .collect::<tantivy::Result<Vec<Box<dyn Query>>>>()?;
-        Ok(match queries.len() {
-            0 => Box::new(EmptyQuery),
-            1 => queries.pop().expect("query exists"),
-            _ => Box::new(BooleanQuery::union(queries)),
-        })
+        // A union of no clauses matches nothing and a union of one matches what its clause does, so
+        // the union alone answers every pattern count.
+        Ok(Box::new(BooleanQuery::union(queries)))
     }
 
     /// Every accepted query names its candidates through the n-gram index, so no clause has to walk
@@ -440,31 +438,37 @@ impl SearchIndex {
             return pattern_query(pattern, pattern_authority);
         }
         let query = fold_lowercase(query);
-        let length = query.chars().count();
-        if length < MIN_NGRAM {
+        let chars: Vec<char> = query.chars().collect();
+        if chars.len() < MIN_NGRAM {
             return Err(SearchError::QueryTooShort { minimum: MIN_NGRAM });
         }
+        let term_query = |term: &str| {
+            Box::new(TermQuery::new(
+                Term::from_field_text(self.fields.search, term),
+                IndexRecordOption::Basic,
+            )) as Box<dyn Query>
+        };
+        // A query up to the n-gram width is itself an indexed term. Checking for a character past that
+        // width, rather than comparing the length, leaves no boundary where both branches agree.
+        if chars.get(MAX_NGRAM).is_none() {
+            return Ok(term_query(&query));
+        }
+        // A longer query decomposes into the widest windows it contains; n-grams do not preserve
+        // adjacency, so the verifier confirms the exact substring.
         let candidates = BooleanQuery::intersection(
-            query_terms(&query)
-                .into_iter()
-                .map(|term| {
-                    Box::new(TermQuery::new(
-                        Term::from_field_text(self.fields.search, &term),
-                        IndexRecordOption::Basic,
-                    )) as Box<dyn Query>
-                })
+            chars
+                .windows(MAX_NGRAM)
+                .map(|window| window.iter().collect::<String>())
+                .collect::<BTreeSet<_>>()
+                .iter()
+                .map(|term| term_query(term))
                 .collect(),
         );
-        // N-grams do not preserve adjacency, so long queries require exact substring verification.
-        Ok(if length > MAX_NGRAM {
-            Box::new(VerifiedQuery::new(
-                Arc::new(candidates),
-                VERIFY_FIELD,
-                Verifier::Substring(query),
-            ))
-        } else {
-            Box::new(candidates)
-        })
+        Ok(Box::new(VerifiedQuery::new(
+            Arc::new(candidates),
+            VERIFY_FIELD,
+            Verifier::Substring(query),
+        )))
     }
 
     fn result_from_doc(&self, doc: &TantivyDocument) -> SearchResult {
@@ -609,21 +613,6 @@ fn tokenizers() -> TokenizerManager {
 
 fn fold_lowercase(value: &str) -> String {
     value.chars().flat_map(char::to_lowercase).collect()
-}
-
-/// A query up to the n-gram width is itself an indexed term; a longer one decomposes into the widest
-/// windows it contains, which the verifier then confirms are adjacent in the document.
-fn query_terms(query: &str) -> Vec<String> {
-    let chars: Vec<char> = query.chars().collect();
-    if chars.len() <= MAX_NGRAM {
-        return vec![query.to_owned()];
-    }
-    chars
-        .windows(MAX_NGRAM)
-        .map(|term| term.iter().collect::<String>())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 /// A pattern names no candidates, so it reads every indexed document and stays operator-only.

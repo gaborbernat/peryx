@@ -250,14 +250,7 @@ async fn test_refresh_sweep_passes_over_a_fresh_page_without_consulting_policy()
 
     drop(guard);
     assert_eq!(summary, crate::cache::RefreshSummary::default());
-    assert!(
-        !logs
-            .security_events()
-            .iter()
-            .any(|event| field(event, "action") == Some("mirror_sync")),
-        "{}",
-        logs.text()
-    );
+    assert_eq!(logs.security_events(), Vec::<serde_json::Value>::new());
 }
 
 #[tokio::test(flavor = "current_thread")]

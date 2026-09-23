@@ -23,8 +23,13 @@ pub trait ScheduledJobFactory: Send + Sync {
     fn kind(&self) -> &'static str;
 
     /// The settings the job was compiled with, which a job taking none reports as an empty table.
+    #[expect(
+        clippy::default_trait_access,
+        reason = "an empty table is the default table, so spelling it as the default leaves mutation nothing \
+                  equivalent to substitute"
+    )]
     fn settings(&self) -> toml::Table {
-        toml::Table::new()
+        Default::default()
     }
 
     /// # Errors

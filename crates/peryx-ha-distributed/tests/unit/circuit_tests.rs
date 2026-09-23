@@ -199,6 +199,20 @@ fn test_concurrent_failures_start_cooldown_from_the_latest_outcome() {
 }
 
 #[test]
+fn test_a_probe_failure_cannot_reopen_a_source_a_closed_permit_already_closed() {
+    let (breaker, clock) = breaker(1, 30);
+    let admitted_while_closed = admit(&breaker, "dc-a");
+    fail(&breaker, "dc-a");
+    clock.store(30, Ordering::SeqCst);
+    let probe = admit(&breaker, "dc-a");
+    admitted_while_closed.success();
+
+    probe.failure();
+
+    assert!(breaker.admit("dc-a").is_some());
+}
+
+#[test]
 fn test_a_success_resets_the_failure_count_before_a_trip() {
     let (breaker, _) = breaker(3, 30);
     fail(&breaker, "dc-a");

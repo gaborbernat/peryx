@@ -102,16 +102,9 @@ struct Member<T: PeerTransport> {
     /// Shrinks when a reply overruns the frame bound so the peer is asked for less before it is
     /// given up on, and returns to the roster's size once a page fits.
     request_size: NonZeroUsize,
-    batch: Option<BatchIdentity>,
     health: Health,
     /// Prevents a fetch between drain and commit from replaying drained changes at the old frontier.
     draining: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BatchIdentity {
-    source: String,
-    version: u16,
 }
 
 pub struct BufferedBatch {
@@ -198,7 +191,6 @@ impl<T: PeerTransport> PeerSet<T> {
             attempt: 0,
             channel: BoundedChannel::new(self.limits.per_peer_budget),
             request_size: self.limits.request_size,
-            batch: None,
             health: Health::Ready,
             draining: false,
         });
@@ -249,10 +241,13 @@ impl<T: PeerTransport> PeerSet<T> {
         if changes.is_empty() {
             return None;
         }
-        let batch = member.batch.take().expect("buffered changes retain their identity");
+        // A page is buffered only after its source matched or became the set's writer.
         Some(BufferedBatch {
-            source: batch.source,
-            version: batch.version,
+            source: self
+                .source
+                .clone()
+                .expect("buffered changes come from the set's writer"),
+            version: self.version,
             changes,
         })
     }
@@ -260,9 +255,7 @@ impl<T: PeerTransport> PeerSet<T> {
     /// Duplicate or stale commits cannot move the frontier backward or alter peer health.
     pub fn commit(&mut self, source: &str, through: u64) {
         if let Some(member) = self.member_mut(source) {
-            if through > member.frontier {
-                member.frontier = through;
-            }
+            member.frontier = member.frontier.max(through);
             member.draining = false;
         }
     }
@@ -404,12 +397,6 @@ impl<T: PeerTransport> PeerSet<T> {
         member.health = Health::Ready;
         member.request_size = self.limits.request_size;
         let outcome = buffer_batch(&mut member.channel, &page.changes);
-        if outcome.accepted > 0 && member.batch.is_none() {
-            member.batch = Some(BatchIdentity {
-                source: page.source.clone(),
-                version: page.version,
-            });
-        }
         let source = member.source.clone();
         if outcome.back_pressure {
             return MemberOutcome::BackPressured {

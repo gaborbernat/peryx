@@ -1,4 +1,5 @@
 use axum::http::{HeaderValue, Method, StatusCode, header};
+use futures_util::{StreamExt as _, stream};
 use rstest::rstest;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1339,10 +1340,14 @@ async fn test_parallel_tag_page_requests_enforce_the_row_cap() {
     let paths = (0..=1_024)
         .map(|cursor| format!("/v2/hub/app/tags/list?n=1&last={cursor}"))
         .collect::<Vec<_>>();
-    let requests = paths.iter().map(|path| send(&app, Method::GET, path));
-    for (status, _, _) in futures_util::future::join_all(requests).await {
-        assert_eq!(status, StatusCode::OK);
-    }
+    // Each stored page rescans every cached row on this one test thread. Unbounded, the last upstream
+    // read waits behind a thousand such commits and its idle read timeout answers 504 before it does.
+    let statuses = stream::iter(paths.iter().map(|path| send(&app, Method::GET, path)))
+        .buffer_unordered(8)
+        .map(|(status, _, _)| status)
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(statuses, vec![StatusCode::OK; paths.len()]);
     assert_eq!(state.serving.meta.driver_prefix_keys("oci\0tp\0").unwrap().len(), 1_024);
 }
 

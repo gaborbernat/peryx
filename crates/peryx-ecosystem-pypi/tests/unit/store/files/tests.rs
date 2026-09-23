@@ -1,10 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use peryx_storage::meta::{ArtifactOrigin as _, ArtifactSource, ByteAvailability};
+use peryx_storage::meta::{
+    ArtifactOrigin as _, ArtifactPlacement, ArtifactSource, ByteAvailability, DriverPlacementSnapshotError,
+};
+use peryx_test_support::fault::{backend, faulted};
 
+use super::FileUiReadError;
 use super::{
-    FILE_PREFIX, FilePublication, FileSource, MetaStore, MetadataClaim, ProvenanceSibling, PypiArtifactOrigin,
-    split_file_source, split_file_source_key,
+    FILE_PREFIX, FilePublication, FileSource, FileUiLookup, MetaStore, MetadataClaim, ProvenanceSibling,
+    PypiArtifactOrigin, read_file_ui_records, split_file_source, split_file_source_key,
 };
 use crate::store::PypiStore as _;
 
@@ -29,6 +33,178 @@ fn test_put_and_get_file_url() {
             upstream: None,
         })
     );
+}
+
+#[test]
+fn test_file_ui_records_keep_publications_with_one_digest_distinct() {
+    let (_dir, meta) = store();
+    for (index, url) in [
+        ("alpha", "https://alpha.example/pkg.whl"),
+        ("beta", "https://beta.example/pkg.whl"),
+    ] {
+        meta.put_file_url(index, "pkg", "deadbeef", url, index).unwrap();
+    }
+    let _ = meta.take_read_transaction_count();
+
+    let records = read_file_ui_records(
+        &meta,
+        &[
+            FileUiLookup {
+                filename: "alpha.whl",
+                source_index: Some("alpha"),
+                normalized: "pkg",
+                digest: "deadbeef",
+            },
+            FileUiLookup {
+                filename: "beta.whl",
+                source_index: Some("beta"),
+                normalized: "pkg",
+                digest: "deadbeef",
+            },
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(meta.take_read_transaction_count(), 1);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.source.as_ref().unwrap().url.as_str())
+            .collect::<Vec<_>>(),
+        ["https://alpha.example/pkg.whl", "https://beta.example/pkg.whl"]
+    );
+    assert_eq!(records[0].placement, records[1].placement);
+}
+
+#[test]
+fn test_file_ui_records_do_not_read_a_source_for_a_hosted_file() {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&format!("{FILE_PREFIX}cached/pkg/deadbeef"), &[0xff])
+        .unwrap();
+
+    let records = read_file_ui_records(
+        &meta,
+        &[FileUiLookup {
+            filename: "hosted.whl",
+            source_index: None,
+            normalized: "pkg",
+            digest: "deadbeef",
+        }],
+    )
+    .unwrap();
+
+    assert_eq!(records[0].source, None);
+}
+
+#[test]
+fn test_file_ui_source_error_names_the_affected_file() {
+    let (_dir, meta) = store();
+    meta.put_driver_value(&format!("{FILE_PREFIX}cached/pkg/deadbeef"), &[0xff])
+        .unwrap();
+
+    let error = read_file_ui_records(
+        &meta,
+        &[FileUiLookup {
+            filename: "broken.whl",
+            source_index: Some("cached"),
+            normalized: "pkg",
+            digest: "deadbeef",
+        }],
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("broken.whl"), "{error}");
+}
+
+#[test]
+fn test_file_ui_placement_error_redacts_the_stored_value() {
+    let (directory, meta) = store();
+    meta.put_artifact_placement("deadbeef", &ArtifactPlacement::record(ArtifactSource::Proxy, false))
+        .unwrap();
+    drop(meta);
+    let database = redb::Database::open(directory.path().join("peryx.redb")).unwrap();
+    let write = database.begin_write().unwrap();
+    write
+        .open_table(redb::TableDefinition::<&str, &[u8]>::new("artifact_placement"))
+        .unwrap()
+        .insert(
+            "deadbeef",
+            br#"{"source":"credential-like-marker","availability":"local"}"#.as_slice(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+    drop(database);
+    let meta = MetaStore::open_existing(directory.path().join("peryx.redb")).unwrap();
+
+    let error = read_file_ui_records(
+        &meta,
+        &[FileUiLookup {
+            filename: "broken.whl",
+            source_index: None,
+            normalized: "pkg",
+            digest: "deadbeef",
+        }],
+    )
+    .unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("broken.whl"), "{message}");
+    assert!(!message.contains("credential-like-marker"), "{message}");
+}
+
+#[test]
+fn test_file_ui_snapshot_failures_name_the_affected_file() {
+    let (backend, fault) = backend();
+    let meta = MetaStore::open_backend(faulted(&backend, &fault)).unwrap();
+    let digest = "f".repeat(64);
+    for index in 0..128 {
+        let filler = format!("{index:064x}");
+        meta.put_file_url("cached", "pkg", &filler, "https://files.example/filler.whl", "cached")
+            .unwrap();
+        meta.put_artifact_placement(&filler, &ArtifactPlacement::record(ArtifactSource::Proxy, false))
+            .unwrap();
+    }
+    meta.put_file_url("cached", "pkg", &digest, "https://files.example/pkg.whl", "cached")
+        .unwrap();
+    meta.put_artifact_placement(&digest, &ArtifactPlacement::record(ArtifactSource::Proxy, false))
+        .unwrap();
+    drop(meta);
+    let lookups = [FileUiLookup {
+        filename: "broken.whl",
+        source_index: Some("cached"),
+        normalized: "pkg",
+        digest: &digest,
+    }];
+    let mut failures = BTreeSet::new();
+
+    for fail_after in 0..512 {
+        let meta = MetaStore::reopen_backend(faulted(&backend, &fault)).unwrap();
+        fault.arm(fail_after);
+        let result = read_file_ui_records(&meta, &lookups);
+        let triggered = fault.triggered();
+        fault.disable();
+        assert!(triggered);
+        let error = result.unwrap_err();
+        assert!(!matches!(error, FileUiReadError::Source { .. }));
+        if let FileUiReadError::Snapshot { filename, source } = &error {
+            assert_eq!(filename, "broken.whl");
+            if matches!(source.as_ref(), DriverPlacementSnapshotError::Driver { .. }) {
+                failures.insert("driver");
+            }
+            if matches!(source.as_ref(), DriverPlacementSnapshotError::Snapshot(_)) {
+                failures.insert("snapshot");
+            }
+        }
+        if let FileUiReadError::Placement { filename, .. } = &error {
+            assert_eq!(filename, "broken.whl");
+            failures.insert("placement");
+        }
+        if failures.len() == 3 {
+            break;
+        }
+    }
+
+    assert_eq!(failures, BTreeSet::from(["driver", "placement", "snapshot"]));
 }
 
 #[test]

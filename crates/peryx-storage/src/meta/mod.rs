@@ -44,6 +44,7 @@ mod revocation;
 mod role_grant;
 mod scoped_token;
 mod server_mutation;
+mod snapshot;
 mod transfer_audit;
 mod user;
 mod version;
@@ -121,6 +122,7 @@ pub use scoped_token::{
     ScopedTokenRecord, ScopedTokenWriteError,
 };
 pub use server_mutation::ServerMutation;
+pub use snapshot::{DriverPlacementSnapshot, DriverPlacementSnapshotError};
 pub use user::{StoredPasswordVerifier, UserStoreError};
 pub use version::VersionPrecondition;
 pub use webhook::{
@@ -283,32 +285,63 @@ impl std::fmt::Debug for MetaStore {
     }
 }
 
-enum MetaDatabase {
+enum MetaDatabaseBackend {
     ReadWrite(Database),
     ReadOnly(ReadOnlyDatabase),
+}
+
+struct MetaDatabase {
+    backend: MetaDatabaseBackend,
+    #[cfg(any(test, feature = "fault-injection"))]
+    read_transactions: AtomicUsize,
 }
 
 impl std::fmt::Debug for MetaDatabase {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::ReadWrite(_) => "ReadWrite",
-            Self::ReadOnly(_) => "ReadOnly",
+            Self {
+                backend: MetaDatabaseBackend::ReadWrite(_),
+                ..
+            } => "ReadWrite",
+            Self {
+                backend: MetaDatabaseBackend::ReadOnly(_),
+                ..
+            } => "ReadOnly",
         })
     }
 }
 
 impl MetaDatabase {
-    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
-        match self {
-            Self::ReadWrite(db) => db.begin_read(),
-            Self::ReadOnly(db) => db.begin_read(),
+    const fn read_write(db: Database) -> Self {
+        Self {
+            backend: MetaDatabaseBackend::ReadWrite(db),
+            #[cfg(any(test, feature = "fault-injection"))]
+            read_transactions: AtomicUsize::new(0),
         }
     }
 
+    const fn read_only(db: ReadOnlyDatabase) -> Self {
+        Self {
+            backend: MetaDatabaseBackend::ReadOnly(db),
+            #[cfg(any(test, feature = "fault-injection"))]
+            read_transactions: AtomicUsize::new(0),
+        }
+    }
+
+    fn begin_read(&self) -> Result<redb::ReadTransaction, redb::TransactionError> {
+        let transaction = match &self.backend {
+            MetaDatabaseBackend::ReadWrite(db) => db.begin_read(),
+            MetaDatabaseBackend::ReadOnly(db) => db.begin_read(),
+        }?;
+        #[cfg(any(test, feature = "fault-injection"))]
+        self.read_transactions.fetch_add(1, Ordering::SeqCst);
+        Ok(transaction)
+    }
+
     fn begin_write(&self) -> Result<redb::WriteTransaction, redb::TransactionError> {
-        match self {
-            Self::ReadWrite(db) => db.begin_write(),
-            Self::ReadOnly(_) => Err(redb::StorageError::from(std::io::Error::new(
+        match &self.backend {
+            MetaDatabaseBackend::ReadWrite(db) => db.begin_write(),
+            MetaDatabaseBackend::ReadOnly(_) => Err(redb::StorageError::from(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "metadata store is read-only",
             ))
@@ -361,7 +394,7 @@ impl MetaStore {
     #[cfg(any(test, feature = "fault-injection"))]
     pub fn reopen_backend(backend: impl redb::StorageBackend) -> Result<Self, MetaError> {
         Ok(Self {
-            db: Arc::new(MetaDatabase::ReadWrite(uncached_database(backend)?)),
+            db: Arc::new(MetaDatabase::read_write(uncached_database(backend)?)),
             clock: system_clock(),
             reclaim_ownership: Arc::new(Mutex::new(())),
             repair_ownership: Arc::new(tokio::sync::Mutex::new(())),
@@ -375,6 +408,13 @@ impl MetaStore {
     pub fn fail_driver_prefix_scan_after(&self, after: usize) {
         self.driver_prefix_scan_fault
             .store(after.wrapping_add(1), Ordering::SeqCst);
+    }
+
+    /// Returns and resets the number of successful read transactions opened through this database.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[must_use]
+    pub fn take_read_transaction_count(&self) -> usize {
+        self.db.read_transactions.swap(0, Ordering::SeqCst)
     }
 
     fn initialize(db: Database) -> Result<Self, MetaError> {
@@ -425,7 +465,7 @@ impl MetaStore {
         revocation::backfill_digest_revocation_state(&txn)?;
         txn.commit()?;
         Ok(Self {
-            db: Arc::new(MetaDatabase::ReadWrite(db)),
+            db: Arc::new(MetaDatabase::read_write(db)),
             clock: system_clock(),
             reclaim_ownership: Arc::new(Mutex::new(())),
             repair_ownership: Arc::new(tokio::sync::Mutex::new(())),
@@ -509,7 +549,7 @@ impl MetaStore {
     /// Returns a store error if the database cannot be opened.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self, MetaError> {
         Ok(Self {
-            db: Arc::new(MetaDatabase::ReadWrite(Database::open(path)?)),
+            db: Arc::new(MetaDatabase::read_write(Database::open(path)?)),
             clock: system_clock(),
             reclaim_ownership: Arc::new(Mutex::new(())),
             repair_ownership: Arc::new(tokio::sync::Mutex::new(())),
@@ -524,7 +564,7 @@ impl MetaStore {
     /// Returns a store error if the database cannot be opened read-only.
     pub fn open_existing_read_only(path: impl AsRef<Path>) -> Result<Self, MetaError> {
         Ok(Self {
-            db: Arc::new(MetaDatabase::ReadOnly(ReadOnlyDatabase::open(path)?)),
+            db: Arc::new(MetaDatabase::read_only(ReadOnlyDatabase::open(path)?)),
             clock: system_clock(),
             reclaim_ownership: Arc::new(Mutex::new(())),
             repair_ownership: Arc::new(tokio::sync::Mutex::new(())),

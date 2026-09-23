@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use peryx_ha::{ArtifactPlacement, ArtifactPlacementStore};
-use peryx_storage::meta::{ArtifactOrigin, ArtifactSource, MetaError, MetaScanError, MetaStore};
+use peryx_storage::meta::{
+    ArtifactOrigin, ArtifactSource, DriverPlacementSnapshotError, MetaError, MetaScanError, MetaStore,
+};
 
 use super::{
     FILE_PREFIX, METADATA_PREFIX, PROVENANCE_PREFIX, PUBLICATION_PREFIX, ProvenanceSibling, file_key,
@@ -36,6 +38,130 @@ pub struct FileSource {
     pub size: Option<u64>,
     /// The named routed upstream that advertised this artifact.
     pub upstream: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FileUiLookup<'a> {
+    pub filename: &'a str,
+    pub source_index: Option<&'a str>,
+    pub normalized: &'a str,
+    pub digest: &'a str,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileUiRecord {
+    pub source: Option<FileSource>,
+    pub placement: Option<ArtifactPlacement>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FileUiReadError {
+    #[error("project file metadata snapshot failed while reading {filename:?}: {source}")]
+    Snapshot {
+        filename: String,
+        #[source]
+        source: Box<DriverPlacementSnapshotError>,
+    },
+    #[error("source record for file {filename:?} could not be decoded: {source}")]
+    Source {
+        filename: String,
+        #[source]
+        source: MetaError,
+    },
+    #[error("placement for file {filename:?} could not be read: {source}")]
+    Placement {
+        filename: String,
+        #[source]
+        source: Box<DriverPlacementSnapshotError>,
+    },
+}
+
+/// Reads the source of each cached publication and every distinct placement from one metadata
+/// snapshot. Source rows retain file order and are never merged by digest.
+///
+/// # Errors
+/// Returns an error naming the affected file when a row cannot be read or decoded.
+pub fn read_file_ui_records(
+    meta: &MetaStore,
+    lookups: &[FileUiLookup<'_>],
+) -> Result<Vec<FileUiRecord>, FileUiReadError> {
+    if lookups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (source_positions, source_keys): (Vec<_>, Vec<_>) = lookups
+        .iter()
+        .enumerate()
+        .filter_map(|(position, lookup)| {
+            lookup
+                .source_index
+                .map(|index| (position, file_key(index, lookup.normalized, lookup.digest)))
+        })
+        .unzip();
+    let placement_digests = lookups
+        .iter()
+        .map(|lookup| lookup.digest.to_owned())
+        .collect::<BTreeSet<_>>();
+    let snapshot = meta
+        .read_driver_placement_snapshot(&source_keys, &placement_digests)
+        .map_err(|source| file_ui_snapshot_error(lookups, &source_positions, &source_keys, source))?;
+    let mut records = lookups
+        .iter()
+        .map(|lookup| FileUiRecord {
+            source: None,
+            placement: snapshot.placements.get(lookup.digest).copied(),
+        })
+        .collect::<Vec<_>>();
+    for ((position, key), raw) in source_positions
+        .into_iter()
+        .zip(source_keys)
+        .zip(snapshot.driver_values)
+    {
+        records[position].source = raw
+            .map(|raw| record_str(&key, raw).and_then(|value| split_file_source(&key, &value)))
+            .transpose()
+            .map_err(|source| FileUiReadError::Source {
+                filename: lookups[position].filename.to_owned(),
+                source,
+            })?;
+    }
+    Ok(records)
+}
+
+fn file_ui_snapshot_error(
+    lookups: &[FileUiLookup<'_>],
+    source_positions: &[usize],
+    source_keys: &[String],
+    source: DriverPlacementSnapshotError,
+) -> FileUiReadError {
+    match &source {
+        DriverPlacementSnapshotError::Driver { key, .. } => {
+            let position = source_keys
+                .iter()
+                .position(|candidate| candidate == key)
+                .map(|position| source_positions[position])
+                .expect("snapshot driver errors retain a requested key");
+            FileUiReadError::Snapshot {
+                filename: lookups[position].filename.to_owned(),
+                source: Box::new(source),
+            }
+        }
+        DriverPlacementSnapshotError::Placement { digest, .. }
+        | DriverPlacementSnapshotError::MalformedPlacement { digest, .. } => {
+            let filename = lookups
+                .iter()
+                .find(|lookup| lookup.digest == digest)
+                .expect("snapshot placement errors retain a requested digest")
+                .filename;
+            FileUiReadError::Placement {
+                filename: filename.to_owned(),
+                source: Box::new(source),
+            }
+        }
+        DriverPlacementSnapshotError::Snapshot(_) => FileUiReadError::Snapshot {
+            filename: lookups[0].filename.to_owned(),
+            source: Box::new(source),
+        },
+    }
 }
 
 /// Record where one index's publication of a blob digest can be fetched from: its upstream URL and the

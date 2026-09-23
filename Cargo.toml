@@ -21,7 +21,7 @@ nursery = { level = "warn", priority = -1 }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(peryx_loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codspeed)', 'cfg(coverage)', 'cfg(peryx_loom)'] }
 dead_code = "deny"
 unused_variables = "warn"
 unused_imports = "warn"

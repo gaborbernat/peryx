@@ -16,13 +16,13 @@ use peryx_driver::access::ReadAccess;
 use peryx_driver::discovery::BaseUrl;
 use peryx_driver::serving::{BrowseDriver as _, BrowseError, BrowseRequest};
 use peryx_driver::{AppState, ServingState};
-use peryx_ha::{ArtifactPlacement, ArtifactPlacementStore, ArtifactSource, ByteAvailability};
+use peryx_ha::{ArtifactPlacement, ArtifactSource, ByteAvailability};
 use peryx_identity::{Denial, ResourceMatch};
 use peryx_index::Index;
 use peryx_storage::blob::{BlobLease, Digest};
 
 use crate::cache;
-use crate::store::PypiStore as _;
+use crate::store::{FileUiLookup, PypiStore as _, read_file_ui_records};
 use crate::view::{
     AttestationView, FileView, MetadataBlock, MetadataView, ProjectView, ProvenanceSource, ProvenanceView, SubjectMatch,
 };
@@ -721,25 +721,37 @@ pub(super) async fn project_page(
         ui.name = display;
     }
     apply_actions(&route, &mut ui);
-    for file in &mut ui.files {
+    let records = read_file_ui_records(
+        &state.meta,
+        &ui.files
+            .iter()
+            .map(|file| {
+                let owner = resolved
+                    .owner(&file.filename)
+                    .expect("resolved files retain their leaf owner");
+                FileUiLookup {
+                    filename: &file.filename,
+                    source_index: (!owner.is_hosted()).then(|| owner.leaf()),
+                    normalized: &normalized,
+                    digest: &file.sha256,
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(crate::error_message)?;
+    for (file, record) in ui.files.iter_mut().zip(records) {
         let owner = resolved
             .owner(&file.filename)
             .expect("resolved files retain their leaf owner");
-        let placement =
-            ArtifactPlacementStore::get_artifact_placement(&state.meta, &file.sha256).map_err(crate::error_message)?;
         if owner.is_hosted() {
             file.upstream = None;
             file.source = UiArtifactSource::Hosted;
-            file.availability = ui_availability(resolve_file_placement(true, placement).availability);
+            file.availability = ui_availability(resolve_file_placement(true, record.placement).availability);
             file.provenance_detail = hosted_provenance(&state, owner.leaf(), &normalized, file).await;
         } else {
-            file.upstream = state
-                .meta
-                .get_file_url(owner.leaf(), &normalized, &file.sha256)
-                .map_err(crate::error_message)?
-                .and_then(|source| source.upstream);
+            file.upstream = record.source.and_then(|source| source.upstream);
             file.source = UiArtifactSource::Proxy;
-            file.availability = ui_availability(cached_availability(placement));
+            file.availability = ui_availability(cached_availability(record.placement));
             file.provenance_detail = file.provenance.as_ref().map(|_| ProvenanceView {
                 source: ProvenanceSource::Mirrored,
                 attestations: Vec::new(),

@@ -12,13 +12,184 @@ use peryx_index::{Index, IndexKind};
 use peryx_policy::Policy;
 use peryx_storage::blob::{BlobStorage, Digest};
 use peryx_storage::meta::MetaStore;
+use peryx_upstream::UpstreamClient;
 
 use super::PypiServing;
-use crate::store::PypiStore as _;
+use crate::store::{CachedIndex, CachedPageWrite, PublishedFileWrite, PypiStore as _};
 use crate::upload::Uploaded;
 use crate::{CoreMetadata, File, Provenance, Yanked};
 
 const FILENAME: &str = "demo-1.0-py3-none-any.whl";
+
+#[tokio::test]
+async fn virtual_project_uses_each_file_owner_for_a_shared_digest() {
+    let (_directory, state) = virtual_project_with_shared_digest();
+    let access = peryx_driver::access::ReadAccess::from_headers(&state.serving, &axum::http::HeaderMap::new());
+
+    let page = PypiServing
+        .browse(BrowseRequest {
+            state: state.serving.clone(),
+            position: 2,
+            raw_query: "index=all&project=demo".to_owned(),
+            access: &access,
+            base: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let rows = page
+        .sections
+        .iter()
+        .find_map(|section| match section {
+            BrowseSection::Table { heading, rows, .. } if heading == "Files" => Some(rows),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| {
+                (
+                    row.cells[0].text.as_str(),
+                    (row.cells[4].text.as_str(), row.cells[4].href.as_deref()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([
+            (
+                "demo-1.0-py2-none-any.whl",
+                ("proxy", Some("https://index.example/simple/")),
+            ),
+            ("demo-1.0-py3-none-any.whl", ("hosted", None)),
+        ])
+    );
+}
+
+fn virtual_project_with_shared_digest() -> (tempfile::TempDir, Arc<AppState>) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut state = AppState::new(
+        MetaStore::open(directory.path().join("peryx.redb")).unwrap(),
+        BlobStorage::filesystem(directory.path().join("blobs")),
+        60,
+        virtual_indexes(),
+    );
+    crate::tests::install(&mut state);
+    seed_shared_digest(&state);
+    (directory, Arc::new(state))
+}
+
+fn virtual_indexes() -> Vec<Index> {
+    vec![
+        Index {
+            name: "cached".to_owned(),
+            route: "cached".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Cached {
+                client: UpstreamClient::new("https://index.example/simple/").unwrap(),
+                offline: true,
+            },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        },
+        Index {
+            name: "hosted".to_owned(),
+            route: "hosted".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Hosted { volatile: false },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        },
+        Index {
+            name: "all".to_owned(),
+            route: "all".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Virtual {
+                layers: vec![1, 0],
+                write_target: None,
+            },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        },
+    ]
+}
+
+fn seed_shared_digest(state: &AppState) {
+    let digest = Digest::of(b"shared bytes");
+    let cached_file = PublishedFileWrite {
+        sha256: digest.as_str().to_owned(),
+        filename: "demo-1.0-py2-none-any.whl".to_owned(),
+        url: "https://files.example/cached.whl".to_owned(),
+        size: Some(12),
+        metadata: None,
+    };
+    state
+        .serving
+        .meta
+        .put_cached_page(CachedPageWrite {
+            key: "cached/demo",
+            record: &CachedIndex {
+                source: None,
+                last_modified: None,
+                etag: None,
+                last_serial: None,
+                fetched_at_unix: 0,
+                content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
+                fresh_secs: None,
+                body: serde_json::to_vec(&serde_json::json!({
+                    "meta": {"api-version": "1.1"},
+                    "name": "demo",
+                    "versions": ["1.0"],
+                    "files": [{
+                        "filename": cached_file.filename.clone(),
+                        "url": cached_file.url.clone(),
+                        "hashes": {"sha256": digest.as_str()},
+                        "size": cached_file.size,
+                    }],
+                }))
+                .unwrap(),
+            },
+            index: "cached",
+            normalized: "demo",
+            display: "demo",
+            source: "cached",
+            upstream: Some("https://index.example/simple/"),
+            project_status: None,
+            project_status_reason: None,
+            files: std::slice::from_ref(&cached_file),
+            attestations: &[],
+        })
+        .unwrap();
+    state
+        .serving
+        .meta
+        .put_upload(
+            "hosted",
+            "demo",
+            "demo-1.0-py3-none-any.whl",
+            crate::to_json(&Uploaded {
+                version: "1.0".to_owned(),
+                file: File {
+                    filename: "demo-1.0-py3-none-any.whl".to_owned(),
+                    url: String::new(),
+                    hashes: BTreeMap::from([("sha256".to_owned(), digest.as_str().to_owned())]),
+                    requires_python: None,
+                    size: Some(12),
+                    upload_time: None,
+                    yanked: Yanked::No,
+                    core_metadata: CoreMetadata::Absent,
+                    dist_info_metadata: CoreMetadata::Absent,
+                    gpg_sig: None,
+                    provenance: Provenance::Absent,
+                    authoritative_version: None,
+                },
+                imports: None,
+                trashed: None,
+            })
+            .as_bytes(),
+        )
+        .unwrap();
+    state.serving.meta.put_project("hosted", "demo", "demo").unwrap();
+}
 
 #[tokio::test]
 async fn project_page_converts_metadata_lifecycle_and_provenance() {

@@ -8,18 +8,22 @@ mod detail;
 
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use http::Request;
 use http_body_util::BodyExt as _;
 use peryx_driver::AppState;
 use peryx_driver::rate_limit::{RateLimitConfig, RateLimiter, RouteClass, RouteLimit};
-use peryx_ecosystem_pypi::ProjectDetail;
-use peryx_ecosystem_pypi::store::CachedIndex;
 use peryx_ecosystem_pypi::store::PypiStore as _;
+use peryx_ecosystem_pypi::store::{
+    CachedIndex, CachedPageWrite, FileUiLookup, PublishedFileWrite, read_file_ui_records,
+};
 use peryx_ecosystem_pypi::to_json;
+use peryx_ecosystem_pypi::{CoreMetadata, File, Meta, ProjectDetail, Provenance, Yanked};
+use peryx_ha::{ArtifactPlacement, ArtifactSource};
 use peryx_http::router;
 use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_index::{Index, IndexKind};
@@ -33,6 +37,14 @@ use tower::ServiceExt as _;
 use detail::project_detail;
 
 const LARGE: usize = 400;
+const PROJECT_UI_FILES: usize = if cfg!(debug_assertions) {
+    64
+} else if cfg!(codspeed) {
+    10_000
+} else {
+    1_800_000
+};
+const PAGE_WRITE_BATCH: usize = 10_000;
 const JSON: &str = "application/vnd.pypi.simple.v1+json";
 const HTML: &str = "text/html";
 
@@ -73,6 +85,46 @@ fn bench_serve(criterion: &mut Criterion) {
         bencher
             .to_async(&runtime)
             .iter(|| serve(app.clone(), "/pypi/flask/json", JSON));
+    });
+    group.finish();
+}
+
+fn bench_project_ui_sources(criterion: &mut Criterion) {
+    let fixture = ui_read_fixture(PROJECT_UI_FILES);
+    let lookups = fixture.lookups();
+    let runtime = runtime();
+    let mut group = criterion.benchmark_group("project_ui_sources");
+    group.throughput(Throughput::Elements(PROJECT_UI_FILES as u64));
+    // Reopening redb clears process-local database state without evicting the operating system's page cache.
+    group.bench_function(
+        BenchmarkId::new("cold-reopen-os-cache-warm", PROJECT_UI_FILES),
+        |bencher| {
+            bencher.iter(|| {
+                let meta = MetaStore::open(&fixture.database).unwrap();
+                black_box(read_file_ui_records(&meta, black_box(&lookups)).unwrap())
+            });
+        },
+    );
+    let meta = MetaStore::open(&fixture.database).unwrap();
+    group.bench_function(BenchmarkId::new("warm", PROJECT_UI_FILES), |bencher| {
+        bencher.iter(|| black_box(read_file_ui_records(&meta, black_box(&lookups)).unwrap()));
+    });
+    drop(meta);
+    group.bench_function(
+        BenchmarkId::new("cold-page-reopen-os-cache-warm", PROJECT_UI_FILES),
+        |bencher| {
+            bencher.to_async(&runtime).iter(|| async {
+                let app = ui_app(&fixture);
+                serve(app, "/+ui/browse?index=pypi&project=flask", JSON).await;
+            });
+        },
+    );
+    let app = ui_app(&fixture);
+    runtime.block_on(serve(app.clone(), "/+ui/browse?index=pypi&project=flask", JSON));
+    group.bench_function(BenchmarkId::new("warm-page", PROJECT_UI_FILES), |bencher| {
+        bencher
+            .to_async(&runtime)
+            .iter(|| serve(app.clone(), "/+ui/browse?index=pypi&project=flask", JSON));
     });
     group.finish();
 }
@@ -150,6 +202,155 @@ fn cached(rate_limit: RateLimitConfig, detail: &ProjectDetail) -> (tempfile::Tem
     (dir, Arc::new(state))
 }
 
+struct UiReadFixture {
+    _directory: tempfile::TempDir,
+    database: PathBuf,
+    blobs: PathBuf,
+    filenames: Vec<String>,
+    digests: Vec<String>,
+}
+
+impl UiReadFixture {
+    fn lookups(&self) -> Vec<FileUiLookup<'_>> {
+        self.filenames
+            .iter()
+            .zip(&self.digests)
+            .map(|(filename, digest)| FileUiLookup {
+                filename,
+                source_index: Some("pypi"),
+                normalized: "flask",
+                digest,
+            })
+            .collect()
+    }
+}
+
+fn ui_read_fixture(file_count: usize) -> UiReadFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("peryx.redb");
+    let meta = MetaStore::open(&database).unwrap();
+    let record = CachedIndex {
+        source: None,
+        last_modified: None,
+        etag: None,
+        last_serial: None,
+        fetched_at_unix: 0,
+        content_type: None,
+        fresh_secs: None,
+        body: Vec::new(),
+    };
+    let mut filenames = Vec::with_capacity(file_count);
+    let mut digests = Vec::with_capacity(file_count);
+    for start in (0..file_count).step_by(PAGE_WRITE_BATCH) {
+        let files = (start..(start + PAGE_WRITE_BATCH).min(file_count))
+            .map(|position| PublishedFileWrite {
+                sha256: format!("{position:064x}"),
+                filename: format!("flask-1.0-{position}-py3-none-any.whl"),
+                url: format!("https://files.example/{position}"),
+                size: Some(1),
+                metadata: None,
+            })
+            .collect::<Vec<_>>();
+        filenames.extend(files.iter().map(|file| file.filename.clone()));
+        digests.extend(files.iter().map(|file| file.sha256.clone()));
+        meta.put_cached_page(CachedPageWrite {
+            key: "pypi/flask",
+            record: &record,
+            index: "pypi",
+            normalized: "flask",
+            display: "flask",
+            source: "pypi",
+            upstream: None,
+            project_status: None,
+            project_status_reason: None,
+            files: &files,
+            attestations: &[],
+        })
+        .unwrap();
+        meta.commit_driver_txn(|txn| {
+            for file in &files {
+                txn.put_artifact_placement(&file.sha256, ArtifactPlacement::record(ArtifactSource::Proxy, true));
+            }
+            Ok::<_, peryx_storage::meta::MetaError>(((), Vec::new()))
+        })
+        .unwrap();
+    }
+    let detail = ProjectDetail {
+        meta: Meta::default(),
+        name: "flask".to_owned(),
+        versions: vec!["1.0".to_owned()],
+        files: filenames
+            .iter()
+            .zip(&digests)
+            .map(|(filename, digest)| File {
+                filename: filename.clone(),
+                url: format!("https://files.example/{filename}"),
+                hashes: std::collections::BTreeMap::from([("sha256".to_owned(), digest.clone())]),
+                requires_python: None,
+                size: Some(1),
+                upload_time: None,
+                yanked: Yanked::No,
+                core_metadata: CoreMetadata::Absent,
+                dist_info_metadata: CoreMetadata::Absent,
+                gpg_sig: None,
+                provenance: Provenance::default(),
+                authoritative_version: Some("1.0".to_owned()),
+            })
+            .collect(),
+    };
+    meta.put_index(
+        "pypi/flask",
+        &CachedIndex {
+            body: to_json(&detail).into_bytes(),
+            ..record
+        },
+    )
+    .unwrap();
+    assert!(meta.get_artifact_placement(digests.last().unwrap()).unwrap().is_some());
+    drop(meta);
+    UiReadFixture {
+        blobs: directory.path().join("blobs"),
+        _directory: directory,
+        database,
+        filenames,
+        digests,
+    }
+}
+
+fn ui_app(fixture: &UiReadFixture) -> axum::Router {
+    let meta = MetaStore::open(&fixture.database).unwrap();
+    let upstream = UpstreamClient::new("http://127.0.0.1:9/simple/").unwrap();
+    let mut state = AppState::with_limits(
+        meta,
+        BlobStore::new(&fixture.blobs),
+        3600,
+        vec![Index {
+            name: "pypi".to_owned(),
+            route: "pypi".to_owned(),
+            ecosystem: peryx_ecosystem_pypi::ECOSYSTEM,
+            kind: IndexKind::Cached {
+                client: upstream,
+                offline: true,
+            },
+            policy: Policy::default(),
+            acl: writer_acl("secret"),
+        }],
+        Arc::new(|| 1000),
+        RateLimitConfig::default(),
+        [("pypi".to_owned(), 0)],
+    );
+    peryx_plugin_registry::PluginRegistry::new(vec![peryx_ecosystem_pypi::registration()])
+        .unwrap()
+        .activate([peryx_ecosystem_pypi::ECOSYSTEM])
+        .unwrap()
+        .install_drivers(
+            &mut state.runtime_install_context().unwrap(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+    router(Arc::new(state))
+}
+
 fn enabled_limits() -> RateLimitConfig {
     RateLimitConfig {
         listing: RouteLimit::new(u64::MAX, 60),
@@ -172,5 +373,5 @@ async fn send(app: axum::Router, request: Request<Body>) {
     let _ = response.into_body().collect().await.unwrap().to_bytes();
 }
 
-criterion_group!(benches, bench_serve, bench_rate_limit);
+criterion_group!(benches, bench_serve, bench_project_ui_sources, bench_rate_limit);
 criterion_main!(benches);

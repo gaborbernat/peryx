@@ -324,6 +324,70 @@ async fn test_trashed_and_revoked_uploads_are_excluded_from_browse_and_search() 
     }
 }
 
+/// A yank override withdraws a cached file from what search describes the project with, as the page
+/// would: its metadata no longer supplies the summary.
+#[tokio::test]
+async fn test_search_stops_describing_a_project_by_a_file_an_override_yanks() {
+    let h = harness().await;
+    let digest = Digest::of(b"yanked cache");
+    let metadata = h
+        .state
+        .serving
+        .blobs
+        .blocking()
+        .put_bytes(b"Metadata-Version: 2.1\nName: YankPkg\nVersion: 1.0\nSummary: yanked cache summary\n")
+        .unwrap();
+    h.state
+        .serving
+        .meta
+        .put_metadata(digest.as_str(), metadata.as_str())
+        .unwrap();
+    let mut file = file_with_hash("yankpkg-1.0-py3-none-any.whl", digest.as_str(), None);
+    file.core_metadata = CoreMetadata::Hashes(BTreeMap::from([("sha256".to_owned(), metadata.as_str().to_owned())]));
+    file.dist_info_metadata = file.core_metadata.clone();
+    put_cached_package(
+        &h.state.serving,
+        "pypi/yankpkg",
+        "pypi",
+        "yankpkg",
+        &ProjectDetail {
+            meta: Meta::default(),
+            name: "YankPkg".to_owned(),
+            versions: vec!["1.0".to_owned()],
+            files: vec![file],
+        },
+    );
+    let summary =
+        |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap()["results"][0]["summary"].clone();
+    let (_, _, before) = get(
+        &h.state,
+        "/root/pypi/+search?q=yankpkg&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(summary(&before), "yanked cache summary");
+
+    cache::set_yanked(
+        &h.state.serving,
+        h.state.serving.index_at(2),
+        "hosted",
+        "yankpkg",
+        None,
+        Yanked::Yes,
+    )
+    .await
+    .unwrap();
+
+    let (status, _, after) = get(
+        &h.state,
+        "/root/pypi/+search?q=yankpkg&page_size=25",
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary(&after), serde_json::Value::Null);
+}
+
 #[tokio::test]
 async fn test_hidden_cached_upload_is_excluded_from_browse_and_search() {
     let h = harness().await;

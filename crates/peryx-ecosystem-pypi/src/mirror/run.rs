@@ -399,10 +399,7 @@ async fn verify_project(
     checks: &Semaphore,
 ) -> anyhow::Result<PrefetchReport> {
     let mut rows = Vec::new();
-    let mut counts = PrefetchCounts {
-        projects: 1,
-        ..PrefetchCounts::default()
-    };
+    let mut counts = PrefetchCounts::default();
     if let Some(reason) = refusal(state, target, &project) {
         write_refusal(&mut rows, &mut counts, &target.index, &project, &reason)?;
         return Ok(PrefetchReport { rows, counts });

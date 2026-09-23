@@ -1,9 +1,9 @@
-use super::{CORE_METADATA_TEXT_BYTES, IDENTITY_TEXT_BYTES, push_text};
+use super::{CORE_METADATA_TEXT_BYTES, IDENTITY_TEXT_BYTES, merge_candidates, push_text};
 use peryx_search::INDEXED_TEXT_BYTES;
 use rstest::rstest;
 use std::collections::BTreeMap;
 
-use crate::{CoreMetadata, File, Provenance, Yanked};
+use crate::{CoreMetadata, File, Meta, ProjectDetail, Provenance, Yanked};
 
 /// Identity and core metadata each hold a bounded share of the one indexed-text allowance, and what
 /// they leave is what catalog text has to work with. Neither share may collapse, and the two together
@@ -158,4 +158,25 @@ fn test_catalog_text_takes_the_budget_the_other_sections_left() {
         text.contains("4999.0.0"),
         "the last version fits in the budget the other sections did not use: {length} bytes"
     );
+}
+
+fn quarantined(reason: &str) -> ProjectDetail {
+    ProjectDetail {
+        meta: Meta {
+            project_status: Some("quarantined".to_owned()),
+            project_status_reason: Some(reason.to_owned()),
+            ..Meta::default()
+        },
+        name: "demo".to_owned(),
+        versions: Vec::new(),
+        files: Vec::new(),
+    }
+}
+
+/// Members are ranked, so of two statuses equally severe the first member's stands, reason included.
+#[test]
+fn test_merge_candidates_keeps_the_first_of_equally_severe_statuses() {
+    let merged = merge_candidates("demo", vec![(0, quarantined("first")), (1, quarantined("second"))]);
+
+    assert_eq!(merged.meta.project_status_reason.as_deref(), Some("first"));
 }

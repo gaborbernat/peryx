@@ -498,7 +498,6 @@ async fn sync_projects<C: SimpleClientExt + Sync>(
         })
         .buffer_unordered(parameters.concurrency.get());
     let mut report = JobReport {
-        processed: 0,
         changed: root_changed,
         ..JobReport::default()
     };
@@ -545,12 +544,10 @@ fn record_project_failure(
     project: &str,
     error: &JobFailure,
 ) {
-    if diagnostics.len() == MAX_PROJECT_FAILURE_DIAGNOSTICS
-        && diagnostics.last().is_some_and(|(last, _)| ordinal > *last)
-    {
+    let (Ok(position) | Err(position)) = diagnostics.binary_search_by_key(&ordinal, |(existing, _)| *existing);
+    if position == MAX_PROJECT_FAILURE_DIAGNOSTICS {
         return;
     }
-    let position = diagnostics.partition_point(|(existing, _)| *existing < ordinal);
     diagnostics.insert(
         position,
         (

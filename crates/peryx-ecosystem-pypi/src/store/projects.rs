@@ -139,7 +139,9 @@ pub fn put_catalog_projects(
                     txn.put_local(&key, display.as_bytes())?;
                     inserted += 1;
                 }
-                Some(current) if display.as_bytes() < current.as_slice() => txn.put_local(&key, display.as_bytes())?,
+                Some(current) if display.as_bytes().cmp(current.as_slice()).is_lt() => {
+                    txn.put_local(&key, display.as_bytes())?;
+                }
                 Some(_) => {}
             }
         }

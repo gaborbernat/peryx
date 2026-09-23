@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use peryx_driver::PrometheusSource as _;
 use peryx_driver::jobs::{
-    JobLimits, JobReport, JobRunOutcome, JobScheduler, PluginScheduledJob, ScheduledJob, scheduled_job,
+    JobFailure, JobLimits, JobReport, JobRunOutcome, JobScheduler, PluginScheduledJob, ScheduledJob, scheduled_job,
 };
 use peryx_driver::serving::{JobConfig, JobIndexConfig};
 use peryx_driver::state::AppState;
@@ -24,7 +24,7 @@ use wiremock::{Mock, MockServer, Request as WiremockRequest, Respond, ResponseTe
 use super::{
     CatalogSyncFactory, CatalogSyncParameters, DEFAULT_CATALOG_CONCURRENCY, DEFAULT_CATALOG_PROJECTS,
     DEFAULT_CATALOG_TIMEOUT, MAX_CATALOG_CONCURRENCY, MAX_CATALOG_PROJECTS_PER_RUN, MAX_CATALOG_TIMEOUT,
-    catalog_projects_or_error, compile, scheduled_from_options, status_error,
+    catalog_projects_or_error, compile, record_project_failure, scheduled_from_options, status_error,
 };
 
 const JSON: &str = "application/vnd.pypi.simple.v1+json";
@@ -909,6 +909,44 @@ async fn test_public_job_orders_failures_by_catalog_position() {
     let error = run(&app, parameters("ordered-failures", 2, 2)).await.unwrap_err();
 
     assert!(error.find("project \"alpha\"").unwrap() < error.find("project \"zulu\"").unwrap());
+}
+
+/// Failures arrive in completion order, but the diagnostics keep the catalog's first ones: a failure
+/// earlier in the catalog displaces the latest kept one, and one past every kept one changes nothing.
+#[rstest]
+#[case::earlier_displaces_the_latest(0, &["zero", "one", "three"])]
+#[case::between_displaces_the_latest(4, &["one", "three", "four"])]
+#[case::later_is_dropped(9, &["one", "three", "five"])]
+fn test_record_project_failure_keeps_the_earliest_catalog_failures(#[case] ordinal: usize, #[case] kept: &[&str]) {
+    let names = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    let mut diagnostics = Vec::new();
+    for known in [1, 3, 5] {
+        record_project_failure(
+            &mut diagnostics,
+            known,
+            names[known],
+            &JobFailure::new("sync", "failed"),
+        );
+    }
+
+    record_project_failure(
+        &mut diagnostics,
+        ordinal,
+        names[ordinal],
+        &JobFailure::new("sync", "failed"),
+    );
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|(_, failure)| failure.message().to_owned())
+            .collect::<Vec<_>>(),
+        kept.iter()
+            .map(|project| format!("project {project:?}: failed"))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[tokio::test]

@@ -621,6 +621,30 @@ fn test_evaluate_retention_rejects_a_project_one_byte_over_the_memory_budget() {
     assert!(message.contains("per-project memory budget"), "{message}");
 }
 
+/// The budget stops reading a project the moment its candidates cross it, before the next record is
+/// even decoded; a project that only reaches it reads on, here into a record that cannot be decoded.
+#[rstest]
+#[case::reaches_the_budget(0, "corrupt upload record")]
+#[case::crosses_the_budget(1, "per-project memory budget")]
+fn test_evaluate_retention_stops_reading_a_project_once_it_crosses_the_budget(
+    #[case] over: usize,
+    #[case] expected: &str,
+) {
+    let (_dir, meta) = store();
+    seed(&meta, "pypi", "demo", "1.0", Yanked::No, None);
+    meta.put_upload("pypi", "demo", "demo-2.0.whl", b"not json").unwrap();
+
+    let message = evaluate_retention(
+        &scan(&meta, "pypi", &expire_all_but_latest(1), &ScanCancellation::new()),
+        candidate_footprint("demo", "1.0") - over,
+        |_| Ok(()),
+        reject_decision,
+    )
+    .unwrap_err();
+
+    assert!(message.contains(expected), "{message}");
+}
+
 #[test]
 fn test_evaluate_retention_rejects_a_plan_whose_expansion_crosses_the_budget() {
     let (_dir, meta) = store();

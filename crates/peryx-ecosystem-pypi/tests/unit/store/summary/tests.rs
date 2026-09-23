@@ -45,6 +45,36 @@ fn test_order_rank_reverses_a_negative_second_consistently_with_a_positive_one()
     assert_eq!(order_rank(0), 0x8000_0000_0000_0000);
 }
 
+/// Removing a project's last live upload drops it from the listing even while a trashed upload keeps
+/// its rows: the project no longer serves a file.
+#[test]
+fn test_removing_the_last_live_upload_delists_a_project_with_trashed_uploads() {
+    let (_dir, meta) = store();
+    meta.put_project("hosted", "flask", "flask").unwrap();
+    upload(
+        &meta,
+        "hosted",
+        "flask",
+        "flask-1.0.whl",
+        "1.0",
+        "2026-01-01T00:00:00Z",
+        10,
+    );
+    let trashed = record("flask-2.0.whl", "2.0", "2026-01-02T00:00:00Z", 10).replacen(
+        r#""imports""#,
+        r#""trashed":{"deleted_at_unix":1},"imports""#,
+        1,
+    );
+    meta.put_upload("hosted", "flask", "flask-2.0.whl", trashed.as_bytes())
+        .unwrap();
+    assert_eq!(meta.list_projects("hosted").unwrap(), ["flask"]);
+
+    meta.delete_upload(false, "hosted", "flask", "flask-1.0.whl", 0)
+        .unwrap();
+
+    assert!(meta.list_projects("hosted").unwrap().is_empty());
+}
+
 #[test]
 fn test_remove_upload_row_decrements_the_indexs_upload_count() {
     let (_dir, meta) = store();

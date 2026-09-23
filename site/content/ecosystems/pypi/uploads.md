@@ -289,11 +289,10 @@ client sees always matches what the index is willing to serve.
 predicate types an upload must carry a PEP 740 attestation for, such as `https://docs.pypi.org/attestations/publish/v1`
 from the
 [PyPA index-hosted attestation specification](https://packaging.python.org/en/latest/specifications/index-hosted-attestations/).
-peryx evaluates the requirement at the upload boundary, after the same structural and subject-binding validation above
-and before the file and its provenance publish. An upload missing a required predicate type publishes neither object,
-and the `403` names the missing types without echoing bundle content. Matching predicates permit the same upload. The
-requirement reads the predicate types declared by the bound attestations. A later verifier checks signatures,
-certificates, transparency logs, and identity claims.
+peryx evaluates the requirement at the upload boundary after complete attestation verification and before the file and
+its provenance publish. An upload missing a required predicate type publishes neither object, and the `403` names the
+missing types without echoing bundle content. Matching predicates permit the same upload. The requirement reads only the
+predicate types declared by attestations whose signatures and publisher identities passed verification.
 
 `attestation_mode` chooses what an unmet requirement does. `enforce`, the default, rejects the upload. `audit` records
 the same policy decision but publishes the upload anyway, so an operator can measure how much of a project's traffic

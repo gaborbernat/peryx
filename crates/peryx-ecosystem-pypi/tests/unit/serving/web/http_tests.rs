@@ -165,6 +165,26 @@ async fn browse_http_reports_a_placement_record_read_failure() {
 }
 
 #[tokio::test]
+async fn browse_http_project_reads_stay_constant_as_file_count_grows() {
+    let mut counts = Vec::new();
+    for file_count in [1, 8, 64] {
+        let directory = tempfile::tempdir().unwrap();
+        let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+        seed_cached_project_files(&meta, file_count);
+        let state = cached_app(&directory, meta);
+        let _ = state.serving.meta.take_read_transaction_count();
+
+        let (status, _, _) = send(state.clone(), Method::GET, "/browse?index=pypi&project=flask", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        counts.push(state.serving.meta.take_read_transaction_count());
+    }
+
+    assert!(counts[0] > 0);
+    assert!(counts.windows(2).all(|pair| pair[0] == pair[1]), "{counts:?}");
+}
+
+#[tokio::test]
 async fn browse_http_reports_archive_query_errors() {
     for (uri, expected_body) in [
         (
@@ -481,6 +501,49 @@ fn seed_cached_project(meta: &MetaStore, digest: &str) {
             content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
             fresh_secs: None,
             body: body.into_bytes(),
+        },
+    )
+    .unwrap();
+}
+
+fn seed_cached_project_files(meta: &MetaStore, file_count: usize) {
+    let files = (0..file_count)
+        .map(|position| {
+            let filename = format!("flask-1.0-{position}-py3-none-any.whl");
+            let digest = Digest::of(filename.as_bytes());
+            meta.put_file_url(
+                "pypi",
+                "flask",
+                digest.as_str(),
+                &format!("https://files.example/{filename}"),
+                "pypi",
+            )
+            .unwrap();
+            serde_json::json!({
+                "filename": filename,
+                "size": 1,
+                "url": format!("https://files.example/{filename}"),
+                "hashes": {"sha256": digest.as_str()},
+            })
+        })
+        .collect::<Vec<_>>();
+    meta.put_index(
+        "pypi/flask",
+        &CachedIndex {
+            source: None,
+            last_modified: None,
+            etag: None,
+            last_serial: None,
+            fetched_at_unix: 900,
+            content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
+            fresh_secs: None,
+            body: serde_json::to_vec(&serde_json::json!({
+                "meta": {"api-version": "1.1"},
+                "name": "flask",
+                "versions": ["1.0"],
+                "files": files,
+            }))
+            .unwrap(),
         },
     )
     .unwrap();

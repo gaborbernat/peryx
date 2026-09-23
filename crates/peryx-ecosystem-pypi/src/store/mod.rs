@@ -34,9 +34,10 @@ impl From<UploadWriteError> for peryx_storage::meta::MetaError {
 
 pub(crate) use files::split_file_source_key;
 pub use files::{
-    FilePublication, FileSource, MetadataClaim, PypiArtifactOrigin, drop_legacy_file_sources, get_file_publication,
-    get_file_url, get_metadata_digest, get_metadata_digests, get_provenance, put_file_url, put_metadata,
-    put_provenance, scan_file_publications, scan_file_urls, scan_metadata_records, scan_provenance_records,
+    FilePublication, FileSource, FileUiLookup, FileUiReadError, FileUiRecord, MetadataClaim, PypiArtifactOrigin,
+    drop_legacy_file_sources, get_file_publication, get_file_url, get_metadata_digest, get_metadata_digests,
+    get_provenance, put_file_url, put_metadata, put_provenance, read_file_ui_records, scan_file_publications,
+    scan_file_urls, scan_metadata_records, scan_provenance_records,
 };
 pub(crate) use imports::{initialize_release_imports, initialize_release_imports_page, release_imports_initialized};
 pub use index::{

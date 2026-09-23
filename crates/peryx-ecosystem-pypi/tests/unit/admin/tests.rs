@@ -390,6 +390,7 @@ fn test_fsck_metadata_reports_every_invalid_record_kind() {
 #[rstest]
 #[case::pep658_artifact('d', "not-hex", format!("url\n{DIGEST_B}\npypi"), "pep658", 1)]
 #[case::pep658_metadata('d', DIGEST_A, "url\nnot-hex\npypi".to_owned(), "pep658", 1)]
+#[case::file_url_digest('f', "pypi/flask/not-hex", "u\npypi".to_owned(), "file-url", 1)]
 #[case::project_index('p', "/flask", "Flask".to_owned(), "project", 1)]
 #[case::project_name('p', "pypi/", "Flask".to_owned(), "project", 1)]
 #[case::project_display('p', "pypi/flask", String::new(), "project", 2)]
@@ -656,13 +657,9 @@ fn test_fsck_ignores_an_index_from_another_ecosystem() {
     let (dir, meta) = store();
     let blobs = BlobStore::new(dir.path().join("blobs")).into();
     meta.put_driver_value("pypi\u{0}k\u{0}hosted", b"1\n1").unwrap();
-    let foreign = Index {
-        ecosystem: peryx_core::Ecosystem::new("oci"),
-        ..hosted_index()
-    };
     let mut output = Vec::new();
 
-    let problems = fsck_metadata(&meta, &blobs, &[foreign], &mut output).unwrap();
+    let problems = fsck_metadata(&meta, &blobs, &[oci_hosted_index()], &mut output).unwrap();
 
     assert_eq!(
         (problems, String::from_utf8(output).unwrap()),
@@ -674,6 +671,42 @@ fn test_fsck_ignores_an_index_from_another_ecosystem() {
             )
         )
     );
+}
+
+/// Only a `PyPI` index that owns rows delimits a source key, so a slash inside the name of any other
+/// index is read as the key's own separator and leaves no digest in its last segment.
+#[rstest]
+#[case::another_ecosystem(oci_hosted_index())]
+#[case::virtual_index(virtual_index())]
+fn test_fsck_splits_a_source_key_only_on_an_index_owning_rows(#[case] index: Index) {
+    let (dir, meta) = store();
+    let blobs = BlobStore::new(dir.path().join("blobs")).into();
+    let key = format!("org/team/flask/{DIGEST_A}");
+    meta.put_driver_value(&format!("pypi\u{0}f\u{0}{key}"), b"u\norg/team")
+        .unwrap();
+    let mut output = Vec::new();
+
+    let problems = fsck_metadata(&meta, &blobs, &[named_org_team(index)], &mut output).unwrap();
+
+    assert_eq!(
+        (problems, String::from_utf8(output).unwrap()),
+        (1, format!("metadata\tpypi\tfile-url\t{key}\tinvalid record\n"))
+    );
+}
+
+fn oci_hosted_index() -> Index {
+    Index {
+        ecosystem: peryx_core::Ecosystem::new("oci"),
+        ..hosted_index()
+    }
+}
+
+/// A name holding a slash, so a key under it splits differently once the index is known.
+fn named_org_team(index: Index) -> Index {
+    Index {
+        name: "org/team".to_owned(),
+        ..index
+    }
 }
 
 fn pypi_index() -> Index {
@@ -1140,10 +1173,18 @@ fn test_repair_reports_and_drops_a_source_row_that_names_no_publication() {
 #[case::unowned_index("pypi\0i\0unknown/flask", b"invalid page", "index", false)]
 #[case::file_url("pypi\0f\0legacy", b"url\ncached", "file-url", true)]
 #[case::unowned_file_url("pypi\0f\0unknown/flask/invalid", b"invalid", "file-url", false)]
+#[case::owned_file_url("pypi\0f\0cached/flask/invalid", b"url\ncached", "file-url", false)]
 #[case::pep658("pypi\0d\0invalid", b"invalid", "pep658", true)]
 #[case::publication("pypi\0n\0cached/flask/invalid/flask.whl", b"invalid", "publication", false)]
+#[case::publication_digest(
+    "pypi\0n\0cached/flask/invalid/flask.whl",
+    b"url\ninvalid\ncached",
+    "publication",
+    false
+)]
 #[case::project("pypi\0p\0cached/flask", b"", "project", true)]
 #[case::unowned_project("pypi\0p\0invalid", b"", "project", false)]
+#[case::unnamed_project("pypi\0p\0cached/", b"Flask", "project", false)]
 #[case::upload("pypi\0u\0hosted/flask/flask.whl", b"invalid", "upload", false)]
 #[case::override_row("pypi\0o\0hosted/flask/flask.whl", b"invalid", "override", false)]
 #[case::provenance("pypi\0a\0hosted/flask/invalid/flask.whl", b"invalid\n16", "provenance", false)]
@@ -1189,21 +1230,42 @@ fn test_repair_reports_an_invalid_metadata_digest_for_a_valid_artifact() {
     assert_eq!(meta.get_driver_value(&key).unwrap(), Some(b"invalid".to_vec()));
 }
 
-#[test]
-fn test_repair_accepts_an_empty_publication() {
+#[rstest]
+#[case::empty_publication(format!("pypi\0n\0cached/flask/{DIGEST_A}/flask.whl"), Vec::new())]
+#[case::override_row(
+    "pypi\0o\0hosted/flask/flask.whl".to_owned(),
+    crate::store::FileOverride::default().encode().into_bytes()
+)]
+fn test_repair_accepts_a_valid_record(#[case] key: String, #[case] value: Vec<u8>) {
     let (_dir, meta) = store();
-    let key = format!("pypi\0n\0cached/flask/{DIGEST_A}/flask.whl");
-    meta.put_driver_value(&key, b"").unwrap();
+    meta.put_driver_value(&key, &value).unwrap();
 
-    let planned = preview_metadata_repair(&meta, &[cached_index()], &mut Vec::new()).unwrap();
+    let planned = preview_metadata_repair(&meta, &[cached_index(), hosted_index()], &mut Vec::new()).unwrap();
 
     assert_eq!(planned, peryx_driver::serving::MetadataRepairCounts::default());
+}
+
+/// The repair pass reads ownership the same way `fsck` does: an index outside `PyPI`, or one that owns
+/// no rows, never delimits a source key, so the row stays an unowned one to report.
+#[rstest]
+#[case::another_ecosystem(oci_hosted_index())]
+#[case::virtual_index(virtual_index())]
+fn test_repair_splits_a_source_key_only_on_an_index_owning_rows(#[case] index: Index) {
+    let (_dir, meta) = store();
+    let key = format!("pypi\0f\0org/team/flask/{DIGEST_A}");
+    meta.put_driver_value(&key, b"u\norg/team").unwrap();
+    let mut preview = Vec::new();
+
+    let planned = preview_metadata_repair(&meta, &[named_org_team(index)], &mut preview).unwrap();
+
+    assert_eq!(planned.report_only, 1, "{}", String::from_utf8_lossy(&preview));
 }
 
 #[rstest]
 #[case::invalid_key("invalid", upload_value(Some(DIGEST_A)))]
 #[case::missing_digest("hosted/flask/flask.whl", upload_value(None))]
 #[case::invalid_digest("hosted/flask/flask.whl", upload_value(Some("invalid")))]
+#[case::empty_project("hosted//flask.whl", upload_value(Some(DIGEST_A)))]
 fn test_repair_reports_each_invalid_upload_field(#[case] upload_key: &str, #[case] value: Vec<u8>) {
     let (_dir, meta) = store();
     let key = format!("pypi\0u\0{upload_key}");

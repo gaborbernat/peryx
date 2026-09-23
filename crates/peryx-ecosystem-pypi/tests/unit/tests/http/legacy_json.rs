@@ -421,8 +421,17 @@ async fn test_hosted_legacy_json_uses_defaults_when_selection_cannot_be_migrated
     );
 }
 
+/// A selection names one published file by filename and digest together; a page file matching only
+/// one of the two is a different publication, so its metadata never stands in for the selected one.
+#[rstest]
+#[case::neither("peryxpkg-1.0-hidden.whl", false)]
+#[case::filename_only("peryxpkg-1.0-py3-none-any.whl", false)]
+#[case::digest_only("peryxpkg-1.0-hidden.whl", true)]
 #[tokio::test]
-async fn test_hosted_legacy_json_uses_defaults_when_selection_is_hidden() {
+async fn test_hosted_legacy_json_uses_defaults_when_selection_is_hidden(
+    #[case] filename: &str,
+    #[case] served_digest: bool,
+) {
     let h = authority_harness().await;
     let wheel = fixture_wheel_with_metadata(
         b"Metadata-Version: 2.4\nName: peryxpkg\nVersion: 1.0\nSummary: Hidden selection\nRequires-Python: >=3.8\n",
@@ -436,8 +445,12 @@ async fn test_hosted_legacy_json_uses_defaults_when_selection_is_hidden() {
         StatusCode::OK
     );
     let selection = crate::store::ReleaseMetadataSelection {
-        filename: "peryxpkg-1.0-hidden.whl".to_owned(),
-        artifact_sha256: "0".repeat(64),
+        filename: filename.to_owned(),
+        artifact_sha256: if served_digest {
+            Digest::of(&wheel).as_str().to_owned()
+        } else {
+            "0".repeat(64)
+        },
         metadata: crate::store::ReleaseMetadataLocator::Generated,
     };
     h.state

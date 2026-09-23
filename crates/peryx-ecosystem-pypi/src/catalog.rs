@@ -479,9 +479,9 @@ impl<S: TokenSink> TendrilSink<html5ever::tendril::fmt::UTF8> for HtmlTokenizer<
 
     fn error(&mut self, _description: std::borrow::Cow<'static, str>) {}
 
-    fn finish(self) {
-        self.tokenizer.end();
-    }
+    // A name reaches the catalog only on a closing `</a>`, and EOF never emits one, so the tokens
+    // `Tokenizer::end` would flush can add no project.
+    fn finish(self) {}
 }
 
 struct HtmlSink<'a, 'store> {

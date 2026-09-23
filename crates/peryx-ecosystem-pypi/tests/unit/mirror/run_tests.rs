@@ -1239,6 +1239,14 @@ async fn sync_overlaps_artifact_transfers_up_to_the_upstream_ceiling() {
 }
 
 #[tokio::test]
+async fn an_index_with_a_configured_ceiling_takes_it_as_its_prefetch_overlap() {
+    let fixture = test_support::limited_state(vec![cached_index("https://example.test/simple/", true)], Some(3));
+    let limits = &fixture.state.serving.upstream_limits;
+
+    assert_eq!(upstream_ceiling(limits, "pypi"), 3);
+}
+
+#[tokio::test]
 async fn an_index_without_a_configured_ceiling_falls_back_to_the_prefetch_default() {
     let fixture = test_support::state(vec![cached_index("https://example.test/simple/", true)]);
     let limits = &fixture.state.serving.upstream_limits;

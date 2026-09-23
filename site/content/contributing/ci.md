@@ -80,6 +80,14 @@ pushed onto a vector without end. Memory available on the machine fell from seve
 well before nextest's 180-second termination. The shard job therefore runs in a cgroup capped at 12 GiB with no swap:
 the kernel kills the runaway test, nextest reports the failure, and cargo-mutants records the mutant as caught.
 
+The cap alone does not decide which process the kernel kills. The hosted runner starts every step with an
+`oom_score_adj` of 500, which the whole tree inherits, so cargo-mutants was as eligible as the test. Run 35906450841
+lost shard 18 when the kernel killed both the runaway `parse.rs` test and cargo-mutants, discarding the 24 mutants the
+shard had not reached. The step now sets its own score to -1000, a value the OOM killer never selects, and a nextest
+target runner, `choom -n 1000 --`, raises each test binary back to 1000. Tests and the processes they spawn are the only
+candidates left. A build that outgrows the cap has no candidate to kill, and cargo-mutants' build timeout ends it
+instead.
+
 The coverage jobs reject uncovered source lines. `ci-gate` gives branch protection one check name and fails unless every
 required job succeeds.
 

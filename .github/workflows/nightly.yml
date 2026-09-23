@@ -192,14 +192,20 @@ jobs:
       # OOM-kills the test process instead, nextest reports the failure, and cargo-mutants records the
       # mutant as caught. Away from such mutants, no shard left the machine with under 12 GB
       # available, and the memory outside the cap keeps the runner agent alive.
+      # The runner gives every step process an oom_score_adj of 500, so the kernel may also pick
+      # cargo-mutants, and run 35906450841 lost shard 18 to that. Everything the step starts
+      # inherits -1000 here, which the OOM killer never selects, and nextest starts each test binary
+      # through choom at 1000, so the only processes it can kill are tests and what they spawn.
       - run: |
           cgroup=/sys/fs/cgroup/mutation
           sudo mkdir "$cgroup"
           echo 12G | sudo tee "$cgroup/memory.max"
           echo 0 | sudo tee "$cgroup/memory.swap.max"
           echo "$$" | sudo tee "$cgroup/cgroup.procs"
+          sudo choom -n -1000 -p "$$"
           just mutation-observed "$SHARD/$SHARD_COUNT" true 1 skip 500 round-robin
         env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: choom -n 1000 --
           SHARD: ${{ matrix.shard }}
           SHARD_COUNT: ${{ needs.mutation-baseline-build.outputs.shard_count }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

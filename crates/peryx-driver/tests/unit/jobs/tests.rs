@@ -797,6 +797,30 @@ async fn test_failed_job_persists_its_partial_report() {
 }
 
 #[tokio::test]
+async fn test_failed_job_completion_carries_its_partial_report() {
+    let (_dir, state) = serving();
+    let scheduler = JobScheduler::new(state, limits(1, 2, 1, 1));
+    let mut completions = scheduler.subscribe_completions();
+    let report = JobReport {
+        processed: 3,
+        changed: 2,
+        ..JobReport::default()
+    };
+
+    scheduler
+        .run(TestJob::new("probe", "partial", Action::FailWithReport(report)))
+        .await
+        .unwrap_err();
+
+    let completion = completions.recv().await.unwrap();
+    assert_eq!(
+        (completion.outcome(), completion.report()),
+        (JobCompletionOutcome::Failed, Some(report))
+    );
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_cancel_job_run_distinguishes_finished_and_missing_attempts() {
     let (_dir, state) = serving();
     let scheduler = JobScheduler::new(state.clone(), limits(1, 2, 1, 1));

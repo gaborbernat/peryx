@@ -505,6 +505,39 @@ async fn test_a_miss_discovered_by_natural_expiry_is_still_rate_limited() {
     );
 }
 
+/// A refresh forced by the window expiring is not a key-miss refresh, even when the key it went on
+/// to find was missing: at the exact `fresh_until` second the cache is already stale, so the new
+/// window still owes one early refresh to the next unknown key.
+#[tokio::test]
+async fn test_a_refresh_at_the_window_boundary_leaves_the_key_miss_refresh_unspent() {
+    let (server, verifier) = verifier().await;
+    verifier
+        .verify_identity(&identity(&server.uri(), "key-1", "warm"), NOW)
+        .await
+        .unwrap();
+    server.reset().await;
+    mount_issuer(&server, json!({"keys": [jwk("key-2")]})).await;
+    assert!(
+        verifier
+            .verify_identity(&identity(&server.uri(), "key-2", "rotated"), NOW + 120)
+            .await
+            .is_ok()
+    );
+    let requests_after_expiry = server.received_requests().await.unwrap().len();
+
+    assert_eq!(
+        verifier
+            .verify_identity(&identity(&server.uri(), "key-3", "unknown"), NOW + 120)
+            .await,
+        Err(OidcVerificationError::UnknownKey)
+    );
+
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        requests_after_expiry + 2
+    );
+}
+
 /// A failed refresh must record the miss it was trying to check just as a successful one does,
 /// using `|=` rather than `&=`: `first_key_miss` is true and `key_miss_checked` false going in, so
 /// only `|=` leaves the cache remembering the miss once the outage clears.

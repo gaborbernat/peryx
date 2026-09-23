@@ -353,9 +353,9 @@ impl JsonValidator {
                 }
             }
             0x20..=0x7F => {}
-            0xC2..=0xDF => self.start_utf8(key, (byte & 0x1F) as u32, 1, 0x80),
-            0xE0..=0xEF => self.start_utf8(key, (byte & 0x0F) as u32, 2, 0x800),
-            0xF0..=0xF4 => self.start_utf8(key, (byte & 0x07) as u32, 3, 0x10000),
+            0xC2..=0xDF => self.start_utf8(key, (byte - 0xC0) as u32, 1, 0x80),
+            0xE0..=0xEF => self.start_utf8(key, (byte - 0xE0) as u32, 2, 0x800),
+            0xF0..=0xF4 => self.start_utf8(key, (byte - 0xF0) as u32, 3, 0x10000),
             _ => self.failed = true,
         }
     }
@@ -425,7 +425,7 @@ impl JsonValidator {
             self.failed = true;
             return;
         }
-        let value = (value << 6) | (byte & 0x3F) as u32;
+        let value = value * 64 + (byte & 0x3F) as u32;
         if remaining > 1 {
             self.start_utf8(key, value, remaining - 1, min);
         } else if value < min || value > 0x0010_FFFF || value >= 0xD800 && value <= 0xDFFF {

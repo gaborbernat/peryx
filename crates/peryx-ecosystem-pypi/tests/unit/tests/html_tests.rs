@@ -65,14 +65,15 @@ fn test_decode_reference_accepts_the_maximum_valid_code_point() {
     assert_eq!(parsed.projects[0].name, "z\u{10FFFF}z");
 }
 
-/// A hex digit's value must not leak into the neighboring nibble: `%00` combines a zero high nibble
-/// with a zero low nibble, so it must decode to a NUL byte, not to some other byte built from stray
-/// bits either digit contributed.
-#[test]
-fn test_percent_decode_treats_each_hex_digit_independently() {
-    let resolved = Url::parse("https://example.invalid/a%00b").unwrap();
+/// A hex digit's value must not leak into the neighboring nibble: `%00` must decode to a NUL byte and
+/// `%4A` to `J`, not to some other byte built from stray bits either digit contributed.
+#[rstest::rstest]
+#[case::zero_nibbles("a%00b", "a\u{0}b")]
+#[case::both_nibbles_set("a%4Ab", "aJb")]
+fn test_percent_decode_treats_each_hex_digit_independently(#[case] path: &str, #[case] expected: &str) {
+    let resolved = Url::parse(&format!("https://example.invalid/{path}")).unwrap();
 
-    assert_eq!(project_from_url(&resolved), Some("a\u{0}b".to_owned()));
+    assert_eq!(project_from_url(&resolved).as_deref(), Some(expected));
 }
 
 #[test]

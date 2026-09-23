@@ -676,6 +676,37 @@ fn test_stream_detail_json_preserves_a_reader_error() {
     ));
 }
 
+/// Reads its bytes only after one read the OS interrupted, as a signal arriving mid-read produces.
+struct InterruptedOnce<'a> {
+    bytes: &'a [u8],
+    interrupted: bool,
+}
+
+impl std::io::Read for InterruptedOnce<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if !self.interrupted {
+            self.interrupted = true;
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        self.bytes.read(buffer)
+    }
+}
+
+/// An interrupted read is retried rather than taken as the input failing, the way every `std` reader
+/// treats one.
+#[test]
+fn test_stream_detail_json_retries_an_interrupted_read() {
+    let mut sink = Collect::default();
+    let reader = InterruptedOnce {
+        bytes: br#"{"meta":{"api-version":"1.0"},"name":"flask","files":[]}"#,
+        interrupted: false,
+    };
+
+    let detail = crate::simple::stream_detail_json(reader, &detail_base(), &mut sink).unwrap();
+
+    assert_eq!(detail.name, "flask");
+}
+
 enum StreamErrorSource {
     Simple,
     Reader,

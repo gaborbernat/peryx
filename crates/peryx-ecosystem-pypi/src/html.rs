@@ -249,7 +249,6 @@ fn parse_metadata_attr(tag: &HTMLTag, name: &str) -> CoreMetadata {
     let value = attr_string(tag, name).unwrap_or_default();
     match value.as_str() {
         "false" => CoreMetadata::Absent,
-        "true" | "" => CoreMetadata::Available,
         _ => match value.split_once('=') {
             Some((algo, hash)) => CoreMetadata::Hashes(BTreeMap::from([(algo.to_owned(), hash.to_owned())])),
             None => CoreMetadata::Available,
@@ -331,9 +330,8 @@ fn decode_reference(text: &str, context: Context) -> Option<([char; 2], usize, u
                 let Some(value) = character.to_digit(radix) else {
                     break;
                 };
-                num = num.wrapping_mul(radix);
+                num = num.wrapping_mul(radix).wrapping_add(value);
                 too_big |= num > 0x10_FFFF;
-                num = num.wrapping_add(value);
                 span += 1;
             }
             if span == 0 {
@@ -381,7 +379,7 @@ fn decode_reference(text: &str, context: Context) -> Option<([char; 2], usize, u
 
 fn numeric_char(num: u32, too_big: bool) -> char {
     match num {
-        _ if too_big || num > 0x10_FFFF => '\u{FFFD}',
+        _ if too_big => '\u{FFFD}',
         0x00 | 0xD800..=0xDFFF => '\u{FFFD}',
         0x80..=0x9F => web_atoms::C1_REPLACEMENTS[(num - 0x80) as usize]
             .unwrap_or_else(|| char::from_u32(num).expect("C1 code point is a valid scalar")),
@@ -398,7 +396,7 @@ fn percent_decode(text: &str) -> String {
             && let (Some(high), Some(low)) = (input.get(index + 1), input.get(index + 2))
             && let (Some(high), Some(low)) = (hex_value(*high), hex_value(*low))
         {
-            bytes.push(high << 4 | low);
+            bytes.push(high * 16 + low);
             index += 3;
         } else {
             bytes.push(byte);

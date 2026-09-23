@@ -336,7 +336,7 @@ impl PageTransformer {
                 }
                 out.push(byte);
             }
-            b':' if self.depth == 1 => {
+            b':' => {
                 self.string.expect_name = self.key() == b"name";
                 if !self.headers_known() && self.key() == b"files" {
                     self.document.headers.files_precede_headers = true;

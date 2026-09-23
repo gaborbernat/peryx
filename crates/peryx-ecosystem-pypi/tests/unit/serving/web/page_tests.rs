@@ -202,8 +202,8 @@ fn padded_provenance(artifact: &str) -> Vec<u8> {
         }],
     }))
     .unwrap();
-    // Larger than the mutant's shrunk read cap (~2,050 bytes) but well under the real 2 MiB one.
-    bundle["padding"] = serde_json::json!("x".repeat(5_000));
+    // Past 1 MiB, so a cap missing either factor of its 2 MiB refuses it, and still under the real one.
+    bundle["padding"] = serde_json::json!("x".repeat(3 * 512 * 1024));
     serde_json::to_vec(&bundle).unwrap()
 }
 

@@ -1049,6 +1049,8 @@ fn test_non_hex_unicode_escape_in_a_key_is_rejected() {
 #[case::lone_low(br#""demo\uDC00""#, false)]
 #[case::missing_low_escape(br#""demo\uD800\x""#, false)]
 #[case::non_low_pair(br#""demo\uD800\u0041""#, false)]
+#[case::lowercase_pair(br#""demo\ud83d\ude00""#, true)]
+#[case::lowercase_lone_low(br#""demo\udc00""#, false)]
 fn test_streaming_and_buffered_parsers_agree_on_surrogate_validity(#[case] name: &[u8], #[case] accepted: bool) {
     let page = [
         br#"{"meta":{"api-version":"1.4"},"name":"#,
@@ -1061,6 +1063,7 @@ fn test_streaming_and_buffered_parsers_agree_on_surrogate_validity(#[case] name:
 
 #[rstest]
 #[case::valid_two_byte(b"\"\xC2\x80\"", true)]
+#[case::valid_two_byte_upper(b"\"\xDF\xBF\"", true)]
 #[case::valid_three_byte_lower(b"\"\xE0\xA0\x80\"", true)]
 #[case::valid_three_byte(b"\"\xE2\x82\xAC\"", true)]
 #[case::valid_four_byte_lower(b"\"\xF0\x90\x80\x80\"", true)]
@@ -1070,6 +1073,11 @@ fn test_streaming_and_buffered_parsers_agree_on_surrogate_validity(#[case] name:
 #[case::invalid_continuation(b"\"demo\xC2A\"", false)]
 #[case::overlong(b"\"demo\xC0\xAF\"", false)]
 #[case::raw_surrogate(b"\"demo\xED\xA0\x80\"", false)]
+#[case::below_surrogates(b"\"\xED\x9F\xBF\"", true)]
+#[case::above_surrogates(b"\"\xEE\x80\x80\"", true)]
+#[case::overlong_three_byte(b"\"demo\xE0\x9F\xBF\"", false)]
+#[case::overlong_four_byte(b"\"demo\xF0\x8F\xBF\xBF\"", false)]
+#[case::past_the_maximum_code_point(b"\"demo\xF4\x90\x80\x80\"", false)]
 fn test_streaming_validator_accepts_only_valid_utf8(#[case] value: &[u8], #[case] accepted: bool) {
     let page = [
         br#"{"meta":{"api-version":"1.4"},"name":"demo","versions":[],"extra":"#,

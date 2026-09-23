@@ -232,9 +232,9 @@ fn test_migration_rewrites_legacy_policy_subject_keys() {
     );
 }
 
-/// The `"reads" if ... .is_ok()` guard only short-circuits an already-current record: a legacy
-/// record already keyed `reads` (an upstream that stores under the current key but in the old
-/// shape) must still fall through to the rewrite, not be mistaken for one needing no migration.
+/// Only an already-current record is left alone: a legacy record already keyed `reads` (an upstream
+/// that stores under the current key but in the old shape) must still be rewritten, not be mistaken
+/// for one needing no migration.
 #[test]
 fn test_migration_rewrites_a_legacy_shaped_record_already_under_the_reads_key() {
     let migrated = rewritten(

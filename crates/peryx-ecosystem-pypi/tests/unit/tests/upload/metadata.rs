@@ -1024,3 +1024,20 @@ fn test_classify_imports_rejects_mismatched_identity(
         Err(expected)
     );
 }
+
+/// Core Metadata before 2.5 cannot declare import names, so its files classify as predating them
+/// rather than as declaring none.
+#[rstest]
+#[case::before_2_5("2.4", crate::upload::ImportDeclarations::Before25)]
+#[case::from_2_5("2.5", crate::upload::ImportDeclarations::V1 { exclusive: None, shared: None })]
+fn test_classify_imports_marks_metadata_that_predates_import_names(
+    #[case] metadata_version: &str,
+    #[case] expected: crate::upload::ImportDeclarations,
+) {
+    let metadata = crate::parse_metadata(&format!(
+        "Metadata-Version: {metadata_version}\nName: Flask\nVersion: 1.0\n"
+    ))
+    .unwrap();
+
+    assert_eq!(crate::upload::classify_imports(&metadata, "flask", "1.0"), Ok(expected));
+}

@@ -100,14 +100,12 @@ fn rewrite_policy_subject(record: &MetadataRecord) -> Option<MetadataRecord> {
 
 fn rewrite_analytics(record: &MetadataRecord) -> Option<MetadataRecord> {
     match record.key.as_str() {
-        "reads" if serde_json::from_slice::<ReadSnapshot>(&record.value).is_ok() => None,
         "reads" | "downloads" => {
             rewrite_json::<ReadSnapshot, LegacyReadSnapshot, _>(record, Into::into).map(|mut rewritten| {
                 "reads".clone_into(&mut rewritten.key);
                 rewritten
             })
         }
-        "daily_usage" if serde_json::from_slice::<DailySnapshot>(&record.value).is_ok() => None,
         "daily_usage" => rewrite_json::<DailySnapshot, LegacyDailySnapshot, _>(record, Into::into),
         _ => None,
     }

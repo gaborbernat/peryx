@@ -59,12 +59,9 @@ pub(super) fn validate_entry_points(bytes: &[u8]) -> Result<(), ArchiveError> {
 }
 
 fn is_valid_entry_point_name(value: &str) -> bool {
-    !value.is_empty()
-        && !value.contains('/')
-        && !value.contains('\\')
-        && value
-            .chars()
-            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-'))
+    value
+        .chars()
+        .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-'))
 }
 
 #[cfg(test)]

@@ -422,6 +422,45 @@ fn test_store_prepared_blocking_reports_a_missing_legacy_archive_digest() {
     ));
 }
 
+/// Backfill reads only the live records of the release being published. A trashed record or one from
+/// another release is left alone, so one that could not be classified blocks nothing.
+#[rstest::rstest]
+#[case::trashed("Flask-1.0-py3-none-any.whl", "1.0", true)]
+#[case::other_release("Flask-2.0-py3-none-any.whl", "2.0", false)]
+fn test_store_prepared_blocking_backfills_only_live_records_of_the_release(
+    #[case] filename: &str,
+    #[case] version: &str,
+    #[case] trashed: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(directory.path().join("blobs"));
+    let first_filename = "Flask-1.0-py3-none-any.whl";
+    assert!(publish_named_wheel(&meta, &blobs, &wheel_metadata("Flask", "1.0"), first_filename).unwrap());
+    let mut uploaded = unclassify_wheel(&meta, first_filename);
+    uploaded.file.clear_metadata();
+    uploaded.file.hashes.clear();
+    uploaded.version = version.to_owned();
+    uploaded.trashed = trashed.then_some(peryx_core::TrashInfo {
+        deleted_at_unix: 1000,
+        actor: None,
+        reason: None,
+    });
+    put_legacy_wheel(&meta, filename, &uploaded);
+
+    let result = publish_named_wheel(
+        &meta,
+        &blobs,
+        &wheel_metadata("Flask", "1.0"),
+        "flask-1.0-py3-none-any.whl",
+    );
+
+    assert!(result.is_ok(), "{result:?}");
+    let stored: crate::upload::Uploaded =
+        serde_json::from_slice(&meta.get_upload("hosted", "flask", filename).unwrap().unwrap()).unwrap();
+    assert_eq!(stored, uploaded);
+}
+
 #[test]
 fn test_upload_store_error_maps_a_typed_store_failure() {
     let error =

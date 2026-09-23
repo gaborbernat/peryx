@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;
+use leptos_router::params::ParamsMap;
 
 use super::{ErrorMessage, LoadState, human_size, reactive_value, retain, start_refresh};
 use crate::data::load_stats;
@@ -11,8 +12,8 @@ pub fn Stats() -> impl IntoView {
     let query = use_query_map();
     #[cfg(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate"))]
     {
-        let route = Memo::new(move |_| query.read().get("index").filter(|name| !name.is_empty()));
-        let resource = Memo::new(move |_| query.read().get("resource").filter(|name| !name.is_empty()));
+        let route = Memo::new(move |_| named_param(&query.read(), "index"));
+        let resource = Memo::new(move |_| named_param(&query.read(), "resource"));
         view! {
             <section class="page">
                 {move || {
@@ -25,16 +26,15 @@ pub fn Stats() -> impl IntoView {
     #[cfg(not(all(target_arch = "wasm32", not(feature = "ssr"), feature = "hydrate")))]
     {
         let query = reactive_value(&query);
-        let route = match query.get("index") {
-            Some(name) if !name.is_empty() => Some(name),
-            _ => None,
-        };
-        let resource = match query.get("resource") {
-            Some(name) if !name.is_empty() => Some(name),
-            _ => None,
-        };
+        let route = named_param(&query, "index");
+        let resource = named_param(&query, "resource");
         view! { <section class="page"><StatsView route resource /></section> }
     }
+}
+
+/// An empty `index=` or `resource=` names nothing, so the page stays at the level above it.
+fn named_param(query: &ParamsMap, key: &str) -> Option<String> {
+    query.get(key).filter(|name| !name.is_empty())
 }
 
 #[component]

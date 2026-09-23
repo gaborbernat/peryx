@@ -49,6 +49,10 @@ exclude_re = [
   # Exports the wasm coverage counters, and exists only in the `wasm32` coverage build.
   'peryx-web/src/lib\.rs.*replace capture_coverage ',
 
+  # The wasm entry point: mounts the app onto the browser's `<body>` and marks it hydrated. It is
+  # compiled only for `wasm32` without `ssr`; the Playwright suite waits on its marker.
+  'peryx-web/src/lib\.rs.*replace hydrate with \(\)$',
+
   # Runs the macOS `sysctl` binary. Its parsing lives in `sysctl_with`, which takes the runner as an
   # argument and is pinned on every platform; the macOS CI job covers the call itself.
   'peryx-bench-core/src/machine\.rs.*replace sysctl -> ',

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,9 +9,9 @@ use peryx_storage::meta::MetaStore;
 
 use crate::replica_cycle::{BlobPass, ReplicaCycle, RetiredPeers};
 use crate::{
-    AvailabilityMetrics, BlobPlaneReport, BlobSources, CapacityLimited, ChangePage, HttpBlobTransport,
-    HttpPeerTransport, PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, ReplicaMonitor, Retry, SyncError,
-    SyncOutcome, TransportError, advance_blob_frontier_with_evidence, pull_checkpoint_blobs,
+    AvailabilityMetrics, BlobPlaneReport, BlobSources, CapacityLimited, ChangePage, CheckpointBlobRecovery,
+    HttpBlobTransport, HttpPeerTransport, PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, ReplicaMonitor, Retry,
+    SyncError, SyncOutcome, TransportError, advance_blob_frontier_with_evidence, pull_checkpoint_blobs,
     pull_outstanding_with_evidence, pull_round,
 };
 
@@ -247,7 +248,10 @@ impl ReplicaLoop {
             delegates: &self.delegates,
             local_dc: &self.local_dc,
         };
-        let checkpoint = pull_checkpoint_blobs(&sources, &self.blobs, &self.meta, self.page_size).await?;
+        // Erased so the nightly solver proves `Send` here; inline, the replica worker's future overflows its depth.
+        let checkpoint: Pin<Box<dyn Future<Output = Result<Option<CheckpointBlobRecovery>, SyncError>> + Send + '_>> =
+            Box::pin(pull_checkpoint_blobs(&sources, &self.blobs, &self.meta, self.page_size));
+        let checkpoint = checkpoint.await?;
         let checkpoint_report = match checkpoint {
             Some(checkpoint) if !checkpoint.complete => return Ok(checkpoint.report),
             Some(checkpoint) => {

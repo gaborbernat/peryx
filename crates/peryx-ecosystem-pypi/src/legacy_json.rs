@@ -38,12 +38,12 @@ pub fn render_legacy_json_with_serial(
     metadata: Option<&CoreMetadataDoc>,
     last_serial: Option<u64>,
 ) -> Option<String> {
-    let (selected_version, grouped) = if let Some(version) = version {
-        (Some(find_release_version(detail, version)?), None)
+    let (selected_version, grouped) = if version.is_some() {
+        (Some(selected_release_version(detail, version)?), None)
     } else {
         let groups = group_by_version(detail);
         let versions = release_versions(detail);
-        let latest = latest_release_version(&groups, &versions);
+        let latest = selected_release_version_from_groups(&groups, &versions);
         (latest, Some((groups, versions)))
     };
     let mut response = Map::new();
@@ -63,38 +63,50 @@ pub fn render_legacy_json_with_serial(
 
 fn legacy_info(detail: &ProjectDetail, version: Option<&str>, metadata: Option<&CoreMetadataDoc>) -> Value {
     let first_file = version.and_then(|version| release_files(detail, version).find(|file| !yanked_bool(&file.yanked)));
-    let requires_python = first_file.and_then(|file| file.requires_python.as_deref());
+    let requires_python = metadata.map_or_else(
+        || first_file.and_then(|file| file.requires_python.as_deref()),
+        |doc| doc.requires_python.as_deref(),
+    );
     let yanked = version.is_some_and(|version| release_yanked(detail, version));
     let yanked_reason = version.and_then(|version| release_yanked_reason(detail, version));
     let contact = |field: fn(&CoreMetadataDoc) -> Option<&str>| metadata.and_then(field).unwrap_or_default();
+    let values = |field: fn(&CoreMetadataDoc) -> &Vec<String>| metadata.map_or(&[][..], |doc| field(doc).as_slice());
+    let project_urls: OrderedMap<&str, &str> = metadata
+        .map(|doc| {
+            doc.project_urls
+                .iter()
+                .map(|(label, url)| (label.as_str(), url.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
     json!({
         "author": contact(|doc| doc.author.as_deref()),
         "author_email": contact(|doc| doc.author_email.as_deref()),
         "bugtrack_url": null,
-        "classifiers": [],
-        "description": "",
-        "description_content_type": null,
+        "classifiers": values(|doc| &doc.classifiers),
+        "description": metadata.map_or("", |doc| doc.description.as_str()),
+        "description_content_type": metadata.and_then(|doc| doc.description_content_type.as_deref()),
         "docs_url": null,
-        "download_url": "",
+        "download_url": contact(|doc| doc.download_url.as_deref()),
         "downloads": {"last_day": -1, "last_month": -1, "last_week": -1},
-        "dynamic": [],
-        "home_page": "",
-        "keywords": "",
-        "license": "",
-        "license_expression": null,
-        "license_files": null,
+        "dynamic": values(|doc| &doc.dynamic),
+        "home_page": contact(|doc| doc.home_page.as_deref()),
+        "keywords": metadata.map_or_else(String::new, |doc| doc.keywords.join(", ")),
+        "license": contact(|doc| doc.license.as_deref()),
+        "license_expression": metadata.and_then(|doc| doc.license_expression.as_deref()),
+        "license_files": metadata.filter(|doc| !doc.license_files.is_empty()).map(|doc| &doc.license_files),
         "maintainer": contact(|doc| doc.maintainer.as_deref()),
         "maintainer_email": contact(|doc| doc.maintainer_email.as_deref()),
         "name": &detail.name,
         "package_url": "",
         "platform": null,
         "project_url": "",
-        "project_urls": {},
-        "provides_extra": [],
+        "project_urls": project_urls,
+        "provides_extra": values(|doc| &doc.provides_extra),
         "release_url": "",
-        "requires_dist": [],
+        "requires_dist": values(|doc| &doc.requires_dist),
         "requires_python": requires_python,
-        "summary": "",
+        "summary": contact(|doc| doc.summary.as_deref()),
         "version": version.unwrap_or_default(),
         "yanked": yanked,
         "yanked_reason": yanked_reason,
@@ -158,7 +170,10 @@ fn find_release_version(detail: &ProjectDetail, requested: &str) -> Option<Strin
 /// stable `1.0` beats a later `2.0rc1` and a higher yanked release does not win. When every release is
 /// pre-release or yanked the greatest of them wins; when no release carries files the greatest version
 /// wins.
-fn latest_release_version(groups: &OrderedMap<VersionKey, Vec<&File>>, versions: &[String]) -> Option<String> {
+fn selected_release_version_from_groups(
+    groups: &OrderedMap<VersionKey, Vec<&File>>,
+    versions: &[String],
+) -> Option<String> {
     let best = versions
         .iter()
         .filter_map(|version| {
@@ -175,6 +190,17 @@ fn latest_release_version(groups: &OrderedMap<VersionKey, Vec<&File>>, versions:
         .max()
         .map(|(.., version)| version.clone());
     best.or_else(|| versions.first().cloned())
+}
+
+pub fn selected_release_version(detail: &ProjectDetail, requested: Option<&str>) -> Option<String> {
+    requested.map_or_else(
+        || {
+            let groups = group_by_version(detail);
+            let versions = release_versions(detail);
+            selected_release_version_from_groups(&groups, &versions)
+        },
+        |requested| find_release_version(detail, requested),
+    )
 }
 
 fn release_versions(detail: &ProjectDetail) -> Vec<String> {

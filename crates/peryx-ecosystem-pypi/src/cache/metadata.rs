@@ -61,14 +61,43 @@ pub async fn metadata_bytes(
     route: &str,
     metadata_filename: &str,
 ) -> Result<Bytes, CacheError> {
+    metadata_bytes_for_project(
+        state,
+        index,
+        &crate::project_of_filename(
+            metadata_filename
+                .strip_suffix(".metadata")
+                .ok_or(CacheError::FileNotFound)?,
+        ),
+        artifact_digest,
+        route,
+        metadata_filename,
+    )
+    .await
+}
+
+/// Read an artifact's metadata while using the caller's authoritative project identity.
+///
+/// # Errors
+/// Returns [`CacheError::FileNotFound`] if the artifact has no usable metadata source, or another
+/// error on a store, archive, or upstream failure.
+pub async fn metadata_bytes_for_project(
+    state: &Arc<ServingState>,
+    index: &Index,
+    project: &str,
+    artifact_digest: &Digest,
+    route: &str,
+    metadata_filename: &str,
+) -> Result<Bytes, CacheError> {
     ensure_digest_clear(state, artifact_digest)?;
     let artifact_filename = metadata_filename
         .strip_suffix(".metadata")
         .ok_or(CacheError::FileNotFound)?;
+    let normalized = crate::normalize_name(project);
     let publication = winning_publication(
         state,
         index,
-        &crate::project_of_filename(artifact_filename),
+        normalized.as_ref(),
         artifact_digest.as_str(),
         artifact_filename,
     )?;

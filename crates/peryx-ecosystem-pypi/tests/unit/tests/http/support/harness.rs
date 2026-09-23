@@ -240,6 +240,67 @@ pub async fn harness() -> Harness {
     harness_with(true, true).await
 }
 
+pub async fn two_cached_harness(first_policy: Policy) -> (Harness, MockServer) {
+    let dir = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let second = MockServer::start().await;
+    let meta = MetaStore::open(dir.path().join("peryx.redb")).unwrap();
+    let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
+    let clock = Arc::new(AtomicI64::new(1000));
+    let ticks = clock.clone();
+    let indexes = vec![
+        Index {
+            name: "first".to_owned(),
+            route: "first".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Cached {
+                client: UpstreamClient::new(&format!("{}/simple/", server.uri())).unwrap(),
+                offline: false,
+            },
+            policy: first_policy,
+            acl: IndexAcl::default(),
+        },
+        Index {
+            name: "second".to_owned(),
+            route: "second".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Cached {
+                client: UpstreamClient::new(&format!("{}/simple/", second.uri())).unwrap(),
+                offline: false,
+            },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        },
+        Index {
+            name: "combined".to_owned(),
+            route: "combined".to_owned(),
+            ecosystem: crate::ECOSYSTEM,
+            kind: IndexKind::Virtual {
+                layers: vec![0, 1],
+                write_target: None,
+            },
+            policy: Policy::default(),
+            acl: IndexAcl::default(),
+        },
+    ];
+    let state = AppState::with_clock(
+        meta,
+        blobs,
+        60,
+        indexes,
+        Arc::new(move || ticks.load(Ordering::Relaxed)),
+    );
+    (
+        Harness {
+            dir,
+            server,
+            state: wire(state, false),
+            clock,
+        },
+        second,
+    )
+}
+
 pub async fn proxied_harness() -> Harness {
     harness_with_options(
         true,

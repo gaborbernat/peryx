@@ -30,7 +30,7 @@ pub use fetch::{
     sync_project_files,
 };
 pub(crate) use metadata::publishes_file;
-pub use metadata::{metadata_bytes, registered_file_size, winning_file_source};
+pub use metadata::{metadata_bytes, metadata_bytes_for_project, registered_file_size, winning_file_source};
 pub(crate) use mutate::{
     RemovalContext, remove_files_with_webhook, restore_files_with_webhook, set_yanked_with_webhook, store_upload,
 };
@@ -41,8 +41,8 @@ pub use page_stream::{PageOutcome, materialize_detail, stream_detail};
 pub use provenance::{ProvenanceBody, provenance_bytes};
 pub use purge::purge_served_project;
 pub(crate) use resolve::local_detail;
-pub(crate) use resolve::resolve_detail_for_ui;
 pub use resolve::{DetailPage, list_serial, resolve_detail, resolve_detail_page, resolve_list};
+pub(crate) use resolve::{ResolvedPage, resolve_detail_for_ui};
 pub use shadow::shadowed_candidates;
 
 pub(crate) fn install_runtime_services(context: &mut RuntimeInstallContext<'_>) {
@@ -99,6 +99,8 @@ pub enum CacheError {
     InvalidProvenance,
     #[error("the artifact's own metadata does not match the advertised sidecar digest")]
     AdvertisedMetadataMismatch,
+    #[error("selected release metadata is invalid: {0}")]
+    InvalidMetadata(String),
     #[error("offline mode has no cached {0}")]
     OfflineMissing(&'static str),
     #[error("index is not volatile; delete is disabled")]
@@ -213,6 +215,9 @@ impl CacheError {
             Self::AdvertisedMetadataMismatch => {
                 "the index advertised a metadata digest the artifact's own metadata does not match".to_owned()
             }
+            Self::InvalidMetadata(message) | Self::ReleaseImports(message) | Self::ConcurrentChange(message) => {
+                message.clone()
+            }
             Self::OfflineMissing(target) => format!("offline mode has no cached {target}"),
             Self::NotVolatile => "index is not volatile; delete is disabled".to_owned(),
             Self::AuthoritySuperseded => {
@@ -225,7 +230,6 @@ impl CacheError {
             Self::ProvenanceMismatch(filename) => {
                 format!("file {filename:?} already exists with different attestations")
             }
-            Self::ReleaseImports(message) | Self::ConcurrentChange(message) => message.clone(),
             Self::MissingSha256(filename) => format!("uploaded file {filename:?} has no sha256 hash"),
             Self::NoPromotableFiles {
                 source_index,

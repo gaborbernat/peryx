@@ -122,9 +122,11 @@ pub fn lift_digest(state: &AppState, digest: &Digest) {
         )
         .unwrap();
 }
+pub const FLASK_METADATA: &[u8] = b"Metadata-Version: 2.4\nName: Flask\nVersion: 1.0\n";
+
 // The default PEP 658 sibling prevents backfill from racing request-count assertions.
 pub fn detail_json(digest: &str, file_url: &str) -> String {
-    let metadata = Digest::of(b"flask metadata");
+    let metadata = Digest::of(FLASK_METADATA);
     format!(
         "{{\"meta\":{{\"api-version\":\"1.1\"}},\"name\":\"flask\",\"versions\":[\"1.0\"],\
          \"files\":[{{\"filename\":\"flask-1.0-py3-none-any.whl\",\"size\":11,\"url\":\"{file_url}\",\
@@ -132,6 +134,19 @@ pub fn detail_json(digest: &str, file_url: &str) -> String {
         metadata = metadata.as_str(),
     )
 }
+
+pub async fn mount_metadata(server: &MockServer, file_url: &str) {
+    let path = format!(
+        "{}.metadata",
+        url::Url::parse(&server.uri()).unwrap().join(file_url).unwrap().path()
+    );
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path(path))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(FLASK_METADATA))
+        .mount(server)
+        .await;
+}
+
 pub async fn mount_detail(server: &MockServer, digest: &str, file_url: &str, etag: Option<&str>) {
     let mut response = ResponseTemplate::new(200).set_body_raw(
         detail_json(digest, file_url).into_bytes(),
@@ -145,6 +160,7 @@ pub async fn mount_detail(server: &MockServer, digest: &str, file_url: &str, eta
         .respond_with(response)
         .mount(server)
         .await;
+    mount_metadata(server, file_url).await;
 }
 pub async fn mount_status_detail(
     server: &MockServer,

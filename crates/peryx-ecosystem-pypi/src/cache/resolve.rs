@@ -28,7 +28,8 @@ pub struct DetailPage {
 
 pub struct ResolvedPage {
     pub detail: ProjectDetail,
-    last_serial: Option<u64>,
+    pub(crate) last_serial: Option<u64>,
+    pub(crate) revoked_files_removed: bool,
     pub(crate) owners: BTreeMap<String, ResolvedFileOwner>,
 }
 
@@ -63,6 +64,7 @@ impl ResolvedPage {
                 .collect(),
             detail: page.detail,
             last_serial: page.last_serial,
+            revoked_files_removed: page.revoked_files_removed,
         }
     }
 
@@ -110,7 +112,7 @@ pub async fn resolve_detail_for_ui(
     else {
         return Ok(None);
     };
-    filter_revoked_files(state, &mut page.detail)?;
+    page.revoked_files_removed = filter_revoked_files(state, &mut page.detail)?;
     rewrite_attestation_urls(&mut page.detail, serve_route, index.policy.remote_metadata_mode());
     Ok(Some(page))
 }
@@ -358,6 +360,7 @@ fn merge_candidates(project: &str, candidates: Vec<(usize, ResolvedPage)>) -> Op
     Some(ResolvedPage {
         detail,
         last_serial: None,
+        revoked_files_removed: false,
         owners,
     })
 }

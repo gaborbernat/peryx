@@ -317,12 +317,27 @@ fn test_legacy_project_json_maps_simple_fields() {
 }
 
 #[test]
-fn test_legacy_project_json_carries_resolved_contacts() {
+fn test_legacy_project_json_carries_core_metadata() {
     let metadata = crate::CoreMetadataDoc {
+        summary: Some("A web framework".to_owned()),
+        requires_python: Some(">=3.10".to_owned()),
+        license: Some("BSD-3-Clause".to_owned()),
+        license_expression: Some("BSD-3-Clause".to_owned()),
+        license_files: vec!["LICENSE".to_owned()],
         author: Some("Jane".to_owned()),
         author_email: Some("jane@example.test".to_owned()),
         maintainer: Some("Joe".to_owned()),
         maintainer_email: Some("joe@example.test".to_owned()),
+        keywords: vec!["web".to_owned(), "framework".to_owned()],
+        requires_dist: vec!["Werkzeug>=3".to_owned()],
+        provides_extra: vec!["async".to_owned()],
+        classifiers: vec!["Framework :: Flask".to_owned()],
+        dynamic: vec!["Version".to_owned()],
+        project_urls: vec![("Docs".to_owned(), "https://docs.example".to_owned())],
+        home_page: Some("https://example.test".to_owned()),
+        download_url: Some("https://example.test/download".to_owned()),
+        description: "Long description".to_owned(),
+        description_content_type: Some("text/markdown".to_owned()),
         ..crate::CoreMetadataDoc::default()
     };
     let legacy: serde_json::Value =
@@ -333,6 +348,34 @@ fn test_legacy_project_json_carries_resolved_contacts() {
     assert_eq!(info["author_email"], "jane@example.test");
     assert_eq!(info["maintainer"], "Joe");
     assert_eq!(info["maintainer_email"], "joe@example.test");
+    assert_eq!(info["summary"], "A web framework");
+    assert_eq!(info["description"], "Long description");
+    assert_eq!(info["description_content_type"], "text/markdown");
+    assert_eq!(info["requires_python"], ">=3.10");
+    assert_eq!(info["license"], "BSD-3-Clause");
+    assert_eq!(info["license_expression"], "BSD-3-Clause");
+    assert_eq!(info["license_files"], serde_json::json!(["LICENSE"]));
+    assert_eq!(info["keywords"], "web, framework");
+    assert_eq!(info["requires_dist"], serde_json::json!(["Werkzeug>=3"]));
+    assert_eq!(info["provides_extra"], serde_json::json!(["async"]));
+    assert_eq!(info["classifiers"], serde_json::json!(["Framework :: Flask"]));
+    assert_eq!(info["dynamic"], serde_json::json!(["Version"]));
+    assert_eq!(
+        info["project_urls"],
+        serde_json::json!({"Docs": "https://docs.example"})
+    );
+    assert_eq!(info["home_page"], "https://example.test");
+    assert_eq!(info["download_url"], "https://example.test/download");
+}
+
+#[test]
+fn test_legacy_project_json_does_not_mix_file_fields_into_core_metadata() {
+    let legacy: serde_json::Value = serde_json::from_str(
+        &render_legacy_json(&sample_detail(), None, Some(&crate::CoreMetadataDoc::default())).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(legacy["info"]["requires_python"], serde_json::Value::Null);
 }
 
 #[test]

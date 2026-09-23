@@ -10,7 +10,7 @@ use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::{MetaError, MetaStore};
 use tower::ServiceExt as _;
 
-use super::{ChangePageBody, MAX_CHANGE_PAGE_BYTES, build_change_page, change_page_response};
+use super::{ChangePageBody, MAX_CHANGE_PAGE_BYTES, below_floor, build_change_page, change_page_response};
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
 use crate::{DEFAULT_MAX_CONCURRENT_BLOB_STREAMS, follower_router_with_change_pages, primary_router_with_limits};
 
@@ -18,6 +18,12 @@ const TOKEN: &str = "replica-secret";
 
 /// Two records this size cannot share a page under [`MAX_CHANGE_PAGE_BYTES`]; one leaves room.
 const HALF_PAGE_EVENT: usize = 2 * 1024 * 1024;
+
+#[test]
+fn test_a_legacy_journal_without_a_floor_detects_missing_history() {
+    assert!(below_floor(2, 3, None));
+    assert!(!below_floor(3, 3, None));
+}
 
 #[tokio::test]
 async fn test_a_page_carries_the_records_after_its_cursor() {

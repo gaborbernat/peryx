@@ -25,10 +25,24 @@ use super::*;
 
 const TOKEN: &str = "replication-secret";
 
-#[derive(Default)]
 struct Views {
     frontier: AtomicU64,
     committed: Mutex<Vec<peryx_ha::BlobCommit>>,
+    pause: Option<(mpsc::SyncSender<()>, Mutex<mpsc::Receiver<()>>)>,
+    checkpoint_failure: Option<&'static str>,
+    panic_on_checkpoint: bool,
+}
+
+impl Default for Views {
+    fn default() -> Self {
+        Self {
+            frontier: AtomicU64::new(0),
+            committed: Mutex::default(),
+            pause: None,
+            checkpoint_failure: None,
+            panic_on_checkpoint: false,
+        }
+    }
 }
 
 impl ReplicaViewApplier for Views {
@@ -46,68 +60,30 @@ impl ReplicaViewApplier for Views {
     fn invalidate_checkpoint(&self) {}
 
     fn replace_checkpoint(&self, serial: u64) -> Result<(), String> {
+        assert!(!self.panic_on_checkpoint, "search rebuild panicked");
+        if let Some(reason) = self.checkpoint_failure {
+            return Err(reason.to_owned());
+        }
         self.frontier.store(serial, Ordering::Relaxed);
         Ok(())
     }
 
     fn readable_frontier(&self) -> u64 {
+        if let Some((arrived, release)) = &self.pause {
+            arrived.send(()).expect("the reader waits for the frontier read");
+            release
+                .lock()
+                .expect("the release channel is usable")
+                .recv()
+                .expect("the reader releases the cycle");
+            return 0;
+        }
         self.frontier.load(Ordering::Relaxed)
     }
 
     fn publish_applied_frontier(&self, serial: u64) {
         self.frontier.store(serial, Ordering::Relaxed);
     }
-}
-
-/// Blocks inside the frontier read so a reader can take a snapshot with a cycle in flight. Its
-/// readable frontier stays at zero, standing in for the blob view a failed pass left behind.
-struct PausedViews {
-    arrived: mpsc::SyncSender<()>,
-    release: Mutex<mpsc::Receiver<()>>,
-}
-
-impl ReplicaViewApplier for PausedViews {
-    fn apply(&self, _page: ReplicaPage, _changed_keys: &[String]) {}
-
-    fn apply_blob_commit(&self, _committed: &[peryx_ha::BlobCommit]) {}
-
-    fn invalidate_checkpoint(&self) {}
-
-    fn replace_checkpoint(&self, _serial: u64) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn readable_frontier(&self) -> u64 {
-        self.arrived.send(()).expect("the reader waits for the frontier read");
-        self.release
-            .lock()
-            .expect("the release channel is usable")
-            .recv()
-            .expect("the reader releases the cycle");
-        0
-    }
-
-    fn publish_applied_frontier(&self, _serial: u64) {}
-}
-
-struct FailingCheckpointViews;
-
-impl ReplicaViewApplier for FailingCheckpointViews {
-    fn apply(&self, _page: ReplicaPage, _changed_keys: &[String]) {}
-
-    fn apply_blob_commit(&self, _committed: &[peryx_ha::BlobCommit]) {}
-
-    fn invalidate_checkpoint(&self) {}
-
-    fn replace_checkpoint(&self, _serial: u64) -> Result<(), String> {
-        Err("search unavailable".to_owned())
-    }
-
-    fn readable_frontier(&self) -> u64 {
-        0
-    }
-
-    fn publish_applied_frontier(&self, _serial: u64) {}
 }
 
 fn stores(dir: &tempfile::TempDir) -> (MetaStore, BlobStorage) {
@@ -178,6 +154,40 @@ fn replica(
         local_dc: String::new(),
         delegates: HashMap::new(),
     })
+}
+
+fn installed_checkpoint() -> (tempfile::TempDir, MetaStore, BlobStorage, u64) {
+    let source_dir = tempfile::tempdir().unwrap();
+    let (source, _) = stores(&source_dir);
+    source
+        .commit_driver_txn(|txn| {
+            txn.put("row", b"value")?;
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    let manifest = source
+        .publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
+            source: "primary".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            schema_version: 1,
+        })
+        .unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let (meta, blobs) = stores(&target_dir);
+    meta.begin_checkpoint_transfer(&manifest).unwrap();
+    let chunk = source
+        .checkpoint_chunk(&peryx_storage::meta::CheckpointCursor::start(), usize::MAX)
+        .unwrap();
+    meta.stage_checkpoint_chunk(
+        &manifest,
+        0,
+        &chunk.bytes,
+        &chunk.next.generation_token(manifest.generation),
+    )
+    .unwrap()
+    .unwrap();
+    meta.install_staged_checkpoint("replica/state", b"state").unwrap();
+    (target_dir, meta, blobs, manifest.serial)
 }
 
 fn bounded_policy(max_attempts: u32) -> ReconnectPolicy {
@@ -402,9 +412,9 @@ async fn test_a_cycle_in_flight_never_publishes_half_of_its_result() {
         blobs,
         metadata(&server.url),
         blob_transport(&server.url),
-        Arc::new(PausedViews {
-            arrived,
-            release: Mutex::new(release),
+        Arc::new(Views {
+            pause: Some((arrived, Mutex::new(release))),
+            ..Views::default()
         }),
         Arc::clone(&monitor),
     );
@@ -667,42 +677,16 @@ async fn test_a_cycle_recovers_through_a_checkpoint_when_the_source_refuses_the_
 
 #[tokio::test]
 async fn test_a_failed_checkpoint_view_rebuild_keeps_the_recovery_marker() {
-    let source_dir = tempfile::tempdir().unwrap();
-    let (source, _) = stores(&source_dir);
-    source
-        .commit_driver_txn(|txn| {
-            txn.put("row", b"value")?;
-            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
-        })
-        .unwrap();
-    let manifest = source
-        .publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
-            source: "primary".to_owned(),
-            protocol_version: PROTOCOL_VERSION,
-            schema_version: 1,
-        })
-        .unwrap();
-    let target_dir = tempfile::tempdir().unwrap();
-    let (meta, blobs) = stores(&target_dir);
-    meta.begin_checkpoint_transfer(&manifest).unwrap();
-    let chunk = source
-        .checkpoint_chunk(&peryx_storage::meta::CheckpointCursor::start(), usize::MAX)
-        .unwrap();
-    meta.stage_checkpoint_chunk(
-        &manifest,
-        0,
-        &chunk.bytes,
-        &chunk.next.generation_token(manifest.generation),
-    )
-    .unwrap()
-    .unwrap();
-    meta.install_staged_checkpoint("replica/state", b"state").unwrap();
+    let (_directory, meta, blobs, _serial) = installed_checkpoint();
     let replica = replica(
         meta.clone(),
         blobs,
         PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default()),
         blob_transport("http://127.0.0.1:1/"),
-        Arc::new(FailingCheckpointViews),
+        Arc::new(Views {
+            checkpoint_failure: Some("search unavailable"),
+            ..Views::default()
+        }),
         Arc::new(ReplicaMonitor::new(0)),
     );
 
@@ -714,6 +698,69 @@ async fn test_a_failed_checkpoint_view_rebuild_keeps_the_recovery_marker() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn test_a_panicked_checkpoint_view_rebuild_keeps_the_recovery_marker() {
+    let (_directory, meta, blobs, _serial) = installed_checkpoint();
+    let replica = replica(
+        meta.clone(),
+        blobs,
+        PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default()),
+        blob_transport("http://127.0.0.1:1/"),
+        Arc::new(Views {
+            panic_on_checkpoint: true,
+            ..Views::default()
+        }),
+        Arc::new(ReplicaMonitor::new(0)),
+    );
+
+    let error = replica.pull_blobs().await.unwrap_err();
+
+    assert!(
+        matches!(error, crate::SyncError::CheckpointView(reason) if reason.starts_with("view rebuild task failed:"))
+    );
+    assert!(meta.checkpoint_blob_recovery_page(NonZeroUsize::MIN).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_a_completed_checkpoint_view_rebuild_advances_its_frontier() {
+    let (_directory, meta, blobs, serial) = installed_checkpoint();
+    let views = Arc::new(Views::default());
+    let replica = replica(
+        meta.clone(),
+        blobs,
+        PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default()),
+        blob_transport("http://127.0.0.1:1/"),
+        views.clone(),
+        Arc::new(ReplicaMonitor::new(0)),
+    );
+
+    let report = replica.pull_blobs().await.unwrap();
+
+    assert_eq!(report, BlobPlaneReport { fetched: 0, pending: 0 });
+    assert_eq!(views.readable_frontier(), serial);
+    assert!(meta.checkpoint_blob_recovery_page(NonZeroUsize::MIN).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_a_read_only_replica_reports_checkpoint_frontier_failure() {
+    let (directory, meta, blobs, _serial) = installed_checkpoint();
+    drop(meta);
+    let meta = MetaStore::open_existing_read_only(directory.path().join("peryx.redb")).unwrap();
+    let replica = replica(
+        meta.clone(),
+        blobs,
+        PeerSet::new(DEFAULT_SET_LIMITS, ReconnectPolicy::default()),
+        blob_transport("http://127.0.0.1:1/"),
+        Arc::new(Views::default()),
+        Arc::new(ReplicaMonitor::new(0)),
+    );
+
+    let error = replica.pull_blobs().await.unwrap_err();
+
+    assert!(matches!(error, crate::SyncError::Store(_)));
+    assert!(meta.checkpoint_blob_recovery_page(NonZeroUsize::MIN).unwrap().is_some());
 }
 
 #[tokio::test]

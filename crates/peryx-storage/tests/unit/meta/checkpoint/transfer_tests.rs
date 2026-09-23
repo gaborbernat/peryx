@@ -177,6 +177,12 @@ fn test_checkpoint_blob_recovery_advances_only_after_the_last_bounded_page() {
 
     let first = replica.checkpoint_blob_recovery_page(limit).unwrap().unwrap();
 
+    assert!(
+        replica
+            .advance_checkpoint_blob_recovery("wrong", first.next.as_deref(), peryx_ha::AVAILABILITY_BLOB_VIEW, 0)
+            .is_err()
+    );
+
     assert_eq!(first.references.len(), 2);
     assert!(first.next.is_some());
     assert_eq!(
@@ -206,6 +212,41 @@ fn test_checkpoint_blob_recovery_advances_only_after_the_last_bounded_page() {
     assert_eq!(
         replica.view_frontier(peryx_ha::AVAILABILITY_BLOB_VIEW).unwrap(),
         Some(manifest.serial)
+    );
+}
+
+#[test]
+fn test_checkpoint_blob_recovery_rejects_a_marker_without_a_manifest() {
+    let store = store();
+    let txn = store.db.begin_write().unwrap();
+    txn.open_table(crate::meta::CHECKPOINT_BLOB_RECOVERY)
+        .unwrap()
+        .insert(super::BLOB_RECOVERY_KEY, "")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let error = store.checkpoint_blob_recovery_page(NonZeroUsize::MIN).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "checkpoint blob references are invalid: blob recovery has no checkpoint manifest"
+    );
+}
+
+#[test]
+fn test_generation_reads_reject_a_stale_generation_before_and_during_chunking() {
+    let (writer, manifest) = published(1);
+    let stale = manifest.generation + 1;
+
+    assert!(
+        writer
+            .checkpoint_chunk_at_generation(stale, &CheckpointCursor::start(), 512)
+            .is_err()
+    );
+    assert!(
+        writer
+            .checkpoint_chunk_from_generation(&CheckpointCursor::start(), 512, Some(stale))
+            .is_err()
     );
 }
 

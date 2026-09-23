@@ -217,6 +217,14 @@ struct CountingDocs {
     built: AtomicUsize,
 }
 
+struct FailingDocs;
+
+impl SearchDocumentProvider for FailingDocs {
+    fn documents(&self, _ctx: &IndexerCtx<'_>) -> Result<Vec<SearchDocument>, SearchError> {
+        Err(SearchError::Indexer("search unavailable".to_owned()))
+    }
+}
+
 impl CountingDocs {
     fn new(resources: &[&str]) -> Self {
         Self {
@@ -442,6 +450,20 @@ fn test_checkpoint_replacement_rebuilds_search_and_drops_response_caches() {
         state.serving.meta.view_frontier(crate::state::SEARCH_VIEW).unwrap(),
         Some(1)
     );
+}
+
+#[test]
+fn test_checkpoint_replacement_reports_a_search_rebuild_failure() {
+    let (_dir, mut state, meta) = state();
+    Arc::get_mut(&mut state.serving)
+        .expect("the serving state is still unique during the build")
+        .search
+        .add_indexer(Arc::new(FailingDocs));
+
+    let error = state.replace_checkpoint(1).unwrap_err();
+
+    assert_eq!(error, "indexing failed: search unavailable");
+    assert_eq!(meta.view_frontier(crate::state::SEARCH_VIEW).unwrap(), None);
 }
 
 #[test]

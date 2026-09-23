@@ -456,28 +456,25 @@ fn start_process_tasks(
     }
     if !state.serving.read_only && !is_replica {
         let source = match config.availability.replication() {
-            Some(config::ReplicationConfig::Primary { source, .. }) => Some(source.clone()),
-            Some(config::ReplicationConfig::Replica { .. }) => None,
-            None => Some(LOCAL_CHECKPOINT_SOURCE.to_owned()),
+            Some(config::ReplicationConfig::Primary { source, .. }) => source.clone(),
+            Some(config::ReplicationConfig::Replica { .. }) | None => LOCAL_CHECKPOINT_SOURCE.to_owned(),
         };
-        if let Some(source) = source {
-            let scanners = Arc::clone(state);
-            tasks.journal_retention = Some(tokio::spawn(run_journal_retention(
-                state.serving.meta.clone(),
-                state.serving.blobs.clone(),
-                peryx_storage::meta::CheckpointIdentity {
-                    source,
-                    protocol_version: peryx_ha_distributed::PROTOCOL_VERSION,
-                    schema_version: u32::from(peryx_ha_distributed::SCHEMA_VERSION.0),
-                },
-                Arc::new(move |checkpoint| {
-                    scanners
-                        .checkpoint_blob_digests(checkpoint)
-                        .map_err(|error| error.to_string())
-                }),
-                tasks.cancellation.child_token(),
-            )));
-        }
+        let scanners = Arc::clone(state);
+        tasks.journal_retention = Some(tokio::spawn(run_journal_retention(
+            state.serving.meta.clone(),
+            state.serving.blobs.clone(),
+            peryx_storage::meta::CheckpointIdentity {
+                source,
+                protocol_version: peryx_ha_distributed::PROTOCOL_VERSION,
+                schema_version: u32::from(peryx_ha_distributed::SCHEMA_VERSION.0),
+            },
+            Arc::new(move |checkpoint| {
+                scanners
+                    .checkpoint_blob_digests(checkpoint)
+                    .map_err(|error| error.to_string())
+            }),
+            tasks.cancellation.child_token(),
+        )));
     }
     for index in (!state.serving.read_only && !is_replica)
         .then_some(&state.serving.indexes)

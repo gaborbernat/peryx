@@ -453,6 +453,25 @@ impl MetaStore {
         }))
     }
 
+    /// Returns the blobs required by the checkpoint currently offered to stale replicas.
+    ///
+    /// # Errors
+    /// Returns a store error if the checkpoint blob table cannot be read.
+    pub fn checkpoint_blob_digests(&self) -> Result<BTreeSet<String>, MetaError> {
+        let txn = self.db.begin_read()?;
+        let Some(table) = open_optional_table(&txn, CHECKPOINT_BLOB)? else {
+            return Ok(BTreeSet::new());
+        };
+        table
+            .iter()?
+            .map(|entry| {
+                entry
+                    .map(|(digest, _)| digest.value().to_owned())
+                    .map_err(MetaError::from)
+            })
+            .collect()
+    }
+
     /// Returns the published manifest without reading the state beside it.
     ///
     /// # Errors

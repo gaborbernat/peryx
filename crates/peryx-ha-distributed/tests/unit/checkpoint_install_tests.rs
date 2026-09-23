@@ -139,10 +139,7 @@ async fn test_a_replica_below_the_floor_installs_and_stands_at_the_manifest_seri
     let peer = CheckpointPeer::serving(writer.clone());
     assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
 
-    let serial = Replica::new(&replica, ONE)
-        .install_checkpoint(&peer, SOURCE)
-        .await
-        .unwrap();
+    let serial = Replica::new(&replica, ONE).install_checkpoint(&peer).await.unwrap();
 
     assert_eq!(serial, manifest.serial);
     assert_eq!(replica.current_serial().unwrap(), manifest.serial);
@@ -156,12 +153,6 @@ async fn test_a_replica_below_the_floor_installs_and_stands_at_the_manifest_seri
 
 #[rstest]
 #[case::empty_source("", PROTOCOL_VERSION, 1, "replication page has an empty source identity")]
-#[case::wrong_source(
-    "primary-b",
-    PROTOCOL_VERSION,
-    1,
-    "replica follows source \"primary-a\", received \"primary-b\""
-)]
 #[case::protocol(
     SOURCE,
     PROTOCOL_VERSION + 1,
@@ -189,11 +180,50 @@ async fn test_checkpoint_identity_is_verified_before_staging(
     let replica = store(&dir, "replica.redb");
 
     let error = Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::serving(writer), SOURCE)
+        .install_checkpoint(&CheckpointPeer::serving(writer))
         .await
         .unwrap_err();
 
     assert_eq!(error.to_string(), expected);
+    assert_eq!(replica.current_serial().unwrap(), 0);
+    assert_eq!(replica.staged_checkpoint().unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_checkpoint_identity_must_match_the_durable_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = store(&dir, "writer.redb");
+    rows(&writer, 1);
+    writer
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-b".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            schema_version: 1,
+        })
+        .unwrap();
+    let replica = store(&dir, "replica.redb");
+    let state = serde_json::to_vec(&crate::ReplicaState {
+        source: SOURCE.to_owned(),
+        serial: 0,
+    })
+    .unwrap();
+    replica
+        .commit_replica_txn(0, |txn| {
+            txn.put_local("replication\0state", &state)?;
+            Ok::<_, crate::SyncError>(((), Vec::new()))
+        })
+        .unwrap();
+
+    let error = Replica::new(&replica, ONE)
+        .install_checkpoint(&CheckpointPeer::serving(writer))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SyncError::SourceChanged { expected, actual }
+            if expected == SOURCE && actual == "primary-b"
+    ));
     assert_eq!(replica.current_serial().unwrap(), 0);
     assert_eq!(replica.staged_checkpoint().unwrap(), None);
 }
@@ -214,7 +244,7 @@ async fn test_the_resume_serial_comes_from_the_manifest_that_was_installed() {
     let replica = store(&dir, "replica.redb");
 
     let serial = Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::serving(writer.clone()), SOURCE)
+        .install_checkpoint(&CheckpointPeer::serving(writer.clone()))
         .await
         .unwrap();
 
@@ -235,7 +265,7 @@ async fn test_an_interrupted_install_leaves_the_previous_state_usable_and_a_rest
     let before = replica.current_serial().unwrap();
 
     let interrupted = Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2), SOURCE)
+        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2))
         .await
         .unwrap_err();
 
@@ -252,7 +282,7 @@ async fn test_an_interrupted_install_leaves_the_previous_state_usable_and_a_rest
     assert!(staged.received > 0 && staged.received < manifest.bytes);
 
     let serial = Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::serving(writer.clone()), SOURCE)
+        .install_checkpoint(&CheckpointPeer::serving(writer.clone()))
         .await
         .unwrap();
 
@@ -294,7 +324,7 @@ async fn test_a_restart_resumes_from_the_staged_cursor_not_from_the_beginning() 
     published(&writer);
     let replica = store(&dir, "replica.redb");
     Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2), SOURCE)
+        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2))
         .await
         .unwrap_err();
     let staged = replica.staged_checkpoint().unwrap().unwrap();
@@ -305,10 +335,7 @@ async fn test_a_restart_resumes_from_the_staged_cursor_not_from_the_beginning() 
         cursors: Mutex::new(Vec::new()),
     };
     assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
-    Replica::new(&replica, ONE)
-        .install_checkpoint(&peer, SOURCE)
-        .await
-        .unwrap();
+    Replica::new(&replica, ONE).install_checkpoint(&peer).await.unwrap();
 
     let first_cursor_requested = peer.cursors.lock().unwrap().first().cloned().unwrap();
     assert_eq!(
@@ -360,7 +387,7 @@ async fn test_a_matching_staged_manifest_resumes_rather_than_restarting() {
     let replica = store(&dir, "replica.redb");
 
     Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2), SOURCE)
+        .install_checkpoint(&CheckpointPeer::losing_after(writer.clone(), 2))
         .await
         .unwrap_err();
     let staged = replica.staged_checkpoint().unwrap().unwrap();
@@ -368,10 +395,7 @@ async fn test_a_matching_staged_manifest_resumes_rather_than_restarting() {
 
     let peer = RefusingFromScratch(writer.clone());
     assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
-    let serial = Replica::new(&replica, ONE)
-        .install_checkpoint(&peer, SOURCE)
-        .await
-        .unwrap();
+    let serial = Replica::new(&replica, ONE).install_checkpoint(&peer).await.unwrap();
 
     assert_eq!(serial, manifest.serial);
 }
@@ -387,7 +411,7 @@ async fn test_a_corrupted_checkpoint_is_rejected_and_does_not_replace_live_state
     let before = replica.current_serial().unwrap();
 
     let refused = Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::corrupting(writer.clone()), SOURCE)
+        .install_checkpoint(&CheckpointPeer::corrupting(writer.clone()))
         .await
         .unwrap_err();
 
@@ -460,10 +484,7 @@ async fn test_the_transfer_stops_once_every_byte_arrives_even_if_the_peer_claims
     };
     assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
 
-    let serial = Replica::new(&replica, ONE)
-        .install_checkpoint(&peer, SOURCE)
-        .await
-        .unwrap();
+    let serial = Replica::new(&replica, ONE).install_checkpoint(&peer).await.unwrap();
 
     assert_eq!(serial, manifest.serial);
 }
@@ -476,7 +497,7 @@ async fn test_a_source_publishing_no_checkpoint_reports_it_rather_than_waiting()
     let replica = store(&dir, "replica.redb");
 
     let refused = Replica::new(&replica, ONE)
-        .install_checkpoint(&CheckpointPeer::serving(writer.clone()), SOURCE)
+        .install_checkpoint(&CheckpointPeer::serving(writer.clone()))
         .await
         .unwrap_err();
 
@@ -500,7 +521,7 @@ async fn test_a_transport_without_checkpoint_support_refuses() {
     let replica = store(&dir, "replica.redb");
 
     let refused = Replica::new(&replica, ONE)
-        .install_checkpoint(&FeedOnly, SOURCE)
+        .install_checkpoint(&FeedOnly)
         .await
         .unwrap_err();
 
@@ -552,10 +573,7 @@ async fn test_a_window_that_overruns_the_manifest_drops_the_staging() {
 
     let peer = Overrunning(writer.clone());
     assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
-    let refused = Replica::new(&replica, ONE)
-        .install_checkpoint(&peer, SOURCE)
-        .await
-        .unwrap_err();
+    let refused = Replica::new(&replica, ONE).install_checkpoint(&peer).await.unwrap_err();
 
     assert!(matches!(refused, SyncError::CheckpointChunk(_)), "{refused:?}");
     assert_eq!(replica.staged_checkpoint().unwrap(), None);
@@ -613,7 +631,7 @@ async fn test_reaching_the_declared_byte_count_stops_the_transfer() {
     };
     assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
 
-    let _ = Replica::new(&replica, ONE).install_checkpoint(&peer, SOURCE).await;
+    let _ = Replica::new(&replica, ONE).install_checkpoint(&peer).await;
 
     assert_eq!(
         *peer.calls.lock().unwrap(),
@@ -658,7 +676,7 @@ async fn test_a_done_cursor_stops_the_transfer_short_of_the_declared_byte_count(
     };
     assert_eq!(refused_feed(&peer).await, TransportError::CheckpointRequired);
 
-    let _ = Replica::new(&replica, ONE).install_checkpoint(&peer, SOURCE).await;
+    let _ = Replica::new(&replica, ONE).install_checkpoint(&peer).await;
 
     assert_eq!(
         *peer.calls.lock().unwrap(),

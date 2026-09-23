@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode, Url};
 
-use crate::AvailabilityMetrics;
 use crate::liveness::HeartbeatReport;
+use crate::{AvailabilityMetrics, BLOB_VIEW};
+use peryx_storage::meta::MetaError;
 use peryx_storage::meta::MetaStore;
 
 /// With the default liveness windows, one dropped beat does not age out a healthy replica.
@@ -115,7 +116,7 @@ impl BeaconSender {
             node: self.node.clone(),
             incarnation: self.incarnation,
             sequence,
-            applied: match self.meta.current_serial() {
+            applied: match applied_frontier(&self.meta) {
                 Ok(serial) => Some(serial),
                 Err(error) => {
                     tracing::warn!(error = %error, "heartbeat reports no applied frontier");
@@ -161,6 +162,11 @@ impl BeaconSender {
             tokio::time::sleep(self.interval).await;
         }
     }
+}
+
+pub fn applied_frontier(meta: &MetaStore) -> Result<u64, MetaError> {
+    let current = meta.current_serial()?;
+    Ok(meta.view_frontier(BLOB_VIEW)?.map_or(current, |blob| blob.min(current)))
 }
 
 fn heartbeat_status(status: StatusCode) -> Result<(), HeartbeatError> {

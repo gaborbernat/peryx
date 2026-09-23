@@ -47,11 +47,13 @@ pub struct JournalSnapshot {
     pub entries: Vec<JournalEntry>,
 }
 
-/// Why a journal snapshot cannot become a Warehouse changelog page.
+/// Why a Warehouse journal read cannot be served safely.
 #[derive(Debug, thiserror::Error)]
 pub enum ChangelogReadError {
     #[error(transparent)]
     Store(#[from] MetaError),
+    #[error("journal records after cursor {after} are no longer retained")]
+    CursorBelowFloor { after: u64 },
     #[error(transparent)]
     InvalidPage(#[from] ChangelogPageError),
 }
@@ -84,11 +86,12 @@ pub fn read_changelog_page(meta: &MetaStore, after: i64, limit: usize) -> Result
 /// highest serial a page returned, having no other cursor - would ask for that same window forever.
 ///
 /// # Errors
-/// Returns a store error if the snapshot cannot be read or a `PyPI` entry cannot be decoded.
-pub fn read_journal_entries(meta: &MetaStore, after: u64, limit: usize) -> Result<JournalSnapshot, MetaError> {
+/// Returns an error when the cursor is below retained history, the snapshot cannot be read, or a
+/// `PyPI` entry cannot be decoded.
+pub fn read_journal_entries(meta: &MetaStore, after: u64, limit: usize) -> Result<JournalSnapshot, ChangelogReadError> {
     let mut entries = Vec::new();
     let mut failure = None;
-    let current_serial = meta.visit_journal_page(after, usize::MAX, |record| {
+    let (current_serial, retained_floor) = meta.visit_retained_journal_page(after, usize::MAX, |record| {
         if entries.len() == limit {
             return ControlFlow::Break(());
         }
@@ -105,8 +108,11 @@ pub fn read_journal_entries(meta: &MetaStore, after: u64, limit: usize) -> Resul
             }
         }
     })?;
+    if retained_floor.is_some_and(|floor| after.saturating_add(1) < floor) {
+        return Err(ChangelogReadError::CursorBelowFloor { after });
+    }
     if let Some(error) = failure {
-        return Err(error.into());
+        return Err(MetaError::from(error).into());
     }
     Ok(JournalSnapshot {
         current_serial,

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use peryx_driver::rate_limit::{RateLimitConfig, RateLimiter, RouteLimit};
 use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
-use peryx_storage::meta::MetaError;
+use peryx_storage::meta::{CheckpointIdentity, MetaError};
 
 use super::*;
 use crate::store::JournalEntry;
@@ -247,6 +247,37 @@ async fn test_changelog_returns_an_opaque_fault_for_bad_storage() {
     assert!(body.contains("<int>-32403</int>"));
     assert!(body.contains("server error; service unavailable"));
     assert!(capture.text().contains("failed to read the PyPI changelog"));
+}
+
+#[tokio::test]
+async fn test_changelog_rejects_a_cursor_below_pruned_history() {
+    let h = harness().await;
+    h.state
+        .serving
+        .meta
+        .commit_driver_txn(|_| Ok::<_, MetaError>(((), vec![entry(0), entry(0)])))
+        .unwrap();
+    h.state
+        .serving
+        .meta
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-a".to_owned(),
+            protocol_version: 1,
+            schema_version: 1,
+        })
+        .unwrap();
+    h.state
+        .serving
+        .meta
+        .commit_driver_txn(|_| Ok::<_, MetaError>(((), vec![entry(0)])))
+        .unwrap();
+    assert_eq!(h.state.serving.meta.prune_journal_batch(usize::MAX).unwrap(), 2);
+
+    let (status, _, body) = post_xml(&h.state, "/RPC2", since(0), None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("<int>-32403</int>"));
+    assert!(!body.contains("project-3"));
 }
 
 #[tokio::test]

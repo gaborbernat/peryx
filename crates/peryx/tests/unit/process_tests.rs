@@ -8,7 +8,9 @@ use crate::config::{
     DcRole, IndexKind, PrefetchConfig, ReplicationConfig, SecretSource, TlsConfig, UpstreamConfig,
     UpstreamRoutingConfig, UpstreamTlsConfig, WebhookConfig, WebhookSecret,
 };
-use crate::tests::support::{plugins, plugins_without_retention};
+use crate::tests::support::{
+    plugins, plugins_with_blob_references, plugins_with_broken_blob_references, plugins_without_retention,
+};
 
 fn cancelled() -> tokio_util::sync::CancellationToken {
     let cancellation = tokio_util::sync::CancellationToken::new();
@@ -23,6 +25,27 @@ fn local_config(directory: &tempfile::TempDir, plugins: &peryx_plugin_registry::
         data_dir: directory.path().to_path_buf(),
         ..Config::with_plugins(plugins)
     }
+}
+
+#[rstest::rstest]
+#[case(plugins_with_blob_references, false)]
+#[case(plugins_with_broken_blob_references, true)]
+fn test_checkpoint_blob_scanners_return_digests_or_error(
+    #[case] registry: fn() -> peryx_plugin_registry::PluginRegistry,
+    #[case] expected_error: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let plugins = registry();
+    let config = local_config(&directory, &plugins);
+    let active = crate::server::activate_plugins(&config, &plugins).unwrap();
+    let state = crate::server::build_state_with_active_plugins(&config, &active).unwrap();
+
+    assert_eq!(
+        state
+            .checkpoint_blob_digests(&peryx_storage::meta::CheckpointState::default())
+            .is_err(),
+        expected_error
+    );
 }
 
 fn certificate_files(directory: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -176,6 +199,71 @@ async fn test_start_process_tasks_retains_journal_only_when_writable_and_not_a_r
 }
 
 #[tokio::test]
+async fn test_start_process_tasks_publishes_a_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let plugins = plugins();
+    let config = local_config(&directory, &plugins);
+    let active = crate::server::activate_plugins(&config, &plugins).unwrap();
+    let state = crate::server::build_state_with_active_plugins(&config, &active).unwrap();
+    let mut tasks = ProcessTasks::new(tokio_util::sync::CancellationToken::new());
+
+    start_process_tasks(&config, &state, false, &mut tasks);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while state.serving.meta.checkpoint_manifest().unwrap().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(state.serving.meta.checkpoint_manifest().unwrap().is_some());
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_start_process_tasks_leaves_the_checkpoint_unpublished_when_scanning_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let plugins = plugins_with_broken_blob_references();
+    let config = local_config(&directory, &plugins);
+    let active = crate::server::activate_plugins(&config, &plugins).unwrap();
+    let state = crate::server::build_state_with_active_plugins(&config, &active).unwrap();
+    let mut tasks = ProcessTasks::new(tokio_util::sync::CancellationToken::new());
+
+    start_process_tasks(&config, &state, false, &mut tasks);
+    assert!(tasks.journal_retention.is_some());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert!(state.serving.meta.checkpoint_manifest().unwrap().is_none());
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_start_process_tasks_does_not_retain_a_replica_configuration_as_a_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let plugins = plugins();
+    let mut config = local_config(&directory, &plugins);
+    config.availability = AvailabilityConfig::Dc(ReplicationConfig::Replica {
+        upstream: "https://writer.example/".to_owned(),
+        token: SecretSource::Literal("secret".to_owned()),
+        poll_interval: std::time::Duration::from_secs(1),
+        page_size: std::num::NonZeroUsize::MIN,
+    });
+    config.writer_identity = Some("writer".to_owned());
+    peryx_storage::meta::MetaStore::open(config.data_dir.join("peryx.redb"))
+        .unwrap()
+        .claim_writer_identity("writer")
+        .unwrap();
+    let active = crate::server::activate_plugins(&config, &plugins).unwrap();
+    let state = crate::server::build_state_with_active_plugins(&config, &active).unwrap();
+    let mut tasks = ProcessTasks::new(tokio_util::sync::CancellationToken::new());
+
+    start_process_tasks(&config, &state, false, &mut tasks);
+
+    assert!(tasks.journal_retention.is_none());
+    tasks.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_journal_retention_publishes_then_prunes_every_record() {
     let directory = tempfile::tempdir().unwrap();
     let meta = peryx_storage::meta::MetaStore::open(directory.path().join("meta.redb")).unwrap();
@@ -262,6 +350,111 @@ async fn test_journal_retention_resolves_a_legacy_blob_size() {
             size: 6,
         }])
     );
+}
+
+fn legacy_retention_fixture(
+    directory: &tempfile::TempDir,
+) -> (
+    peryx_storage::meta::MetaStore,
+    peryx_storage::blob::BlobStorage,
+    peryx_storage::meta::CheckpointIdentity,
+) {
+    let meta = peryx_storage::meta::MetaStore::open(directory.path().join("meta.redb")).unwrap();
+    meta.commit_driver_txn(|txn| {
+        txn.put("legacy", b"row")?;
+        Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+    })
+    .unwrap();
+    (
+        meta,
+        peryx_storage::blob::BlobStorage::filesystem(directory.path().join("blobs")),
+        peryx_storage::meta::CheckpointIdentity {
+            source: "local".to_owned(),
+            protocol_version: peryx_ha_distributed::PROTOCOL_VERSION,
+            schema_version: u32::from(peryx_ha_distributed::SCHEMA_VERSION.0),
+        },
+    )
+}
+
+#[tokio::test]
+async fn test_journal_retention_propagates_publication_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = peryx_storage::meta::MetaStore::open(directory.path().join("meta.redb")).unwrap();
+    let blobs = peryx_storage::blob::BlobStorage::filesystem(directory.path().join("blobs"));
+    let identity = peryx_storage::meta::CheckpointIdentity {
+        source: "local".to_owned(),
+        protocol_version: peryx_ha_distributed::PROTOCOL_VERSION,
+        schema_version: u32::from(peryx_ha_distributed::SCHEMA_VERSION.0),
+    };
+    let scan: CheckpointBlobScan = Arc::new(|_| Err("scan failed".to_owned()));
+
+    assert!(
+        retain_journal(
+            &meta,
+            &blobs,
+            &identity,
+            &scan,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .is_err()
+    );
+    run_journal_retention(meta, blobs, identity, scan, cancelled()).await;
+}
+
+#[tokio::test]
+async fn test_journal_retention_stops_legacy_size_recovery_when_cancelled() {
+    let directory = tempfile::tempdir().unwrap();
+    let (meta, blobs, identity) = legacy_retention_fixture(&directory);
+    let digest = "a".repeat(64);
+    let scan: CheckpointBlobScan = Arc::new(move |_| Ok(BTreeSet::from([digest.clone()])));
+
+    assert_eq!(
+        retain_journal(&meta, &blobs, &identity, &scan, &cancelled(),)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn test_journal_retention_rejects_an_invalid_legacy_digest() {
+    let directory = tempfile::tempdir().unwrap();
+    let (meta, blobs, identity) = legacy_retention_fixture(&directory);
+    let scan: CheckpointBlobScan = Arc::new(|_| Ok(BTreeSet::from(["invalid".to_owned()])));
+
+    let error = retain_journal(
+        &meta,
+        &blobs,
+        &identity,
+        &scan,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), "checkpoint scanner returned invalid sha256 invalid");
+}
+
+#[tokio::test]
+async fn test_journal_retention_rejects_a_missing_legacy_blob() {
+    let directory = tempfile::tempdir().unwrap();
+    let (meta, blobs, identity) = legacy_retention_fixture(&directory);
+    let digest = "a".repeat(64);
+    let expected = digest.clone();
+    let scan: CheckpointBlobScan = Arc::new(move |_| Ok(BTreeSet::from([digest.clone()])));
+
+    let error = retain_journal(
+        &meta,
+        &blobs,
+        &identity,
+        &scan,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.to_string(), format!("checkpoint blob {expected} is missing"));
 }
 
 /// The file sink's directory is whatever the configured path's parent is, as long as that parent

@@ -45,8 +45,8 @@ pub use index::{
     publish_project_generation, put_cached_page, put_index, put_project_files, recover_project_generations,
     refresh_project_generation, scan_index_pages, scan_index_records, touch_index_freshness,
 };
-pub(crate) use journal::{ChangelogReadError, read_changelog_page};
-pub use journal::{JournalEntry, JournalSnapshot, read_journal_entries};
+pub(crate) use journal::read_changelog_page;
+pub use journal::{ChangelogReadError, JournalEntry, JournalSnapshot, read_journal_entries};
 pub use overrides::{FileOverride, OverrideMutation};
 pub use peryx_driver::serving::{IndexSummary, RecentWrite};
 pub use projects::{

@@ -78,6 +78,21 @@ fn test_a_fold_stops_at_the_serial_it_was_asked_for() {
 }
 
 #[test]
+fn test_checkpoint_blob_digests_report_the_published_inventory() {
+    let store = store();
+    commit(&store, |txn| {
+        txn.reference_blob(DIGEST_HEX, 7);
+        Ok(())
+    });
+    store.publish_checkpoint(identity()).unwrap();
+
+    assert_eq!(
+        store.checkpoint_blob_digests().unwrap(),
+        BTreeSet::from([DIGEST_HEX.to_owned()])
+    );
+}
+
+#[test]
 fn test_a_local_row_stays_out_of_the_fold_a_replicated_row_stays_in() {
     let store = store();
     put(&store, "replicated", b"kept");
@@ -311,6 +326,34 @@ fn test_nothing_is_published_before_the_first_publication() {
 
     assert_eq!(store.checkpoint_manifest().unwrap(), None);
     assert_eq!(store.checkpoint().unwrap(), None);
+}
+
+#[test]
+fn test_an_uninitialized_database_has_no_checkpoint_or_journal_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    drop(redb::Database::create(&path).unwrap());
+    let store = MetaStore::open_existing(path).unwrap();
+
+    assert_eq!(store.checkpoint_manifest().unwrap(), None);
+    assert_eq!(store.journal_floor().unwrap(), None);
+}
+
+#[test]
+fn test_a_legacy_journal_uses_its_first_serial_as_the_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    let database = redb::Database::create(&path).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.open_table(crate::meta::JOURNAL)
+        .unwrap()
+        .insert(7, b"entry".as_slice())
+        .unwrap();
+    txn.commit().unwrap();
+    drop(database);
+    let store = MetaStore::open_existing(path).unwrap();
+
+    assert_eq!(store.journal_floor().unwrap(), Some(7));
 }
 
 #[test]

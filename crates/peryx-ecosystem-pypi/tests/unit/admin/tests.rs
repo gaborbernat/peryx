@@ -217,6 +217,26 @@ fn test_checkpoint_blob_digests_reads_the_folded_rows() {
                     key: format!("pypi\0d\0{DIGEST_A}"),
                     value: DIGEST_B.as_bytes().to_vec(),
                 },
+                DriverMutation::Put {
+                    key: format!("pypi\0n\0pypi/flask/{DIGEST_A}/flask-1.0.whl"),
+                    value: format!("https://files/flask.whl.metadata\n{DIGEST_B}\npypi\n").into_bytes(),
+                },
+                DriverMutation::Put {
+                    key: "pypi\0n\0pypi/flask/unclaimed/flask-1.0.whl".to_owned(),
+                    value: Vec::new(),
+                },
+                DriverMutation::Put {
+                    key: "pypi\0u\0pypi/flask/flask-1.0.whl".to_owned(),
+                    value: crate::to_json(&upload_record("flask-1.0.whl", DIGEST_A)).into_bytes(),
+                },
+                DriverMutation::Put {
+                    key: format!("pypi\0a\0pypi/flask/{DIGEST_A}/flask-1.0.whl"),
+                    value: format!("{DIGEST_B}\n16").into_bytes(),
+                },
+                DriverMutation::Put {
+                    key: "unrelated".to_owned(),
+                    value: b"ignored".to_vec(),
+                },
             ],
             Vec::new(),
             b"{}",
@@ -230,20 +250,51 @@ fn test_checkpoint_blob_digests_reads_the_folded_rows() {
 }
 
 #[test]
-fn test_checkpoint_blob_digests_rejects_a_corrupt_folded_row() {
+fn test_checkpoint_blob_digests_reads_a_provenance_row() {
     let mut state = CheckpointState::default();
     state
         .apply(
             vec![DriverMutation::Put {
-                key: "pypi\0f\0invalid".to_owned(),
-                value: b"invalid".to_vec(),
+                key: format!("pypi\0a\0pypi/flask/{DIGEST_A}/flask-1.0.whl"),
+                value: format!("{DIGEST_B}\n16").into_bytes(),
             }],
             Vec::new(),
             b"{}",
         )
         .unwrap();
 
-    assert!(checkpoint_blob_digests(&state).is_err());
+    assert_eq!(
+        checkpoint_blob_digests(&state).unwrap(),
+        std::collections::BTreeSet::from([DIGEST_B.to_owned()])
+    );
+}
+
+#[test]
+fn test_checkpoint_blob_digests_rejects_a_corrupt_folded_row() {
+    for (key, value) in [
+        ("pypi\0f\0invalid".to_owned(), b"invalid".to_vec()),
+        (
+            "pypi\0f\0pypi/flask/not-hex".to_owned(),
+            b"https://files/flask.whl\npypi".to_vec(),
+        ),
+        (format!("pypi\0d\0{DIGEST_A}"), b"not-hex".to_vec()),
+        (
+            format!("pypi\0n\0pypi/flask/{DIGEST_A}/flask-1.0.whl"),
+            b"invalid".to_vec(),
+        ),
+        ("pypi\0u\0pypi/flask/flask-1.0.whl".to_owned(), b"invalid".to_vec()),
+        (
+            format!("pypi\0a\0pypi/flask/{DIGEST_A}/flask-1.0.whl"),
+            b"invalid".to_vec(),
+        ),
+    ] {
+        let mut state = CheckpointState::default();
+        state
+            .apply(vec![DriverMutation::Put { key, value }], Vec::new(), b"{}")
+            .unwrap();
+
+        assert!(checkpoint_blob_digests(&state).is_err());
+    }
 }
 
 #[test]

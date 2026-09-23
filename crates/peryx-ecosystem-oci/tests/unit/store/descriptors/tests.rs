@@ -84,6 +84,10 @@ fn test_checkpoint_blob_digests_uses_only_rows_in_the_folded_state() {
                     key: manifest_key(&format!("sha256:{}", hex('d'))),
                     value: manifest.encode().unwrap(),
                 },
+                DriverMutation::Put {
+                    key: "z-unrelated".to_owned(),
+                    value: Vec::new(),
+                },
             ],
             Vec::new(),
             b"{}",

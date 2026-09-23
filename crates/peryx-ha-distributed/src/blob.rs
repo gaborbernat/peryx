@@ -3,7 +3,7 @@
 //! serving, or committing it.
 
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -29,6 +29,11 @@ pub struct BlobRequest {
 /// Whole-blob results are digest-verified; ranged results require verification after reassembly.
 #[async_trait]
 pub trait BlobTransport: Sync {
+    /// The largest response this transport accepts. Unknown limits leave range sizing to the caller.
+    fn max_response_bytes(&self) -> Option<NonZeroU64> {
+        None
+    }
+
     /// Returns the peer's byte length only when it confirms the digest is serveable.
     ///
     /// # Errors
@@ -83,6 +88,10 @@ impl<T> CapacityLimited<T> {
 
 #[async_trait]
 impl<T: BlobTransport + Send> BlobTransport for CapacityLimited<T> {
+    fn max_response_bytes(&self) -> Option<NonZeroU64> {
+        self.inner.max_response_bytes()
+    }
+
     async fn blob_size(&self, digest: &Digest) -> Result<Option<u64>, TransportError> {
         let _permit = Arc::clone(&self.permits)
             .try_acquire_owned()
@@ -113,6 +122,10 @@ impl LoopbackBlobSource {
 
 #[async_trait]
 impl BlobTransport for LoopbackBlobSource {
+    fn max_response_bytes(&self) -> Option<NonZeroU64> {
+        Some(self.limits.max_encoded_bytes)
+    }
+
     async fn blob_size(&self, digest: &Digest) -> Result<Option<u64>, TransportError> {
         Ok(self.blobs.get(digest).map(|content| content.len() as u64))
     }

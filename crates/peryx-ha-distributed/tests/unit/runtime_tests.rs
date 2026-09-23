@@ -1642,6 +1642,52 @@ async fn replica_runtime_pulls_metadata_and_reports_worker_health() {
 }
 
 #[tokio::test]
+async fn replica_runtime_recovers_from_an_upstream_with_a_distinct_writer_identity() {
+    let primary_dir = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(primary_dir.path().join("peryx.redb")).unwrap();
+    for index in 0..4 {
+        meta.commit_driver_txn(|txn| {
+            txn.put(&format!("pypi\u{0}project-{index}"), b"display")
+                .map(|()| ((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    }
+    let manifest = meta
+        .publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
+            source: "writer-a".to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            schema_version: u32::from(crate::SCHEMA_VERSION.0),
+        })
+        .unwrap();
+    assert_eq!(meta.prune_journal_batch(usize::MAX).unwrap(), 4);
+    let server = TestServer::start(
+        primary_router(
+            "writer-a",
+            TOKEN,
+            meta,
+            BlobStore::new(primary_dir.path().join("blobs")),
+        )
+        .unwrap(),
+    )
+    .await;
+    let (dir, state) = state();
+    state.serving.meta.claim_writer_identity("writer-a").unwrap();
+    let mut runtime = runtime(&replica_config(&dir, &server.url), &state).unwrap();
+
+    assert_eq!(sync_cycle(&mut runtime).await, Some(false));
+    assert_eq!(state.serving.meta.current_serial().unwrap(), manifest.serial);
+    assert_eq!(
+        state
+            .serving
+            .meta
+            .get_driver_value("pypi\u{0}project-0")
+            .unwrap()
+            .as_deref(),
+        Some(&b"display"[..])
+    );
+}
+
+#[tokio::test]
 async fn replica_runtime_builds_rostered_services_and_beacon() {
     let (dir, mut state) = state();
     install_distributed_services(&mut state, peryx_core::TopologyMode::Ha, peryx_core::NodeRole::Replica);

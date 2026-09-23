@@ -5,7 +5,7 @@ use peryx_core::{Ecosystem, TrashRecord};
 use peryx_driver::DriverSet;
 use peryx_driver::serving::{BlobReferenceDriver, CapabilityRegistrar, EcosystemDriver, TrashDriver};
 use peryx_identity::UserId;
-use peryx_storage::meta::{MetaStore, NewRepository};
+use peryx_storage::meta::{CheckpointIdentity, MetaError, MetaStore, NewRepository};
 
 #[derive(Clone, Copy)]
 enum Capability {
@@ -101,6 +101,64 @@ fn reference_inventory_merges_live_and_trash_digests() {
         inventory.referenced().unwrap(),
         BTreeSet::from(["base".to_owned(), "trash".to_owned()])
     );
+}
+
+#[test]
+fn checkpoint_reference_scan_uses_registered_drivers() {
+    let references = drivers(References {
+        blobs: Capability::Ready,
+        trash: Capability::Absent,
+    });
+
+    assert_eq!(
+        references
+            .checkpoint_blob_digests(&peryx_storage::meta::CheckpointState::default())
+            .unwrap(),
+        BTreeSet::from(["base".to_owned()])
+    );
+}
+
+#[test]
+fn checkpoint_reference_scan_propagates_driver_failures() {
+    let references = drivers(References {
+        blobs: Capability::Failing,
+        trash: Capability::Absent,
+    });
+
+    assert_eq!(
+        references
+            .checkpoint_blob_digests(&peryx_storage::meta::CheckpointState::default())
+            .unwrap_err()
+            .to_string(),
+        "scan example blob references: references unavailable"
+    );
+}
+
+#[test]
+fn reference_inventory_keeps_blobs_required_by_the_published_checkpoint() {
+    let (_directory, meta) = store();
+    let digest = format!("{:064x}", 7);
+    meta.commit_driver_txn(|txn| {
+        txn.reference_blob(&digest, 7);
+        Ok::<_, MetaError>(((), vec![b"{}".to_vec()]))
+    })
+    .unwrap();
+    meta.publish_checkpoint(CheckpointIdentity {
+        source: "primary-a".to_owned(),
+        protocol_version: crate::PROTOCOL_VERSION,
+        schema_version: u32::from(crate::SCHEMA_VERSION.0),
+    })
+    .unwrap();
+    let inventory = super::reference_inventory(
+        drivers(References {
+            blobs: Capability::Absent,
+            trash: Capability::Absent,
+        }),
+        meta,
+        Vec::new(),
+    );
+
+    assert_eq!(inventory.referenced().unwrap(), BTreeSet::from([digest]));
 }
 
 #[test]

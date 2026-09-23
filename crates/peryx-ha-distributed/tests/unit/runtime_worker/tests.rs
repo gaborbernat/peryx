@@ -98,6 +98,9 @@ fn test_views_apply_pages_and_publish_the_frontier() {
     }]);
     assert_eq!(views.changed.load(Ordering::Relaxed), 3);
     assert_eq!(views.readable_frontier(), 7);
+    views.invalidate_checkpoint();
+    views.replace_checkpoint(9).unwrap();
+    assert_eq!(views.readable_frontier(), 9);
     views.publish_applied_frontier(11);
     assert_eq!(views.readable_frontier(), 11);
 }

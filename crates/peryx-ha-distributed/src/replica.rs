@@ -60,16 +60,19 @@ impl<'store> Replica<'store> {
         Self { meta, page_limit }
     }
 
+    fn stored_state(&self) -> Result<Option<ReplicaState>, SyncError> {
+        self.meta
+            .get_driver_value(REPLICA_STATE_KEY)?
+            .map(|raw| serde_json::from_slice(&raw).map_err(SyncError::from))
+            .transpose()
+    }
+
     /// Reads the resume cursor and verifies that it matches the local journal.
     ///
     /// # Errors
     /// Returns an error if storage fails, decoding fails, or the cursor differs from the journal serial.
     pub fn state(&self) -> Result<Option<ReplicaState>, SyncError> {
-        let state = self
-            .meta
-            .get_driver_value(REPLICA_STATE_KEY)?
-            .map(|raw| serde_json::from_slice(&raw))
-            .transpose()?;
+        let state = self.stored_state()?;
         let cursor = state.as_ref().map_or(0, |state: &ReplicaState| state.serial);
         let journal = self.meta.current_serial()?;
         if journal != cursor {
@@ -91,14 +94,16 @@ impl<'store> Replica<'store> {
     ///
     /// # Errors
     /// Returns a transport error, a store error, or the reason the transfer failed verification.
-    pub async fn install_checkpoint<T: PeerTransport>(&self, peer: &T, source: &str) -> Result<u64, SyncError> {
+    pub async fn install_checkpoint<T: PeerTransport>(&self, peer: &T) -> Result<u64, SyncError> {
         let manifest = peer.checkpoint_manifest().await.map_err(SyncError::primary)?;
         if manifest.identity.source.is_empty() {
             return Err(SyncError::EmptySource);
         }
-        if manifest.identity.source != source {
+        if let Some(state) = self.stored_state()?
+            && manifest.identity.source != state.source
+        {
             return Err(SyncError::SourceChanged {
-                expected: source.to_owned(),
+                expected: state.source,
                 actual: manifest.identity.source.clone(),
             });
         }
@@ -125,7 +130,7 @@ impl<'store> Replica<'store> {
             self.meta.begin_checkpoint_transfer(&manifest)?;
             (0, CheckpointCursor::start().generation_token(manifest.generation))
         };
-        self.stage_and_install(peer, &manifest, source, offset, cursor).await
+        self.stage_and_install(peer, &manifest, offset, cursor).await
     }
 
     /// Pulls the windows after `offset` and installs once the transfer is whole.
@@ -133,7 +138,6 @@ impl<'store> Replica<'store> {
         &self,
         peer: &T,
         manifest: &CheckpointManifest,
-        source: &str,
         offset: u64,
         cursor: String,
     ) -> Result<u64, SyncError> {
@@ -153,7 +157,7 @@ impl<'store> Replica<'store> {
             cursor = window.next;
         }
         let state = serde_json::to_vec(&ReplicaState {
-            source: source.to_owned(),
+            source: manifest.identity.source.clone(),
             serial: manifest.serial,
         })?;
         let installed = self.meta.install_staged_checkpoint(REPLICA_STATE_KEY, &state)?;

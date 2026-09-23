@@ -222,10 +222,7 @@ impl ReplicaLoop {
             let Some(peer) = self.metadata.transport(&source) else {
                 continue;
             };
-            match Replica::new(&self.meta, self.page_size)
-                .install_checkpoint(peer, &source)
-                .await
-            {
+            match Replica::new(&self.meta, self.page_size).install_checkpoint(peer).await {
                 Ok(serial) => {
                     self.views.invalidate_checkpoint();
                     tracing::info!(source, serial, "installed a checkpoint after falling below the floor");
@@ -245,14 +242,12 @@ impl ReplicaLoop {
         if self.meta.checkpoint_blob_recovery_page(self.page_size)?.is_some() {
             self.views.invalidate_checkpoint();
         }
-        let checkpoint = pull_checkpoint_blobs(
-            &self.transport,
-            &self.blobs,
-            &self.meta,
-            self.page_size,
-            REPLICA_BLOB_FETCH_CONCURRENCY,
-        )
-        .await?;
+        let sources = BlobSources {
+            simple: &self.transport,
+            delegates: &self.delegates,
+            local_dc: &self.local_dc,
+        };
+        let checkpoint = pull_checkpoint_blobs(&sources, &self.blobs, &self.meta, self.page_size).await?;
         let checkpoint_report = match checkpoint {
             Some(checkpoint) if !checkpoint.complete => return Ok(checkpoint.report),
             Some(checkpoint) => {
@@ -271,11 +266,6 @@ impl ReplicaLoop {
                 Some(checkpoint.report)
             }
             None => None,
-        };
-        let sources = BlobSources {
-            simple: &self.transport,
-            delegates: &self.delegates,
-            local_dc: &self.local_dc,
         };
         let mut committed = Vec::new();
         let pulled = pull_outstanding_with_evidence(

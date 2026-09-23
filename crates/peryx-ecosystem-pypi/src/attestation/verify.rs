@@ -77,9 +77,7 @@ impl VerificationContext {
                 let value = Utf8StringRef::from_der(extension.extn_value.as_bytes())
                     .map_err(|_| ())?
                     .to_string();
-                if actual.insert(oid, value).is_some() {
-                    return Err(());
-                }
+                actual.insert(oid, value).is_none().then_some(()).ok_or(())?;
             }
         }
         (actual == self.claims).then_some(()).ok_or(())

@@ -76,6 +76,30 @@ fn test_attestation_without_a_verification_policy_is_rejected() {
     );
 }
 
+#[test]
+fn test_signed_attestation_with_an_unsupported_version_is_rejected() {
+    let mut attestation = signed_attestation();
+    attestation["version"] = json!(2);
+
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(attestation),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::new(),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::UnsupportedVersion {
+            index: 0,
+            version: "2".to_owned(),
+        }
+    );
+}
+
 #[rstest]
 #[case::signature("envelope", "signature")]
 #[case::certificate("verification_material", "certificate")]

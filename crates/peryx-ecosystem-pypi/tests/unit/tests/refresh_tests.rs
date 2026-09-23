@@ -189,8 +189,9 @@ async fn test_serving_refresh_stale_surfaces_metadata_store_errors() {
     assert!(error.contains("read-only"));
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn test_refresh_sweep_skips_policy_denied_project() {
+/// A mirror whose policy blocks `flask`, holding a cached `flask` page fetched `age_secs` ago and fresh
+/// for `fresh_secs`.
+async fn blocked_flask_page(age_secs: i64, fresh_secs: i64) -> super::http::Harness {
     let mirror_policy = policy(|policy| {
         policy.block_resources = vec!["flask".to_owned()];
     });
@@ -207,13 +208,19 @@ async fn test_refresh_sweep_skips_policy_denied_project() {
                 last_modified: None,
                 etag: None,
                 last_serial: None,
-                fetched_at_unix: 0,
+                fetched_at_unix: h.clock.load(Ordering::Relaxed) - age_secs,
                 content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
-                fresh_secs: Some(1),
+                fresh_secs: Some(fresh_secs),
                 body: detail_json(digest.as_str(), &file_url).into_bytes(),
             },
         )
         .unwrap();
+    h
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_refresh_sweep_skips_policy_denied_project() {
+    let h = blocked_flask_page(1000, 1).await;
     let logs = LogCapture::default();
     let guard = logs.install();
 
@@ -229,6 +236,21 @@ async fn test_refresh_sweep_skips_policy_denied_project() {
     assert_eq!(field(sync, "index"), Some("pypi"));
     assert_eq!(field(sync, "resource"), Some("flask"));
     assert_eq!(field(sync, "reason"), Some("resource \"flask\" is blocked"));
+}
+
+/// A page still inside its freshness window is passed over before the sweep asks policy about it, so
+/// a blocked project whose page has not expired records no denial on every sweep.
+#[tokio::test(flavor = "current_thread")]
+async fn test_refresh_sweep_passes_over_a_fresh_page_without_consulting_policy() {
+    let h = blocked_flask_page(0, 60).await;
+    let logs = LogCapture::default();
+    let guard = logs.install();
+
+    let summary = refresh_stale_pages(&h.state.serving).await.unwrap();
+
+    drop(guard);
+    assert_eq!(summary, crate::cache::RefreshSummary::default());
+    assert_eq!(logs.security_events(), Vec::<serde_json::Value>::new());
 }
 
 #[tokio::test(flavor = "current_thread")]

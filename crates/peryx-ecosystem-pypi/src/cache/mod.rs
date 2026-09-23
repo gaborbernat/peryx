@@ -323,7 +323,7 @@ pub(crate) fn stale_servable(state: &ServingState, key: &str) -> Result<Option<C
     Ok(cached_record(state, key)?.filter(|record| servable_stale(state, record)))
 }
 
-const fn freshness(state: &ServingState, record: &CachedIndex) -> i64 {
+fn freshness(state: &ServingState, record: &CachedIndex) -> i64 {
     freshness_secs(state.ttl_secs, record.fresh_secs)
 }
 
@@ -371,13 +371,9 @@ pub(crate) fn servable_stale(state: &ServingState, record: &CachedIndex) -> bool
 /// `max-age=31536000` would otherwise pin a page for a year with no revalidation. `ttl_secs` is both
 /// the fallback when no lifetime is granted and the ceiling when too much is: a shorter upstream
 /// lifetime is honoured, a longer one is not.
-pub(crate) const fn freshness_secs(ttl_secs: i64, fresh_secs: Option<i64>) -> i64 {
-    let ttl_secs = if ttl_secs < 0 { 0 } else { ttl_secs };
-    match fresh_secs {
-        Some(granted) if granted < 0 => 0,
-        Some(granted) if granted < ttl_secs => granted,
-        _ => ttl_secs,
-    }
+pub(crate) fn freshness_secs(ttl_secs: i64, fresh_secs: Option<i64>) -> i64 {
+    let ttl_secs = ttl_secs.max(0);
+    fresh_secs.map_or(ttl_secs, |granted| granted.clamp(0, ttl_secs))
 }
 
 fn mirror_route(state: &ServingState, name: &str) -> String {

@@ -543,15 +543,6 @@ impl Default for MetadataBackfills {
     }
 }
 
-impl Drop for MetadataBackfills {
-    fn drop(&mut self) {
-        self.tasks
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .abort_all();
-    }
-}
-
 fn metadata_backfill_candidates(registrations: &[Registration]) -> Vec<MetadataBackfillCandidate> {
     registrations
         .iter()

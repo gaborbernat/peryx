@@ -216,20 +216,16 @@ async fn test_online_purge_preview_leaves_the_cached_render_untouched() {
         .state
         .serving
         .representation_key("pypi", "flask", crate::cache::SIMPLE_JSON);
-    h.state
-        .serving
-        .cache
-        .store_hot(key.clone(), bytes::Bytes::from_static(b"cached render"), i64::MAX);
-    h.state.serving.cache.hot.run_pending_tasks();
 
     cache::purge_served_project(&h.state.serving, "pypi", "flask", false)
         .await
         .unwrap();
 
-    assert!(
-        h.state.serving.hot_fresh(&key).is_some(),
-        "a dry run must not invalidate the cached render"
-    );
+    let current = h
+        .state
+        .serving
+        .representation_key("pypi", "flask", crate::cache::SIMPLE_JSON);
+    assert_eq!(current, key, "a dry run must not invalidate the cached render");
 }
 
 #[tokio::test]

@@ -265,7 +265,7 @@ _mutation-telemetry-contract:
     #!/usr/bin/env bash
     set -euo pipefail
     recipe="$(just --dry-run mutation-observed 0/1 true 1 skip 500 round-robin 2>&1)"
-    # A shard that loses its runner uploads nothing and leaves no log, so each property below is what
+    # A shard that loses its runner uploads nothing and its log expires, so each property below is what
     # a shard that survives can still report about the run-up.
     check() {
       if ! grep -Fq -- "$2" <<<"$recipe"; then
@@ -714,8 +714,8 @@ mutation-observed shard="0/1" in_place="false" jobs="2" baseline="run" timeout="
       exit 2
     fi
     # cargo-mutants creates mutants.out inside the output directory, and the shard uploads that
-    # directory, so a trace written beside it reaches the artifact. A job log does not: every log
-    # from a run whose shards executed already answers BlobNotFound.
+    # directory, so a trace written beside it reaches the artifact. The job log carries the same
+    # samples for a shard that loses its runner, but only until GitHub expires it.
     mkdir -p .tox/mutants
     trace=.tox/mutants/resource.log
     sample() {
@@ -731,12 +731,12 @@ mutation-observed shard="0/1" in_place="false" jobs="2" baseline="run" timeout="
       fi
       printf 'mutation-resource timestamp=%s progress=%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$progress"
       # The cgroup counts this job's own process tree. What starves a hosted runner is what the
-      # machine has left, and its 14 GB disk is the smallest of the three resources it publishes.
+      # machine has left.
       if [[ -r /proc/meminfo ]]; then
         printf ' memory.available=%s' "$(awk '$1 == "MemAvailable:" { print $2 * 1024 }' /proc/meminfo)"
       fi
       df -P -B1 . | awk 'NR == 2 { printf " disk.total=%s disk.available=%s", $2, $4 }'
-      for metric in memory.current memory.peak pids.current; do
+      for metric in memory.max memory.current memory.peak pids.current; do
         if [[ -r "$cgroup_root/$metric" ]]; then
           printf ' %s=%s' "$metric" "$(<"$cgroup_root/$metric")"
         fi

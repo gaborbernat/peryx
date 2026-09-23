@@ -186,7 +186,19 @@ jobs:
       - uses: $/.github/actions/setup
         with:
           tools: ${{ env.MUTATION_TOOLS }}
-      - run: just mutation-observed "$SHARD/$SHARD_COUNT" true 1 skip 500 round-robin
+      # A mutant that breaks a loop's progress (`index += 3` into `index *= 3`) can make a test allocate
+      # without bound. Run 35716947329 lost 10 shards to one: the machine ran out of memory before
+      # nextest's 180s termination, and the hosted runner shut down. A capped cgroup without swap
+      # OOM-kills the test process instead, nextest reports the failure, and cargo-mutants records the
+      # mutant as caught. Away from such mutants, no shard left the machine with under 12 GB
+      # available, and the memory outside the cap keeps the runner agent alive.
+      - run: |
+          cgroup=/sys/fs/cgroup/mutation
+          sudo mkdir "$cgroup"
+          echo 12G | sudo tee "$cgroup/memory.max"
+          echo 0 | sudo tee "$cgroup/memory.swap.max"
+          echo "$$" | sudo tee "$cgroup/cgroup.procs"
+          just mutation-observed "$SHARD/$SHARD_COUNT" true 1 skip 500 round-robin
         env:
           SHARD: ${{ matrix.shard }}
           SHARD_COUNT: ${{ needs.mutation-baseline-build.outputs.shard_count }}

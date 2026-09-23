@@ -165,6 +165,7 @@ async fn test_fetch_applies_the_streaming_byte_cap_before_decode() {
 #[tokio::test]
 async fn test_checkpoint_manifest_accepts_a_body_exactly_at_its_byte_cap() {
     let manifest = CheckpointManifest {
+        generation: 1,
         identity: CheckpointIdentity {
             source: "writer".to_owned(),
             protocol_version: PROTOCOL_VERSION,

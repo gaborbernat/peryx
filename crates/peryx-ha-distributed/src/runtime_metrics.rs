@@ -38,7 +38,7 @@ impl SyncErrorClass {
 
     const fn of(error: &SyncError) -> Self {
         match error {
-            SyncError::UnsupportedVersion { .. } => Self::Schema,
+            SyncError::UnsupportedVersion { .. } | SyncError::UnsupportedCheckpointSchema { .. } => Self::Schema,
             SyncError::Primary(_) => Self::Transport,
             _ => Self::Apply,
         }

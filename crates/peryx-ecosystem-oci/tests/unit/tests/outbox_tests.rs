@@ -224,7 +224,19 @@ fn test_none_mode_publish_records_no_outbox_entry() {
 fn test_blob_membership_records_a_mount_operation() {
     let (_dir, meta) = store();
 
-    quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, None, true).unwrap();
+    quota::commit_blob_membership(
+        &meta,
+        "store",
+        "app",
+        quota::BlobDescriptor {
+            digest: "sha256:layer",
+            bytes: 5,
+        },
+        None,
+        None,
+        true,
+    )
+    .unwrap();
 
     assert_eq!(
         only_op(&meta),
@@ -240,7 +252,19 @@ fn test_blob_membership_records_a_mount_operation() {
 #[test]
 fn test_blob_deletion_records_an_unmount_operation() {
     let (_dir, meta) = store();
-    quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, None, false).unwrap();
+    quota::commit_blob_membership(
+        &meta,
+        "store",
+        "app",
+        quota::BlobDescriptor {
+            digest: "sha256:layer",
+            bytes: 5,
+        },
+        None,
+        None,
+        false,
+    )
+    .unwrap();
 
     assert!(quota::release_blob_membership(&meta, "store", "app", "sha256:layer", None, true).unwrap());
 
@@ -268,7 +292,19 @@ fn test_deleting_an_absent_blob_membership_records_no_outbox_entry() {
 #[test]
 fn test_none_mode_blob_deletion_records_no_outbox_entry() {
     let (_dir, meta) = store();
-    quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, None, false).unwrap();
+    quota::commit_blob_membership(
+        &meta,
+        "store",
+        "app",
+        quota::BlobDescriptor {
+            digest: "sha256:layer",
+            bytes: 5,
+        },
+        None,
+        None,
+        false,
+    )
+    .unwrap();
 
     assert!(quota::release_blob_membership(&meta, "store", "app", "sha256:layer", None, false).unwrap());
 
@@ -385,7 +421,18 @@ fn test_aborted_transaction_leaves_no_row_or_outbox_entry() {
         .unwrap();
     meta.release_quota_reservation(reservation.id).unwrap();
 
-    let outcome = quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", Some(reservation), None, true);
+    let outcome = quota::commit_blob_membership(
+        &meta,
+        "store",
+        "app",
+        quota::BlobDescriptor {
+            digest: "sha256:layer",
+            bytes: 5,
+        },
+        Some(reservation),
+        None,
+        true,
+    );
 
     assert!(outcome.is_err(), "an unavailable reservation aborts the commit");
     assert!(
@@ -401,7 +448,19 @@ fn test_journal_survives_a_restart() {
     let path = dir.path().join("peryx.redb");
     {
         let meta = MetaStore::open(&path).unwrap();
-        quota::commit_blob_membership(&meta, "store", "app", "sha256:layer", None, None, true).unwrap();
+        quota::commit_blob_membership(
+            &meta,
+            "store",
+            "app",
+            quota::BlobDescriptor {
+                digest: "sha256:layer",
+                bytes: 5,
+            },
+            None,
+            None,
+            true,
+        )
+        .unwrap();
     }
 
     let meta = MetaStore::open(&path).unwrap();

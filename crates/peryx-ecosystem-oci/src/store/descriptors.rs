@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 
 use peryx_storage::blob::Digest;
-use peryx_storage::meta::{MetaError, MetaStore};
+use peryx_storage::meta::{CheckpointState, MetaError, MetaStore};
 
 use super::{BLOB_MEMBERSHIP_PREFIX, MANIFEST_PREFIX, Manifest, ManifestSchema, ManifestSchemaError};
 
@@ -122,6 +122,27 @@ pub fn referenced_blob_digests(meta: &MetaStore) -> Result<BTreeSet<String>, Met
         }
     }
     Ok(digests)
+}
+
+#[must_use]
+pub fn checkpoint_blob_digests(state: &CheckpointState) -> BTreeSet<String> {
+    let mut digests = BTreeSet::new();
+    for (key, value) in state.rows() {
+        if let Some(key) = key.strip_prefix(BLOB_MEMBERSHIP_PREFIX) {
+            if let Some(storage) = key.rsplit_once('\u{0}').and_then(|(_, digest)| blob_digest(digest)) {
+                digests.insert(storage.as_str().to_owned());
+            }
+        } else if key.starts_with(MANIFEST_PREFIX)
+            && let Some(manifest) = Manifest::decode(value)
+        {
+            for blob in manifest_descriptors(&manifest.bytes).1 {
+                if let Some(storage) = blob_digest(&blob) {
+                    digests.insert(storage.as_str().to_owned());
+                }
+            }
+        }
+    }
+    digests
 }
 
 #[cfg(test)]

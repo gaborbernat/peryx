@@ -16,7 +16,7 @@ use crate::blob_availability::{BlobAvailability, ReferencedBlob, blob_availabili
 use crate::blob_fetch::{FetchOutcome, FetchReport, fetch_missing};
 use crate::blob_placement::{FetchPlan, plan_blob_fetch};
 use crate::blob_pull::{ChunkFailure, ChunkUnavailable};
-use crate::blob_stage::{DEFAULT_RANGED_PULL_BUDGET, StagedPullError, pull_blob_staged};
+use crate::blob_stage::{DEFAULT_RANGED_PULL_BUDGET, RangedPullBudget, StagedPullError, pull_blob_staged};
 use crate::error::SyncError;
 use crate::protocol::{PlacementAvailability, PlacementDescriptor};
 use crate::{TransportError, mark_artifact_local, record_artifact_placement};
@@ -30,6 +30,131 @@ pub struct BlobPlaneReport {
     pub fetched: usize,
     /// Blobs left for a later pass after retryable losses.
     pub pending: usize,
+}
+
+pub struct CheckpointBlobRecovery {
+    pub report: BlobPlaneReport,
+    pub complete: bool,
+    pub after: String,
+    pub serial: u64,
+}
+
+/// Recovers one bounded page of an installed checkpoint before the journal tail is eligible.
+///
+/// # Errors
+/// Returns a malformed digest, fetch, blob, placement, or store error.
+pub async fn pull_checkpoint_blobs<T: BlobTransport>(
+    sources: &BlobSources<'_, T>,
+    blobs: &BlobStorage,
+    meta: &MetaStore,
+    batch: NonZeroUsize,
+) -> Result<Option<CheckpointBlobRecovery>, SyncError> {
+    let Some(page) = meta.checkpoint_blob_recovery_page(batch)? else {
+        return Ok(None);
+    };
+    let referenced = page
+        .references
+        .iter()
+        .map(|reference| {
+            Digest::from_hex(&reference.sha256)
+                .map(|digest| (digest, reference.size))
+                .ok_or_else(|| SyncError::InvalidDigest(reference.sha256.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let report = pull_checkpoint_referenced(sources, blobs, meta, &referenced).await?;
+    if report.pending == 0 && page.next.is_some() {
+        meta.advance_checkpoint_blob_recovery(&page.after, page.next.as_deref(), BLOB_VIEW, page.serial)?;
+    }
+    Ok(Some(CheckpointBlobRecovery {
+        complete: report.pending == 0 && page.next.is_none(),
+        report,
+        after: page.after,
+        serial: page.serial,
+    }))
+}
+
+async fn pull_checkpoint_referenced<T: BlobTransport>(
+    sources: &BlobSources<'_, T>,
+    blobs: &BlobStorage,
+    meta: &MetaStore,
+    referenced: &[(Digest, u64)],
+) -> Result<BlobPlaneReport, SyncError> {
+    let mut report = BlobPlaneReport { fetched: 0, pending: 0 };
+    let mut fallback: Vec<String> = sources.delegates.keys().cloned().collect();
+    fallback.sort_unstable();
+    for (digest, size) in referenced {
+        if blobs.head(digest).await?.is_some() {
+            repair_local_placement(meta, digest)?;
+            continue;
+        }
+        let mut route = Vec::new();
+        if let FetchPlan::Sources(ordered) = plan_blob_fetch(&placement_descriptors(meta, digest)?, sources.local_dc) {
+            for descriptor in ordered {
+                if sources.delegates.contains_key(&descriptor.data_center) && !route.contains(&descriptor.data_center) {
+                    route.push(descriptor.data_center);
+                }
+            }
+        }
+        for data_center in &fallback {
+            if !route.contains(data_center) {
+                route.push(data_center.clone());
+            }
+        }
+        let mut transports: Vec<&T> = route
+            .iter()
+            .map(|data_center| &sources.delegates[data_center])
+            .collect();
+        transports.push(sources.simple);
+        let total_length = usize::try_from(*size).expect("a blob fits addressable memory");
+        match pull_blob_staged(
+            blobs,
+            &transports,
+            digest,
+            total_length,
+            None,
+            ranged_budget(&transports),
+        )
+        .await
+        {
+            Ok(_) => {
+                record_artifact_placement(meta, digest.as_str(), ArtifactSource::Proxy, true)?;
+                report.fetched += 1;
+            }
+            Err(StagedPullError::Stage(error)) => return Err(SyncError::Blob(error)),
+            Err(StagedPullError::DigestMismatch { .. }) => {
+                return Err(SyncError::BlobFetchFailed {
+                    reason: "blob_digest_mismatch",
+                    digest: digest.as_str().to_owned(),
+                });
+            }
+            Err(StagedPullError::RangeUnavailable(unavailable)) => {
+                if let Some(reason) = checkpoint_terminal_range_reason(&unavailable) {
+                    return Err(SyncError::BlobFetchFailed {
+                        reason,
+                        digest: digest.as_str().to_owned(),
+                    });
+                }
+                report.pending += 1;
+            }
+        }
+    }
+    Ok(report)
+}
+
+fn ranged_budget<T: BlobTransport>(sources: &[&T]) -> RangedPullBudget {
+    let range_bytes = sources
+        .iter()
+        .filter_map(|source| source.max_response_bytes())
+        .filter_map(|limit| usize::try_from(limit.get()).ok())
+        .min()
+        .map_or(DEFAULT_RANGED_PULL_BUDGET.range_bytes, |limit| {
+            NonZeroUsize::new(limit.min(DEFAULT_RANGED_PULL_BUDGET.range_bytes.get()))
+                .expect("transport response limits are non-zero")
+        });
+    RangedPullBudget {
+        range_bytes,
+        ..DEFAULT_RANGED_PULL_BUDGET
+    }
 }
 
 /// Repairs placement records after an interrupted commit and fetches missing blobs.
@@ -306,6 +431,20 @@ async fn pull_one_ranged<T: BlobTransport>(
     })
 }
 
+fn checkpoint_terminal_range_reason(unavailable: &ChunkUnavailable) -> Option<&'static str> {
+    if unavailable
+        .failures
+        .iter()
+        .any(|(_, failure)| matches!(failure, ChunkFailure::Transport(error) if error.is_retryable()))
+    {
+        return None;
+    }
+    unavailable
+        .failures
+        .iter()
+        .find_map(|(_, failure)| terminal_failure_reason(failure))
+}
+
 /// A source that failed at the transport may recover, so the blob stays pending. A source that served the
 /// wrong length or wrong chunk bytes will serve them again, so the pass fails closed.
 fn terminal_range_reason(unavailable: &ChunkUnavailable) -> Option<&'static str> {
@@ -313,11 +452,18 @@ fn terminal_range_reason(unavailable: &ChunkUnavailable) -> Option<&'static str>
     for (_, failure) in &unavailable.failures {
         match failure {
             ChunkFailure::Transport(_) => return None,
-            ChunkFailure::WrongLength { .. } => reason = Some("range_length_mismatch"),
-            ChunkFailure::DigestMismatch => reason = Some("chunk_digest_mismatch"),
+            failure => reason = terminal_failure_reason(failure),
         }
     }
     reason
+}
+
+const fn terminal_failure_reason(failure: &ChunkFailure) -> Option<&'static str> {
+    match failure {
+        ChunkFailure::Transport(error) => error.terminal_reason(),
+        ChunkFailure::WrongLength { .. } => Some("range_length_mismatch"),
+        ChunkFailure::DigestMismatch => Some("chunk_digest_mismatch"),
+    }
 }
 
 /// Omits unparseable digests from pulls; [`advance_blob_frontier`] still holds the frontier below them.

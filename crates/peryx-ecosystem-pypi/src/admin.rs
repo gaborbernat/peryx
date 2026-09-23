@@ -10,10 +10,11 @@ use peryx_driver::serving::{CachePage, MetadataRepairCounts, PurgeReport};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{PolicyAction, PolicyDenial};
 use peryx_storage::blob::{BlobStorage, Digest};
-use peryx_storage::meta::{MetaStore, RepairScan};
+use peryx_storage::meta::{CheckpointState, MetaStore, RepairScan};
 
 use crate::store::PypiStore as _;
 use crate::store::{AuditedIndex, CachedIndex, MetadataRepairFinding, PypiRecords, SummaryDefect};
+use crate::store::{FILE_PREFIX, METADATA_PREFIX, PROVENANCE_PREFIX, PUBLICATION_PREFIX, UPLOAD_PREFIX};
 
 use crate::policy::PypiPolicy as _;
 use crate::upload::Uploaded;
@@ -74,6 +75,50 @@ pub fn referenced_blob_digests(meta: &MetaStore) -> Result<BTreeSet<String>, Str
         Ok(())
     })
     .map_err(crate::error_message)?;
+    Ok(digests)
+}
+
+pub fn checkpoint_blob_digests(state: &CheckpointState) -> Result<BTreeSet<String>, String> {
+    let mut digests = BTreeSet::new();
+    for (key, raw) in state.rows() {
+        if let Some(key) = key.strip_prefix(FILE_PREFIX) {
+            let Some((index, normalized, digest)) = crate::store::split_file_source_key(key) else {
+                return Err(format!("invalid file URL record {key:?}"));
+            };
+            let value = std::str::from_utf8(raw).map_err(crate::error_message)?;
+            if Digest::from_hex(digest).is_none() || split_pair(value).is_none() {
+                return Err(format!(
+                    "invalid file URL record for {index}/{normalized} digest {digest:?}"
+                ));
+            }
+            digests.insert(digest.to_owned());
+        } else if let Some(digest) = key.strip_prefix(METADATA_PREFIX) {
+            let metadata = std::str::from_utf8(raw).map_err(crate::error_message)?;
+            if Digest::from_hex(digest).is_none() || Digest::from_hex(metadata).is_none() {
+                return Err(format!("invalid PEP 658 metadata record {digest:?}"));
+            }
+            digests.insert(digest.to_owned());
+            digests.insert(metadata.to_owned());
+        } else if key.starts_with(PUBLICATION_PREFIX) {
+            let value = std::str::from_utf8(raw).map_err(crate::error_message)?;
+            match claimed_sidecar(value) {
+                ClaimedSidecar::Digest(digest) => {
+                    digests.insert(digest.to_owned());
+                }
+                ClaimedSidecar::None => {}
+                ClaimedSidecar::Unreadable => return Err(format!("invalid PEP 658 publication record {key:?}")),
+            }
+        } else if key.starts_with(UPLOAD_PREFIX) {
+            for digest in upload_digests(raw).ok_or_else(|| format!("invalid upload record {key}"))? {
+                digests.insert(digest.as_str().to_owned());
+            }
+        } else if key.starts_with(PROVENANCE_PREFIX) {
+            let value = std::str::from_utf8(raw).map_err(crate::error_message)?;
+            let digest =
+                valid_provenance(value).ok_or_else(|| format!("invalid provenance record for publication {key:?}"))?;
+            digests.insert(digest.to_owned());
+        }
+    }
     Ok(digests)
 }
 

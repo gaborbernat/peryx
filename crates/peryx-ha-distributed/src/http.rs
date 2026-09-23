@@ -312,20 +312,28 @@ async fn serve_checkpoint_chunk(
     if !authorized(&headers, &state.token) {
         return unauthorized();
     }
-    let Some(cursor) = CheckpointCursor::from_token(query.cursor.as_deref().unwrap_or("r")) else {
+    let Some((generation, cursor)) = query
+        .cursor
+        .as_deref()
+        .and_then(CheckpointCursor::from_generation_token)
+    else {
         return (StatusCode::BAD_REQUEST, "unreadable checkpoint cursor").into_response();
     };
     let meta = state.meta.clone();
     let built = state
         .change_pages
-        .try_run(move |_| meta.checkpoint_chunk(&cursor, MAX_CHECKPOINT_CHUNK_BYTES))
+        .try_run(move |_| meta.checkpoint_chunk_at_generation(generation, &cursor, MAX_CHECKPOINT_CHUNK_BYTES))
         .await;
     match built {
         None => change_pages_at_capacity(),
         Some(Err(_) | Ok(Err(_))) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         Some(Ok(Ok(chunk))) => {
             // A tag, a colon and hex are all a token holds, so it is always a legal header value.
-            let cursor = chunk.next.token().parse().expect("a cursor token is header-safe");
+            let cursor = chunk
+                .next
+                .generation_token(generation)
+                .parse()
+                .expect("a cursor token is header-safe");
             let mut response = ([(header::CONTENT_TYPE, "application/octet-stream")], chunk.bytes).into_response();
             response.headers_mut().insert(CHECKPOINT_CURSOR_HEADER, cursor);
             response

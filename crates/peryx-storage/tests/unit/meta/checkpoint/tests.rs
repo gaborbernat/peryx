@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr as _;
 
 use peryx_identity::{ArtifactDigest, RevocationReason, UserId};
@@ -10,6 +10,7 @@ use crate::meta::{
 };
 
 const DIGEST_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+const OTHER_DIGEST_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000002";
 
 fn identity() -> CheckpointIdentity {
     CheckpointIdentity {
@@ -74,6 +75,21 @@ fn test_a_fold_stops_at_the_serial_it_was_asked_for() {
     put(&store, "alpha", b"two");
 
     assert_eq!(store.folded_state(through).unwrap().rows(), &rows(&[("alpha", b"one")]),);
+}
+
+#[test]
+fn test_checkpoint_blob_digests_report_the_published_inventory() {
+    let store = store();
+    commit(&store, |txn| {
+        txn.reference_blob(DIGEST_HEX, 7);
+        Ok(())
+    });
+    store.publish_checkpoint(identity()).unwrap();
+
+    assert_eq!(
+        store.checkpoint_blob_digests().unwrap(),
+        BTreeSet::from([DIGEST_HEX.to_owned()])
+    );
 }
 
 #[test]
@@ -185,9 +201,99 @@ fn test_an_incremental_fold_over_a_published_checkpoint_equals_a_fold_from_empty
     let incremental = store.publish_checkpoint(identity()).unwrap();
 
     let from_empty = folded(&store);
+    let mut expected = from_empty.manifest(identity(), incremental.serial);
+    expected.generation = incremental.generation;
     assert!(first.serial < incremental.serial);
     assert_eq!(store.checkpoint().unwrap().unwrap().state, from_empty);
-    assert_eq!(incremental, from_empty.manifest(identity(), incremental.serial));
+    assert_eq!(incremental, expected);
+}
+
+#[test]
+fn test_publication_keeps_only_blob_references_still_reachable_from_rows() {
+    let store = store();
+    commit(&store, |txn| {
+        txn.put("artifact/live", b"one")?;
+        txn.reference_blob(DIGEST_HEX, 3);
+        txn.reference_blob(OTHER_DIGEST_HEX, 4);
+        Ok(())
+    });
+
+    let manifest = store
+        .publish_checkpoint_with(identity(), |_| Ok(BTreeSet::from([DIGEST_HEX.to_owned()])))
+        .unwrap();
+
+    assert_eq!(manifest.blobs, 1);
+    assert_eq!(
+        store.checkpoint().unwrap().unwrap().state.blobs(),
+        &BTreeSet::from([DriverBlobReference {
+            sha256: DIGEST_HEX.to_owned(),
+            size: 3,
+        }])
+    );
+}
+
+#[test]
+fn test_republication_drops_a_blob_no_live_row_references() {
+    let store = store();
+    commit(&store, |txn| {
+        txn.put("artifact/live", b"one")?;
+        txn.reference_blob(DIGEST_HEX, 3);
+        Ok(())
+    });
+    store
+        .publish_checkpoint_with(identity(), |_| Ok(BTreeSet::from([DIGEST_HEX.to_owned()])))
+        .unwrap();
+    delete(&store, "artifact/live");
+
+    let manifest = store
+        .publish_checkpoint_with(identity(), |_| Ok(BTreeSet::new()))
+        .unwrap();
+
+    assert_eq!(manifest.blobs, 0);
+    assert!(store.checkpoint().unwrap().unwrap().state.blobs().is_empty());
+}
+
+#[test]
+fn test_an_unjournaled_live_blob_refuses_publication_without_moving_the_floor() {
+    let store = store();
+    put(&store, "artifact/live", b"one");
+    let previous = store.publish_checkpoint(identity()).unwrap();
+    let floor = store.journal_floor().unwrap();
+    put(&store, "artifact/second", b"two");
+
+    let error = store
+        .publish_checkpoint_with(identity(), |_| Ok(BTreeSet::from([DIGEST_HEX.to_owned()])))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        MetaError::CheckpointBlobSizesMissing { digests } if digests == [DIGEST_HEX]
+    ));
+    assert_eq!(store.checkpoint_manifest().unwrap(), Some(previous));
+    assert_eq!(store.journal_floor().unwrap(), floor);
+}
+
+#[test]
+fn test_legacy_blob_sizes_resolve_across_multiple_batches() {
+    let store = store();
+    let digests = (0..=256).map(|index| format!("{index:064x}")).collect::<BTreeSet<_>>();
+    let mut sizes = digests
+        .iter()
+        .take(256)
+        .map(|digest| (digest.clone(), 1))
+        .collect::<BTreeMap<_, _>>();
+
+    let error = store
+        .publish_checkpoint_with_sizes(identity(), &sizes, |_| Ok(digests.clone()))
+        .unwrap_err();
+
+    let missing = digests.last().unwrap();
+    assert!(matches!(error, MetaError::CheckpointBlobSizesMissing { digests } if digests == [missing.clone()]));
+    sizes.insert(missing.clone(), 1);
+    let manifest = store
+        .publish_checkpoint_with_sizes(identity(), &sizes, |_| Ok(digests.clone()))
+        .unwrap();
+    assert_eq!(manifest.blobs, 257);
 }
 
 #[test]
@@ -220,6 +326,34 @@ fn test_nothing_is_published_before_the_first_publication() {
 
     assert_eq!(store.checkpoint_manifest().unwrap(), None);
     assert_eq!(store.checkpoint().unwrap(), None);
+}
+
+#[test]
+fn test_an_uninitialized_database_has_no_checkpoint_or_journal_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    drop(redb::Database::create(&path).unwrap());
+    let store = MetaStore::open_existing(path).unwrap();
+
+    assert_eq!(store.checkpoint_manifest().unwrap(), None);
+    assert_eq!(store.journal_floor().unwrap(), None);
+}
+
+#[test]
+fn test_a_legacy_journal_uses_its_first_serial_as_the_floor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peryx.redb");
+    let database = redb::Database::create(&path).unwrap();
+    let txn = database.begin_write().unwrap();
+    txn.open_table(crate::meta::JOURNAL)
+        .unwrap()
+        .insert(7, b"entry".as_slice())
+        .unwrap();
+    txn.commit().unwrap();
+    drop(database);
+    let store = MetaStore::open_existing(path).unwrap();
+
+    assert_eq!(store.journal_floor().unwrap(), Some(7));
 }
 
 #[test]
@@ -351,4 +485,27 @@ fn test_the_manifest_sizes_the_state_a_later_transfer_has_to_carry() {
         (manifest.rows, manifest.bytes),
         (64, 64 * (ROW_OVERHEAD_BYTES + 4096) + key_bytes),
     );
+}
+
+#[test]
+fn test_checkpoint_failure_never_separates_the_manifest_from_its_floor() {
+    let mut failures = 0;
+    for fail_after in 0..256 {
+        let (store, inner, fault) = initialized();
+        put(&store, "alpha", b"one");
+        let previous = store.publish_checkpoint(identity()).unwrap();
+        put(&store, "alpha", b"two");
+        fault.arm(fail_after);
+        if store.publish_checkpoint(identity()).is_err() {
+            failures += 1;
+            fault.disable();
+            drop(store);
+            let recovered = crate::meta::fault::reopen(&inner, &fault);
+            let manifest = recovered.checkpoint_manifest().unwrap().unwrap();
+
+            assert!(manifest == previous || manifest.serial == 2);
+            assert_eq!(recovered.journal_floor().unwrap(), Some(manifest.serial + 1));
+        }
+    }
+    assert!(failures > 0);
 }

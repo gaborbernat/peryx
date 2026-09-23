@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use peryx_driver::AppState;
+use peryx_driver::{AppState, DriverSet};
 use peryx_ha::{BackendId, ObservedFrontier};
 use peryx_ha::{
     ClusterStatus, ControlActor, ControlAuthenticationError, ControlAuthorizer, ControlPermission, HomeClaim,
     OwnershipAuthority, OwnershipError, ReclamationFrontiers, ReferenceInventory, TransferOutcome,
 };
 use peryx_storage::blob::{BlobStorage, BlobStore};
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{CheckpointIdentity, MetaStore};
 use tower::ServiceExt as _;
 
 use super::*;
@@ -289,6 +289,28 @@ fn service_installation_applies_the_distributed_contract() {
     assert_eq!(state.serving.availability_topology().mode, peryx_core::TopologyMode::Dc);
     assert_eq!(state.http_routes().count(), 1);
     assert!(state.serving.authority_drainer().is_some());
+}
+
+#[test]
+fn reference_inventory_includes_checkpoint_blobs() {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let digest = "a".repeat(64);
+    meta.commit_driver_txn(|txn| {
+        txn.reference_blob(&digest, 1);
+        Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"created".to_vec()]))
+    })
+    .unwrap();
+    meta.publish_checkpoint(CheckpointIdentity {
+        source: "writer-a".to_owned(),
+        protocol_version: crate::PROTOCOL_VERSION,
+        schema_version: u32::from(crate::SCHEMA_VERSION.0),
+    })
+    .unwrap();
+
+    let references = reference_inventory(DriverSet::default(), meta, Vec::new());
+
+    assert_eq!(references.referenced().unwrap(), BTreeSet::from([digest]));
 }
 
 #[test]

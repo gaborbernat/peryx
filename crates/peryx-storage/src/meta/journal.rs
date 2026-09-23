@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 pub use peryx_core::JournalCommit;
 
 use super::error::MetaError;
-use super::{JOURNAL, JOURNAL_BLOBS, JOURNAL_MUTATIONS, MetaStore, SERIAL, SERIAL_KEY};
+use super::{JOURNAL, JOURNAL_BLOBS, JOURNAL_MUTATIONS, JOURNAL_RETENTION, MetaStore, SERIAL, SERIAL_KEY};
+
+pub(super) const RETAINED_FLOOR_KEY: &str = "floor";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverCommit<T> {
@@ -92,16 +94,34 @@ impl MetaStore {
         &self,
         after: u64,
         limit: usize,
-        mut visit: impl FnMut(JournalRecord) -> ControlFlow<()>,
+        visit: impl FnMut(JournalRecord) -> ControlFlow<()>,
     ) -> Result<u64, MetaError> {
+        self.visit_retained_journal_page(after, limit, visit)
+            .map(|(current_serial, _)| current_serial)
+    }
+
+    /// Decodes a page with its head and retained floor from one snapshot.
+    ///
+    /// # Errors
+    /// Returns a store error if the read fails.
+    pub fn visit_retained_journal_page(
+        &self,
+        after: u64,
+        limit: usize,
+        mut visit: impl FnMut(JournalRecord) -> ControlFlow<()>,
+    ) -> Result<(u64, Option<u64>), MetaError> {
         let txn = self.db.begin_read()?;
         let current_serial = txn
             .open_table(SERIAL)?
             .get(SERIAL_KEY)?
             .map_or(0, |value| value.value());
+        let retained_floor = match super::open_optional_table(&txn, JOURNAL_RETENTION)? {
+            Some(table) => table.get(RETAINED_FLOOR_KEY)?.map(|floor| floor.value()),
+            None => None,
+        };
         let table = match txn.open_table(JOURNAL) {
             Ok(table) => table,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(current_serial),
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok((current_serial, retained_floor)),
             Err(error) => return Err(error.into()),
         };
         let mutations = match txn.open_table(JOURNAL_MUTATIONS) {
@@ -139,20 +159,27 @@ impl MetaStore {
                 break;
             }
         }
-        Ok(current_serial)
+        let retained_floor = match retained_floor {
+            Some(floor) => Some(floor),
+            None => table.first()?.map(|(serial, _)| serial.value()),
+        };
+        Ok((current_serial, retained_floor))
     }
 
-    /// The lowest serial the journal still holds, or `None` when it holds nothing.
+    /// The first serial incremental readers may request.
     ///
     /// A reader whose cursor sits below this has lost the records it would need to catch up, which is
-    /// what makes a checkpoint the only way forward for it. Reading what the journal holds rather than a
-    /// recorded floor keeps this true the moment retention starts removing rows, and true today, when
-    /// nothing removes any.
+    /// what makes a checkpoint the only way forward for it.
     ///
     /// # Errors
     /// Returns a store error if the read fails.
     pub fn journal_floor(&self) -> Result<Option<u64>, MetaError> {
         let txn = self.db.begin_read()?;
+        if let Some(table) = super::open_optional_table(&txn, JOURNAL_RETENTION)?
+            && let Some(floor) = table.get(RETAINED_FLOOR_KEY)?
+        {
+            return Ok(Some(floor.value()));
+        }
         let Some(table) = super::open_optional_table(&txn, JOURNAL)? else {
             return Ok(None);
         };
@@ -173,6 +200,47 @@ impl MetaStore {
             current_serial,
             records,
         })
+    }
+
+    /// Removes at most `limit` journal records below the retained floor.
+    ///
+    /// Payload, mutation, and blob rows are removed together. A later call resumes from the first
+    /// retained row left behind.
+    ///
+    /// # Errors
+    /// Returns a store error if the read, write, or commit fails.
+    pub fn prune_journal_batch(&self, limit: usize) -> Result<usize, MetaError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let txn = self.db.begin_write()?;
+        let floor = txn
+            .open_table(JOURNAL_RETENTION)?
+            .get(RETAINED_FLOOR_KEY)?
+            .map_or(1, |floor| floor.value());
+        let serials = {
+            let journal = txn.open_table(JOURNAL)?;
+            journal
+                .range(..floor)?
+                .take(limit)
+                .map(|entry| entry.map(|(serial, _)| serial.value()))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        if serials.is_empty() {
+            return Ok(0);
+        }
+        {
+            let mut journal = txn.open_table(JOURNAL)?;
+            let mut mutations = txn.open_table(JOURNAL_MUTATIONS)?;
+            let mut blobs = txn.open_table(JOURNAL_BLOBS)?;
+            for serial in &serials {
+                journal.remove(*serial)?;
+                mutations.remove(*serial)?;
+                blobs.remove(*serial)?;
+            }
+        }
+        txn.commit()?;
+        Ok(serials.len())
     }
 
     /// # Errors

@@ -1,5 +1,5 @@
 use peryx_ecosystem_oci::OciMutation;
-use peryx_storage::meta::{MetaError, MetaStore};
+use peryx_storage::meta::{CheckpointIdentity, MetaError, MetaStore};
 use rstest::rstest;
 
 use super::{
@@ -86,13 +86,44 @@ fn test_read_journal_entries_passes_the_cursor_and_limit() {
 }
 
 #[test]
+fn test_read_journal_entries_rejects_a_cursor_below_the_retained_floor() {
+    let (_dir, store) = store();
+    store
+        .commit_driver_txn(|_| Ok::<_, MetaError>(((), vec![value("first"), value("second"), value("third")])))
+        .unwrap();
+    store
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-a".to_owned(),
+            protocol_version: 1,
+            schema_version: 1,
+        })
+        .unwrap();
+    store
+        .commit_driver_txn(|_| Ok::<_, MetaError>(((), vec![value("fourth")])))
+        .unwrap();
+    assert_eq!(store.prune_journal_batch(usize::MAX).unwrap(), 3);
+
+    assert!(matches!(
+        read_journal_entries(&store, 1, 10),
+        Err(ChangelogReadError::CursorBelowFloor { after: 1 })
+    ));
+    assert_eq!(
+        read_journal_entries(&store, 3, 10).unwrap().entries[0].project,
+        "fourth"
+    );
+}
+
+#[test]
 fn test_read_journal_entries_rejects_an_invalid_value() {
     let (_dir, store) = store();
     store
         .commit_driver_txn(|_| Ok::<_, MetaError>(((), vec![b"{".to_vec()])))
         .unwrap();
 
-    assert!(matches!(read_journal_entries(&store, 0, 10), Err(MetaError::Decode(_))));
+    assert!(matches!(
+        read_journal_entries(&store, 0, 10),
+        Err(ChangelogReadError::Store(MetaError::Decode(_)))
+    ));
 }
 
 #[test]
@@ -340,7 +371,10 @@ fn test_read_journal_entries_rejects_a_payload_claiming_the_pypi_tag(#[case] pay
         .commit_driver_txn(|_| Ok::<_, MetaError>(((), vec![payload])))
         .unwrap();
 
-    assert!(matches!(read_journal_entries(&store, 0, 10), Err(MetaError::Decode(_))));
+    assert!(matches!(
+        read_journal_entries(&store, 0, 10),
+        Err(ChangelogReadError::Store(MetaError::Decode(_)))
+    ));
 }
 
 #[test]

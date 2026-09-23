@@ -81,7 +81,7 @@ pub fn build_change_page(
     let mut used = CHANGE_PAGE_ENVELOPE_BYTES;
     let mut oversized = None;
     let mut encoded = Vec::new();
-    let walked = meta.visit_journal_page(after, limit, |record| {
+    let walked = meta.visit_retained_journal_page(after, limit, |record| {
         if cancellation.is_cancelled() {
             return ControlFlow::Break(());
         }
@@ -105,10 +105,7 @@ pub fn build_change_page(
         changes.push(change);
         ControlFlow::Continue(())
     });
-    // The floor read joins the walk's result, so one arm answers a store this node cannot read at all
-    // rather than two that differ only in which read noticed.
-    let Ok((current_serial, floor)) = walked.and_then(|serial| meta.journal_floor().map(|floor| (serial, floor)))
-    else {
+    let Ok((current_serial, floor)) = walked else {
         return ChangePageBody::Failed;
     };
     if below_floor(after, current_serial, floor) {

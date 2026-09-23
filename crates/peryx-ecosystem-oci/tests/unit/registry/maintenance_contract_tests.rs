@@ -60,6 +60,12 @@ fn registry_exposes_storage_contracts() {
     assert!(registry.referenced_blob_digests(&meta).unwrap().is_empty());
     assert!(
         registry
+            .checkpoint_blob_digests(&peryx_storage::meta::CheckpointState::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        registry
             .trash_records(&meta, &["private".to_owned()])
             .unwrap()
             .is_empty()

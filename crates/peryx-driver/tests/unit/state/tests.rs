@@ -217,6 +217,14 @@ struct CountingDocs {
     built: AtomicUsize,
 }
 
+struct FailingDocs;
+
+impl SearchDocumentProvider for FailingDocs {
+    fn documents(&self, _ctx: &IndexerCtx<'_>) -> Result<Vec<SearchDocument>, SearchError> {
+        Err(SearchError::Indexer("search unavailable".to_owned()))
+    }
+}
+
 impl CountingDocs {
     fn new(resources: &[&str]) -> Self {
         Self {
@@ -419,6 +427,61 @@ fn test_an_empty_blob_commit_rebuilds_nothing() {
 
     assert_eq!(published_documents(&state), 3);
     assert_eq!(docs.built.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn test_checkpoint_replacement_rebuilds_search_and_drops_response_caches() {
+    let (_dir, state, docs) = indexed_state(&["alpha", "beta"], None);
+    state.serving.meta.next_serial().unwrap();
+    state
+        .serving
+        .cache
+        .store_hot("page".to_owned(), bytes::Bytes::from_static(b"old"), i64::MAX);
+    state.serving.remember_negative("missing".to_owned(), i64::MAX);
+
+    state.invalidate_checkpoint();
+    state.replace_checkpoint(1).unwrap();
+
+    assert_eq!(state.serving.hot_fresh("page"), None);
+    assert!(!state.serving.negative_fresh("missing"));
+    assert_eq!(published_documents(&state), 2);
+    assert_eq!(docs.built.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        state.serving.meta.view_frontier(crate::state::SEARCH_VIEW).unwrap(),
+        Some(1)
+    );
+}
+
+#[test]
+fn test_checkpoint_replacement_reports_a_search_rebuild_failure() {
+    let (_dir, mut state, meta) = state();
+    Arc::get_mut(&mut state.serving)
+        .expect("the serving state is still unique during the build")
+        .search
+        .add_indexer(Arc::new(FailingDocs));
+
+    let error = state.replace_checkpoint(1).unwrap_err();
+
+    assert_eq!(error, "indexing failed: search unavailable");
+    assert_eq!(meta.view_frontier(crate::state::SEARCH_VIEW).unwrap(), None);
+}
+
+#[test]
+fn test_checkpoint_invalidation_drops_revocation_decisions() {
+    let (_dir, state, meta) = state();
+    let digest = ArtifactDigest::from_str(&format!("sha256:{:064x}", 1)).unwrap();
+    assert_eq!(
+        state.serving.revocations.decision(&digest).unwrap(),
+        DigestDecision::Clear
+    );
+    revoked_digest(&meta);
+
+    state.invalidate_checkpoint();
+
+    assert_eq!(
+        state.serving.revocations.decision(&digest).unwrap(),
+        DigestDecision::Revoked
+    );
 }
 
 /// A driver that cannot rebuild leaves the blob commit blocked, and the view still owes the whole index

@@ -1130,6 +1130,13 @@ pub trait ReplicaViewApplier: Send + Sync {
     fn apply(&self, page: ReplicaPage, changed_keys: &[String]);
     /// Retires the derived views that read the bytes these blobs just made local.
     fn apply_blob_commit(&self, committed: &[BlobCommit]);
+    /// Retires caches as soon as checkpoint rows replace the live metadata.
+    fn invalidate_checkpoint(&self);
+    /// Checkpoint replacement has no incremental key set, so every derived view must rebuild before serving it.
+    ///
+    /// # Errors
+    /// Returns an error when a derived view cannot rebuild from the installed checkpoint.
+    fn replace_checkpoint(&self, serial: u64) -> Result<(), String>;
     fn readable_frontier(&self) -> u64;
     fn publish_applied_frontier(&self, serial: u64);
 }

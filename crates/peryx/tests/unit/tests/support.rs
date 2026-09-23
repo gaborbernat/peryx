@@ -672,6 +672,16 @@ impl BlobReferenceDriver for Driver {
             .map(|digest| digest.as_str().to_owned())
             .collect())
     }
+
+    fn checkpoint_blob_digests(&self, _: &peryx_storage::meta::CheckpointState) -> Result<BTreeSet<String>, String> {
+        if self.has(Capability::BrokenBlobReferences) {
+            return Err("blob-reference scan failed".to_owned());
+        }
+        Ok([Digest::of(b"artifact bytes"), Digest::of(b"metadata bytes")]
+            .into_iter()
+            .map(|digest| digest.as_str().to_owned())
+            .collect())
+    }
 }
 
 impl RetentionDriver for Driver {

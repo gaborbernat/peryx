@@ -407,6 +407,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// # Errors
+    /// Returns the first ecosystem checkpoint scanner error.
+    pub fn checkpoint_blob_digests(
+        &self,
+        state: &peryx_storage::meta::CheckpointState,
+    ) -> Result<std::collections::BTreeSet<String>, crate::BlobReferenceScanError> {
+        self.drivers.checkpoint_blob_digests(state)
+    }
+
     pub fn register_prometheus(&self, source: Arc<dyn PrometheusSource>) {
         self.prometheus
             .lock()

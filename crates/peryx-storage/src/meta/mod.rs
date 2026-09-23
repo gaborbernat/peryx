@@ -57,7 +57,8 @@ pub use analytics::{
 pub use bootstrap::AdministratorBootstrapError;
 pub use checkpoint::{Checkpoint, CheckpointIdentity, CheckpointManifest, CheckpointState, CheckpointVerifyError};
 pub use checkpoint_transfer::{
-    CheckpointChunk, CheckpointCursor, CheckpointInstallError, CheckpointStageError, StagedCheckpoint,
+    CheckpointBlobPage, CheckpointChunk, CheckpointCursor, CheckpointInstallError, CheckpointStageError,
+    StagedCheckpoint,
 };
 pub use error::{MetaError, MetaScanError, WriterIdentityError};
 pub use external_identity::ExternalIdentityStoreError;
@@ -172,12 +173,15 @@ const JOURNAL: TableDefinition<u64, &[u8]> = TableDefinition::new("journal");
 const WRITER: TableDefinition<&str, &str> = TableDefinition::new("writer");
 const JOURNAL_MUTATIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_mutations");
 const JOURNAL_BLOBS: TableDefinition<u64, &[u8]> = TableDefinition::new("journal_blobs");
+const JOURNAL_RETENTION: TableDefinition<&str, u64> = TableDefinition::new("journal_retention");
 /// The folded replicated state one checkpoint publishes, and the manifest naming it. Held apart from
 /// [`DRIVER_KV`] so a publication replaces the checkpoint whole without touching live rows.
 const CHECKPOINT_ROW: TableDefinition<&str, &[u8]> = TableDefinition::new("checkpoint_row");
 const CHECKPOINT_REVOCATION: TableDefinition<&str, &[u8]> = TableDefinition::new("checkpoint_revocation");
 const CHECKPOINT_BLOB: TableDefinition<&str, u64> = TableDefinition::new("checkpoint_blob");
 const CHECKPOINT_META: TableDefinition<&str, &[u8]> = TableDefinition::new("checkpoint_meta");
+const CHECKPOINT_PIN: TableDefinition<&str, &[u8]> = TableDefinition::new("checkpoint_pin");
+const CHECKPOINT_BLOB_RECOVERY: TableDefinition<&str, &str> = TableDefinition::new("checkpoint_blob_recovery");
 /// A checkpoint arriving over the wire, staged by encoding offset so an install interrupted at a chunk
 /// boundary resumes from what it holds rather than from nothing.
 const CHECKPOINT_STAGING: TableDefinition<u64, &[u8]> = TableDefinition::new("checkpoint_staging");
@@ -437,6 +441,18 @@ impl MetaStore {
             txn.open_table(QUOTA_RESERVATION)?;
             txn.open_table(QUOTA_ALLOCATION)?;
             txn.open_table(QUOTA_PENDING)?;
+            let checkpoint = txn.open_table(CHECKPOINT_META)?;
+            let retained_floor = checkpoint
+                .get(checkpoint::MANIFEST_KEY)?
+                .map(|value| serde_json::from_slice::<CheckpointManifest>(value.value()))
+                .transpose()?
+                .map_or(1, |manifest| manifest.serial.saturating_add(1));
+            drop(checkpoint);
+            let mut retention = txn.open_table(JOURNAL_RETENTION)?;
+            if retention.get(journal::RETAINED_FLOOR_KEY)?.is_none() {
+                retention.insert(journal::RETAINED_FLOOR_KEY, retained_floor)?;
+            }
+            drop(retention);
             txn.open_table(DRIVER_KV)?;
             txn.open_table(ANALYTICS)?;
             txn.open_table(ANALYTICS_LIFETIME)?;

@@ -9,14 +9,16 @@ use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
 use peryx_index::{Index, IndexKind};
 use peryx_policy::{Policy, PolicyConfig};
 use peryx_storage::blob::{BlobStore, Digest};
-use peryx_storage::meta::{DriverBatch, MetaStore, OperationOutcomeQuery, OperationState};
+use peryx_storage::meta::{
+    CheckpointIdentity, DriverBatch, DriverBlobReference, MetaStore, OperationOutcomeQuery, OperationState,
+};
 use rstest::rstest;
 use tower::ServiceExt as _;
 
 use super::{
     EpochAuthority, app_with_indexes, assert_registry_version, auth, bind_ownership, body_has_code, hosted,
-    hosted_writable, image_manifest, oci_digest, proxy, scoped_index, seed_config, send, send_body, send_with,
-    writable_index,
+    hosted_writable, hosted_writable_distributed_with_durability, image_manifest, oci_digest, proxy, scoped_index,
+    seed_config, send, send_body, send_with, writable_index,
 };
 
 const TOKEN: &str = "s3cret";
@@ -441,6 +443,52 @@ async fn test_monolithic_upload() {
             .await
             .unwrap()
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_monolithic_upload_survives_checkpoint_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _durability, app) = hosted_writable_distributed_with_durability(
+        &dir,
+        TOKEN,
+        peryx_ha::WriteDurability::Confirmed {
+            scope: peryx_core::BlobDurability::Filesystem,
+        },
+    );
+    let blob = b"checkpointed-blob";
+    let digest = oci_digest(blob);
+    let stored = digest.strip_prefix("sha256:").unwrap();
+
+    let (status, _, _) = send_body(
+        &app,
+        Method::POST,
+        &format!("/v2/store/app/blobs/uploads/?digest={digest}"),
+        &[("authorization", &auth(TOKEN))],
+        blob.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    state
+        .serving
+        .meta
+        .publish_checkpoint_with(
+            CheckpointIdentity {
+                source: "local".to_owned(),
+                protocol_version: 1,
+                schema_version: 1,
+            },
+            |checkpoint| Ok(crate::checkpoint_blob_digests(checkpoint)),
+        )
+        .unwrap();
+
+    assert_eq!(
+        state.serving.meta.checkpoint().unwrap().unwrap().state.blobs(),
+        &BTreeSet::from([DriverBlobReference {
+            sha256: stored.to_owned(),
+            size: blob.len() as u64,
+        }])
     );
 }
 

@@ -12,7 +12,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::support::{TestServer, http_contract};
 use crate::{
-    AvailabilityMetrics, BeaconError, BeaconSender, DEFAULT_BEACON_INTERVAL, LivenessTracker, liveness_router,
+    AvailabilityMetrics, BLOB_VIEW, BeaconError, BeaconSender, DEFAULT_BEACON_INTERVAL, LivenessTracker,
+    liveness_router,
 };
 
 const TOKEN: &str = "group-secret";
@@ -123,6 +124,19 @@ async fn test_beat_reports_the_current_frontier_and_beacon_position() {
         .find(|peer| peer.node == "replica-a")
         .unwrap();
     assert_eq!((peer.incarnation, peer.sequence), (Some(7), Some(3)));
+}
+
+#[tokio::test]
+async fn test_beat_reports_the_blob_frontier_while_checkpoint_recovery_is_pending() {
+    let (server, tracker) = writer().await;
+    let dir = tempfile::tempdir().unwrap();
+    let meta = seeded_meta(&dir, 6);
+    meta.set_view_frontier(BLOB_VIEW, 4).unwrap();
+    let beacon = BeaconSender::new(&server.url, TOKEN, "replica-a", 7, meta, Duration::from_mins(1)).unwrap();
+
+    beacon.beat(3).await.unwrap();
+
+    assert_eq!(tracker.applied_frontier("replica-a", Instant::now()), Some(4));
 }
 
 #[tokio::test]

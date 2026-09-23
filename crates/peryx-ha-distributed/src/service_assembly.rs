@@ -11,7 +11,7 @@ use anyhow::Context as _;
 use axum::Router;
 use futures_util::FutureExt as _;
 use peryx_core::{Clock, NodeRole, PrometheusSource, TopologyConfig, TopologyMember, TopologyMode};
-use peryx_driver::{AppState, DriverSet};
+use peryx_driver::{AppState, BlobReferenceScanError, DriverSet};
 use peryx_ha::{
     AnalyticsCompleteness, AvailabilityAssembler, AvailabilityCapabilities, AvailabilityFailure, AvailabilityInstall,
     AvailabilityShutdownError, AvailabilityShutdownStage, AvailabilityTaskError, AvailabilityTaskReport, BlobServices,
@@ -771,6 +771,14 @@ impl ReferenceInventory for DriverReferences {
         let mut referenced = self
             .drivers
             .scan_blob_references(&self.meta)
+            .and_then(|mut references| {
+                references.digests.extend(
+                    self.meta
+                        .checkpoint_blob_digests()
+                        .map_err(BlobReferenceScanError::Store)?,
+                );
+                Ok(references)
+            })
             .map_err(|error| error.to_string())?
             .digests;
         for (ecosystem, trash) in self.drivers.trash_drivers() {

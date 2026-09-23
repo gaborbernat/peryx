@@ -10,7 +10,8 @@ use crate::replica_cycle::{BlobPass, ReplicaCycle, RetiredPeers};
 use crate::{
     AvailabilityMetrics, BlobPlaneReport, BlobSources, CapacityLimited, ChangePage, HttpBlobTransport,
     HttpPeerTransport, PROTOCOL_VERSION, PeerSet, ReconnectPolicy, Replica, ReplicaMonitor, Retry, SyncError,
-    SyncOutcome, TransportError, advance_blob_frontier_with_evidence, pull_outstanding_with_evidence, pull_round,
+    SyncOutcome, TransportError, advance_blob_frontier_with_evidence, pull_checkpoint_blobs,
+    pull_outstanding_with_evidence, pull_round,
 };
 
 /// The retirement reason a peer that refused this replica's cursor carries.
@@ -221,15 +222,12 @@ impl ReplicaLoop {
             let Some(peer) = self.metadata.transport(&source) else {
                 continue;
             };
-            match Replica::new(&self.meta, self.page_size)
-                .install_checkpoint(peer, &source)
-                .await
-            {
+            match Replica::new(&self.meta, self.page_size).install_checkpoint(peer).await {
                 Ok(serial) => {
+                    self.views.invalidate_checkpoint();
                     tracing::info!(source, serial, "installed a checkpoint after falling below the floor");
                     self.metadata.commit(&source, serial);
                     self.metadata.rearm(&source);
-                    self.views.publish_applied_frontier(serial);
                     recovered = true;
                 }
                 Err(error) => tracing::error!(%error, source, "checkpoint install failed"),
@@ -241,10 +239,33 @@ impl ReplicaLoop {
     /// Retires the views the newly local blobs belong to before the frontier advances, so a read that
     /// the frontier lets through cannot see a document still reporting those bytes as absent.
     async fn pull_blobs(&self) -> Result<BlobPlaneReport, SyncError> {
+        if self.meta.checkpoint_blob_recovery_page(self.page_size)?.is_some() {
+            self.views.invalidate_checkpoint();
+        }
         let sources = BlobSources {
             simple: &self.transport,
             delegates: &self.delegates,
             local_dc: &self.local_dc,
+        };
+        let checkpoint = pull_checkpoint_blobs(&sources, &self.blobs, &self.meta, self.page_size).await?;
+        let checkpoint_report = match checkpoint {
+            Some(checkpoint) if !checkpoint.complete => return Ok(checkpoint.report),
+            Some(checkpoint) => {
+                let serial = checkpoint.serial;
+                let views = Arc::clone(&self.views);
+                tokio::task::spawn_blocking(move || views.replace_checkpoint(serial))
+                    .await
+                    .map_err(|error| SyncError::CheckpointView(format!("view rebuild task failed: {error}")))?
+                    .map_err(SyncError::CheckpointView)?;
+                self.meta.advance_checkpoint_blob_recovery(
+                    &checkpoint.after,
+                    None,
+                    peryx_ha::AVAILABILITY_BLOB_VIEW,
+                    serial,
+                )?;
+                Some(checkpoint.report)
+            }
+            None => None,
         };
         let mut committed = Vec::new();
         let pulled = pull_outstanding_with_evidence(
@@ -258,7 +279,11 @@ impl ReplicaLoop {
         .await;
         // Before the error, so a pass that failed after committing some blobs still retires their views.
         self.views.apply_blob_commit(&committed);
-        let (report, served_by_peer) = pulled?;
+        let (mut report, served_by_peer) = pulled?;
+        if let Some(checkpoint) = checkpoint_report {
+            report.fetched += checkpoint.fetched;
+            report.pending += checkpoint.pending;
+        }
         advance_blob_frontier_with_evidence(&self.meta, &self.blobs, self.page_size, &served_by_peer).await?;
         Ok(report)
     }

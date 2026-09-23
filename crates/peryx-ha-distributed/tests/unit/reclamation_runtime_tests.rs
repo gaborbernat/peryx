@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,11 +9,14 @@ use peryx_ha::{
 };
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, Digest};
-use peryx_storage::meta::MetaStore;
+use peryx_storage::meta::{CheckpointCursor, CheckpointIdentity, MetaStore};
 use redb::{Database, TableDefinition};
 
 use super::*;
-use crate::{HeartbeatReport, LivenessTracker};
+use crate::{
+    BLOB_VIEW, BlobSources, DEFAULT_TRANSFER_LIMITS, HeartbeatReport, LivenessTracker, LoopbackBlobSource,
+    pull_checkpoint_blobs,
+};
 
 fn meta() -> (tempfile::TempDir, MetaStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -285,6 +288,126 @@ async fn test_a_lagging_replica_blocks_readiness() {
         tombstone_status(&state.meta, &artifact),
         Some(ReclamationStatus::Pending),
         "a replica short of the required frontier keeps the candidate pending"
+    );
+}
+
+async fn recover_checkpoint_blob(replica_blobs: &BlobStorage, replica_meta: &MetaStore, digest: &Digest) {
+    let source = LoopbackBlobSource::new(
+        HashMap::from([(digest.clone(), bytes::Bytes::from_static(b"checkpoint blob"))]),
+        DEFAULT_TRANSFER_LIMITS,
+    );
+    let delegates = HashMap::new();
+    let recovered = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &source,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        replica_blobs,
+        replica_meta,
+        NonZeroUsize::MIN,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(recovered.complete);
+    replica_meta
+        .advance_checkpoint_blob_recovery(&recovered.after, None, BLOB_VIEW, recovered.serial)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_checkpoint_replacement_waits_for_pending_replica_blob_recovery() {
+    let (_writer_meta_dir, writer_meta) = meta();
+    let (_writer_blob_dir, writer) = app(writer_meta.clone());
+    let (digest, artifact) = store_blob(&writer, b"checkpoint blob");
+    writer_meta
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), 15);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"created".to_vec()]))
+        })
+        .unwrap();
+    let identity = CheckpointIdentity {
+        source: "writer-a".to_owned(),
+        protocol_version: crate::PROTOCOL_VERSION,
+        schema_version: u32::from(crate::SCHEMA_VERSION.0),
+    };
+    let first = writer_meta.publish_checkpoint(identity.clone()).unwrap();
+
+    let (replica_dir, replica_meta) = meta();
+    let replica_blobs = BlobStorage::filesystem(replica_dir.path().join("blobs"));
+    replica_meta.begin_checkpoint_transfer(&first).unwrap();
+    let chunk = writer_meta
+        .checkpoint_chunk(&CheckpointCursor::start(), usize::MAX)
+        .unwrap();
+    replica_meta
+        .stage_checkpoint_chunk(&first, 0, &chunk.bytes, &chunk.next.token())
+        .unwrap()
+        .unwrap();
+    replica_meta
+        .install_staged_checkpoint("replica/state", b"state")
+        .unwrap();
+    replica_meta.next_serial().unwrap();
+
+    writer_meta
+        .commit_driver_txn(|_txn| Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"deleted".to_vec()])))
+        .unwrap();
+    writer_meta
+        .publish_checkpoint_with(identity, |_| Ok(BTreeSet::new()))
+        .unwrap();
+    assert_eq!(writer_meta.checkpoint_blob_digests().unwrap(), BTreeSet::new());
+
+    let tracker = Arc::new(LivenessTracker::new(
+        ["replica-a".to_owned()],
+        Duration::from_secs(30),
+        Duration::from_mins(1),
+    ));
+    tracker
+        .observe(
+            &HeartbeatReport {
+                node: "replica-a".to_owned(),
+                incarnation: 1,
+                sequence: 1,
+                applied: Some(crate::beacon::applied_frontier(&replica_meta).unwrap()),
+            },
+            Instant::now(),
+        )
+        .unwrap();
+    let reclaimer = BlobReclamationSelector::new(
+        Arc::new(StubRefs(writer_meta.checkpoint_blob_digests().unwrap())),
+        Arc::new(ReplicaReclamationFrontiers::new(
+            Some(tracker.clone()),
+            vec!["replica-a".to_owned()],
+        )),
+    );
+    reclaimer
+        .reclaim_pass(&writer.meta, &writer.blobs, &writer.clock, &|| false, 9, batch())
+        .unwrap();
+    assert_eq!(
+        tombstone_status(&writer.meta, &artifact),
+        Some(ReclamationStatus::Pending)
+    );
+
+    recover_checkpoint_blob(&replica_blobs, &replica_meta, &digest).await;
+    replica_meta.set_view_frontier(BLOB_VIEW, 2).unwrap();
+    tracker
+        .observe(
+            &HeartbeatReport {
+                node: "replica-a".to_owned(),
+                incarnation: 1,
+                sequence: 2,
+                applied: Some(crate::beacon::applied_frontier(&replica_meta).unwrap()),
+            },
+            Instant::now(),
+        )
+        .unwrap();
+
+    reclaimer
+        .reclaim_pass(&writer.meta, &writer.blobs, &writer.clock, &|| false, 9, batch())
+        .unwrap();
+    assert_eq!(
+        tombstone_status(&writer.meta, &artifact),
+        Some(ReclamationStatus::Ready)
     );
 }
 

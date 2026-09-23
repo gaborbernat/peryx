@@ -113,7 +113,7 @@ pub use registry::OciRegistry;
 pub use registry::OciRegistryWithHasher;
 pub use search_oci::OciIndexer;
 pub use settings::{IndexSettings, LibraryPrefix};
-pub use store::referenced_blob_digests;
+pub use store::{checkpoint_blob_digests, referenced_blob_digests};
 
 pub struct OciInstaller {
     settings: HashMap<String, IndexSettings>,

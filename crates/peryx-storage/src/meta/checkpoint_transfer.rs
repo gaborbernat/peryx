@@ -14,6 +14,7 @@
 //! Nothing here removes a journal row or advances a floor.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::ops::Bound::{Excluded, Unbounded};
 
 use redb::ReadableTable as _;
@@ -24,9 +25,9 @@ use super::error::MetaError;
 use super::journal::DriverBlobReference;
 use super::revocation::DigestRevocation;
 use super::{
-    CHECKPOINT_BLOB, CHECKPOINT_META, CHECKPOINT_REVOCATION, CHECKPOINT_ROW, CHECKPOINT_STAGING,
-    CHECKPOINT_STAGING_META, DRIVER_KV, JOURNAL, JOURNAL_BLOBS, JOURNAL_MUTATIONS, MetaStore, SERIAL, SERIAL_KEY,
-    open_optional_table,
+    CHECKPOINT_BLOB, CHECKPOINT_BLOB_RECOVERY, CHECKPOINT_META, CHECKPOINT_PIN, CHECKPOINT_REVOCATION, CHECKPOINT_ROW,
+    CHECKPOINT_STAGING, CHECKPOINT_STAGING_META, DERIVED_VIEW_FRONTIER, DRIVER_KV, JOURNAL, JOURNAL_BLOBS,
+    JOURNAL_MUTATIONS, MetaStore, SERIAL, SERIAL_KEY, open_optional_table,
 };
 
 /// Names the single staged-manifest row, which one transfer replaces whole.
@@ -36,6 +37,17 @@ const STAGED_MANIFEST_KEY: &str = "staged";
 const ROW_TAG: u8 = b'r';
 const REVOCATION_TAG: u8 = b'v';
 const BLOB_TAG: u8 = b'b';
+pub(super) const PIN_KEY: &str = "active";
+const PIN_LEASE_SECS: i64 = 30;
+const PIN_MAX_LIFETIME_SECS: i64 = 300;
+const BLOB_RECOVERY_KEY: &str = "cursor";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct CheckpointPin {
+    pub generation: u64,
+    pub started_at: i64,
+    pub expires_at: i64,
+}
 
 /// Where the next chunk of a checkpoint transfer begins.
 ///
@@ -71,6 +83,11 @@ impl CheckpointCursor {
             .map_or_else(|| format!("{tag}"), |key| format!("{tag}:{}", hex::encode(key)))
     }
 
+    #[must_use]
+    pub fn generation_token(&self, generation: u64) -> String {
+        format!("g{generation}:{}", self.token())
+    }
+
     /// Reads back a token, or `None` when it names no position this writer can resume from.
     #[must_use]
     pub fn from_token(token: &str) -> Option<Self> {
@@ -91,6 +108,12 @@ impl CheckpointCursor {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub fn from_generation_token(token: &str) -> Option<(u64, Self)> {
+        let (generation, cursor) = token.strip_prefix('g')?.split_once(':')?;
+        Some((generation.parse().ok()?, Self::from_token(cursor)?))
+    }
 }
 
 /// One window of a checkpoint's canonical encoding, and where the window after it begins.
@@ -108,6 +131,14 @@ pub struct StagedCheckpoint {
     pub received: u64,
     /// The token naming where the writer continues, so a restart resumes rather than refetching.
     pub cursor: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointBlobPage {
+    pub serial: u64,
+    pub after: String,
+    pub references: Vec<DriverBlobReference>,
+    pub next: Option<String>,
 }
 
 /// What the staging row holds beside the bytes.
@@ -142,6 +173,122 @@ pub enum CheckpointStageError {
 }
 
 impl MetaStore {
+    /// Returns the next bounded page of checkpoint blobs an installed replica must recover.
+    ///
+    /// # Errors
+    /// Returns a store or manifest decode error.
+    pub fn checkpoint_blob_recovery_page(&self, limit: NonZeroUsize) -> Result<Option<CheckpointBlobPage>, MetaError> {
+        let txn = self.db.begin_read()?;
+        let Some(recovery) = open_optional_table(&txn, CHECKPOINT_BLOB_RECOVERY)? else {
+            return Ok(None);
+        };
+        let Some(after) = recovery.get(BLOB_RECOVERY_KEY)?.map(|value| value.value().to_owned()) else {
+            return Ok(None);
+        };
+        let manifest = txn
+            .open_table(CHECKPOINT_META)?
+            .get(super::checkpoint::MANIFEST_KEY)?
+            .map(|value| serde_json::from_slice::<CheckpointManifest>(value.value()))
+            .transpose()?
+            .ok_or_else(|| MetaError::CheckpointReferences("blob recovery has no checkpoint manifest".to_owned()))?;
+        let table = txn.open_table(CHECKPOINT_BLOB)?;
+        let mut references = table
+            .range::<&str>((bound((!after.is_empty()).then_some(after.as_str())), Unbounded))?
+            .take(limit.get().saturating_add(1))
+            .map(|entry| {
+                entry.map(|(digest, size)| DriverBlobReference {
+                    sha256: digest.value().to_owned(),
+                    size: size.value(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let next = (references.len() > limit.get()).then(|| references[limit.get() - 1].sha256.clone());
+        references.truncate(limit.get());
+        Ok(Some(CheckpointBlobPage {
+            serial: manifest.serial,
+            after,
+            references,
+            next,
+        }))
+    }
+
+    /// Commits one recovered checkpoint-blob page and advances `view` only after the final page.
+    ///
+    /// # Errors
+    /// Returns a store error or a precondition failure when another worker moved the cursor.
+    pub fn advance_checkpoint_blob_recovery(
+        &self,
+        expected_after: &str,
+        next: Option<&str>,
+        view: &str,
+        serial: u64,
+    ) -> Result<(), MetaError> {
+        let txn = self.db.begin_write()?;
+        let mut recovery = txn.open_table(CHECKPOINT_BLOB_RECOVERY)?;
+        let actual = recovery.get(BLOB_RECOVERY_KEY)?.map(|cursor| cursor.value().to_owned());
+        if actual.as_deref() != Some(expected_after) {
+            return Err(MetaError::DriverPrecondition(
+                "checkpoint blob recovery cursor moved".to_owned(),
+            ));
+        }
+        if let Some(next) = next {
+            recovery.insert(BLOB_RECOVERY_KEY, next)?;
+        } else {
+            recovery.remove(BLOB_RECOVERY_KEY)?;
+            txn.open_table(DERIVED_VIEW_FRONTIER)?.insert(view, serial)?;
+        }
+        drop(recovery);
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Renews the bounded lease for `generation` and serves one stable chunk.
+    ///
+    /// # Errors
+    /// Returns a store error, or rejects stale and over-lifetime generations.
+    pub fn checkpoint_chunk_at_generation(
+        &self,
+        generation: u64,
+        cursor: &CheckpointCursor,
+        budget: usize,
+    ) -> Result<CheckpointChunk, MetaError> {
+        let now = (self.clock)();
+        let txn = self.db.begin_write()?;
+        let current = txn
+            .open_table(CHECKPOINT_META)?
+            .get(super::checkpoint::MANIFEST_KEY)?
+            .map(|value| serde_json::from_slice::<CheckpointManifest>(value.value()))
+            .transpose()?
+            .map_or(0, |manifest| manifest.generation);
+        if generation != current {
+            return Err(MetaError::StaleCheckpointGeneration {
+                requested: generation,
+                current,
+            });
+        }
+        let previous = txn
+            .open_table(CHECKPOINT_PIN)?
+            .get(PIN_KEY)?
+            .map(|value| serde_json::from_slice::<CheckpointPin>(value.value()))
+            .transpose()?;
+        let started_at = previous
+            .filter(|pin| pin.generation == generation)
+            .map_or(now, |pin| pin.started_at);
+        let deadline = started_at.saturating_add(PIN_MAX_LIFETIME_SECS);
+        if now >= deadline {
+            return Err(MetaError::CheckpointGenerationExpired { generation });
+        }
+        let pin = CheckpointPin {
+            generation,
+            started_at,
+            expires_at: now.saturating_add(PIN_LEASE_SECS).min(deadline),
+        };
+        txn.open_table(CHECKPOINT_PIN)?
+            .insert(PIN_KEY, serde_json::to_vec(&pin)?.as_slice())?;
+        txn.commit()?;
+        self.checkpoint_chunk_from_generation(cursor, budget, Some(generation))
+    }
+
     /// Encodes at most `budget` bytes of the published checkpoint from `cursor`.
     ///
     /// The window ends on an entry boundary, so one entry larger than the budget is still served whole
@@ -150,7 +297,30 @@ impl MetaStore {
     /// # Errors
     /// Returns a store error if the read fails, or a decode error for a malformed stored revocation.
     pub fn checkpoint_chunk(&self, cursor: &CheckpointCursor, budget: usize) -> Result<CheckpointChunk, MetaError> {
+        self.checkpoint_chunk_from_generation(cursor, budget, None)
+    }
+
+    fn checkpoint_chunk_from_generation(
+        &self,
+        cursor: &CheckpointCursor,
+        budget: usize,
+        generation: Option<u64>,
+    ) -> Result<CheckpointChunk, MetaError> {
         let txn = self.db.begin_read()?;
+        if let Some(generation) = generation {
+            let current = txn
+                .open_table(CHECKPOINT_META)?
+                .get(super::checkpoint::MANIFEST_KEY)?
+                .map(|value| serde_json::from_slice::<CheckpointManifest>(value.value()))
+                .transpose()?
+                .map_or(0, |manifest| manifest.generation);
+            if generation != current {
+                return Err(MetaError::StaleCheckpointGeneration {
+                    requested: generation,
+                    current,
+                });
+            }
+        }
         let mut bytes = Vec::new();
         let mut cursor = cursor.clone();
         loop {
@@ -240,7 +410,7 @@ impl MetaStore {
         {
             let header = StagedHeader {
                 manifest: manifest.clone(),
-                cursor: CheckpointCursor::start().token(),
+                cursor: CheckpointCursor::start().generation_token(manifest.generation),
             };
             txn.open_table(CHECKPOINT_STAGING_META)?
                 .insert(STAGED_MANIFEST_KEY, serde_json::to_vec(&header)?.as_slice())?;
@@ -418,6 +588,12 @@ impl MetaStore {
             let mut names = txn.open_table(CHECKPOINT_META)?;
             names.insert(super::checkpoint::MANIFEST_KEY, published.as_slice())?;
             drop(names);
+            txn.open_table(super::JOURNAL_RETENTION)?
+                .insert(super::journal::RETAINED_FLOOR_KEY, serial.saturating_add(1))?;
+            txn.open_table(CHECKPOINT_BLOB_RECOVERY)?
+                .insert(BLOB_RECOVERY_KEY, "")?;
+            txn.open_table(DERIVED_VIEW_FRONTIER)?
+                .insert(peryx_ha::AVAILABILITY_BLOB_VIEW, serial.saturating_sub(1))?;
             txn.open_table(SERIAL)?.insert(SERIAL_KEY, serial)?;
         }
         txn.commit()?;

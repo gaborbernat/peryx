@@ -15,6 +15,8 @@ pub enum SyncError {
     State(#[from] serde_json::Error),
     #[error("unsupported replication protocol version {actual}; expected {expected}")]
     UnsupportedVersion { actual: u16, expected: u16 },
+    #[error("unsupported checkpoint schema version {actual}; expected {expected}")]
+    UnsupportedCheckpointSchema { actual: u32, expected: u32 },
     #[error("replication page has an empty source identity")]
     EmptySource,
     #[error("replication page starts after serial {actual}; requested {expected}")]
@@ -37,6 +39,8 @@ pub enum SyncError {
     Checkpoint(#[from] CheckpointInstallError),
     #[error("checkpoint chunk does not continue the transfer: {0}")]
     CheckpointChunk(#[from] CheckpointStageError),
+    #[error("checkpoint view rebuild failed: {0}")]
+    CheckpointView(String),
     #[error("blob {digest} has conflicting sizes {first} and {second}")]
     ConflictingBlobSize { digest: String, first: u64, second: u64 },
     #[error("blob {digest} has {actual} bytes; expected {expected}")]

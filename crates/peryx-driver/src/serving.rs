@@ -270,6 +270,13 @@ pub trait BlobReferenceDriver: Send + Sync {
         &self,
         meta: &peryx_storage::meta::MetaStore,
     ) -> Result<std::collections::BTreeSet<String>, String>;
+
+    /// # Errors
+    /// Returns an error when replicated checkpoint rows contain malformed references.
+    fn checkpoint_blob_digests(
+        &self,
+        state: &peryx_storage::meta::CheckpointState,
+    ) -> Result<std::collections::BTreeSet<String>, String>;
 }
 
 pub trait FsckDriver: Send + Sync {

@@ -31,6 +31,8 @@ use super::{
     MetaStore, open_optional_table,
 };
 
+const MISSING_BLOB_SIZE_BATCH: usize = 256;
+
 /// Names the single manifest row, which one publication replaces whole.
 pub(super) const MANIFEST_KEY: &str = "manifest";
 
@@ -49,6 +51,8 @@ pub struct CheckpointIdentity {
 /// before its digest is ever recomputed over the wrong length.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointManifest {
+    #[serde(default)]
+    pub generation: u64,
     pub identity: CheckpointIdentity,
     pub serial: u64,
     pub rows: u64,
@@ -102,6 +106,35 @@ impl CheckpointState {
     #[must_use]
     pub const fn blobs(&self) -> &BTreeSet<DriverBlobReference> {
         &self.blobs
+    }
+
+    fn retain_blobs(
+        &mut self,
+        digests: &BTreeSet<String>,
+        supplemental: &BTreeMap<String, u64>,
+    ) -> Result<(), MetaError> {
+        let mut found = BTreeSet::new();
+        self.blobs.retain(|blob| {
+            digests.contains(&blob.sha256) && {
+                found.insert(blob.sha256.clone());
+                true
+            }
+        });
+        let mut missing = Vec::new();
+        for digest in digests.difference(&found) {
+            if let Some(size) = supplemental.get(digest) {
+                self.blobs.insert(DriverBlobReference {
+                    sha256: digest.clone(),
+                    size: *size,
+                });
+            } else if missing.len() < MISSING_BLOB_SIZE_BATCH {
+                missing.push(digest.clone());
+            }
+        }
+        if !missing.is_empty() {
+            return Err(MetaError::CheckpointBlobSizesMissing { digests: missing });
+        }
+        Ok(())
     }
 
     /// Rebuilds a state a consumer received, so a transfer can be verified before it is installed.
@@ -182,6 +215,7 @@ impl CheckpointState {
     pub fn manifest(&self, identity: CheckpointIdentity, serial: u64) -> CheckpointManifest {
         let canonical = self.canonical();
         CheckpointManifest {
+            generation: 0,
             identity,
             serial,
             rows: self.rows.len() as u64,
@@ -285,21 +319,78 @@ impl MetaStore {
     /// Makes the state at the current serial durable, folding only the records the published
     /// checkpoint does not already cover.
     ///
-    /// One transaction writes the state and the manifest that names it, so a crash leaves either the
-    /// previous checkpoint or this one. No journal row is removed and no floor moves: a replica that
-    /// has fallen behind still has the whole history to read.
+    /// One transaction writes the state, manifest, and retained floor, so a crash leaves either the
+    /// previous checkpoint and floor or this pair. Journal pruning happens separately.
     ///
     /// # Errors
     /// Returns a store error if the read, write or commit fails, or a decode error for a malformed
     /// record.
     pub fn publish_checkpoint(&self, identity: CheckpointIdentity) -> Result<CheckpointManifest, MetaError> {
+        self.publish_checkpoint_with(identity, |state| {
+            Ok(state.blobs.iter().map(|blob| blob.sha256.clone()).collect())
+        })
+    }
+
+    /// Publishes a checkpoint whose blob section is filtered through live replicated rows.
+    ///
+    /// # Errors
+    /// Returns a store, decode, or reference-scanner error.
+    pub fn publish_checkpoint_with(
+        &self,
+        identity: CheckpointIdentity,
+        scan: impl FnOnce(&CheckpointState) -> Result<BTreeSet<String>, String>,
+    ) -> Result<CheckpointManifest, MetaError> {
+        self.publish_checkpoint_with_sizes(identity, &BTreeMap::new(), scan)
+    }
+
+    /// Accepts externally resolved sizes so upgraded stores can checkpoint live blobs absent from old journals.
+    ///
+    /// # Errors
+    /// Returns a store, decode, reference-scanner, or missing-size error.
+    pub fn publish_checkpoint_with_sizes(
+        &self,
+        identity: CheckpointIdentity,
+        supplemental: &BTreeMap<String, u64>,
+        scan: impl FnOnce(&CheckpointState) -> Result<BTreeSet<String>, String>,
+    ) -> Result<CheckpointManifest, MetaError> {
+        let txn = self.db.begin_write()?;
+        let current_manifest = txn
+            .open_table(CHECKPOINT_META)?
+            .get(MANIFEST_KEY)?
+            .map(|value| serde_json::from_slice::<CheckpointManifest>(value.value()))
+            .transpose()?;
+        let now = (self.clock)();
+        let pinned = txn
+            .open_table(super::CHECKPOINT_PIN)?
+            .get(super::checkpoint_transfer::PIN_KEY)?
+            .map(|value| serde_json::from_slice::<super::checkpoint_transfer::CheckpointPin>(value.value()))
+            .transpose()?;
+        if let (Some(manifest), Some(pin)) = (&current_manifest, pinned.as_ref())
+            && pin.generation == manifest.generation
+            && now < pin.expires_at
+        {
+            return Ok(manifest.clone());
+        }
+        let serial = txn
+            .open_table(super::SERIAL)?
+            .get(super::SERIAL_KEY)?
+            .map_or(0, |value| value.value());
+        if let Some(manifest) = &current_manifest
+            && manifest.generation > 0
+            && manifest.serial == serial
+            && manifest.identity == identity
+            && pinned.is_none()
+        {
+            return Ok(manifest.clone());
+        }
         let published = self.checkpoint()?;
         let base = published.as_ref().map_or(0, |checkpoint| checkpoint.manifest.serial);
         let mut state = published.map_or_else(CheckpointState::default, |checkpoint| checkpoint.state);
-        let serial = self.current_serial()?;
         self.fold_journal(&mut state, base, serial)?;
-        let manifest = state.manifest(identity, serial);
-        let txn = self.db.begin_write()?;
+        let live = scan(&state).map_err(MetaError::CheckpointReferences)?;
+        state.retain_blobs(&live, supplemental)?;
+        let mut manifest = state.manifest(identity, serial);
+        manifest.generation = current_manifest.map_or(1, |manifest| manifest.generation.saturating_add(1));
         txn.delete_table(CHECKPOINT_ROW)?;
         txn.delete_table(CHECKPOINT_REVOCATION)?;
         txn.delete_table(CHECKPOINT_BLOB)?;
@@ -318,6 +409,10 @@ impl MetaStore {
             }
             txn.open_table(CHECKPOINT_META)?
                 .insert(MANIFEST_KEY, serde_json::to_vec(&manifest)?.as_slice())?;
+            txn.open_table(super::JOURNAL_RETENTION)?
+                .insert(super::journal::RETAINED_FLOOR_KEY, serial.saturating_add(1))?;
+            txn.open_table(super::CHECKPOINT_PIN)?
+                .remove(super::checkpoint_transfer::PIN_KEY)?;
         }
         txn.commit()?;
         Ok(manifest)
@@ -356,6 +451,25 @@ impl MetaStore {
             manifest,
             state: CheckpointState::from_parts(rows, revocations, blobs),
         }))
+    }
+
+    /// Returns the blobs required by the checkpoint currently offered to stale replicas.
+    ///
+    /// # Errors
+    /// Returns a store error if the checkpoint blob table cannot be read.
+    pub fn checkpoint_blob_digests(&self) -> Result<BTreeSet<String>, MetaError> {
+        let txn = self.db.begin_read()?;
+        let Some(table) = open_optional_table(&txn, CHECKPOINT_BLOB)? else {
+            return Ok(BTreeSet::new());
+        };
+        table
+            .iter()?
+            .map(|entry| {
+                entry
+                    .map(|(digest, _)| digest.value().to_owned())
+                    .map_err(MetaError::from)
+            })
+            .collect()
     }
 
     /// Returns the published manifest without reading the state beside it.

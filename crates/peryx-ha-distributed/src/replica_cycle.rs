@@ -24,7 +24,9 @@ pub enum MetadataFault {
 impl MetadataFault {
     pub(crate) const fn of(error: &SyncError) -> Self {
         match error {
-            SyncError::UnsupportedVersion { .. } => Self::IncompatibleSchema,
+            SyncError::UnsupportedVersion { .. } | SyncError::UnsupportedCheckpointSchema { .. } => {
+                Self::IncompatibleSchema
+            }
             SyncError::Store(_) => Self::Store,
             _ => Self::Transport,
         }

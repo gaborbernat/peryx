@@ -196,7 +196,10 @@ async fn publish(
             &state.meta,
             &index.name,
             &payload.repo,
-            &payload.digest,
+            crate::quota::BlobDescriptor {
+                digest: &payload.digest,
+                bytes: payload.size,
+            },
             None,
             payload.session.as_deref(),
             journal,

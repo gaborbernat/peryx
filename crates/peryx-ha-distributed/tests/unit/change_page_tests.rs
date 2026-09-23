@@ -10,7 +10,7 @@ use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::{MetaError, MetaStore};
 use tower::ServiceExt as _;
 
-use super::{ChangePageBody, MAX_CHANGE_PAGE_BYTES, build_change_page, change_page_response};
+use super::{ChangePageBody, MAX_CHANGE_PAGE_BYTES, below_floor, build_change_page, change_page_response};
 use crate::protocol::{Change, ChangePage, PROTOCOL_VERSION};
 use crate::{DEFAULT_MAX_CONCURRENT_BLOB_STREAMS, follower_router_with_change_pages, primary_router_with_limits};
 
@@ -18,6 +18,12 @@ const TOKEN: &str = "replica-secret";
 
 /// Two records this size cannot share a page under [`MAX_CHANGE_PAGE_BYTES`]; one leaves room.
 const HALF_PAGE_EVENT: usize = 2 * 1024 * 1024;
+
+#[test]
+fn test_a_legacy_journal_without_a_floor_detects_missing_history() {
+    assert!(below_floor(2, 3, None));
+    assert!(!below_floor(3, 3, None));
+}
 
 #[tokio::test]
 async fn test_a_page_carries_the_records_after_its_cursor() {
@@ -456,6 +462,30 @@ async fn test_a_writer_that_retains_its_whole_journal_never_answers_below_the_fl
 }
 
 #[tokio::test]
+async fn test_an_interrupted_prune_exposes_neither_the_removed_prefix_nor_a_false_gap() {
+    let (_dir, meta) = journaled(&[b"one", b"two", b"three"]);
+    meta.publish_checkpoint(peryx_storage::meta::CheckpointIdentity {
+        source: "primary-a".to_owned(),
+        protocol_version: PROTOCOL_VERSION,
+        schema_version: 1,
+    })
+    .unwrap();
+    assert_eq!(meta.prune_journal_batch(2).unwrap(), 2);
+
+    let below = served(build_change_page(&meta, "primary-a", 0, 10, &ScanCancellation::new())).await;
+    let retained = served(build_change_page(&meta, "primary-a", 3, 10, &ScanCancellation::new())).await;
+
+    assert_eq!(below.0, StatusCode::GONE);
+    assert_eq!(retained.0, StatusCode::OK);
+    assert!(
+        serde_json::from_slice::<ChangePage>(&retained.1)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn test_the_primary_handler_answers_below_the_floor() {
     let dir = tempfile::tempdir().unwrap();
     let router = primary_router_with_limits(
@@ -532,7 +562,7 @@ async fn test_a_checkpoint_window_is_refused_while_every_build_slot_is_taken() {
     let saturated = SaturatedPages::start(&pages, 1).await;
 
     let response = router
-        .oneshot(authenticated("/+replication/v1/checkpoint/chunk"))
+        .oneshot(authenticated("/+replication/v1/checkpoint/chunk?cursor=g1:r"))
         .await
         .unwrap();
     let status = response.status();

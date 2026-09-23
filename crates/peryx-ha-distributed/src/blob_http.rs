@@ -103,6 +103,10 @@ fn require_served_range(response: &reqwest::Response, range: ByteRange) -> Resul
 
 #[async_trait]
 impl BlobTransport for HttpBlobTransport {
+    fn max_response_bytes(&self) -> Option<std::num::NonZeroU64> {
+        Some(self.limits.max_encoded_bytes)
+    }
+
     async fn blob_size(&self, digest: &Digest) -> Result<Option<u64>, TransportError> {
         let url = format!("{}{}", self.blobs_url, digest.as_str());
         let response = self

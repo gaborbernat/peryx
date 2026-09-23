@@ -13,12 +13,13 @@ use bytes::Bytes;
 use peryx_ha::{ArtifactSource, BackendId, BackendLocation, BlobPlacementKey, BlobPlacementTransition, DataCenterId};
 use peryx_identity::ArtifactDigest;
 use peryx_storage::blob::{BlobStorage, ChunkedDigest, Digest};
-use peryx_storage::meta::{DriverBlobReference, JournalEntry, MetaStore};
+use peryx_storage::meta::{CheckpointCursor, CheckpointIdentity, DriverBlobReference, JournalEntry, MetaStore};
 
 use crate::blob::{BlobRequest, BlobTransport, CapacityLimited, LoopbackBlobSource};
 use crate::blob_http::HttpBlobTransport;
 use crate::blob_plane::{
-    BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_outstanding, pull_referenced,
+    BLOB_VIEW, BlobPlaneReport, BlobSources, advance_blob_frontier, pull_checkpoint_blobs, pull_outstanding,
+    pull_referenced,
 };
 use crate::error::SyncError;
 use crate::peer::{TransferLimits, TransportError};
@@ -33,6 +34,24 @@ fn stores() -> (tempfile::TempDir, MetaStore, BlobStorage) {
     let meta = crate::support::distributed_meta(dir.path().join("peryx.redb"));
     let blobs = BlobStorage::filesystem(dir.path().join("blobs"));
     (dir, meta, blobs)
+}
+
+fn install_checkpoint(writer: &MetaStore, replica: &MetaStore) -> peryx_storage::meta::CheckpointManifest {
+    let manifest = writer
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-a".to_owned(),
+            protocol_version: crate::PROTOCOL_VERSION,
+            schema_version: u32::from(crate::SCHEMA_VERSION.0),
+        })
+        .unwrap();
+    replica.begin_checkpoint_transfer(&manifest).unwrap();
+    let chunk = writer.checkpoint_chunk(&CheckpointCursor::start(), usize::MAX).unwrap();
+    replica
+        .stage_checkpoint_chunk(&manifest, 0, &chunk.bytes, &chunk.next.token())
+        .unwrap()
+        .unwrap();
+    replica.install_staged_checkpoint("replica/state", b"state").unwrap();
+    manifest
 }
 
 fn limits() -> TransferLimits {
@@ -117,6 +136,11 @@ impl BlobTransport for Faulty {
     }
 }
 
+#[test]
+fn test_blob_transport_has_no_response_limit_by_default() {
+    assert_eq!(Faulty(TransportError::Disconnected).max_response_bytes(), None);
+}
+
 #[tokio::test]
 async fn test_pull_referenced_fetches_absent_blobs_over_http_and_marks_them_local() {
     let (_dir, meta, blobs) = stores();
@@ -146,6 +170,335 @@ async fn test_pull_referenced_fetches_absent_blobs_over_http_and_marks_them_loca
     assert!(blobs.verify(&digest).await.unwrap());
     let placement = meta.get_artifact_placement(digest.as_str()).unwrap().unwrap();
     assert!(placement.availability.is_local());
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_fetches_blobs_before_advancing_its_frontier() {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let bytes = b"checkpoint artifact";
+    let digest = Digest::of(bytes);
+    writer
+        .commit_driver_txn(|txn| {
+            txn.put("artifact/live", b"one")?;
+            txn.reference_blob(digest.as_str(), bytes.len() as u64);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    let manifest = writer
+        .publish_checkpoint(CheckpointIdentity {
+            source: "primary-a".to_owned(),
+            protocol_version: crate::PROTOCOL_VERSION,
+            schema_version: u32::from(crate::SCHEMA_VERSION.0),
+        })
+        .unwrap();
+    meta.begin_checkpoint_transfer(&manifest).unwrap();
+    let chunk = writer.checkpoint_chunk(&CheckpointCursor::start(), 1 << 20).unwrap();
+    meta.stage_checkpoint_chunk(&manifest, 0, &chunk.bytes, &chunk.next.token())
+        .unwrap()
+        .unwrap();
+    meta.install_staged_checkpoint("replica/state", b"state").unwrap();
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(manifest.serial - 1));
+
+    let simple = loopback(&digest, bytes);
+    let delegates = HashMap::new();
+    let recovered = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(recovered.complete);
+    assert_eq!(recovered.report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(manifest.serial - 1));
+    meta.advance_checkpoint_blob_recovery(&recovered.after, None, BLOB_VIEW, recovered.serial)
+        .unwrap();
+    assert_eq!(meta.view_frontier(BLOB_VIEW).unwrap(), Some(manifest.serial));
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_fetches_a_blob_from_its_configured_delegate() {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let bytes = b"delegate checkpoint artifact";
+    let digest = Digest::of(bytes);
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), bytes.len() as u64);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    seed_verified_placement(&writer, &digest, "dc-b", bytes.len() as u64);
+    install_checkpoint(&writer, &meta);
+    seed_verified_placement(&meta, &digest, "dc-b", bytes.len() as u64);
+    let simple = empty_source();
+    let delegates = HashMap::from([
+        ("dc-a".to_owned(), empty_source()),
+        ("dc-b".to_owned(), loopback(&digest, bytes)),
+    ]);
+
+    let recovered = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(recovered.complete);
+    assert_eq!(recovered.report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_ranges_a_blob_larger_than_the_http_response_cap() {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let bytes = vec![b'x'; (1 << 20) + 1];
+    let digest = Digest::of(&bytes);
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), bytes.len() as u64);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    install_checkpoint(&writer, &meta);
+    let remote_blobs = BlobStorage::filesystem(writer_dir.path().join("blobs"));
+    remote_blobs.put_bytes(&bytes).await.unwrap();
+    let server = TestServer::start(crate::primary_router("remote", TOKEN, writer, remote_blobs).unwrap()).await;
+    let simple = http_blob(&server.url);
+    let delegates = HashMap::new();
+
+    let recovered = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(recovered.complete);
+    assert_eq!(recovered.report, BlobPlaneReport { fetched: 1, pending: 0 });
+    assert!(blobs.verify(&digest).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_rejects_an_invalid_digest() {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob("invalid", 1);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    install_checkpoint(&writer, &meta);
+
+    let simple = empty_source();
+    let delegates = HashMap::new();
+    assert!(matches!(
+        pull_checkpoint_blobs(
+            &BlobSources {
+                simple: &simple,
+                delegates: &delegates,
+                local_dc: "dc-a",
+            },
+            &blobs,
+            &meta,
+            nz(1),
+        )
+        .await,
+        Err(SyncError::InvalidDigest(digest)) if digest == "invalid"
+    ));
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_rejects_bytes_with_the_wrong_digest() {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let digest = Digest::of(b"good");
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), 4);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    install_checkpoint(&writer, &meta);
+    let simple = mislabeled(&digest, b"evil");
+    let delegates = HashMap::new();
+
+    let error = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await
+    .err()
+    .expect("corrupt checkpoint bytes fail recovery");
+
+    assert!(matches!(
+        error,
+        SyncError::BlobFetchFailed { reason: "blob_digest_mismatch", digest: failed }
+            if failed == digest.as_str()
+    ));
+}
+
+#[rstest::rstest]
+#[case::retryable(TransportError::Disconnected, None)]
+#[case::terminal(TransportError::Unauthenticated, Some("unauthenticated"))]
+#[tokio::test]
+async fn test_checkpoint_recovery_classifies_transport_failures(
+    #[case] failure: TransportError,
+    #[case] terminal_reason: Option<&str>,
+) {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let digest = Digest::of(b"absent");
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), 6);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    install_checkpoint(&writer, &meta);
+    let simple = Faulty(failure);
+    let delegates = HashMap::new();
+    let result = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await;
+
+    match terminal_reason {
+        Some(reason) => assert!(matches!(
+            result,
+            Err(SyncError::BlobFetchFailed { reason: actual, .. }) if actual == reason
+        )),
+        None => assert_eq!(
+            result.unwrap().unwrap().report,
+            BlobPlaneReport { fetched: 0, pending: 1 }
+        ),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_checkpoint_recovery_reports_a_stage_the_local_store_refuses() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let meta = crate::support::distributed_meta(directory.path().join("peryx.redb"));
+    let root = directory.path().join("blobs");
+    std::fs::create_dir_all(&root).unwrap();
+    let blobs = BlobStorage::filesystem(root.clone());
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let bytes = b"unstageable checkpoint";
+    let digest = Digest::of(bytes);
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(digest.as_str(), bytes.len() as u64);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    install_checkpoint(&writer, &meta);
+    let simple = loopback(&digest, bytes);
+    let delegates = HashMap::new();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let error = pull_checkpoint_blobs(
+        &BlobSources {
+            simple: &simple,
+            delegates: &delegates,
+            local_dc: "dc-a",
+        },
+        &blobs,
+        &meta,
+        nz(1),
+    )
+    .await
+    .err()
+    .expect("a refused local stage fails recovery");
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(error, SyncError::Blob(_)));
+}
+
+#[tokio::test]
+async fn test_checkpoint_recovery_advances_between_complete_pages() {
+    let (_dir, meta, blobs) = stores();
+    let writer_dir = tempfile::tempdir().unwrap();
+    let writer = crate::support::distributed_meta(writer_dir.path().join("writer.redb"));
+    let first = Digest::of(b"first");
+    let second = Digest::of(b"second");
+    writer
+        .commit_driver_txn(|txn| {
+            txn.reference_blob(first.as_str(), 5);
+            txn.reference_blob(second.as_str(), 6);
+            Ok::<_, peryx_storage::meta::MetaError>(((), vec![b"{}".to_vec()]))
+        })
+        .unwrap();
+    let manifest = install_checkpoint(&writer, &meta);
+    seed_local(&blobs, &first, b"first").await;
+    seed_local(&blobs, &second, b"second").await;
+
+    let simple = empty_source();
+    let delegates = HashMap::new();
+    let sources = BlobSources {
+        simple: &simple,
+        delegates: &delegates,
+        local_dc: "dc-a",
+    };
+    let first_page = pull_checkpoint_blobs(&sources, &blobs, &meta, nz(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let second_page = pull_checkpoint_blobs(&sources, &blobs, &meta, nz(1))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(!first_page.complete);
+    assert!(second_page.complete);
+    assert_eq!(second_page.serial, manifest.serial);
 }
 
 #[tokio::test]

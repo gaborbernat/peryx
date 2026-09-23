@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use super::super::manifest_key;
 use super::*;
 use crate::store::record_manifest;
+use peryx_storage::meta::DriverMutation;
 
 fn store() -> (tempfile::TempDir, MetaStore) {
     let dir = tempfile::tempdir().unwrap();
@@ -55,6 +58,73 @@ fn test_referenced_blob_digests_keeps_repository_members() {
     assert_eq!(
         referenced_blob_digests(&meta).unwrap(),
         BTreeSet::from(["f".repeat(64)])
+    );
+}
+
+#[test]
+fn test_checkpoint_blob_digests_uses_only_rows_in_the_folded_state() {
+    let hex = |byte: char| byte.to_string().repeat(64);
+    let member = hex('a');
+    let config = hex('b');
+    let layer = hex('c');
+    let manifest = Manifest {
+        media_type: "application/vnd.oci.image.manifest.v1+json".to_owned(),
+        bytes: format!(r#"{{"config":{{"digest":"sha256:{config}"}},"layers":[{{"digest":"sha256:{layer}"}}]}}"#)
+            .into_bytes(),
+    };
+    let mut state = CheckpointState::default();
+    state
+        .apply(
+            vec![
+                DriverMutation::Put {
+                    key: format!("{BLOB_MEMBERSHIP_PREFIX}hub\0app\0sha256:{member}"),
+                    value: Vec::new(),
+                },
+                DriverMutation::Put {
+                    key: manifest_key(&format!("sha256:{}", hex('d'))),
+                    value: manifest.encode().unwrap(),
+                },
+                DriverMutation::Put {
+                    key: "z-unrelated".to_owned(),
+                    value: Vec::new(),
+                },
+            ],
+            Vec::new(),
+            b"{}",
+        )
+        .unwrap();
+
+    assert_eq!(checkpoint_blob_digests(&state), BTreeSet::from([member, config, layer]));
+}
+
+#[test]
+fn test_legacy_membership_uses_a_supplemental_checkpoint_size() {
+    let (_dir, meta) = store();
+    let digest = "a".repeat(64);
+    meta.commit_driver_txn(|txn| {
+        txn.put(&format!("{BLOB_MEMBERSHIP_PREFIX}hub\0app\0sha256:{digest}"), &[])?;
+        Ok::<_, MetaError>(((), vec![b"{}".to_vec()]))
+    })
+    .unwrap();
+    let identity = peryx_storage::meta::CheckpointIdentity {
+        source: "local".to_owned(),
+        protocol_version: 1,
+        schema_version: 1,
+    };
+
+    let manifest = meta
+        .publish_checkpoint_with_sizes(identity, &BTreeMap::from([(digest.clone(), 17)]), |state| {
+            Ok(checkpoint_blob_digests(state))
+        })
+        .unwrap();
+
+    assert_eq!(manifest.blobs, 1);
+    assert_eq!(
+        meta.checkpoint().unwrap().unwrap().state.blobs(),
+        &BTreeSet::from([peryx_storage::meta::DriverBlobReference {
+            sha256: digest,
+            size: 17
+        }])
     );
 }
 

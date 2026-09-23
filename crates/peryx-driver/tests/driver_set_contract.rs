@@ -25,6 +25,13 @@ impl BlobReferenceDriver for References {
     fn referenced_blob_digests(&self, _meta: &peryx_storage::meta::MetaStore) -> Result<BTreeSet<String>, String> {
         Ok(BTreeSet::from([self.digest.to_owned()]))
     }
+
+    fn checkpoint_blob_digests(
+        &self,
+        _state: &peryx_storage::meta::CheckpointState,
+    ) -> Result<BTreeSet<String>, String> {
+        Ok(BTreeSet::from([self.digest.to_owned()]))
+    }
 }
 
 impl EcosystemDriver for Driver {
@@ -55,6 +62,13 @@ impl BlobReferenceDriver for Driver {
     fn referenced_blob_digests(
         &self,
         _meta: &peryx_storage::meta::MetaStore,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        Err("blob references".to_owned())
+    }
+
+    fn checkpoint_blob_digests(
+        &self,
+        _state: &peryx_storage::meta::CheckpointState,
     ) -> Result<std::collections::BTreeSet<String>, String> {
         Err("blob references".to_owned())
     }
@@ -269,6 +283,10 @@ fn driver_set_registers_and_dispatches_independent_capabilities() {
             .referenced_blob_digests(&meta),
         Err("blob references".to_owned())
     );
+    let error = set
+        .checkpoint_blob_digests(&peryx_storage::meta::CheckpointState::default())
+        .unwrap_err();
+    assert_eq!(error.to_string(), "scan example blob references: blob references");
     assert_eq!(
         set.fsck_drivers()
             .next()
@@ -381,6 +399,19 @@ fn driver_set_scans_all_covered_repository_ecosystems() {
             ecosystems: vec!["alpha".to_owned(), "beta".to_owned()],
             digests: ["a".to_owned(), "b".to_owned()].into_iter().collect(),
         }
+    );
+}
+
+#[test]
+fn driver_set_collects_checkpoint_blob_references() {
+    let mut set = DriverSet::default();
+    set.register_blob_references(Ecosystem::new("alpha"), Arc::new(References { digest: "a" }));
+    set.register_blob_references(Ecosystem::new("beta"), Arc::new(References { digest: "b" }));
+
+    assert_eq!(
+        set.checkpoint_blob_digests(&peryx_storage::meta::CheckpointState::default())
+            .unwrap(),
+        BTreeSet::from(["a".to_owned(), "b".to_owned()])
     );
 }
 

@@ -179,6 +179,31 @@ async fn test_browser_upload_derives_legacy_fields_and_publishes() {
     );
 }
 
+/// Browser mode derives only the identity fields from the filename; any other field the form sends is
+/// still held against the archive's metadata.
+#[tokio::test]
+async fn test_browser_upload_still_checks_a_sent_field_against_the_metadata() {
+    let h = harness().await;
+    let wheel = fixture_wheel();
+    let (content_type, body) = multipart_body(
+        &[("requires_python", ">=3.12")],
+        Some(("peryxpkg-1.0-py3-none-any.whl", &wheel)),
+    );
+
+    let (status, body) = post_upload_with_headers_response(
+        &h.state,
+        "/root/pypi/",
+        Some(&upload_auth()),
+        &content_type,
+        &BROWSER_HEADERS[..3],
+        body,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body.contains("Requires-Python"), "{body}");
+}
+
 #[tokio::test]
 async fn test_upload_durably_stages_one_ingress_intent_and_deduplicates_a_resend() {
     let h = harness().await;

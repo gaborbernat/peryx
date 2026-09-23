@@ -91,6 +91,26 @@ async fn test_hosted_provenance_with_a_missing_blob_is_not_found() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// A bundle carries certificates and transparency proofs, so its field may run far past the 64 KiB
+/// that bounds every other upload text field.
+#[tokio::test]
+async fn test_upload_accepts_an_attestation_field_past_the_text_field_limit() {
+    let harness = harness().await;
+    let wheel = fixture_wheel();
+    let sha256 = Digest::of(&wheel).as_str().to_owned();
+    let field = serde_json::json!([{
+        "version": 1,
+        "verification_material": {"certificate": "Zm9v".repeat(32 * 1024), "transparency_entries": []},
+        "envelope": {"statement": statement(FILENAME, &sha256), "signature": "YmFy"},
+    }])
+    .to_string();
+
+    assert_eq!(
+        upload_with_attestations(&harness.state, &wheel, &field).await,
+        StatusCode::OK
+    );
+}
+
 #[tokio::test]
 async fn test_upload_with_attestation_publishes_and_serves_provenance() {
     let harness = harness().await;

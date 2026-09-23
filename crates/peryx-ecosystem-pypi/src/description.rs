@@ -81,7 +81,7 @@ fn render_plain(text: &str) -> String {
 fn render_markdown(text: &str) -> String {
     let mut link_safe = None;
     let parser =
-        Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH).filter_map(move |event| {
+        Parser::new_ext(text, Options::ENABLE_TABLES.union(Options::ENABLE_STRIKETHROUGH)).filter_map(move |event| {
             match event {
                 Event::Start(Tag::Link { ref dest_url, .. }) => {
                     let safe = is_safe_link(dest_url);

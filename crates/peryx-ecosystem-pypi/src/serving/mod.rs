@@ -124,11 +124,8 @@ struct Preference {
 }
 
 impl Preference {
-    const fn consider(&mut self, specificity: u8, quality: u16) {
-        if specificity > self.specificity || specificity == self.specificity && quality > self.quality {
-            self.specificity = specificity;
-            self.quality = quality;
-        }
+    fn consider(&mut self, specificity: u8, quality: u16) {
+        (self.specificity, self.quality) = (self.specificity, self.quality).max((specificity, quality));
     }
 }
 

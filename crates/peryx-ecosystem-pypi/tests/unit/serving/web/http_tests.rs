@@ -651,3 +651,105 @@ fn readme_zip() -> Vec<u8> {
     }
     bytes
 }
+
+/// A pre-PEP 700 page names no versions, so no release owns a file and the project page borrows the
+/// newest file that is live, carries metadata, and names a release it belongs to.
+#[rstest]
+#[case::only_file(&[("flask-1.0-py3-none-any.whl", false, Some("only file"))], Some("only file"))]
+#[case::newest_yanked(
+    &[("flask-1.0-py3-none-any.whl", false, Some("live")), ("flask-2.0-py3-none-any.whl", true, Some("yanked"))],
+    Some("live")
+)]
+#[case::newest_without_metadata(
+    &[("flask-1.0-py3-none-any.whl", false, Some("with metadata")), ("flask-2.0-py3-none-any.whl", false, None)],
+    Some("with metadata")
+)]
+#[tokio::test]
+async fn browse_http_describes_a_versionless_project_from_its_newest_eligible_file(
+    #[case] files: &[(&str, bool, Option<&str>)],
+    #[case] summary: Option<&str>,
+) {
+    let (_directory, state) = versionless_app(files);
+
+    let (status, _, body) = send(state, Method::GET, "/browse?index=pypi&project=flask", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let page: BrowsePage = serde_json::from_str(&body).unwrap();
+    assert_eq!(page.summary.as_deref(), summary, "{body}");
+}
+
+/// A cached `flask` page that names no versions, as a pre-PEP 700 upstream serves it, listing each
+/// `(filename, yanked, summary)` file in order; a file with a summary advertises a stored metadata
+/// sibling carrying it.
+fn versionless_app(files: &[(&str, bool, Option<&str>)]) -> (tempfile::TempDir, Arc<AppState>) {
+    let directory = tempfile::tempdir().unwrap();
+    let meta = MetaStore::open(directory.path().join("peryx.redb")).unwrap();
+    let metadata = files
+        .iter()
+        .map(|(_, _, summary)| {
+            summary.map(|summary| format!("Metadata-Version: 2.1\nName: flask\nVersion: 1.0\nSummary: {summary}\n"))
+        })
+        .collect::<Vec<_>>();
+    let entries = files
+        .iter()
+        .zip(&metadata)
+        .map(|((filename, yanked, _), metadata)| {
+            let core_metadata = metadata.as_ref().map_or(
+                serde_json::json!(false),
+                |metadata| serde_json::json!({"sha256": Digest::of(metadata.as_bytes()).as_str()}),
+            );
+            serde_json::json!({
+                "filename": filename,
+                "url": format!("https://files.example/{filename}"),
+                "hashes": {"sha256": Digest::of(filename.as_bytes()).as_str()},
+                "yanked": yanked,
+                "core-metadata": core_metadata,
+            })
+        })
+        .collect::<Vec<_>>();
+    let body = serde_json::json!({"meta": {"api-version": "1.0"}, "name": "flask", "files": entries});
+    let published = files
+        .iter()
+        .map(|(filename, ..)| PublishedFileWrite {
+            sha256: Digest::of(filename.as_bytes()).as_str().to_owned(),
+            filename: (*filename).to_owned(),
+            url: format!("https://files.example/{filename}"),
+            size: None,
+            metadata: None,
+        })
+        .collect::<Vec<_>>();
+    meta.put_cached_page(CachedPageWrite {
+        key: "pypi/flask",
+        record: &CachedIndex {
+            source: None,
+            last_modified: None,
+            etag: None,
+            last_serial: None,
+            fetched_at_unix: 900,
+            content_type: Some("application/vnd.pypi.simple.v1+json".to_owned()),
+            fresh_secs: None,
+            body: body.to_string().into_bytes(),
+        },
+        index: "pypi",
+        normalized: "flask",
+        display: "flask",
+        source: "pypi",
+        upstream: None,
+        project_status: None,
+        project_status_reason: None,
+        files: &published,
+        attestations: &[],
+    })
+    .unwrap();
+    let state = cached_app(&directory, meta);
+    for ((filename, ..), metadata) in files.iter().zip(metadata) {
+        let Some(metadata) = metadata else { continue };
+        let digest = state.serving.blobs.blocking().put_bytes(metadata.as_bytes()).unwrap();
+        state
+            .serving
+            .meta
+            .put_metadata(Digest::of(filename.as_bytes()).as_str(), digest.as_str())
+            .unwrap();
+    }
+    (directory, state)
+}

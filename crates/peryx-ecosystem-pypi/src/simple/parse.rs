@@ -424,7 +424,7 @@ pub struct ProjectDetail {
 impl Serialize for ProjectDetail {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let project_status = self.meta.project_status_object();
-        let mut map = serializer.serialize_map(Some(4 + usize::from(project_status.is_some())))?;
+        let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("meta", &self.meta)?;
         if let Some(project_status) = project_status {
             map.serialize_entry("project-status", &project_status)?;

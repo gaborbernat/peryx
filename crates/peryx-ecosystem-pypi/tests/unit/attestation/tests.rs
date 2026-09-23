@@ -1,4 +1,309 @@
 use super::*;
+use std::sync::Arc;
+
+use rstest::rstest;
+use sigstore_verify::Verifier;
+use sigstore_verify::trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, SIGSTORE_STAGING_TRUSTED_ROOT, TrustedRoot};
+
+const SIGNED_FILENAME: &str = "pypi_attestations-0.0.19.tar.gz";
+const SIGNED_SHA256: &str = "9bb1add04b1b4e182be6b0b80931593f7a291eb49d69b4fd728a5d4cbcdc4bd3";
+const SIGNED_ATTESTATION: &str = include_str!("../../fixtures/pypi_attestations-0.0.19.tar.gz.publish.attestation");
+const SIGNED_IDENTITY: &str =
+    "https://github.com/trailofbits/pypi-attestations/.github/workflows/release.yml@refs/tags/v0.0.19";
+
+fn build_provenance(raw: &str, sha256: &str, filename: &str) -> Result<BuiltProvenance, AttestationError> {
+    build_provenance_unverified(raw, sha256, filename)
+}
+
+fn verification_context(root: &str, identity: &str, claims: BTreeMap<String, String>) -> VerificationContext {
+    verification_context_with_issuer(root, identity, "https://token.actions.githubusercontent.com", claims)
+}
+
+fn verification_context_with_issuer(
+    root: &str,
+    identity: &str,
+    issuer: &str,
+    claims: BTreeMap<String, String>,
+) -> VerificationContext {
+    let root = TrustedRoot::from_json(root).unwrap();
+    VerificationContext::new(
+        Arc::new(Verifier::new(&root)),
+        identity.to_owned(),
+        issuer.to_owned(),
+        claims,
+    )
+}
+
+fn signed_field(attestation: Value) -> String {
+    serde_json::to_string(&[attestation]).unwrap()
+}
+
+fn signed_attestation() -> Value {
+    serde_json::from_str(SIGNED_ATTESTATION).unwrap()
+}
+
+#[test]
+fn test_signed_attestation_verifies() {
+    let built = super::build_provenance(
+        &signed_field(signed_attestation()),
+        SIGNED_SHA256,
+        SIGNED_FILENAME,
+        Some(&verification_context(
+            SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+            SIGNED_IDENTITY,
+            BTreeMap::new(),
+        )),
+    )
+    .unwrap();
+
+    assert_eq!(
+        built.predicate_types,
+        BTreeSet::from(["https://docs.pypi.org/attestations/publish/v1".to_owned()])
+    );
+}
+
+#[test]
+fn test_attestation_without_a_verification_policy_is_rejected() {
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(signed_attestation()),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            None,
+        )
+        .unwrap_err(),
+        AttestationError::MissingVerificationPolicy
+    );
+}
+
+#[test]
+fn test_signed_attestation_with_an_unsupported_version_is_rejected() {
+    let mut attestation = signed_attestation();
+    attestation["version"] = json!(2);
+
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(attestation),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::new(),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::UnsupportedVersion {
+            index: 0,
+            version: "2".to_owned(),
+        }
+    );
+}
+
+#[rstest]
+#[case::signature("envelope", "signature")]
+#[case::certificate("verification_material", "certificate")]
+fn test_mutated_signed_material_is_rejected(#[case] object: &str, #[case] field: &str) {
+    let mut attestation = signed_attestation();
+    let value = attestation[object][field].as_str().unwrap();
+    attestation[object][field] = Value::String(format!("A{}", &value[1..]));
+
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(attestation),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::new(),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::VerificationFailed(0)
+    );
+}
+
+#[test]
+fn test_mutated_statement_is_rejected() {
+    let mut attestation = signed_attestation();
+    let statement = STANDARD
+        .decode(attestation["envelope"]["statement"].as_str().unwrap())
+        .unwrap();
+    let mut statement: Value = serde_json::from_slice(&statement).unwrap();
+    statement["predicate"] = serde_json::json!({"changed": true});
+    attestation["envelope"]["statement"] = Value::String(STANDARD.encode(serde_json::to_vec(&statement).unwrap()));
+
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(attestation),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::new(),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::VerificationFailed(0)
+    );
+}
+
+#[rstest]
+#[case::identity("other@example.com", SIGSTORE_PRODUCTION_TRUSTED_ROOT)]
+#[case::root(SIGNED_IDENTITY, SIGSTORE_STAGING_TRUSTED_ROOT)]
+fn test_untrusted_attestation_identity_or_root_is_rejected(#[case] identity: &str, #[case] root: &str) {
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(signed_attestation()),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(root, identity, BTreeMap::new())),
+        )
+        .unwrap_err(),
+        AttestationError::VerificationFailed(0)
+    );
+}
+
+#[test]
+fn test_untrusted_attestation_issuer_is_rejected() {
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(signed_attestation()),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context_with_issuer(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                "https://issuer.example",
+                BTreeMap::new(),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::VerificationFailed(0)
+    );
+}
+
+#[test]
+fn test_attestation_without_transparency_evidence_is_rejected() {
+    let mut attestation = signed_attestation();
+    attestation["verification_material"]["transparency_entries"] = json!([]);
+
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(attestation),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::new(),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::VerificationFailed(0)
+    );
+}
+
+#[test]
+fn test_matching_certificate_claim_is_accepted() {
+    assert!(
+        super::build_provenance(
+            &signed_field(signed_attestation()),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::from([(
+                    "1.3.6.1.4.1.57264.1.12".to_owned(),
+                    "https://github.com/trailofbits/pypi-attestations".to_owned(),
+                )]),
+            )),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn test_mismatched_certificate_claim_is_rejected() {
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(signed_attestation()),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::from([(
+                    "1.3.6.1.4.1.57264.1.12".to_owned(),
+                    "https://github.com/other/repo".to_owned()
+                )]),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::VerificationFailed(0)
+    );
+}
+
+#[rstest]
+#[case::integrated_time("integrated-time")]
+#[case::log_key("log-key")]
+#[case::set("set")]
+#[case::missing_proof("missing-proof")]
+#[case::checkpoint("checkpoint")]
+#[case::body("body")]
+fn test_mutated_transparency_material_is_rejected(#[case] mutation: &str) {
+    let mut attestation = signed_attestation();
+    let entry = &mut attestation["verification_material"]["transparency_entries"][0];
+    match mutation {
+        "integrated-time" => entry["integratedTime"] = Value::String("1733354042".to_owned()),
+        "log-key" => entry["logId"]["keyId"] = Value::String(STANDARD.encode([0; 32])),
+        "set" => entry["inclusionPromise"]["signedEntryTimestamp"] = Value::String("AA==".to_owned()),
+        "missing-proof" => {
+            entry.as_object_mut().unwrap().remove("inclusionProof");
+        }
+        "checkpoint" => entry["inclusionProof"]["checkpoint"]["envelope"] = Value::String("changed".to_owned()),
+        "body" => entry["canonicalizedBody"] = Value::String(STANDARD.encode(b"{}")),
+        _ => unreachable!(),
+    }
+
+    assert_eq!(
+        super::build_provenance(
+            &signed_field(attestation),
+            SIGNED_SHA256,
+            SIGNED_FILENAME,
+            Some(&verification_context(
+                SIGSTORE_PRODUCTION_TRUSTED_ROOT,
+                SIGNED_IDENTITY,
+                BTreeMap::new(),
+            )),
+        )
+        .unwrap_err(),
+        AttestationError::VerificationFailed(0)
+    );
+}
+
+#[test]
+fn test_mixed_attestations_reject_the_complete_upload() {
+    let valid = signed_attestation();
+    let mut invalid = valid.clone();
+    invalid["envelope"]["signature"] = Value::String("AA==".to_owned());
+    let context = verification_context(SIGSTORE_PRODUCTION_TRUSTED_ROOT, SIGNED_IDENTITY, BTreeMap::new());
+
+    for attestations in [[valid.clone(), invalid.clone()], [invalid.clone(), valid]] {
+        assert!(matches!(
+            super::build_provenance(
+                &serde_json::to_string(&attestations).unwrap(),
+                SIGNED_SHA256,
+                SIGNED_FILENAME,
+                Some(&context),
+            ),
+            Err(AttestationError::VerificationFailed(_))
+        ));
+    }
+}
 
 const SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const FILENAME: &str = "peryxpkg-1.0-py3-none-any.whl";

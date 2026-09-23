@@ -258,23 +258,22 @@ publisher that attaches attestations to a `twine upload` against pypi.org attach
 
 ### Provenance binding
 
-peryx does not verify Sigstore signatures, certificate identities, or transparency-log inclusion; those are the
-consumer's to check, and a build-service identity policy is out of scope. What peryx enforces is the binding a consumer
-relies on before it ever looks at a signature: every attestation must name *this* distribution. Each attestation's
-in-toto subject has to carry the uploaded file's SHA-256 digest, and if it names a filename, that filename has to be the
-one being uploaded. An attestation whose subject digest is for some other file, or whose subject names a different
-wheel, is a bundle issued for a different artifact, and peryx rejects it.
+peryx accepts hosted attestations only from an authenticated trusted publisher with an attestation policy. It verifies
+the Sigstore certificate chain, SCT, transparency entry and proof, signing time, artifact digest, certificate issuer,
+exact SAN, and configured certificate claims. It also requires every in-toto subject to carry the uploaded file's
+SHA-256 digest and, when present, the uploaded filename. Peryx rejects an attestation for another artifact, publisher,
+repository, or workflow.
 
 Storing the attestation next to the file lets a client confirm that the provenance describes the downloaded bytes. peryx
-keeps the certificate chain, log proofs, and predicate intact for the verifier.
+keeps the certificate, log proofs, and predicate intact. Serving stored provenance does not depend on the current trust
+root; verification happens once, before publication.
 
 ### Publish is all-or-nothing
 
-The attestation and the distribution publish in one transaction, so a bad bundle takes both down with it. A subject
-mismatch, a malformed envelope, a statement that is not valid base64 or not a valid in-toto statement, an unsupported
-version, a bundle nested past the JSON parser's depth limit, or a field over its size limit. Any of these fails the
-upload with a `400`, and neither the file nor its provenance becomes visible. There is no half-published state where the
-wheel is installable but its provenance is missing, or the reverse.
+The attestation and the distribution publish in one transaction, so a bad bundle takes both down with it. A failed
+signature or identity check, subject mismatch, malformed envelope, unsupported version, excessive nesting, or oversized
+field fails the upload with a `400`. Peryx verifies every item in an attestation array; one invalid item rejects the
+array. Neither the file nor its provenance becomes visible.
 
 ### Visibility and provenance
 
@@ -290,11 +289,10 @@ client sees always matches what the index is willing to serve.
 predicate types an upload must carry a PEP 740 attestation for, such as `https://docs.pypi.org/attestations/publish/v1`
 from the
 [PyPA index-hosted attestation specification](https://packaging.python.org/en/latest/specifications/index-hosted-attestations/).
-peryx evaluates the requirement at the upload boundary, after the same structural and subject-binding validation above
-and before the file and its provenance publish. An upload missing a required predicate type publishes neither object,
-and the `403` names the missing types without echoing bundle content. Matching predicates permit the same upload. The
-requirement reads the predicate types declared by the bound attestations. A later verifier checks signatures,
-certificates, transparency logs, and identity claims.
+peryx evaluates the requirement at the upload boundary after complete attestation verification and before the file and
+its provenance publish. An upload missing a required predicate type publishes neither object, and the `403` names the
+missing types without echoing bundle content. Matching predicates permit the same upload. The requirement reads only the
+predicate types declared by attestations whose signatures and publisher identities passed verification.
 
 `attestation_mode` chooses what an unmet requirement does. `enforce`, the default, rejects the upload. `audit` records
 the same policy decision but publishes the upload anyway, so an operator can measure how much of a project's traffic

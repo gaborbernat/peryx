@@ -353,10 +353,14 @@ test("project page opens browsable artifacts", async ({ page }) => {
 test("project page summarizes hosted provenance and flags a mirrored claim", async ({
   page,
 }) => {
-  await goto(page, PROJECT_URL);
+  await goto(
+    page,
+    "/browse?index=root%2Fpypi&project=circleci-sign-publish-example",
+  );
   const hosted = page
     .locator(".browse-table tbody tr", {
-      hasText: "veloxdemo-1.0.0-py3-none-any.whl",
+      hasText:
+        "circleci_sign_publish_example-0.0.1.dev137-py3-none-any.whl",
     })
     .locator(".badge.provenance-valid");
   await expect(hosted).toHaveText("hosted provenance");
@@ -365,6 +369,7 @@ test("project page summarizes hosted provenance and flags a mirrored claim", asy
     /attestations\/publish\/v1.*matched/,
   );
 
+  await goto(page, PROJECT_URL);
   const mirrored = page
     .locator(".browse-table tbody tr", {
       hasText: "veloxdemo-0.9-py3-none-any.whl",

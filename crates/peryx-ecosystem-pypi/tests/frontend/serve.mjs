@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
@@ -13,6 +13,27 @@ const upstreamBase = `http://127.0.0.1:${upstreamPort}`;
 const wheel = readFileSync(
   join(here, "..", "fixtures", "veloxdemo-1.0.0-py3-none-any.whl"),
 );
+const signedFilename =
+  "circleci_sign_publish_example-0.0.1.dev137-py3-none-any.whl";
+const signedWheel = Buffer.from(
+  readFileSync(
+    join(here, "..", "fixtures", `${signedFilename}.b64`),
+    "utf8",
+  ).replace(/\s/g, ""),
+  "base64",
+);
+const signedAttestation = readFileSync(
+  join(here, "..", "fixtures", `${signedFilename}.publish.attestation`),
+  "utf8",
+);
+const sigstoreTrustedRoot = readFileSync(
+  join(here, "..", "fixtures", "sigstore-production-trusted-root.json"),
+  "utf8",
+);
+const signingKey = "frontend-trusted-publisher-signing-key";
+const attestationIdentity =
+  "https://circleci.com/api/v2/projects/fdd9283f-e619-46af-8f9c-851f7d3e8b2b/" +
+  "pipeline-definitions/8e4f8ab2-8d7c-4827-9f15-de076d6d647f";
 
 function file(filename) {
   const digest = createHash("sha256").update(filename).digest("hex");
@@ -88,27 +109,23 @@ await new Promise((resolve, reject) => {
   upstream.listen(upstreamPort, "127.0.0.1", resolve);
 });
 
-function attestationsField(filename) {
-  const sha256 = createHash("sha256").update(wheel).digest("hex");
-  const statement = Buffer.from(
-    JSON.stringify({
-      _type: "https://in-toto.io/Statement/v1",
-      subject: [{ name: filename, digest: { sha256 } }],
-      predicateType: "https://docs.pypi.org/attestations/publish/v1",
-      predicate: {},
-    }),
-  ).toString("base64");
-  return JSON.stringify([
-    {
-      version: 1,
-      verification_material: { certificate: "Zm9v", transparency_entries: [] },
-      envelope: { statement, signature: "YmFy" },
-    },
-  ]);
-}
-
 await startPeryx({
-  configText: `[[index]]
+  configText: `[auth]
+signing_key = "${signingKey}"
+sigstore_trusted_root = '''${sigstoreTrustedRoot}'''
+
+[[auth.trusted_publisher]]
+id = "release"
+issuer = "https://oidc.circleci.com"
+repository = "hosted"
+subject = "*"
+projects = ["circleci-sign-publish-example"]
+attestation_identity = "${attestationIdentity}"
+
+[auth.trusted_publisher.attestation_claims]
+"1.3.6.1.4.1.57264.1.12" = "github.com/CircleCI-Public/sign-and-publish-examples"
+
+[[index]]
 name = "pypi"
 ecosystem = "pypi"
 
@@ -181,10 +198,6 @@ write_target = "hosted"
     form.set("name", "veloxdemo");
     form.set("version", "1.0.0");
     form.set("filetype", "bdist_wheel");
-    form.set(
-      "attestations",
-      attestationsField("veloxdemo-1.0.0-py3-none-any.whl"),
-    );
     form.set("content", new Blob([wheel]), "veloxdemo-1.0.0-py3-none-any.whl");
     const response = await fetch(`${base}/root/pypi/`, {
       method: "POST",
@@ -197,6 +210,22 @@ write_target = "hosted"
       throw new Error(
         `upload rejected: ${response.status} ${await response.text()}`,
       );
+    const signedForm = new FormData();
+    signedForm.set(":action", "file_upload");
+    signedForm.set("name", "circleci-sign-publish-example");
+    signedForm.set("version", "0.0.1.dev137");
+    signedForm.set("filetype", "bdist_wheel");
+    signedForm.set("attestations", `[${signedAttestation}]`);
+    signedForm.set("content", new Blob([signedWheel]), signedFilename);
+    const signedResponse = await fetch(`${base}/root/pypi/`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${trustedPublisherToken()}` },
+      body: signedForm,
+    });
+    if (!signedResponse.ok)
+      throw new Error(
+        `signed upload rejected: ${signedResponse.status} ${await signedResponse.text()}`,
+      );
     const search = await fetch(`${base}/+search?q=veloxdemo&page_size=1`);
     const body = await search.text();
     if (!search.ok || !body.includes("veloxdemo"))
@@ -205,3 +234,24 @@ write_target = "hosted"
       );
   },
 });
+
+function trustedPublisherToken() {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const encode = (value) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const content = `${encode({ alg: "HS256", typ: "JWT" })}.${encode({
+    sub: "trusted-publisher:release",
+    aud: "peryx",
+    iat: issuedAt,
+    exp: issuedAt + 300,
+    jti: "frontend-trusted-token",
+    purpose: "trusted-publishing",
+    grants: [
+      {
+        resources: ["root/pypi/circleci-sign-publish-example"],
+        actions: ["write"],
+      },
+    ],
+  })}`;
+  return `${content}.${createHmac("sha256", signingKey).update(content).digest("base64url")}`;
+}

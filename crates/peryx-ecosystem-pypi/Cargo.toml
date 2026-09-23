@@ -53,6 +53,8 @@ serving = [
   "dep:html5ever",
   "dep:regex",
   "dep:uuid",
+  "dep:sigstore-verify",
+  "dep:x509-cert",
 ]
 bench = [
   "serving",
@@ -126,6 +128,8 @@ toml = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
 html5ever = { version = "0.39", optional = true }
 regex = { workspace = true, optional = true }
+sigstore-verify = { version = "0.11.0", git = "https://github.com/sigstore/sigstore-rust", rev = "5b108840fda21e9f3315906efee8feac113ffa21", default-features = false, optional = true }
+x509-cert = { version = "0.2.5", optional = true }
 
 [dev-dependencies]
 # The changelog reader shares one journal with every other driver, so its tests read what a real one writes.

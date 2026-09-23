@@ -1,4 +1,6 @@
-use super::attestations::{attestations_field, upload_with_attestations};
+use super::attestations::{
+    SIGNED_FILENAME, SIGNED_PROJECT, signed_attestations_field, signed_distribution, upload_signed_attestation,
+};
 use super::support::*;
 use crate::policy::RemoteMetadataMode;
 use crate::store::UpstreamAttestation;
@@ -177,6 +179,30 @@ pub(super) async fn upstream_page(harness: &Harness, digest: &str, accept: &str)
     let (status, _, body) = get(&harness.state, "/pypi/simple/peryxpkg/", Some(accept)).await;
     assert_eq!(status, StatusCode::OK);
     body
+}
+
+async fn signed_upstream_page(harness: &Harness, digest: &str) {
+    let provenance = format!("{}/integrity/{SIGNED_FILENAME}.provenance", harness.server.uri());
+    let body = format!(
+        r#"{{"meta":{{"api-version":"1.4"}},"name":"{SIGNED_PROJECT}","versions":["0.0.1.dev137"],"files":[{{"filename":"{SIGNED_FILENAME}","size":11,"url":"{server}/files/{SIGNED_FILENAME}","hashes":{{"sha256":"{digest}"}},"provenance":"{provenance}"}}]}}"#,
+        server = harness.server.uri(),
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/simple/{SIGNED_PROJECT}/")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("cache-control", "max-age=60")
+                .set_body_raw(body, "application/vnd.pypi.simple.v1+json"),
+        )
+        .mount(&harness.server)
+        .await;
+    let (status, ..) = get(
+        &harness.state,
+        &format!("/pypi/simple/{SIGNED_PROJECT}/"),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 pub(super) fn upstream_provenance_uri(digest: &str) -> String {
@@ -575,21 +601,25 @@ async fn test_cached_and_virtual_routes_select_the_visible_attestation_source() 
         upstream_policy(RemoteMetadataMode::Proxy),
     )
     .await;
-    let wheel = fixture_wheel();
-    let digest = Digest::of(&wheel).as_str().to_owned();
-    mount_provenance(
-        &harness,
-        ResponseTemplate::new(200).set_body_raw(PYPI_PROVENANCE, "application/json"),
-    )
-    .await;
-    upstream_page(&harness, &digest, "application/json").await;
+    let digest = Digest::of(&signed_distribution()).as_str().to_owned();
+    Mock::given(method("GET"))
+        .and(path(format!("/integrity/{SIGNED_FILENAME}.provenance")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(PYPI_PROVENANCE, "application/json"))
+        .mount(&harness.server)
+        .await;
+    signed_upstream_page(&harness, &digest).await;
     assert_eq!(
-        upload_with_attestations(&harness.state, &wheel, &attestations_field(FILENAME, &digest)).await,
+        upload_signed_attestation(&harness.state, "/root/pypi/", &signed_attestations_field()).await,
         StatusCode::OK
     );
 
-    let cached = get(&harness.state, &upstream_provenance_uri(&digest), None).await;
-    let virtual_uri = format!("/root/pypi/files/{digest}/{FILENAME}.provenance");
+    let cached = get(
+        &harness.state,
+        &format!("/pypi/files/{digest}/{SIGNED_FILENAME}.provenance"),
+        None,
+    )
+    .await;
+    let virtual_uri = format!("/root/pypi/files/{digest}/{SIGNED_FILENAME}.provenance");
     let hosted = get(&harness.state, &virtual_uri, None).await;
 
     assert_eq!(
@@ -611,15 +641,19 @@ async fn test_cached_and_virtual_routes_select_the_visible_attestation_source() 
 #[tokio::test]
 async fn test_direct_cached_route_does_not_serve_a_hosted_digest_collision() {
     let harness = upstream_harness(RemoteMetadataMode::Direct).await;
-    let wheel = fixture_wheel();
-    let digest = Digest::of(&wheel).as_str().to_owned();
-    upstream_page(&harness, &digest, "application/json").await;
+    let digest = Digest::of(&signed_distribution()).as_str().to_owned();
+    signed_upstream_page(&harness, &digest).await;
     assert_eq!(
-        upload_with_attestations(&harness.state, &wheel, &attestations_field(FILENAME, &digest)).await,
+        upload_signed_attestation(&harness.state, "/root/pypi/", &signed_attestations_field()).await,
         StatusCode::OK
     );
 
-    let (status, ..) = get(&harness.state, &upstream_provenance_uri(&digest), None).await;
+    let (status, ..) = get(
+        &harness.state,
+        &format!("/pypi/files/{digest}/{SIGNED_FILENAME}.provenance"),
+        None,
+    )
+    .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

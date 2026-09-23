@@ -1,13 +1,5 @@
-//! PEP 740 / index-hosted attestations: parse the upload field, bind each attestation to its
+//! PEP 740 / index-hosted attestations: verify each uploaded attestation, bind it to its
 //! distribution, and assemble the provenance object the Simple API serves.
-//!
-//! Peryx stores what a publisher uploads and serves it back verbatim; it does not verify Sigstore
-//! signatures, certificates, or transparency-log inclusion. What it does enforce is the binding a
-//! consumer relies on before it ever looks at a signature: every attestation names this exact
-//! distribution, by filename and by SHA-256 digest. An attestation that does not is rejected, so a
-//! bundle can never claim a file it was not issued for. Untrusted material (the certificate, the
-//! transparency entries, the in-toto predicate) is bounded and preserved as opaque JSON, never
-//! interpreted.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +11,10 @@ use crate::{
     parse_distribution_filename,
     view::{AttestationView, SubjectMatch},
 };
+
+mod verify;
+
+pub(crate) use verify::VerificationContext;
 
 /// The media type PEP 740 assigns the served provenance object.
 pub const PROVENANCE_MEDIA_TYPE: &str = "application/vnd.pypi.integrity.v1+json";
@@ -78,6 +74,10 @@ pub enum AttestationError {
         expected: String,
         actual: String,
     },
+    /// The authenticated publisher has no attestation verification policy.
+    MissingVerificationPolicy,
+    /// Sigstore or publisher-identity verification failed.
+    VerificationFailed(usize),
 }
 
 impl AttestationError {
@@ -117,6 +117,10 @@ impl AttestationError {
                 expected,
                 actual,
             } => format!("attestation {index} subject names {actual:?} but the distribution is {expected:?}"),
+            Self::MissingVerificationPolicy => {
+                "the authenticated publisher has no attestation verification policy".to_owned()
+            }
+            Self::VerificationFailed(index) => format!("attestation {index} failed Sigstore verification"),
         }
     }
 }
@@ -139,13 +143,47 @@ pub struct BuiltProvenance {
 /// # Errors
 /// Returns [`AttestationError`] when the field is malformed, oversized, over-nested, or carries an
 /// attestation whose subject does not bind to `sha256` and `filename`.
-pub fn build_provenance(raw: &str, sha256: &str, filename: &str) -> Result<BuiltProvenance, AttestationError> {
+pub(crate) fn build_provenance(
+    raw: &str,
+    sha256: &str,
+    filename: &str,
+    verification: Option<&VerificationContext>,
+) -> Result<BuiltProvenance, AttestationError> {
+    let attestations = parse_attestations(raw)?;
+    let verification = verification.ok_or(AttestationError::MissingVerificationPolicy)?;
+    let mut predicate_types = BTreeSet::new();
+    for (index, attestation) in attestations.iter().enumerate() {
+        if let Some(predicate_type) = validate_attestation(index, attestation, sha256, filename, verification)? {
+            predicate_types.insert(predicate_type);
+        }
+    }
+    Ok(BuiltProvenance {
+        document: provenance_document(&attestations),
+        predicate_types,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn build_provenance_unverified(
+    raw: &str,
+    sha256: &str,
+    filename: &str,
+) -> Result<BuiltProvenance, AttestationError> {
     let attestations = parse_attestations(raw)?;
     let mut predicate_types = BTreeSet::new();
     for (index, attestation) in attestations.iter().enumerate() {
-        if let Some(predicate_type) = validate_attestation(index, attestation, sha256, filename)? {
-            predicate_types.insert(predicate_type);
+        match &attestation["version"] {
+            Value::Number(version) if version.as_u64() == Some(SUPPORTED_VERSION) => {}
+            version => {
+                return Err(AttestationError::UnsupportedVersion {
+                    index,
+                    version: version.to_string(),
+                });
+            }
         }
+        let statement = decode_statement(index, attestation)?;
+        bind_subject(index, &statement, sha256, filename)?;
+        predicate_types.insert(statement.predicate_type);
     }
     Ok(BuiltProvenance {
         document: provenance_document(&attestations),
@@ -162,7 +200,7 @@ const MAX_PREDICATE_TYPE_CHARS: usize = 256;
 ///
 /// This reads the document peryx already stored - it fetches nothing and verifies no signature. It
 /// decodes each DSSE statement only far enough to read its `predicateType` and check that a subject
-/// digest binds to `sha256`, mirroring the binding [`build_provenance`] enforced at upload.
+/// digest binds to `sha256`, mirroring the binding `build_provenance` enforced at upload.
 ///
 /// Returns `None` when the document does not parse as a version-1 provenance object or carries no
 /// attestation, so a caller renders it as an unreadable record rather than an empty panel.
@@ -305,6 +343,7 @@ fn validate_attestation(
     attestation: &Value,
     sha256: &str,
     filename: &str,
+    verification: &VerificationContext,
 ) -> Result<Option<String>, AttestationError> {
     match &attestation["version"] {
         Value::Number(version) if version.as_u64() == Some(SUPPORTED_VERSION) => {}
@@ -317,6 +356,9 @@ fn validate_attestation(
     }
     let statement = decode_statement(index, attestation)?;
     bind_subject(index, &statement, sha256, filename)?;
+    verification
+        .verify(attestation, sha256)
+        .map_err(|()| AttestationError::VerificationFailed(index))?;
     Ok(Some(statement.predicate_type))
 }
 

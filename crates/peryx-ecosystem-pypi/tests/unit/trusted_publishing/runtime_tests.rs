@@ -11,9 +11,12 @@ use peryx_policy::Policy;
 use peryx_storage::blob::BlobStorage;
 use peryx_storage::meta::MetaStore;
 use rstest::rstest;
+use sigstore_verify::Verifier as SigstoreVerifier;
+use sigstore_verify::trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot};
 use tower::ServiceExt as _;
 
 use super::*;
+use crate::trusted_publishing::policy::AttestationPolicy;
 
 const NOW: i64 = 2_000_000_000;
 
@@ -54,6 +57,7 @@ fn binding() -> PublisherBinding {
             subject: Glob::new("repo:org/app:*"),
             claims: BTreeMap::from([("repository_id".to_owned(), "42".to_owned())]),
             projects: vec![Glob::new("app")],
+            attestation: None,
         },
     }
 }
@@ -80,6 +84,7 @@ fn runtime(bindings: Vec<PublisherBinding>, replay_capacity: usize) -> (Signer, 
         signer.clone(),
         300,
         replay_capacity,
+        None,
     )
     .unwrap();
     (signer, runtime)
@@ -100,6 +105,7 @@ async fn test_exchange_caps_the_minted_ttl_at_the_identitys_remaining_lifetime()
         signer,
         300,
         MAX_REPLAY_ENTRIES,
+        None,
     )
     .unwrap();
 
@@ -126,6 +132,45 @@ fn test_runtime_reports_configured_audience() {
     let (_, runtime) = runtime(vec![binding], MAX_REPLAY_ENTRIES);
 
     assert_eq!(runtime.audience(), "packages.example");
+}
+
+#[rstest]
+#[case::anonymous(Principal::Anonymous, false)]
+#[case::publisher(
+    Principal::Named {
+        subject: "trusted-publisher:github-release".to_owned(),
+    },
+    true
+)]
+fn test_attestation_context_requires_a_named_configured_publisher(
+    #[case] principal: Principal,
+    #[case] expected: bool,
+) {
+    let mut binding = binding();
+    binding.publisher.attestation = Some(AttestationPolicy {
+        identity: "https://identity.example".to_owned(),
+        claims: BTreeMap::new(),
+    });
+    let root = TrustedRoot::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT).unwrap();
+    let runtime = OidcRuntime::build(
+        vec![binding],
+        Arc::new(Verifier {
+            identity: identity(),
+            error: None,
+        }),
+        Signer::new(b"local-key", "peryx"),
+        300,
+        MAX_REPLAY_ENTRIES,
+        Some(Arc::new(SigstoreVerifier::new(&root))),
+    )
+    .unwrap();
+    let token = VerifiedToken {
+        principal,
+        grants: Vec::new(),
+        id: "token".to_owned(),
+    };
+
+    assert_eq!(runtime.attestation_context(&token).is_some(), expected);
 }
 
 #[tokio::test]
@@ -346,6 +391,7 @@ async fn test_verification_error_is_preserved() {
         Signer::new(b"local-key", "peryx"),
         300,
         MAX_REPLAY_ENTRIES,
+        None,
     )
     .unwrap();
 
@@ -382,6 +428,7 @@ fn test_build_rejects_invalid_configuration(
             Signer::new(b"local-key", "peryx"),
             ttl_secs,
             replay_capacity,
+            None,
         ),
         Err(ExchangeError::Configuration)
     ));

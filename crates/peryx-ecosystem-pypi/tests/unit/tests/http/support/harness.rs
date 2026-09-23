@@ -1,5 +1,7 @@
 use super::*;
+use peryx_identity::Signer;
 use peryx_identity::{Action, Glob, Grant, IndexAcl, NamedToken};
+use sigstore_verify::trust_root::SIGSTORE_PRODUCTION_TRUSTED_ROOT;
 use std::sync::RwLock;
 
 pub struct Harness {
@@ -176,6 +178,7 @@ async fn harness_with_options(
         },
         [("pypi".to_owned(), options.upstream_concurrency)],
     );
+    install_attestation_auth(&mut state, &[("release", "root-pypi")]);
     let serving = Arc::get_mut(&mut state.serving).unwrap();
     serving.max_stale_secs = options.max_stale_secs;
     if let Some(indexer) = options.indexer {
@@ -523,6 +526,7 @@ async fn promotion_harness_with(distributed: bool, target_policy: Policy) -> Har
         indexes,
         Arc::new(move || ticks.load(Ordering::Relaxed)),
     );
+    install_attestation_auth(&mut state, &[("staging", "staging"), ("prod", "prod")]);
     let state = if distributed {
         install_distributed_services(&mut state);
         wire(state, true)
@@ -535,6 +539,49 @@ async fn promotion_harness_with(distributed: bool, target_policy: Policy) -> Har
         state,
         clock,
     }
+}
+
+fn install_attestation_auth(state: &mut AppState, publishers: &[(&str, &str)]) {
+    state.set_token_realm(Signer::new(b"realm-key", "peryx"), 300).unwrap();
+    let claims = toml::Table::from_iter([(
+        "1.3.6.1.4.1.57264.1.12".to_owned(),
+        toml::Value::String("github.com/CircleCI-Public/sign-and-publish-examples".to_owned()),
+    )]);
+    let publishers = publishers
+        .iter()
+        .map(|(id, repository)| {
+            toml::Value::Table(toml::Table::from_iter([
+                ("id".to_owned(), toml::Value::String((*id).to_owned())),
+                (
+                    "issuer".to_owned(),
+                    toml::Value::String("https://oidc.circleci.com".to_owned()),
+                ),
+                ("repository".to_owned(), toml::Value::String((*repository).to_owned())),
+                ("subject".to_owned(), toml::Value::String("*".to_owned())),
+                (
+                    "projects".to_owned(),
+                    toml::Value::Array(vec![toml::Value::String("*".to_owned())]),
+                ),
+                (
+                    "attestation_identity".to_owned(),
+                    toml::Value::String(
+                        "https://circleci.com/api/v2/projects/fdd9283f-e619-46af-8f9c-851f7d3e8b2b/\
+                         pipeline-definitions/8e4f8ab2-8d7c-4827-9f15-de076d6d647f"
+                            .to_owned(),
+                    ),
+                ),
+                ("attestation_claims".to_owned(), toml::Value::Table(claims.clone())),
+            ]))
+        })
+        .collect();
+    let auth = toml::Table::from_iter([
+        (
+            "sigstore_trusted_root".to_owned(),
+            toml::Value::String(SIGSTORE_PRODUCTION_TRUSTED_ROOT.to_owned()),
+        ),
+        ("trusted_publisher".to_owned(), toml::Value::Array(publishers)),
+    ]);
+    crate::trusted_publishing::install(&mut state.auth_install_context().unwrap(), &auth).unwrap();
 }
 /// Promotion where source read and target write are held by different credentials.
 ///
@@ -639,6 +686,15 @@ fn sealed_acl() -> IndexAcl {
 /// project it addresses shows up as an authorization change rather than passing on the wildcard.
 fn hosted_acl() -> IndexAcl {
     let mut acl = crate::tests::writer_acl("s3cret");
+    acl.tokens.push(NamedToken {
+        name: "trusted-publisher:release".to_owned(),
+        secret: "basic-publisher".to_owned(),
+        grants: vec![Grant {
+            resources: vec![Glob::new("*")],
+            actions: std::collections::BTreeSet::from([Action::Write]),
+        }],
+        expires_at: None,
+    });
     acl.tokens.push(NamedToken {
         name: "narrow".to_owned(),
         secret: NARROW_SECRET.to_owned(),

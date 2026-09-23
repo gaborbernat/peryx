@@ -25,6 +25,13 @@ pub(super) struct TrustedPublisher {
     pub subject: Glob,
     pub claims: BTreeMap<String, String>,
     pub projects: Vec<Glob>,
+    pub attestation: Option<AttestationPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AttestationPolicy {
+    pub identity: String,
+    pub claims: BTreeMap<String, String>,
 }
 
 impl TrustedPublisher {

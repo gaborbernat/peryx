@@ -185,6 +185,7 @@ pub struct PreparedUpload {
     pub attestation_predicate_types: BTreeSet<String>,
     pub record: Uploaded,
     pub submitted_at_unix: i64,
+    attestations: Option<String>,
 }
 
 struct PreparedRecord {
@@ -447,11 +448,10 @@ pub fn prepare(
     let upload_time = upload_time(upload_time_unix)?;
     let digest = staged.blob.digest().clone();
     let url = local_artifact_url(index, digest.as_str(), &filename);
-    let provenance = prepared_provenance(form.attestations.as_deref(), digest.as_str(), &filename, &url)?;
     let file = uploaded_file(UploadedFile {
         filename: filename.clone(),
         url,
-        provenance: provenance.marker,
+        provenance: Provenance::Absent,
         digest: &digest,
         size: staged.blob.len(),
         upload_time,
@@ -464,8 +464,8 @@ pub fn prepare(
         digest,
         content: staged.blob,
         metadata,
-        provenance: provenance.document,
-        attestation_predicate_types: provenance.predicate_types,
+        provenance: None,
+        attestation_predicate_types: BTreeSet::new(),
         record: Uploaded {
             version,
             file,
@@ -473,7 +473,41 @@ pub fn prepare(
             trashed: None,
         },
         submitted_at_unix: upload_time_unix,
+        attestations: form.attestations,
     })
+}
+
+impl PreparedUpload {
+    pub(crate) fn verify_attestations(
+        &mut self,
+        verification: Option<&attestation::VerificationContext>,
+    ) -> Result<(), UploadError> {
+        let provenance = prepared_provenance(
+            self.attestations.as_deref(),
+            self.digest.as_str(),
+            &self.filename,
+            &self.record.file.url,
+            verification,
+        )?;
+        self.record.file.provenance = provenance.marker;
+        self.provenance = provenance.document;
+        self.attestation_predicate_types = provenance.predicate_types;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_attestations_unverified_for_storage_test(&mut self) -> Result<(), UploadError> {
+        let Some(attestations) = self.attestations.as_deref().filter(|field| !field.trim().is_empty()) else {
+            return Ok(());
+        };
+        let built = attestation::build_provenance_unverified(attestations, self.digest.as_str(), &self.filename)
+            .map_err(UploadError::Attestation)?;
+        self.record.file.provenance =
+            Provenance::Url(format!("{}{}", self.record.file.url, attestation::PROVENANCE_SUFFIX));
+        self.provenance = Some(built.document);
+        self.attestation_predicate_types = built.predicate_types;
+        Ok(())
+    }
 }
 
 /// The pieces a prepared upload's served [`File`] is assembled from.
@@ -520,6 +554,7 @@ fn prepared_provenance(
     sha256: &str,
     filename: &str,
     url: &str,
+    verification: Option<&attestation::VerificationContext>,
 ) -> Result<PreparedProvenance, UploadError> {
     let Some(attestations) = attestations.filter(|field| !field.trim().is_empty()) else {
         return Ok(PreparedProvenance {
@@ -528,7 +563,8 @@ fn prepared_provenance(
             predicate_types: BTreeSet::new(),
         });
     };
-    let built = attestation::build_provenance(attestations, sha256, filename).map_err(UploadError::Attestation)?;
+    let built = attestation::build_provenance(attestations, sha256, filename, verification)
+        .map_err(UploadError::Attestation)?;
     Ok(PreparedProvenance {
         document: Some(built.document),
         marker: Provenance::Url(format!("{url}{}", attestation::PROVENANCE_SUFFIX)),
@@ -783,6 +819,7 @@ fn split_prepared(prepared: PreparedUpload) -> (BlobStaged, PreparedRecord) {
         attestation_predicate_types: _,
         record,
         submitted_at_unix,
+        attestations: _,
     } = prepared;
     let content_size = content.len();
     (

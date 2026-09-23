@@ -1,4 +1,6 @@
-use super::attestations::{FILENAME, attestations_field, upload_with_attestations};
+use super::attestations::{
+    SIGNED_FILENAME, SIGNED_PROJECT, signed_attestations_field, signed_distribution, upload_signed_attestation,
+};
 use super::support::*;
 use super::upstream_attestations::{
     PYPI_PROVENANCE, mount_provenance, upstream_harness, upstream_page, upstream_provenance_uri,
@@ -88,17 +90,16 @@ async fn test_metadata_sidecar_validates_against_the_documents_own_digest() {
 #[tokio::test]
 async fn test_hosted_provenance_validates_against_the_stored_blob() {
     let h = harness().await;
-    let wheel = fixture_wheel();
-    let sha256 = Digest::of(&wheel).as_str().to_owned();
+    let sha256 = Digest::of(&signed_distribution()).as_str().to_owned();
     assert_eq!(
-        upload_with_attestations(&h.state, &wheel, &attestations_field(FILENAME, &sha256)).await,
+        upload_signed_attestation(&h.state, "/root/pypi/", &signed_attestations_field()).await,
         StatusCode::OK
     );
     let (stored, _) = h
         .state
         .serving
         .meta
-        .get_provenance("hosted", "peryxpkg", &sha256, FILENAME)
+        .get_provenance("hosted", SIGNED_PROJECT, &sha256, SIGNED_FILENAME)
         .unwrap()
         .unwrap();
     let document = h
@@ -109,7 +110,7 @@ async fn test_hosted_provenance_validates_against_the_stored_blob() {
         .await
         .unwrap();
 
-    let uri = format!("/root/pypi/files/{sha256}/{FILENAME}.provenance");
+    let uri = format!("/root/pypi/files/{sha256}/{SIGNED_FILENAME}.provenance");
 
     assert_sidecar_validator(&h.state, &uri, &document, REVALIDATED).await;
 }

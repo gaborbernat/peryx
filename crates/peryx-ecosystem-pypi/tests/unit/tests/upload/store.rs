@@ -54,12 +54,9 @@ fn publish_wheel(
     let sha = staged.blob.digest().as_str().to_owned();
     let mut form = staged_form(wheel);
     form.attestations = signature.map(|signature| signed_attestations_field(FILENAME, &sha, signature));
-    store_prepared_blocking(
-        meta,
-        blobs,
-        "hosted",
-        prepare(form, staged, "root/hosted", 1000).unwrap(),
-    )
+    let mut prepared = prepare(form, staged, "root/hosted", 1000).unwrap();
+    prepared.prepare_attestations_unverified_for_storage_test().unwrap();
+    store_prepared_blocking(meta, blobs, "hosted", prepared)
 }
 
 fn publish_named_wheel(
@@ -147,7 +144,8 @@ fn test_store_prepared_blocking_stages_and_records_the_provenance_bundle() {
     let mut form = staged_form(&wheel);
     form.attestations = Some(attestations_field(FILENAME, &sha));
 
-    let prepared = prepare(form, staged, "root/hosted", 1000).unwrap();
+    let mut prepared = prepare(form, staged, "root/hosted", 1000).unwrap();
+    prepared.prepare_attestations_unverified_for_storage_test().unwrap();
     assert!(
         prepared.provenance.is_some(),
         "attestations produce a provenance object"
@@ -212,7 +210,8 @@ async fn test_commit_publish_adds_the_provenance_placement() {
     let sha = staged.blob.digest().as_str().to_owned();
     let mut form = staged_form(&wheel);
     form.attestations = Some(attestations_field(FILENAME, &sha));
-    let prepared = prepare(form, staged, "root/hosted", 1000).unwrap();
+    let mut prepared = prepare(form, staged, "root/hosted", 1000).unwrap();
+    prepared.prepare_attestations_unverified_for_storage_test().unwrap();
     assert!(
         prepared.provenance.is_some(),
         "attestations produce a provenance object"

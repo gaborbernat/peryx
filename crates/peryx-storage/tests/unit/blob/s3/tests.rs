@@ -171,21 +171,33 @@ async fn test_abort_removes_the_local_stage() {
     );
 }
 
+/// A directory in place of the stage file makes its removal fail.
+fn block_stage_removal(staging: &Path) {
+    let path = std::fs::read_dir(staging).unwrap().next().unwrap().unwrap().path();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+}
+
 /// Dropping the write also removes its stage, so only the reported failure shows the abort ran.
 #[tokio::test]
 async fn test_abort_reports_stage_removal_failure() {
     let staging = tempfile::tempdir().unwrap();
     let write = backend(staging.path()).begin().await.unwrap();
-    let path = std::fs::read_dir(staging.path())
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    std::fs::remove_file(&path).unwrap();
-    std::fs::create_dir(&path).unwrap();
+    block_stage_removal(staging.path());
 
     let error = write.abort().await.unwrap_err();
+
+    assert_eq!(error.kind(), BlobErrorKind::Io);
+}
+
+/// Dropping a finished write also removes its stage, so only the reported failure shows the abort ran.
+#[tokio::test]
+async fn test_finished_abort_reports_stage_removal_failure() {
+    let staging = tempfile::tempdir().unwrap();
+    let staged = backend(staging.path()).begin().await.unwrap().finish().await.unwrap();
+    block_stage_removal(staging.path());
+
+    let error = staged.abort().await.unwrap_err();
 
     assert_eq!(error.kind(), BlobErrorKind::Io);
 }

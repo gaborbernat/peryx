@@ -290,8 +290,8 @@ fn test_arm_reclaim_guards_accepts_an_empty_batch() {
 }
 
 #[test]
-fn test_replica_apply_bypasses_a_reclaim_guard() {
-    let (_dir, store) = super::store();
+fn test_replica_apply_bypasses_a_live_reclaim_guard() {
+    let (_dir, store, _now) = stepped_store();
     assert_eq!(
         store
             .compare_and_arm_reclaim_guards(&["mirror"], 0, 0, guard(1))
@@ -324,4 +324,5 @@ fn test_replica_apply_bypasses_a_reclaim_guard() {
         store.get_driver_value("mirror/ref").unwrap().as_deref(),
         Some(b"v".as_slice())
     );
+    assert_eq!(store.reclaim_guard("mirror").unwrap(), Some(guard(1)));
 }

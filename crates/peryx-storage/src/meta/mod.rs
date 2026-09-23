@@ -238,7 +238,9 @@ const ANALYTICS_APPLY_KEY: &str = "apply_state";
 const ANALYTICS_PRODUCER_KEY: &str = "producer";
 const WRITER_KEY: &str = "active";
 #[cfg(any(test, feature = "fault-injection"))]
-const DRIVER_PREFIX_SCAN_FAULT_DISABLED: usize = usize::MAX;
+/// An armed fault holds the rows it still admits plus one, so the scan that fires it also leaves it
+/// here.
+const DRIVER_PREFIX_SCAN_FAULT_DISABLED: usize = 0;
 
 /// Opaque driver writes committed atomically through [`MetaStore::commit_driver_batch`].
 #[derive(Debug, Default)]
@@ -368,9 +370,11 @@ impl MetaStore {
     }
 
     /// Fails a driver transaction prefix scan after `after` matching rows without invalidating its transaction.
+    /// `usize::MAX` disarms the fault.
     #[cfg(any(test, feature = "fault-injection"))]
     pub fn fail_driver_prefix_scan_after(&self, after: usize) {
-        self.driver_prefix_scan_fault.store(after, Ordering::SeqCst);
+        self.driver_prefix_scan_fault
+            .store(after.wrapping_add(1), Ordering::SeqCst);
     }
 
     fn initialize(db: Database) -> Result<Self, MetaError> {

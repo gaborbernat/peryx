@@ -836,13 +836,9 @@ impl DriverTxn<'_> {
                 .try_update(
                     std::sync::atomic::Ordering::SeqCst,
                     std::sync::atomic::Ordering::SeqCst,
-                    |remaining| match remaining {
-                        usize::MAX => None,
-                        0 => Some(usize::MAX),
-                        _ => Some(remaining - 1),
-                    },
+                    |remaining| remaining.checked_sub(1),
                 )
-                .is_ok_and(|remaining| remaining == 0)
+                .is_ok_and(|remaining| remaining == 1)
             {
                 return Err(MetaError::DriverPrecondition("injected driver prefix scan failure".to_owned()).into());
             }

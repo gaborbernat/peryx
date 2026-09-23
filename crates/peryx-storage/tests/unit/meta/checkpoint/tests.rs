@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr as _;
 
 use peryx_identity::{ArtifactDigest, RevocationReason, UserId};
+use rstest::rstest;
 
 use crate::meta::checkpoint::CheckpointState;
 use crate::meta::fault::initialized;
@@ -321,6 +322,30 @@ fn test_publication_names_the_current_serial_and_verifies() {
     assert_eq!((manifest.rows, manifest.identity.clone()), (1, identity()));
     assert_eq!(checkpoint.manifest, manifest);
     checkpoint.verify().unwrap();
+}
+
+#[rstest]
+#[case::same_identity("primary-a", 1)]
+#[case::new_identity("primary-b", 2)]
+fn test_republication_at_the_same_serial_advances_the_generation_only_for_a_new_identity(
+    #[case] source: &str,
+    #[case] expected_generation: u64,
+) {
+    let store = store();
+    put(&store, "alpha", b"one");
+    store.publish_checkpoint(identity()).unwrap();
+
+    let republished = store
+        .publish_checkpoint(CheckpointIdentity {
+            source: source.to_owned(),
+            ..identity()
+        })
+        .unwrap();
+
+    assert_eq!(
+        (republished.generation, republished.identity.source),
+        (expected_generation, source.to_owned())
+    );
 }
 
 #[test]

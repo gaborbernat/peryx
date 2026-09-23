@@ -115,10 +115,11 @@ fn test_create_repository_accepts_fields_at_their_byte_limit() {
     let (_dir, store) = store();
     let route = "r".repeat(512);
     let display_name = "n".repeat(256);
+    let ecosystem = "e".repeat(64);
 
     assert!(
         store
-            .create_repository(new_repo(&route, &display_name, "alpha", &UserId::random()), 1)
+            .create_repository(new_repo(&route, &display_name, &ecosystem, &UserId::random()), 1)
             .is_ok()
     );
 }

@@ -423,6 +423,23 @@ fn test_user_name_migration_rebuilds_records_and_lookup_keys() {
     );
 }
 
+/// `open_existing` skips initialization, so the stale store reaches the migration unchanged.
+#[test]
+fn test_migrate_user_names_upgrades_a_store_opened_without_initialization() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older.redb");
+    older_store_with_users(&path, &[("usr_street", "Straße", "straße")], Some("prior-unicode-data"));
+    let store = MetaStore::open_existing(&path).unwrap();
+
+    store.migrate_user_names().unwrap();
+
+    assert!(!store.user_names_require_migration().unwrap());
+    assert_eq!(
+        store.get_user_by_name("STRASSE").unwrap().unwrap().id.as_str(),
+        "usr_street"
+    );
+}
+
 #[test]
 fn test_user_name_migration_reports_collisions_before_writes() {
     let dir = tempfile::tempdir().unwrap();

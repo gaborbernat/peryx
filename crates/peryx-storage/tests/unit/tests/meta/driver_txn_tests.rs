@@ -341,6 +341,19 @@ fn test_driver_txn_prefix_after_limited_applies_scan_fault_after_the_cursor() {
 }
 
 #[test]
+fn test_driver_txn_prefix_scan_fault_disarms_at_usize_max() {
+    let (_dir, store) = super::store();
+    store.put_driver_value("scope/a", b"value").unwrap();
+    store.fail_driver_prefix_scan_after(0);
+    store.fail_driver_prefix_scan_after(usize::MAX);
+
+    assert_eq!(
+        store.commit_driver_cache_txn(|txn| txn.prefix("scope/")).unwrap(),
+        vec![("scope/a".to_owned(), b"value".to_vec())]
+    );
+}
+
+#[test]
 fn test_driver_txn_prefix_reads_staged_rows() {
     let (_dir, store) = super::store();
     store.put_driver_value("scope/removed", b"old").unwrap();

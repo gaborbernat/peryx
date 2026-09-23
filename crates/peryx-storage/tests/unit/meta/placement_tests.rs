@@ -1,6 +1,7 @@
 //! What a committed placement records, and what a failed record does to the caller.
 
 use peryx_ha::{ArtifactPlacement, ArtifactSource, ReclaimGuard, ReclaimGuardStore as _};
+use rstest::rstest;
 
 use crate::meta::fault::initialized;
 
@@ -37,6 +38,29 @@ fn test_a_committed_placement_refines_unknown_and_keeps_a_known_source() {
     assert_eq!(
         store.get_artifact_placement(DIGEST).unwrap(),
         Some(ArtifactPlacement::record(ArtifactSource::Hosted, true))
+    );
+}
+
+#[rstest]
+#[case::refines_unknown(ArtifactSource::Unknown, ArtifactSource::Proxy)]
+#[case::keeps_known(ArtifactSource::Hosted, ArtifactSource::Hosted)]
+fn test_marking_an_artifact_local_resolves_its_source(
+    #[case] stored: ArtifactSource,
+    #[case] expected: ArtifactSource,
+) {
+    let (store, _inner, _fault) = initialized();
+    store
+        .put_artifact_placement(DIGEST, &ArtifactPlacement::record(stored, false))
+        .unwrap();
+
+    let marked = store.mark_artifact_local(DIGEST, ArtifactSource::Proxy).unwrap();
+
+    assert_eq!(
+        (marked, store.get_artifact_placement(DIGEST).unwrap()),
+        (
+            ArtifactPlacement::record(expected, true),
+            Some(ArtifactPlacement::record(expected, true))
+        )
     );
 }
 

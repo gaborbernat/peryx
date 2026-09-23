@@ -157,6 +157,28 @@ fn test_an_installed_checkpoint_holds_the_rows_the_writer_replicated() {
     assert!(replica.has_active_digest_revocation().unwrap());
 }
 
+#[test]
+fn test_a_checkpoint_installed_without_a_generation_is_republished_at_generation_one() {
+    let (writer, published) = published(2);
+    let manifest = CheckpointManifest {
+        generation: 0,
+        ..published
+    };
+    let replica = store();
+    transfer(&writer, &replica, &manifest, 4096);
+    replica.install_staged_checkpoint(CURSOR_KEY, CURSOR_VALUE).unwrap();
+
+    let republished = replica.publish_checkpoint(identity()).unwrap();
+
+    assert_eq!(
+        republished,
+        CheckpointManifest {
+            generation: 1,
+            ..manifest
+        }
+    );
+}
+
 fn recovering_replica(blobs: u64) -> (MetaStore, CheckpointManifest) {
     let writer = store();
     for index in 1..=blobs {

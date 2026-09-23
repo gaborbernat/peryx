@@ -4,9 +4,10 @@ use std::io::{Error, ErrorKind};
 use peryx_core::Ecosystem;
 use peryx_driver::DriverSet;
 use peryx_driver::cache_inspection::{
-    CacheInspectionError, CacheListFilter, CachePageSource, write_cache_fsck, write_cache_list, write_cache_size,
+    CacheInspectionError, CacheListFilter, CachePageSource, resource_filter, write_cache_fsck, write_cache_list,
+    write_cache_size,
 };
-use peryx_driver::serving::{CachePage, CapabilityRegistrar, FsckDriver};
+use peryx_driver::serving::{CachePage, CapabilityRegistrar, FsckDriver, NameDriver};
 use peryx_identity::UserId;
 use peryx_storage::blob::{BlobError, BlobScanError, BlobStorage};
 use peryx_storage::meta::{MetaError, MetaStore, NewRepository};
@@ -54,6 +55,26 @@ fn cache_inspection_errors_name_the_failing_step(#[case] error: CacheInspectionE
 )))]
 fn cache_inspection_errors_keep_their_cause(#[case] error: CacheInspectionError) {
     assert!(error.source().is_some());
+}
+
+struct LowercaseNames;
+
+impl NameDriver for LowercaseNames {
+    fn normalize_name(&self, name: &str) -> String {
+        name.to_ascii_lowercase()
+    }
+}
+
+#[rstest]
+#[case::normalized_by_the_name_driver(Some("MiXeD"), Some(&LowercaseNames as &dyn NameDriver), Some("mixed"))]
+#[case::verbatim_without_a_name_driver(Some("MiXeD"), None, Some("MiXeD"))]
+#[case::absent(None, Some(&LowercaseNames as &dyn NameDriver), None)]
+fn resource_filter_matches_the_normalization_of_the_stored_keys(
+    #[case] resource: Option<&str>,
+    #[case] names: Option<&dyn NameDriver>,
+    #[case] expected: Option<&str>,
+) {
+    assert_eq!(resource_filter(resource, names).as_deref(), expected);
 }
 
 const NOW: i64 = 1_000_000;
@@ -185,16 +206,17 @@ fn write_cache_list_min_size_filter_keeps_pages_at_or_past_the_boundary() {
     assert_eq!(listed_keys(vec![small, big.clone()], None, &filter), vec![big.key]);
 }
 
-/// Any active page filter (an index here) means the request is scoped to the index pages, so the
-/// blob scan that would otherwise follow must not run and add rows the caller never asked to see.
-#[test]
-fn write_cache_list_skips_the_blob_scan_once_any_page_filter_is_active() {
+/// Any active page filter means the request is scoped to the index pages, so the blob scan that would
+/// otherwise follow must not run and add rows the caller never asked to see. Each case activates one
+/// filter alone, so no other term can decide the skip on its behalf.
+#[rstest]
+#[case::index(CacheListFilter { index: Some("index"), ..no_filter() })]
+#[case::resource(CacheListFilter { resource_filtered: true, ..no_filter() })]
+#[case::stale(CacheListFilter { stale: true, ..no_filter() })]
+#[case::min_age(CacheListFilter { min_age_secs: Some(0), ..no_filter() })]
+fn write_cache_list_skips_the_blob_scan_once_any_page_filter_is_active(#[case] filter: CacheListFilter<'static>) {
     let (_dir, blobs) = empty_blobs();
     blobs.blocking().put_bytes(b"unwanted blob").unwrap();
-    let filter = CacheListFilter {
-        index: Some("index"),
-        ..no_filter()
-    };
     let mut out = Vec::new();
 
     write_cache_list(Vec::new(), &blobs, &filter, TTL, NOW, &mut out).unwrap();

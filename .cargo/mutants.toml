@@ -16,6 +16,10 @@ exclude_globs = [
   # run. Add a path back if that stops holding, and say here why.
   "crates/peryx-test-support/**",
 
+  # The driver doubles that harness registers. They compile only for tests or the `test-doubles`
+  # feature, so no production build carries them, and the harness's own suite pins what they return.
+  "crates/peryx-driver/src/test_doubles.rs",
+
   # Fixture binaries the integration suites drive, such as the S3 multipart fixture. They hold up
   # assertions that live elsewhere, and a mutant in one fails the suite that runs it.
   "crates/*/tests/**",

@@ -35,10 +35,11 @@ explained by that upstream defect. Do not increase `leak-timeout`, exclude a tes
 of finding the process that retains the descriptor.
 
 The nightly mutation run examines production code only. `.cargo/mutants.toml` excludes benchmark workloads under
-`crates/*/src/bench/`, the shared harness in `crates/peryx-test-support/`, and the fixture binaries under
-`crates/*/tests/`. A surviving mutant means the code could behave another way and no test would notice, which marks a
-gap where the behaviour is a promise to somebody. None of those three paths promises anything outside this repository,
-so a survivor in them is noise that each run reports again. The exclusions take 18,902 mutants down to 17,839.
+`crates/*/src/bench/`, the shared harness in `crates/peryx-test-support/` along with the driver doubles it registers
+from `crates/peryx-driver/src/test_doubles.rs`, and the fixture binaries under `crates/*/tests/`. A surviving mutant
+means the code could behave another way and no test would notice, which marks a gap where the behaviour is a promise to
+somebody. None of those paths promises anything outside this repository, so a survivor in them is noise that each run
+reports again. The exclusions take 18,902 mutants down to 17,839.
 
 The harness is the one worth arguing about, since a fault injector that stopped injecting would leave every test using
 it green while testing nothing. That failure shows up red instead. A test that arms a fault asserts the faulted outcome,

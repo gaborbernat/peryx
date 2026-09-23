@@ -246,7 +246,7 @@ lint-automation: _project-temp _archive-binary-contract _browser-contract _codsp
 _mutation-scope-contract:
     #!/usr/bin/env bash
     set -euo pipefail
-    for glob in 'crates/*/src/bench/**' 'crates/peryx-test-support/**' 'crates/*/tests/**'; do
+    for glob in 'crates/*/src/bench/**' 'crates/peryx-test-support/**' 'crates/peryx-driver/src/test_doubles.rs' 'crates/*/tests/**'; do
       if ! grep -Fq "\"$glob\"" .cargo/mutants.toml; then
         printf 'mutation scope must exclude %s; see contributing/ci.md for why\n' "$glob" >&2
         exit 1

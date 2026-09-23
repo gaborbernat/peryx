@@ -99,7 +99,7 @@ fn percent_decode(value: &str) -> Result<String, &'static str> {
             let Some(low) = hex(low) else {
                 return Err("invalid percent encoding");
             };
-            decoded.push(high << 4 | low);
+            decoded.push(high * 16 + low);
             index += 3;
         } else if bytes[index] == b'+' {
             decoded.push(b' ');

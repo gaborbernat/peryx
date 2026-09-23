@@ -7,8 +7,10 @@ use peryx_driver::oidc::GuardedOidcTransport;
 use peryx_identity::{
     Glob, Grant, OidcTokenVerifier, OidcVerificationError, OidcVerifier, Principal, Signer, TokenScope, VerifiedToken,
 };
+use sigstore_verify::Verifier as SigstoreVerifier;
 
 use super::policy::{PublishClaims, PublishDenial, TrustedPublisher, authorize_publish};
+use crate::attestation::VerificationContext;
 
 pub(super) const TOKEN_SCOPE: TokenScope = TokenScope::new("trusted-publishing");
 const MAX_REPLAY_ENTRIES: usize = 65_536;
@@ -38,6 +40,7 @@ pub struct OidcRuntime {
     token_ttl_secs: i64,
     replay: Mutex<HashMap<(String, String), i64>>,
     replay_capacity: usize,
+    attestation_verifier: Option<Arc<SigstoreVerifier>>,
 }
 
 impl OidcRuntime {
@@ -46,6 +49,7 @@ impl OidcRuntime {
         trusted_endpoint_hosts: &[String],
         signer: Signer,
         token_ttl_secs: i64,
+        attestation_verifier: Option<Arc<SigstoreVerifier>>,
     ) -> Result<Self, ExchangeError> {
         let first = bindings.first().ok_or(ExchangeError::Configuration)?;
         let transport = GuardedOidcTransport::new(
@@ -60,7 +64,14 @@ impl OidcRuntime {
             Arc::new(transport),
         )
         .map_err(|_| ExchangeError::Configuration)?;
-        Self::build(bindings, Arc::new(verifier), signer, token_ttl_secs, MAX_REPLAY_ENTRIES)
+        Self::build(
+            bindings,
+            Arc::new(verifier),
+            signer,
+            token_ttl_secs,
+            MAX_REPLAY_ENTRIES,
+            attestation_verifier,
+        )
     }
 
     fn build(
@@ -69,6 +80,7 @@ impl OidcRuntime {
         signer: Signer,
         token_ttl_secs: i64,
         replay_capacity: usize,
+        attestation_verifier: Option<Arc<SigstoreVerifier>>,
     ) -> Result<Self, ExchangeError> {
         if token_ttl_secs <= 0 || replay_capacity == 0 {
             return Err(ExchangeError::Configuration);
@@ -93,11 +105,27 @@ impl OidcRuntime {
             token_ttl_secs,
             replay: Mutex::new(HashMap::new()),
             replay_capacity,
+            attestation_verifier,
         })
     }
 
     pub(crate) fn verify_upload(&self, token: &str) -> Result<VerifiedToken, peryx_identity::TokenError> {
         self.signer.verify_scoped(token, TOKEN_SCOPE)
+    }
+
+    pub(crate) fn attestation_context(&self, token: &VerifiedToken) -> Option<VerificationContext> {
+        let Principal::Named { subject } = &token.principal else {
+            return None;
+        };
+        let id = subject.strip_prefix("trusted-publisher:")?;
+        let binding = self.bindings.iter().find(|binding| binding.id == id)?;
+        let policy = binding.publisher.attestation.as_ref()?;
+        Some(VerificationContext::new(
+            Arc::clone(self.attestation_verifier.as_ref()?),
+            policy.identity.clone(),
+            binding.publisher.issuer.clone(),
+            policy.claims.clone(),
+        ))
     }
 
     async fn exchange_token(&self, token: &str, now: i64) -> Result<ExchangedToken, ExchangeError> {

@@ -32,6 +32,42 @@ the [CI ID token reference](https://docs.gitlab.com/ci/secrets/id_token_authenti
 `[auth].oidc_trusted_endpoint_hosts` optionally lists hosts whose private addresses a discovered JWKS endpoint may name;
 see [verification and cache limits](#verification-and-cache-limits).
 
+## Verify uploaded attestations
+
+An upload carrying a PEP 740 `attestations` field must use a trusted-publishing token. Configure the Sigstore
+trusted-root snapshot under `[auth]`, then attach a certificate identity policy to each publisher that may submit
+attestations:
+
+```toml
+[auth]
+sigstore_trusted_root = """{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1", ...}"""
+
+[[auth.trusted_publisher]]
+id = "peryx-github-release"
+issuer = "https://token.actions.githubusercontent.com"
+repository = "root-pypi"
+subject = "repo:tox-dev/peryx:*"
+projects = ["peryx"]
+attestation_identity = "https://github.com/tox-dev/peryx/.github/workflows/release.yml@refs/tags/v1.2.3"
+
+[auth.trusted_publisher.attestation_claims]
+"1.3.6.1.4.1.57264.1.12" = "https://github.com/tox-dev/peryx"
+"1.3.6.1.4.1.57264.1.14" = "refs/tags/v1.2.3"
+```
+
+Replace the abbreviated JSON with a complete Sigstore trusted-root document. Peryx accepts up to 1 MiB and parses the
+snapshot at startup. Replace it through the normal configuration rollout when the trust root changes.
+
+`attestation_identity` is the exact Fulcio certificate SAN. It is separate from the OIDC `subject` glob used during
+token exchange. `attestation_claims` maps certificate extension OIDs encoded as DER UTF8String to exact values. Peryx
+requires every configured claim and rejects duplicate extensions.
+
+Peryx verifies the certificate chain, SCT, Rekor entry, inclusion proof, checkpoint, signed-entry timestamp, signing
+time, artifact digest, issuer, identity, and configured claims. Every attestation must pass before upload policy or
+storage runs; one invalid entry rejects the complete upload. Missing roots or publisher policies disable attestation
+uploads without affecting uploads that carry no attestations. Peryx stores accepted provenance and does not reverify it
+when serving it, so a later root rotation does not hide an existing publication.
+
 Peryx mounts the exchange routes after an operator configures a publisher. Without a publisher it creates no OIDC client
 or replay state. Peryx contacts an issuer during an exchange request. This CI exchange does not create a server user or
 browser session. Browser OIDC login uses a separate provider configuration and credential path.

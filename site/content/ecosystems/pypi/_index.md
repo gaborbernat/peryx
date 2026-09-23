@@ -171,7 +171,8 @@ or unassociated files**.
 
 Each file row shows size, upload time, sha256, yank state, metadata availability, source, and byte availability. A file
 with PEP 740 provenance has a disclosure for its predicate types and subject binding. The disclosure reports claims and
-binding checks; it does not claim that peryx verified a Sigstore signature, certificate, or transparency log.
+binding checks from the provenance document. Peryx verifies hosted provenance against its publisher's Sigstore and
+certificate policy before publication; cached provenance retains the upstream source's verification status.
 
 Wheels, zip files, zipped eggs, `.tar`, `.tar.gz`, and `.tgz` files expose archive contents. The browser lists members
 and previews bounded text chunks. Other compressed tar formats remain download-only.

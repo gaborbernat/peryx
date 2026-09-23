@@ -1041,17 +1041,20 @@ async fn test_promote_reads_the_stored_bundle_for_the_target_attestation_rule() 
         pypi.required_attestations = vec!["https://docs.pypi.org/attestations/publish/v1".to_owned()];
     }))
     .await;
-    let wheel = fixture_wheel();
-    let field = super::attestations::attestations_field(super::attestations::FILENAME, Digest::of(&wheel).as_str());
     assert_eq!(
-        super::attestations::upload_with_attestations_to(&h.state, "/staging/", &wheel, &field).await,
+        super::attestations::upload_signed_attestation(
+            &h.state,
+            "/staging/",
+            &super::attestations::signed_attestations_field(),
+        )
+        .await,
         StatusCode::OK
     );
 
     let (status, body) = request_response(
         &h.state,
         "PUT",
-        "/prod/peryxpkg/1.0/promote?from=staging",
+        "/prod/circleci-sign-publish-example/0.0.1.dev137/promote?from=staging",
         Some(&upload_auth()),
     )
     .await;

@@ -62,6 +62,46 @@ fn test_validate_accepts_a_writable_pypi_repository() {
 }
 
 #[test]
+fn test_validate_accepts_the_sigstore_production_root() {
+    let mut values = publisher();
+    values.insert(
+        "sigstore_trusted_root".to_owned(),
+        toml::Value::String(sigstore_verify::trust_root::SIGSTORE_PRODUCTION_TRUSTED_ROOT.to_owned()),
+    );
+    let indexes = [PluginIndexConfig {
+        name: "hosted",
+        ecosystem: crate::ECOSYSTEM,
+        writable: true,
+    }];
+
+    assert_eq!(validate(config(&values, &indexes)), Ok(()));
+}
+
+#[test]
+fn test_validate_rejects_an_invalid_sigstore_root() {
+    let mut values = auth_defaults();
+    values.insert("sigstore_trusted_root".to_owned(), toml::Value::String("{}".to_owned()));
+
+    assert_eq!(
+        validate(config(&values, &[])),
+        Err("auth: `sigstore_trusted_root` is invalid".to_owned())
+    );
+}
+
+#[rstest]
+#[case::empty(String::new())]
+#[case::too_large("x".repeat(MAX_TRUSTED_ROOT_BYTES + 1))]
+fn test_validate_bounds_the_sigstore_root(#[case] root: String) {
+    let mut values = auth_defaults();
+    values.insert("sigstore_trusted_root".to_owned(), toml::Value::String(root));
+
+    assert_eq!(
+        validate(config(&values, &[])),
+        Err("auth: `sigstore_trusted_root` must be between 1 byte and 1 MiB".to_owned())
+    );
+}
+
+#[test]
 fn test_validate_requires_a_signing_key() {
     let values = publisher();
     let indexes = [PluginIndexConfig {
@@ -257,6 +297,52 @@ projects = [""]
 "#
 )]
 fn test_validate_rejects_each_blank_publisher_field_on_its_own(#[case] source: &str) {
+    assert_eq!(
+        validate(config(&values(source), &[])),
+        Err("auth: trusted publisher fields and project lists must not be empty".to_owned())
+    );
+}
+
+#[rstest]
+#[case::blank_identity(
+    r#"
+[[trusted_publisher]]
+id = "release"
+issuer = "https://issuer.example"
+repository = "hosted"
+subject = "*"
+projects = ["app"]
+attestation_identity = " "
+"#
+)]
+#[case::claims_without_identity(
+    r#"
+[[trusted_publisher]]
+id = "release"
+issuer = "https://issuer.example"
+repository = "hosted"
+subject = "*"
+projects = ["app"]
+
+[trusted_publisher.attestation_claims]
+"1.2.3" = "value"
+"#
+)]
+#[case::blank_claim(
+    r#"
+[[trusted_publisher]]
+id = "release"
+issuer = "https://issuer.example"
+repository = "hosted"
+subject = "*"
+projects = ["app"]
+attestation_identity = "https://example.test/workflow"
+
+[trusted_publisher.attestation_claims]
+"1.2.3" = " "
+"#
+)]
+fn test_validate_rejects_invalid_attestation_policy(#[case] source: &str) {
     assert_eq!(
         validate(config(&values(source), &[])),
         Err("auth: trusted publisher fields and project lists must not be empty".to_owned())

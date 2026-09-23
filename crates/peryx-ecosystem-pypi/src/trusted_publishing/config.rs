@@ -6,13 +6,22 @@ use peryx_driver::serving::PluginAuthConfig;
 use peryx_driver::state::ServingState;
 use peryx_identity::Glob;
 use serde::Deserialize;
+use sigstore_verify::Verifier as SigstoreVerifier;
+use sigstore_verify::trust_root::TrustedRoot;
 
 use super::http::TrustedPublishingRoutes;
-use super::policy::TrustedPublisher;
+use super::policy::{AttestationPolicy, TrustedPublisher};
 use super::runtime::{OidcRuntime, PublisherBinding};
 use crate::ECOSYSTEM;
 
-pub const AUTH_FIELDS: &[&str] = &["oidc_audience", "oidc_trusted_endpoint_hosts", "trusted_publisher"];
+pub const AUTH_FIELDS: &[&str] = &[
+    "oidc_audience",
+    "oidc_trusted_endpoint_hosts",
+    "sigstore_trusted_root",
+    "trusted_publisher",
+];
+
+const MAX_TRUSTED_ROOT_BYTES: usize = 1024 * 1024;
 
 pub fn auth_defaults() -> toml::Table {
     toml::Table::from_iter([("oidc_audience".to_owned(), toml::Value::String("peryx".to_owned()))])
@@ -20,6 +29,7 @@ pub fn auth_defaults() -> toml::Table {
 
 pub fn validate(config: PluginAuthConfig<'_>) -> Result<(), String> {
     let trusted = parse(config.values)?;
+    attestation_verifier(trusted.sigstore_trusted_root.as_deref())?;
     if trusted.publishers.is_empty() {
         return Ok(());
     }
@@ -49,6 +59,7 @@ pub fn install(context: &mut AuthInstallContext<'_>, values: &toml::Table) -> Re
     let Config {
         audience,
         trusted_endpoint_hosts,
+        sigstore_trusted_root,
         publishers,
     } = parse(values)?;
     if publishers.is_empty() {
@@ -58,6 +69,7 @@ pub fn install(context: &mut AuthInstallContext<'_>, values: &toml::Table) -> Re
         .signer()
         .cloned()
         .ok_or_else(|| "auth: `signing_key` is required when trusted publishers are configured".to_owned())?;
+    let attestation_verifier = attestation_verifier(sigstore_trusted_root.as_deref())?;
     let runtime = Arc::new(
         OidcRuntime::new(
             publishers
@@ -77,6 +89,10 @@ pub fn install(context: &mut AuthInstallContext<'_>, values: &toml::Table) -> Re
                             subject: Glob::new(publisher.subject),
                             claims: publisher.claims,
                             projects: publisher.projects.into_iter().map(Glob::new).collect(),
+                            attestation: publisher.attestation_identity.map(|identity| AttestationPolicy {
+                                identity,
+                                claims: publisher.attestation_claims,
+                            }),
                         },
                     })
                 })
@@ -84,6 +100,7 @@ pub fn install(context: &mut AuthInstallContext<'_>, values: &toml::Table) -> Re
             &trusted_endpoint_hosts,
             signer,
             context.token_ttl_secs(),
+            attestation_verifier,
         )
         .map_err(|error| error.to_string())?,
     );
@@ -106,6 +123,7 @@ struct Config {
     /// issuer host is trusted without listing.
     #[serde(rename = "oidc_trusted_endpoint_hosts")]
     trusted_endpoint_hosts: Vec<String>,
+    sigstore_trusted_root: Option<String>,
     #[serde(rename = "trusted_publisher")]
     publishers: Vec<PublisherConfig>,
 }
@@ -115,6 +133,7 @@ impl Default for Config {
         Self {
             audience: "peryx".to_owned(),
             trusted_endpoint_hosts: Vec::new(),
+            sigstore_trusted_root: None,
             publishers: Vec::new(),
         }
     }
@@ -131,6 +150,10 @@ struct PublisherConfig {
     projects: Vec<String>,
     #[serde(default)]
     claims: BTreeMap<String, String>,
+    #[serde(default)]
+    attestation_identity: Option<String>,
+    #[serde(default)]
+    attestation_claims: BTreeMap<String, String>,
 }
 
 fn parse(values: &toml::Table) -> Result<Config, String> {
@@ -143,6 +166,13 @@ fn parse(values: &toml::Table) -> Result<Config, String> {
     if config.trusted_endpoint_hosts.iter().any(|host| host.trim().is_empty()) {
         return Err("auth: `oidc_trusted_endpoint_hosts` entries must not be empty".to_owned());
     }
+    if config
+        .sigstore_trusted_root
+        .as_ref()
+        .is_some_and(|root| root.is_empty() || root.len() > MAX_TRUSTED_ROOT_BYTES)
+    {
+        return Err("auth: `sigstore_trusted_root` must be between 1 byte and 1 MiB".to_owned());
+    }
     if config.publishers.iter().any(|publisher| {
         publisher.id.trim().is_empty()
             || publisher.issuer.trim().is_empty()
@@ -150,6 +180,15 @@ fn parse(values: &toml::Table) -> Result<Config, String> {
             || publisher.subject.trim().is_empty()
             || publisher.projects.is_empty()
             || publisher.projects.iter().any(|project| project.trim().is_empty())
+            || publisher
+                .attestation_identity
+                .as_ref()
+                .is_some_and(|identity| identity.trim().is_empty())
+            || publisher
+                .attestation_claims
+                .iter()
+                .any(|(claim, value)| claim.trim().is_empty() || value.trim().is_empty())
+            || (publisher.attestation_identity.is_none() && !publisher.attestation_claims.is_empty())
     }) {
         return Err("auth: trusted publisher fields and project lists must not be empty".to_owned());
     }
@@ -158,6 +197,15 @@ fn parse(values: &toml::Table) -> Result<Config, String> {
 
 fn invalid_repository(id: &str) -> String {
     format!("trusted publisher {id}: repository must name a writable index with trusted publishing support")
+}
+
+fn attestation_verifier(root: Option<&str>) -> Result<Option<Arc<SigstoreVerifier>>, String> {
+    root.map(|root| {
+        TrustedRoot::from_json(root)
+            .map(|root| Arc::new(SigstoreVerifier::new(&root)))
+            .map_err(|_| "auth: `sigstore_trusted_root` is invalid".to_owned())
+    })
+    .transpose()
 }
 
 #[cfg(test)]

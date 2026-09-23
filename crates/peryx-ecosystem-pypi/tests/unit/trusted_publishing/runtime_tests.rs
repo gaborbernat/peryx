@@ -54,6 +54,7 @@ fn binding() -> PublisherBinding {
             subject: Glob::new("repo:org/app:*"),
             claims: BTreeMap::from([("repository_id".to_owned(), "42".to_owned())]),
             projects: vec![Glob::new("app")],
+            attestation: None,
         },
     }
 }
@@ -80,6 +81,7 @@ fn runtime(bindings: Vec<PublisherBinding>, replay_capacity: usize) -> (Signer, 
         signer.clone(),
         300,
         replay_capacity,
+        None,
     )
     .unwrap();
     (signer, runtime)
@@ -100,6 +102,7 @@ async fn test_exchange_caps_the_minted_ttl_at_the_identitys_remaining_lifetime()
         signer,
         300,
         MAX_REPLAY_ENTRIES,
+        None,
     )
     .unwrap();
 
@@ -346,6 +349,7 @@ async fn test_verification_error_is_preserved() {
         Signer::new(b"local-key", "peryx"),
         300,
         MAX_REPLAY_ENTRIES,
+        None,
     )
     .unwrap();
 
@@ -382,6 +386,7 @@ fn test_build_rejects_invalid_configuration(
             Signer::new(b"local-key", "peryx"),
             ttl_secs,
             replay_capacity,
+            None,
         ),
         Err(ExchangeError::Configuration)
     ));

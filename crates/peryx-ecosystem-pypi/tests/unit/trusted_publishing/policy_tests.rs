@@ -16,6 +16,7 @@ fn publisher() -> TrustedPublisher {
         subject: Glob::new("repo:octo/app:*"),
         claims: BTreeMap::from([("repository".to_owned(), "octo/app".to_owned())]),
         projects: vec![Glob::new("app")],
+        attestation: None,
     }
 }
 

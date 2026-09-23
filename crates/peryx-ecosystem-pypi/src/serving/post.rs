@@ -174,7 +174,7 @@ async fn accept_upload(context: UploadContext<'_>, multipart: Multipart) -> Resp
     let form_version = form.version.clone();
     let form_filename = form.filename.clone();
     let upload_time_unix = (state.clock)();
-    let prepared = match upload::prepare(form, staged, &index.route, upload_time_unix) {
+    let mut prepared = match upload::prepare(form, staged, &index.route, upload_time_unix) {
         Ok(prepared) => prepared,
         Err(err) => {
             let (_, reason) = upload_error_message(&err);
@@ -190,6 +190,16 @@ async fn accept_upload(context: UploadContext<'_>, multipart: Multipart) -> Resp
     let project = prepared.normalized.clone();
     if let Err(error) = authorize(&index.route, hosted, identity, Some(&project), Action::Write, request) {
         return error.into_response();
+    }
+    if let Err(err) = verify_attestations(state, identity, &mut prepared) {
+        let (_, reason) = upload_error_message(&err);
+        security_upload_event(request, attribution, &index.route, Some(&hosted.name), "denied")
+            .resource(Some(&project))
+            .group(form_version.as_deref())
+            .artifact(form_filename.as_deref())
+            .reason(Some(&reason))
+            .emit();
+        return upload_error_response(&err);
     }
     let version = prepared.record.version.clone();
     let filename = prepared.filename.clone();
@@ -224,6 +234,19 @@ async fn accept_upload(context: UploadContext<'_>, multipart: Multipart) -> Resp
         return block.response;
     }
     admit_and_store(state, index, hosted, prepared, &audit).await
+}
+
+fn verify_attestations(
+    state: &ServingState,
+    identity: &super::UploadIdentity,
+    prepared: &mut upload::PreparedUpload,
+) -> Result<(), UploadError> {
+    let verification = identity.bearer.as_ref().and_then(|token| {
+        state
+            .plugin_service::<crate::trusted_publishing::OidcRuntime>()
+            .and_then(|runtime| runtime.attestation_context(token))
+    });
+    prepared.verify_attestations(verification.as_ref())
 }
 
 /// Durably admit the upload into the ingress datacenter, store it, and acknowledge it against the

@@ -2799,10 +2799,14 @@ projects = ["*"]
 }
 
 pub(super) fn trusted_token(signer: &Signer, resource: &str) -> String {
+    trusted_publisher_token(signer, resource, "release")
+}
+
+pub(super) fn trusted_publisher_token(signer: &Signer, resource: &str, publisher: &str) -> String {
     signer.mint_scoped(
         TokenScope::new("trusted-publishing"),
         &Principal::Named {
-            subject: "trusted-publisher:release".to_owned(),
+            subject: format!("trusted-publisher:{publisher}"),
         },
         &[Grant {
             resources: vec![Glob::new(resource)],

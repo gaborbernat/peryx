@@ -39,7 +39,8 @@ The nightly mutation run examines production code only. `.cargo/mutants.toml` ex
 from `crates/peryx-driver/src/test_doubles.rs`, and the fixture binaries under `crates/*/tests/`. A surviving mutant
 means the code could behave another way and no test would notice, which marks a gap where the behaviour is a promise to
 somebody. None of those paths promises anything outside this repository, so a survivor in them is noise that each run
-reports again. The exclusions take 18,902 mutants down to 17,839.
+reports again. `cargo mutants --list --workspace --all-features` against the same command with `--no-config` shows what
+the exclusions remove.
 
 The harness is the one worth arguing about, since a fault injector that stopped injecting would leave every test using
 it green while testing nothing. That failure shows up red instead. A test that arms a fault asserts the faulted outcome,
@@ -63,8 +64,8 @@ it, and only when the code has no simpler spelling that removes the mutant. Afte
 `cargo mutants --list` against `cargo mutants --list --no-config` and check that every line it removes is one you meant.
 
 Excluding paths shortens the matrix rather than the shards. The nightly derives its shard count from the same list it
-mutates, at `mutation-shard-count "$(just mutation-count)" 128`, so the run goes from 148 shards to 140 with each still
-targeting 128 mutants. A shard takes as long as it did.
+mutates, at `mutation-shard-count "$(just mutation-count)" 128`, so an exclusion removes shards while each one still
+targets 128 mutants. A shard takes as long as it did.
 
 Most shards end with `The hosted runner lost communication with the server`, and a runner that disappears uploads no
 artifact and leaves no log, so `just mutation-observed` samples the shard every 60 seconds into

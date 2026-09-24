@@ -13,19 +13,10 @@ mod throughput;
 
 pub use endpoints::endpoints;
 pub use fleet::fleet;
-pub use install::installs;
+pub(super) use install::{InstallInput, installs};
 pub use load::load;
 pub use metadata::metadata;
 pub use throughput::throughput;
-
-/// The interpreter every install workload builds its venv with.
-///
-/// Pinned so runs stay comparable as `uv venv`'s default interpreter moves. Installs also pass
-/// `--only-binary :all:`: without it a package that lacks a wheel for the chosen interpreter is
-/// compiled from source, and that build lands inside the measured install, dwarfing what the index
-/// server contributes and swamping the machine while it runs. A missing wheel now fails the round
-/// loudly instead of silently turning the benchmark into a compile.
-const BENCH_PYTHON: &str = "3.14";
 
 /// What pip and uv ask a simple index for, and so what any workload standing in for them must send.
 ///

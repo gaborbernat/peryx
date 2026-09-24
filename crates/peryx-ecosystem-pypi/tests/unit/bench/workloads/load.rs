@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use peryx_bench_core::report::load as load_report;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -34,10 +35,12 @@ async fn load_workload_records_successful_and_failed_servers() {
         Server {
             name: "good",
             homepage: "https://example.invalid/",
-            base_url: load_good_base,
-            probe: |url| url.to_owned(),
-            command: Some(idle_process),
+            version: "1.0.0",
+            base_url: Arc::new(load_good_base),
+            probe: Arc::new(str::to_owned),
+            command: Some(Arc::new(idle_process)),
             setup: None,
+            configure: None,
             teardown: None,
         },
         server("bad", load_bad_base),
@@ -45,11 +48,21 @@ async fn load_workload_records_successful_and_failed_servers() {
     let windows = LoadWindows {
         capacity: Duration::from_millis(250),
         latency: Duration::from_millis(250),
+        request: REQUEST_TIMEOUT,
+        round: ROUND_TIMEOUT,
+        drain: Duration::ZERO,
     };
 
-    load_with_windows(&context, &servers, &[1, 2], 1, &http_client(), &windows)
-        .await
-        .unwrap();
+    load_with_windows(
+        &context,
+        &servers,
+        &[1, 2],
+        &Schedule::new(servers.len(), 1, 1161),
+        &http_client(),
+        &windows,
+    )
+    .await
+    .unwrap();
 
     let report = load_report(&directory.path().join("report.toml")).unwrap();
     let rows = &report.tables["load"].rows;
@@ -99,6 +112,9 @@ async fn swarm_and_tail_report_empty_probes() {
     let windows = LoadWindows {
         capacity: Duration::from_millis(20),
         latency: Duration::from_millis(20),
+        request: REQUEST_TIMEOUT,
+        round: ROUND_TIMEOUT,
+        drain: Duration::ZERO,
     };
     assert_eq!(
         swarm(&format!("{}/simple/", server.uri()), 1, &windows)
@@ -109,10 +125,103 @@ async fn swarm_and_tail_report_empty_probes() {
         "the swarm completed no requests"
     );
     assert_eq!(
-        measure_tail(&format!("{}/simple/", server.uri()), 0, 1.0, Duration::from_millis(1),)
+        measure_tail(&format!("{}/simple/", server.uri()), 0, 1.0, &windows)
             .await
             .unwrap_err()
             .to_string(),
         "the latency probe recorded no requests"
     );
+}
+
+#[tokio::test]
+async fn a_request_the_server_never_answers_fails_instead_of_stalling_the_round() {
+    install_crypto_provider();
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_mins(5)))
+        .mount(&server)
+        .await;
+    let windows = LoadWindows {
+        capacity: Duration::from_millis(20),
+        latency: Duration::from_millis(20),
+        request: Duration::from_millis(50),
+        round: ROUND_TIMEOUT,
+        drain: Duration::ZERO,
+    };
+    assert_eq!(
+        swarm(&format!("{}/simple/", server.uri()), 1, &windows)
+            .await
+            .err()
+            .unwrap()
+            .to_string(),
+        "the swarm completed no requests"
+    );
+}
+
+#[tokio::test]
+async fn a_round_past_its_deadline_becomes_an_error_cell() {
+    let stalled = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_mins(5)))
+        .mount(&stalled)
+        .await;
+    let base = format!("{}/simple/", stalled.uri());
+    let (directory, context) = benchmark();
+    let servers = [Server {
+        base_url: Arc::new(move |_| base.clone()),
+        ..server("stalled", load_bad_base)
+    }];
+    let windows = LoadWindows {
+        capacity: Duration::from_millis(20),
+        latency: Duration::from_millis(20),
+        request: REQUEST_TIMEOUT,
+        round: Duration::from_millis(100),
+        drain: Duration::ZERO,
+    };
+
+    load_with_windows(
+        &context,
+        &servers,
+        &[1],
+        &Schedule::new(servers.len(), 1, 1161),
+        &http_client(),
+        &windows,
+    )
+    .await
+    .unwrap();
+
+    let report = load_report(&directory.path().join("report.toml")).unwrap();
+    assert_eq!(report.tables["load"].rows[0].cells[0].text, "error");
+}
+
+#[tokio::test]
+async fn each_round_waits_for_the_previous_rounds_sockets_to_expire() {
+    let unreachable = MockServer::start().await;
+    let base = format!("{}/simple/", unreachable.uri());
+    let (_directory, context) = benchmark();
+    let servers = [Server {
+        base_url: Arc::new(move |_| base.clone()),
+        ..server("idle", load_bad_base)
+    }];
+    let windows = LoadWindows {
+        capacity: Duration::from_millis(20),
+        latency: Duration::from_millis(20),
+        request: REQUEST_TIMEOUT,
+        round: ROUND_TIMEOUT,
+        drain: Duration::from_millis(300),
+    };
+    let started = std::time::Instant::now();
+
+    load_with_windows(
+        &context,
+        &servers,
+        &[1],
+        &Schedule::new(servers.len(), 2, 1161),
+        &http_client(),
+        &windows,
+    )
+    .await
+    .unwrap();
+
+    assert!(started.elapsed() >= Duration::from_millis(600));
 }

@@ -15,6 +15,7 @@ fn report(value: f64, higher_is_better: bool, network_bound: bool, noisy: bool) 
                 parties: vec![Party {
                     name: "peryx".to_owned(),
                     url: String::new(),
+                    version: String::new(),
                 }],
                 rows: vec![Row {
                     name: "metric".to_owned(),
@@ -27,6 +28,7 @@ fn report(value: f64, higher_is_better: bool, network_bound: bool, noisy: bool) 
                         noisy,
                         outliers: 0,
                         value: Some(value),
+                        samples: vec![value],
                     }],
                     network_bound,
                     higher_is_better,

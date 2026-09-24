@@ -23,18 +23,17 @@ async fn install_workload_records_successful_and_failed_servers() {
     let (directory, context) = benchmark();
     let servers = [server("good", install_good_base), server("bad", install_bad_base)];
     let packages = ["sample-pkg"];
-    let prewarm_index = format!("{}/simple/", good.uri());
 
-    installs_packages(
+    installs(
         &context,
         &servers,
         &["uv"],
-        1,
+        &Schedule::new(servers.len(), 1, 1),
         &http_client(),
         InstallInput {
             packages: &packages,
             python: "python3",
-            prewarm_index: &prewarm_index,
+            pip_version: "26.2.1",
         },
     )
     .await
@@ -60,9 +59,9 @@ async fn install_workload_records_successful_and_failed_servers() {
             .iter()
             .filter(|path| path.as_str() == "/simple/sample-pkg/")
             .count()
-            >= 3
+            >= 2
     );
-    assert!(paths.iter().filter(|path| path.as_str() == wheel_path.as_str()).count() >= 3);
+    assert!(paths.iter().filter(|path| path.as_str() == wheel_path.as_str()).count() >= 2);
 }
 
 #[tokio::test]
@@ -70,16 +69,16 @@ async fn install_workload_reports_publication_errors() {
     let (_directory, context) = benchmark();
     std::fs::write(context.report_path(), "[").unwrap();
 
-    let error = installs_packages(
+    let error = installs(
         &context,
         &[server("unused", install_good_base)],
         &["uv"],
-        0,
+        &Schedule::new(1, 0, 1),
         &http_client(),
         InstallInput {
             packages: &[],
             python: "python3",
-            prewarm_index: "https://example.invalid/simple/",
+            pip_version: "26.2.1",
         },
     )
     .await
@@ -92,8 +91,8 @@ async fn install_workload_reports_publication_errors() {
 fn install_plans_build_uv_and_pip_commands() {
     let venv = Path::new("/tmp/venv");
     let workdir = Path::new("/tmp/work");
-    let (uv_setup, uv) = install_plan("uv", "https://index/simple/", &["one", "two"], venv, workdir);
-    let (pip_setup, pip) = install_plan("pip", "https://index/simple/", &["one", "two"], venv, workdir);
+    let (uv_setup, uv) = install_plan("uv", "https://index/simple/", &["one", "two"], venv, workdir, "26.2.1");
+    let (pip_setup, pip) = install_plan("pip", "https://index/simple/", &["one", "two"], venv, workdir, "26.2.1");
 
     assert_eq!(uv_setup.len(), 0);
     assert_eq!(
@@ -134,7 +133,7 @@ fn install_plans_build_uv_and_pip_commands() {
         command(&pip_setup[0]),
         (
             "uv".to_owned(),
-            vec!["pip", "install", "--python", "/tmp/venv/bin/python", "pip"]
+            vec!["pip", "install", "--python", "/tmp/venv/bin/python", "pip==26.2.1"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),

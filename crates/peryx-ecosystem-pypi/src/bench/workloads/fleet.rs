@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use anyhow::{Context as _, bail};
 
-use super::super::packages::FLEET_PACKAGE;
-use super::{BENCH_PYTHON, Rounds, report_samples, run_checked};
+use super::{Rounds, report_samples, run_checked};
+use crate::bench::schedule::Schedule;
 use peryx_bench_core::context::BenchmarkContext;
-use peryx_bench_core::report::{Absent, Metric, baseline, cost_rows, network_row, row, summarize, table};
+use peryx_bench_core::report::{Absent, Metric, baseline, complete_row, cost_rows, table};
 use peryx_bench_core::servers::Server;
 use peryx_bench_core::usage::{Cost, Usage};
 
@@ -21,16 +21,18 @@ use peryx_bench_core::usage::{Cost, Usage};
 pub async fn fleet(
     context: &BenchmarkContext,
     servers: &[Server],
-    rounds: usize,
+    schedule: &Schedule,
     http: &reqwest::Client,
+    package: &str,
+    python: &str,
 ) -> anyhow::Result<()> {
-    fleet_package(context, servers, rounds, http, FLEET_PACKAGE, BENCH_PYTHON, 10).await
+    fleet_package(context, servers, schedule, http, package, python, 10).await
 }
 
 async fn fleet_package(
     context: &BenchmarkContext,
     servers: &[Server],
-    rounds: usize,
+    schedule: &Schedule,
     http: &reqwest::Client,
     package: &str,
     python: &str,
@@ -38,39 +40,41 @@ async fn fleet_package(
 ) -> anyhow::Result<()> {
     let mut cold: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
     let mut warm: Vec<Vec<f64>> = servers.iter().map(|_| Vec::new()).collect();
-    let mut costs: Vec<Option<Vec<Cost>>> = Vec::new();
-    for (index, server) in servers.iter().enumerate() {
-        let mut collected = Rounds::new();
-        for attempt in 1..=rounds {
-            let scratch = tempfile::tempdir_in(context.scratch())?;
-            let state = scratch.path().join("state");
-            std::fs::create_dir(&state)?;
-            let active = server.start(context, &state, http).await?;
-            let usage = Usage::watch(active.pid())?;
-            match fleet_round(&active.url, scratch.path(), workers, package, python) {
-                Ok((cold_seconds, warm_seconds)) => {
-                    cold[index].push(cold_seconds);
-                    warm[index].push(warm_seconds);
-                }
-                Err(error) => println!("[fleet] {} round {attempt}: failed ({error:#})", server.name),
+    let mut costs = servers.iter().map(|_| Rounds::new()).collect::<Vec<_>>();
+    for entry in schedule.entries() {
+        let server = &servers[entry.server];
+        let scratch = tempfile::tempdir_in(context.scratch())?;
+        let state = scratch.path().join("state");
+        std::fs::create_dir(&state)?;
+        let active = server.start(context, &state, http).await?;
+        let usage = Usage::watch(active.pid())?;
+        match fleet_round(&active.url, scratch.path(), workers, package, python) {
+            Ok((cold_seconds, warm_seconds)) => {
+                cold[entry.server].push(cold_seconds);
+                warm[entry.server].push(warm_seconds);
             }
-            collected.record_cost(usage)?;
+            Err(error) => println!("[fleet] {} round {}: failed ({error:#})", server.name, entry.round),
         }
-        report_samples(&format!("[fleet] {}", server.name), &cold[index], &warm[index]);
-        costs.push(collected.costs());
+        costs[entry.server].record_cost(usage)?;
     }
+    for (index, server) in servers.iter().enumerate() {
+        report_samples(&format!("[fleet] {}", server.name), &cold[index], &warm[index]);
+    }
+    let costs = costs.into_iter().map(Rounds::costs).collect::<Vec<Option<Vec<Cost>>>>();
     let base = baseline(servers);
     let mut rows = vec![
-        network_row(
+        complete_row(
             &format!("cold cache: {workers} parallel installs"),
-            &summarize(&cold),
+            &cold,
+            schedule.rounds,
             base,
             Metric::Seconds,
             Absent::Failed,
         ),
-        row(
+        complete_row(
             &format!("warm cache: {workers} parallel installs"),
-            &summarize(&warm),
+            &warm,
+            schedule.rounds,
             base,
             Metric::Seconds,
             Absent::Failed,

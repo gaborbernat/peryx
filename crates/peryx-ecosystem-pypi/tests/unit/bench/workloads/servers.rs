@@ -4,6 +4,8 @@ use peryx_bench_core::context::BenchmarkContext;
 
 use super::*;
 
+const UPSTREAM: &str = "https://fixture.invalid/simple/";
+
 type Target = (
     &'static str,
     &'static str,
@@ -24,12 +26,28 @@ fn server_targets_build_expected_urls_and_commands() {
     });
 }
 
+#[test]
+fn proxpi_worker_caches_live_in_its_state_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let context = BenchmarkContext::new("peryx-bin".into(), directory.path().join("report.toml"));
+    let proxpi = all(UPSTREAM)
+        .into_iter()
+        .find(|server| server.name == "proxpi")
+        .unwrap();
+    let command = (proxpi.command.unwrap())(&context, 4321, directory.path());
+    let cache = command
+        .get_envs()
+        .find(|(key, _)| *key == "TMPDIR")
+        .and_then(|(_, value)| value);
+    assert_eq!(cache, Some(directory.path().as_os_str()));
+}
+
 fn targets(context: &BenchmarkContext, state: &std::path::Path) -> Vec<Target> {
-    all()
+    all(UPSTREAM)
         .iter()
         .map(|server| {
             let base = (server.base_url)(4321);
-            let command = server.command.map(|build| build(context, 4321, state));
+            let command = server.command.as_ref().map(|build| build(context, 4321, state));
             (
                 server.name,
                 server.homepage,
@@ -64,7 +82,7 @@ fn expected_core_targets(state: &std::path::Path) -> Vec<Target> {
             "peryx",
             "https://peryx.readthedocs.io/",
             "http://127.0.0.1:4321/root/pypi/simple/".to_owned(),
-            "http://127.0.0.1:4321/root/pypi/simple/six/".to_owned(),
+            "http://127.0.0.1:4321/root/pypi/simple/".to_owned(),
             Some("peryx-bin".to_owned()),
             Some(strings(&[
                 "serve",
@@ -74,13 +92,15 @@ fn expected_core_targets(state: &std::path::Path) -> Vec<Target> {
                 "4321",
                 "--data-dir",
                 &state,
+                "--config",
+                &format!("{state}/peryx.toml"),
             ])),
         ),
         (
             "direct",
             "https://pypi.org/",
-            "https://pypi.org/simple/".to_owned(),
-            "https://pypi.org/simple/six/".to_owned(),
+            UPSTREAM.to_owned(),
+            UPSTREAM.to_owned(),
             None,
             None,
         ),
@@ -88,11 +108,13 @@ fn expected_core_targets(state: &std::path::Path) -> Vec<Target> {
             "devpi",
             "https://devpi.net/docs/",
             "http://127.0.0.1:4321/root/pypi/+simple/".to_owned(),
-            "http://127.0.0.1:4321/root/pypi/+simple/six/".to_owned(),
+            "http://127.0.0.1:4321/root/pypi/+simple/".to_owned(),
             Some("uvx".to_owned()),
             Some(strings(&[
+                "--python",
+                "3.14.7",
                 "--from",
-                "devpi-server",
+                "devpi-server==6.20.3",
                 "devpi-server",
                 "--serverdir",
                 &state,
@@ -111,13 +133,15 @@ fn expected_competitor_targets(state: &std::path::Path) -> Vec<Target> {
             "proxpi",
             "https://github.com/EpicWink/proxpi",
             "http://127.0.0.1:4321/index/".to_owned(),
-            "http://127.0.0.1:4321/index/six/".to_owned(),
+            "http://127.0.0.1:4321/index/".to_owned(),
             Some("uvx".to_owned()),
             Some(strings(&[
+                "--python",
+                "3.14.7",
                 "--from",
-                "proxpi",
+                "proxpi==1.3.0",
                 "--with",
-                "gunicorn",
+                "gunicorn==26.2.0",
                 "gunicorn",
                 "--bind",
                 "127.0.0.1:4321",
@@ -130,17 +154,19 @@ fn expected_competitor_targets(state: &std::path::Path) -> Vec<Target> {
             "pypiserver",
             "https://github.com/pypiserver/pypiserver",
             "http://127.0.0.1:4321/simple/".to_owned(),
-            "http://127.0.0.1:4321/simple/six/".to_owned(),
+            "http://127.0.0.1:4321/simple/".to_owned(),
             Some("uvx".to_owned()),
             Some(strings(&[
+                "--python",
+                "3.14.7",
                 "--from",
-                "pypiserver[passlib]",
+                "pypiserver[passlib]==2.4.2",
                 "pypi-server",
                 "run",
                 "-p",
                 "4321",
                 "--fallback-url",
-                "https://pypi.org/simple/",
+                UPSTREAM,
                 "-P",
                 ".",
                 "-a",
@@ -152,17 +178,17 @@ fn expected_competitor_targets(state: &std::path::Path) -> Vec<Target> {
             "pypicloud",
             "https://pypicloud.readthedocs.io/",
             "http://127.0.0.1:4321/simple/".to_owned(),
-            "http://127.0.0.1:4321/simple/six/".to_owned(),
+            "http://127.0.0.1:4321/simple/".to_owned(),
             Some("uvx".to_owned()),
             Some(strings(&[
                 "--python",
-                "3.10",
+                "3.10.21",
                 "--from",
-                "pypicloud",
+                "pypicloud==1.3.12",
                 "--with",
-                "sqlalchemy<2",
+                "sqlalchemy==1.4.54",
                 "--with",
-                "waitress",
+                "waitress==3.0.2",
                 "pserve",
                 &config,
             ])),
@@ -178,11 +204,24 @@ fn strings(values: &[&str]) -> Vec<String> {
 fn server_setup_hooks_create_expected_state() {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path();
-    let servers = all();
+    let servers = all(UPSTREAM);
+    (servers[0].setup.as_ref().unwrap())(4321, state).unwrap();
     temp_env::with_var(UVX_ENV, Some("true"), || {
-        (servers[2].setup.unwrap())(4321, state).unwrap();
+        (servers[2].setup.as_ref().unwrap())(4321, state).unwrap();
+        (servers[2].configure.as_ref().unwrap())("http://127.0.0.1:4321/root/pypi/+simple/", state).unwrap();
     });
-    (servers[5].setup.unwrap())(4321, state).unwrap();
+    (servers[5].setup.as_ref().unwrap())(4321, state).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(state.join("peryx.toml")).unwrap(),
+        format!(
+            "[[index]]\nname = \"pypi\"\necosystem = \"pypi\"\n\
+             [[index.upstream]]\nname = \"fixture\"\nurl = \"{UPSTREAM}\"\n\
+             trusted_hosts = [\"127.0.0.1\"]\n\n\
+             [[index]]\nname = \"root-pypi\"\nroute = \"root/pypi\"\n\
+             ecosystem = \"pypi\"\nlayers = [\"pypi\"]\n"
+        )
+    );
 
     let ini = std::fs::read_to_string(state.join("pypicloud.ini")).unwrap();
     assert_eq!(
@@ -192,6 +231,7 @@ fn server_setup_hooks_create_expected_state() {
              use = egg:pypicloud\n\
              pyramid.reload_templates = False\n\
              pypi.fallback = cache\n\
+             pypi.fallback_base_url = https://fixture.invalid\n\
              pypi.default_read = everyone\n\
              pypi.cache_update = everyone\n\
              pypi.storage = file\n\
@@ -216,6 +256,19 @@ fn server_setup_hooks_create_expected_state() {
     let output = Command::new("false").output().unwrap();
     assert_eq!(
         check_devpi_init(&output).unwrap_err().to_string(),
-        "devpi-init failed:\n"
+        "devpi-init failed:\nstdout: \nstderr: "
     );
+}
+
+#[test]
+fn devpi_configuration_reports_a_failed_client() {
+    temp_env::with_var(UVX_ENV, Some("false"), || {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            configure_devpi("http://127.0.0.1:4321/root/pypi/+simple/", directory.path(), UPSTREAM)
+                .unwrap_err()
+                .to_string(),
+            "devpi configuration failed:\nstdout: \nstderr: "
+        );
+    });
 }

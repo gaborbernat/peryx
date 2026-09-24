@@ -1,5 +1,5 @@
 use std::io::{Cursor, Write as _};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use peryx_bench_core::context::BenchmarkContext;
 use peryx_bench_core::servers::Server;
@@ -42,10 +42,12 @@ pub(super) fn server(name: &'static str, base_url: fn(u16) -> String) -> Server 
     Server {
         name,
         homepage: "https://example.invalid/",
-        base_url,
-        probe: identity_probe,
+        version: "1.0.0",
+        base_url: Arc::new(base_url),
+        probe: Arc::new(identity_probe),
         command: None,
         setup: None,
+        configure: None,
         teardown: None,
     }
 }
@@ -158,7 +160,7 @@ fn identity_probe(base: &str) -> String {
     base.to_owned()
 }
 
-fn wheel() -> Vec<u8> {
+pub(super) fn wheel() -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
     let options = zip::write::SimpleFileOptions::default();

@@ -16,7 +16,14 @@ async fn metadata_records_successful_and_failed_servers() {
     let (directory, context) = benchmark();
     let servers = [server("good", metadata_good_base), server("bad", metadata_bad_base)];
 
-    metadata(&context, &servers, 1, &http_client()).await.unwrap();
+    metadata(
+        &context,
+        &servers,
+        &Schedule::new(servers.len(), 1, 1161),
+        &http_client(),
+    )
+    .await
+    .unwrap();
 
     let report = load_report(&directory.path().join("report.toml")).unwrap();
     let table = &report.tables["metadata"];

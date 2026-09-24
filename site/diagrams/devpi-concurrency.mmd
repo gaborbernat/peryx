@@ -3,7 +3,7 @@ sequenceDiagram
   participant B as clients B…J
   participant D as devpi
   A->>+D: GET simple/polars/ (first ever)
-  B->>+D: GET simple/polars/ (name list still empty)
-  D-->>-B: 404 "does not exist" (cached ~30 min)
-  Note over B: uv reads 404 as "no such package"
-  D-->>-A: 200 once the upstream fetch lands
+  B->>+D: GET simple/polars/ (snapshot taken, waits on the project lock)
+  D-->>-A: 200 once the upstream fetch commits
+  D-->>-B: 200 empty page, read from the older snapshot
+  Note over B: uv reads the empty page as "no version of polars"

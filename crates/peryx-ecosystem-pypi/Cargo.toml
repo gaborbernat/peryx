@@ -63,7 +63,10 @@ bench = [
   "dep:hdrhistogram",
   "dep:clap",
   "dep:http",
+  "dep:hex",
+  "dep:tokio-util",
   "tokio/macros",
+  "tokio/net",
   "tokio/rt-multi-thread",
 ]
 
@@ -85,6 +88,8 @@ xml = { package = "xml-rs", version = "1.0" }
 hdrhistogram = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 
 peryx-driver = { workspace = true, optional = true }
 peryx-archive = { workspace = true, optional = true }

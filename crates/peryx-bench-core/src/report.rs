@@ -44,6 +44,8 @@ pub struct Table {
 pub struct Party {
     pub name: String,
     pub url: String,
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -81,6 +83,9 @@ pub struct Cell {
     /// with no number.
     #[serde(default)]
     pub value: Option<f64>,
+    /// The raw rounds behind the displayed summary.
+    #[serde(default)]
+    pub samples: Vec<f64>,
 }
 
 /// What a `None` measurement means for a row, and how its cell renders.
@@ -106,6 +111,27 @@ pub enum Metric {
 #[must_use]
 pub fn row(name: &str, values: &[Option<Summary>], baseline: usize, metric: Metric, absent: Absent) -> Row {
     build_row(name, values, baseline, metric, absent, false)
+}
+
+/// Summarizes a series only when it holds every expected round; a partial series keeps its samples for diagnosis.
+#[must_use]
+pub fn complete_row(
+    name: &str,
+    samples: &[Vec<f64>],
+    expected: usize,
+    baseline: usize,
+    metric: Metric,
+    absent: Absent,
+) -> Row {
+    let values = samples
+        .iter()
+        .map(|series| Summary::of(series).filter(|_| series.len() == expected))
+        .collect::<Vec<_>>();
+    let mut result = build_row(name, &values, baseline, metric, absent, false);
+    for (cell, series) in result.cells.iter_mut().zip(samples) {
+        cell.samples.clone_from(series);
+    }
+    result
 }
 
 #[must_use]
@@ -165,6 +191,7 @@ fn build_row(
                         noisy: summary.noisy(),
                         outliers: summary.outliers,
                         value: Some(summary.median),
+                        samples: summary.samples.clone(),
                     }
                 },
             )
@@ -225,6 +252,7 @@ fn absent_cell(absent: Absent) -> Cell {
         noisy: false,
         outliers: 0,
         value: None,
+        samples: Vec::new(),
     }
 }
 
@@ -326,6 +354,7 @@ pub fn table(label: &str, servers: &[Server], baseline: usize, rows: Vec<Row>) -
             .map(|server| Party {
                 name: server.name.to_owned(),
                 url: server.homepage.to_owned(),
+                version: server.version.to_owned(),
             })
             .collect(),
         rows,

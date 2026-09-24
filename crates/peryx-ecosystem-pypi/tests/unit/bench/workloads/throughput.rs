@@ -21,10 +21,10 @@ async fn throughput_records_transfers_and_failed_servers() {
     let (directory, context) = benchmark();
     let servers = [server("good", throughput_good_base), server("bad", throughput_bad_base)];
 
-    throughput_from(
+    throughput(
         &context,
         &servers,
-        1,
+        &Schedule::new(servers.len(), 1, 1161),
         &http_client(),
         &format!("{}/simple/", good.uri()),
     )

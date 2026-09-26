@@ -41,8 +41,6 @@ skip = [
   { crate = "const-oid@0.9.6", reason = "Sigstore 0.13 requires const-oid 0.9." },
   { crate = "cpufeatures@0.2.17", reason = "sha1 0.10 and sha2 0.10 require cpufeatures 0.2." },
   { crate = "crypto-common@0.1.7", reason = "digest 0.10 requires crypto-common 0.1." },
-  { crate = "der@0.7.10", reason = "Sigstore 0.13 requires der 0.7." },
-  { crate = "der_derive@0.7.3", reason = "der 0.7 requires der_derive 0.7." },
   { crate = "digest@0.10.7", reason = "sha1 0.10, sha2 0.10, and AWS checksum crates require digest 0.10." },
   { crate = "fs4@0.13.1", reason = "Tantivy 0.26 requires fs4 0.13." },
   { crate = "getrandom@0.2.17", reason = "ring 0.17 and rand_core 0.6 require getrandom 0.2." },
@@ -58,7 +56,6 @@ skip = [
   { crate = "lru@0.16.4", reason = "Tantivy 0.26 requires lru 0.16." },
   { crate = "nix@0.27.1", reason = "command-group 5.0.1 requires nix 0.27." },
   { crate = "nix@0.30.1", reason = "homedir 0.3 requires nix 0.30." },
-  { crate = "pem-rfc7468@0.7.0", reason = "der 0.7 requires pem-rfc7468 0.7." },
   { crate = "prettyplease@0.2.37", reason = "Leptos 0.8 requires prettyplease 0.2." },
   { crate = "r-efi@5.3.0", reason = "getrandom 0.3 requires r-efi 5." },
   { crate = "rand@0.8.8", reason = "OpenRaft 0.9 requires rand 0.8." },
@@ -70,7 +67,6 @@ skip = [
   { crate = "sha1@0.10.7", reason = "AWS SDK 1.x, Axum 0.8, and Tungstenite 0.29 require sha1 0.10." },
   { crate = "sha2@0.10.9", reason = "wasm_split_macros 0.2 requires sha2 0.10." },
   { crate = "spin@0.9.9", reason = "multer 3.1 requires spin 0.9." },
-  { crate = "spki@0.7.3", reason = "Sigstore 0.13 requires spki 0.7." },
   { crate = "syn@2.0.119", reason = "Leptos 0.8 and current proc-macro dependencies require syn 2." },
   { crate = "synstructure@0.13.2", reason = "asn1-rs 0.7 requires synstructure 0.13." },
   { crate = "thiserror@1.0.69", reason = "OpenRaft 0.9, Leptos 0.8, and pep508_rs 0.9 require thiserror 1." },
@@ -90,7 +86,6 @@ skip = [
   { crate = "windows-sys@0.52.0", reason = "ring 0.17, atomicwrites 0.4, and self-replace 1.5 require windows-sys 0.52." },
   { crate = "windows-sys@0.59.0", reason = "fs4 0.13 and rustix 0.38 require windows-sys 0.59." },
   { crate = "windows-threading@0.1.0", reason = "windows-future 0.2 requires windows-threading 0.1." },
-  { crate = "x509-cert@0.2.5", reason = "Sigstore 0.13 requires x509-cert 0.2." },
   { crate = "xml-rs@0.8.29", reason = "rst_renderer 0.4 requires xml-rs 0.8." },
 ]
 

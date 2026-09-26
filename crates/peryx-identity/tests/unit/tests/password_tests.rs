@@ -114,3 +114,18 @@ fn custom_verifier(algorithm: Algorithm, version: Version, output_len: usize) ->
         .to_string();
     serde_json::from_value(serde_json::Value::String(encoded)).unwrap()
 }
+
+/// Stores keep verifiers enrolled by earlier argon2 releases; this one came from argon2 0.5.3 under the
+/// recommended policy, so an upgrade that stops reading it would lock every existing account out.
+#[test]
+fn test_check_accepts_a_verifier_enrolled_by_argon2_0_5() {
+    let verifier: PasswordVerifier = serde_json::from_str(
+        r#""$argon2id$v=19$m=19456,t=2,p=1$BwcHBwcHBwcHBwcHBwcHBw$eZ8SueF3EIJEgtgpg1rLafWpNVv3dMTwc0KCOxG5CSg""#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        verifier.check("correct horse battery staple", &PasswordPolicy::recommended()),
+        PasswordCheck::Accepted { stale: false }
+    );
+}

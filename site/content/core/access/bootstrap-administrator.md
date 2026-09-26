@@ -24,8 +24,9 @@ log records the same path in its `password_file` field. Neither prints the passw
 $ cat peryx-data/initial-admin-password
 ```
 
-Store the password in a password manager, then delete the file. Peryx does not remove it: once the administrator grant
-exists, later starts skip this step and leave the data directory alone.
+Store the password in a password manager, or sign in at `/login` and replace it with the change password form there,
+then delete the file. Peryx does not remove it: once the administrator grant exists, later starts skip this step and
+leave the data directory alone.
 
 Startup fails without creating the account when the file already exists, for example after an interrupted first start
 left it behind. Delete the stale file and start again. Startup also fails when a user named `admin` exists without an
@@ -56,9 +57,11 @@ $ peryx serve --data-dir /var/lib/peryx
 The shell variable stays local unless the operator exported it. The `peryx` process receives the password through
 standard input, so tools that inspect process arguments cannot read it.
 
-Once `peryx serve` runs, the administrator signs in to the web UI at `/login` with the same name and password. A
-standalone server needs no signing key for that; a `dc` or `ha` deployment needs `[auth].signing_key` on every node. See
-[local password sign-in](@/core/access/authentication.md#local-password-sign-in).
+Once `peryx serve` runs, the administrator signs in to the web UI at `/login` with the same name and password, and can
+change the password from the same page. A standalone server needs no signing key for that; a `dc` or `ha` deployment
+needs `[auth].signing_key` on every node. See
+[local password sign-in](@/core/access/authentication.md#local-password-sign-in) and
+[changing a local password](@/core/access/authentication.md#changing-a-local-password).
 
 ## Secret file
 
@@ -123,12 +126,15 @@ one command commits and the other reports that an administrator grant exists. A 
 records.
 
 The command stops working while any administrator grant exists. This prevents local bootstrap from becoming a second
-administrator-creation path after setup; use an authenticated management operation for later accounts and grants.
+administrator-creation path after setup. Later accounts come from a first sign-in through an
+[OpenID Connect provider](@/core/access/authentication.md#external-identity-links), and an administrator gives them
+roles through [role grants](@/core/access/role-grants.md).
 
-A lost password does not reopen bootstrap because the administrator grant remains. Use another authenticated
-administrator to replace the verifier, or restore a protected metadata backup. If recovery leaves the store with no
-administrator grant, run the same secret-file command against that recovered data directory before restarting the
-server:
+A lost password does not reopen bootstrap because the administrator grant remains. The
+[change password form](@/core/access/authentication.md#changing-a-local-password) requires the current password, and no
+operation lets another administrator set or remove it, so restore a protected metadata backup taken while the password
+was known. If recovery leaves the store with no administrator grant, run the same secret-file command against that
+recovered data directory before restarting the server:
 
 ```console
 $ peryx bootstrap-administrator recovery-admin \
@@ -136,5 +142,6 @@ $ peryx bootstrap-administrator recovery-admin \
     --password-file /run/secrets/peryx-recovery-password
 ```
 
-Create at least two administrator accounts through authenticated management. An operator with write access to the
-metadata directory controls local identity state, so restrict the directory and bootstrap secret to the service account.
+Keep a second administrator: grant the server administrator role to an account that signs in through a provider, so
+losing one password does not force a restore. An operator with write access to the metadata directory controls local
+identity state, so restrict the directory and bootstrap secret to the service account.

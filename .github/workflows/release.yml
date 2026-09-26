@@ -1,4 +1,4 @@
-# Based on dist 0.32.0 output; this version keeps GitHub expressions out of shell commands.
+# Based on dist 0.33.0 output; this version keeps GitHub expressions out of shell commands.
 #
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0

@@ -4660,7 +4660,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "peryx"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4723,7 +4723,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-archive"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "flate2",
  "rstest",
@@ -4736,7 +4736,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-bench"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-bench-core"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4771,7 +4771,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-core"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "rstest",
  "serde",
@@ -4782,7 +4782,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-driver"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -4827,7 +4827,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-ecosystem-oci"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4884,7 +4884,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-ecosystem-pypi"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "ammonia",
  "anyhow",
@@ -4967,7 +4967,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-events"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "codspeed-criterion-compat",
  "futures-util",
@@ -4995,7 +4995,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-ha"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "async-trait",
  "peryx-core",
@@ -5011,7 +5011,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-ha-distributed"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5056,7 +5056,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-http"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5094,7 +5094,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-identity"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -5125,7 +5125,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-index"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -5142,7 +5142,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-oci-system-tests"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5167,7 +5167,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-plugin-registry"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5188,7 +5188,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-policy"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "rstest",
  "serde",
@@ -5198,7 +5198,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-pql"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "base64 0.23.1",
  "codspeed-criterion-compat",
@@ -5212,7 +5212,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-pypi-system-tests"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5252,7 +5252,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-search"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "hdrhistogram",
  "peryx-core",
@@ -5274,7 +5274,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-storage"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "atomicwrites",
  "aws-config",
@@ -5313,7 +5313,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-test-support"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5335,7 +5335,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-upstream"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -5365,7 +5365,7 @@ dependencies = [
 
 [[package]]
 name = "peryx-web"
-version = "2026.925.0"
+version = "2026.927.0"
 dependencies = [
  "any_spawner",
  "async-trait",

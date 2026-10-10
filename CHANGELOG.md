@@ -3,6 +3,18 @@
 Each release lists the change files merged since the previous one. Versions follow the calendar as `YYYY.MDD.N`: the
 year, the month and zero-padded day, and a counter for several releases on one day.
 
+## 2026.1010.0 (2026-10-10)
+
+### Changes
+
+- 🧪 test(bench-core): kill free_port_in + to - mutant (#2367)
+- 🧪 test(http): pin the password session expiry (#2368)
+- 🧪 test(storage): kill upload_parts offset mutant (#2369)
+- 🧪 test(pypi): pin the trusted root size limit (#2370)
+- 🧪 test(ha): serialize sole-voter handoff (#2371)
+- ci: overlap browser and LLVM setup (#2372)
+- feat(python): require 3.11 and default to 3.15 (#2373)
+
 ## 2026.927.0 (2026-09-27)
 
 ### Changes

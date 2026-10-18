@@ -118,7 +118,7 @@ fn wheel_metadata(path: &Path, artifact: &Artifact) -> anyhow::Result<Vec<u8>> {
     let mut metadata = None;
     for index in 0..archive.len() {
         let mut member = archive.by_index(index)?;
-        let name = member.name();
+        let name = member.name()?;
         if name.ends_with(".dist-info/METADATA") && name.matches('/').count() == 1 {
             if metadata.is_some() {
                 bail!("{} contains multiple METADATA files", artifact.filename);

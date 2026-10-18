@@ -166,7 +166,10 @@ fn zip_member_position(
 ) -> Result<Option<usize>, ArchiveError> {
     for position in 0..archive.len() {
         let entry = archive.by_index(position).map_err(read_error)?;
-        if entry.is_file() && safe_member_name(entry.name()).is_ok_and(|name| name == member) {
+        if entry.is_file()
+            && let Ok(raw_name) = entry.name()
+            && safe_member_name(&raw_name).is_ok_and(|name| name == member)
+        {
             return Ok(Some(position));
         }
     }

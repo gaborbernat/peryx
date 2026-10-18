@@ -114,11 +114,11 @@ fn validate_zip_sdist_reader(filename: &str, reader: impl Read + Seek) -> Result
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(read_error)?;
         let is_dir = entry.is_dir();
-        let raw_name = entry.name();
+        let raw_name = entry.name().map_err(read_error)?;
         let name = if is_dir {
-            raw_name.strip_suffix('/').unwrap_or(raw_name)
+            raw_name.strip_suffix('/').unwrap_or(&raw_name)
         } else {
-            raw_name
+            &raw_name
         };
         let path = safe_sdist_member_name(name)?;
         // A zip sdist has only files and directories, so it reuses the tar member vocabulary the

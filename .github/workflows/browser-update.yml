@@ -27,7 +27,9 @@ jobs:
           branch: automation/browser-dependencies
           commit-message: "⬆️ build(deps): update browser tools"
           delete-branch: true
-          labels: enhancement
+          labels: |
+            enhancement
+            skip news
           title: "⬆️ build(deps): update browser tools"
           body: |
             Playwright and Puppeteer require the matching Chrome for Testing revision selected by each package release. This weekly update keeps those package and browser inputs aligned.

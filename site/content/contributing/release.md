@@ -56,9 +56,9 @@ gh workflow run prepare-release.yml --repo tox-dev/peryx
 ```
 
 The workflow computes the version from the date and the existing tags. It stops if `.changeset/` has no change files. It
-then runs `knope prepare-release`, which writes the version into every manifest, `Cargo.lock`, and
-`site/static/openapi.json`, moves the change files into `CHANGELOG.md`, and commits the result to `main` with a
-`v<version>` tag. One atomic push lands both, and the tag starts `release.yml`, which builds the archives, creates the
+runs `knope prepare-release` without release credentials to update the manifests, `Cargo.lock`,
+`site/static/openapi.json`, and `CHANGELOG.md`. A second job checks those changes, commits them to `main`, and tags
+`v<version>`. One atomic push lands both, and the tag starts `release.yml`, which builds the archives, creates the
 GitHub release with the `CHANGELOG.md` section as its notes, and publishes the PyPI package. The release workflow
 rejects a tag whose version has no section in `CHANGELOG.md`.
 

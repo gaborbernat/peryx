@@ -41,6 +41,19 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Require a changelog section for the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]{4}\.[0-9]{3,4}\.[0-9]+$ ]]; then
+            echo "::error::unexpected release tag $TAG"
+            exit 1
+          fi
+          version=${TAG#v}
+          if ! grep -qE "^## ${version//./\\.} \\(" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no section for $TAG"
+            exit 1
+          fi
       - uses: $/.github/actions/setup
         with:
           tools: aqua:axodotdev/cargo-dist

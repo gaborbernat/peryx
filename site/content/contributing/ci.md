@@ -18,6 +18,7 @@ The required workflow runs these job groups:
 - `coverage`: the native workspace suite with all features
 - `frontend`: native and Wasm browser coverage
 - `docs`: rustdoc, Markdown, Mermaid regeneration, and the site build
+- `changelog`: a new `.changeset/*.md` file, unless a maintainer applies `skip news`
 
 There is no `semver` job. Every crate reads `0.0.1`, a version at which Cargo permits any change, so cargo-semver-checks
 compared each package against itself, assumed a major bump and skipped all 254 checks while reporting success. Seven

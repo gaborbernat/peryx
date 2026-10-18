@@ -40,21 +40,3 @@ type = "PrepareRelease"
 type = "Command"
 command = "prek run mdformat --files CHANGELOG.md || prek run mdformat --files CHANGELOG.md"
 shell = true
-
-[[workflows.steps]]
-type = "Command"
-command = "git add CHANGELOG.md"
-
-[[workflows.steps]]
-type = "Command"
-command = "git commit --message \"🔖 chore(release): v$version\""
-
-# Without a forge section this step only tags the commit; the tag push starts release.yml, which publishes
-# the GitHub release and the PyPI package.
-[[workflows.steps]]
-type = "Release"
-
-# An atomic push lands the commit and the tag together or neither, so a rejected push leaves nothing to undo.
-[[workflows.steps]]
-type = "Command"
-command = "git push --atomic origin HEAD:main refs/tags/v$version"

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       nightly:
@@ -224,19 +225,40 @@ jobs:
       - run: just lint-docs
       - run: just docs
 
+  changelog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a change file
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip news')
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ! git diff --name-only --diff-filter=AM "$BASE_SHA" "$HEAD_SHA" -- .changeset |
+            grep -Eq '^\.changeset/[^/]+\.md$'; then
+            echo '::error::add a .changeset/*.md file or apply the skip news label'
+            exit 1
+          fi
+
   nightly:
     if: github.event_name == 'workflow_dispatch' && inputs.nightly
     uses: $/.github/workflows/nightly.yml
 
   ci-gate:
     if: always()
-    needs: [automation, changes, contracts, coverage, coverage-lines, docs, frontend, platform, source]
+    needs: [automation, changelog, changes, contracts, coverage, coverage-lines, docs, frontend, platform, source]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       # A job the `changes` filter stood down reports `skipped`; anything else short of success fails.
       - if: >-
-          needs.automation.result != 'success' || needs.changes.result != 'success' ||
+          needs.automation.result != 'success' || needs.changelog.result != 'success' ||
+          needs.changes.result != 'success' ||
           needs.docs.result != 'success' || needs.source.result != 'success' ||
           !contains(fromJSON('["success", "skipped"]'), needs.contracts.result) ||
           !contains(fromJSON('["success", "skipped"]'), needs.coverage.result) ||

@@ -182,7 +182,8 @@ fn list_zip(profile: &dyn ArchiveProfile, reader: impl Read + Seek) -> Result<Ve
     for position in 0..archive.len() {
         let entry = archive.by_index(position).map_err(read_error)?;
         if entry.is_file()
-            && let Ok(name) = safe_member_name(entry.name())
+            && let Ok(raw_name) = entry.name()
+            && let Ok(name) = safe_member_name(&raw_name)
         {
             push_member(profile, &mut members, name, entry.size())?;
         }

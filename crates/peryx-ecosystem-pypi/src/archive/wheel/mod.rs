@@ -138,11 +138,11 @@ fn wheel_members<R: Read + Seek>(
         let entry = archive.by_index(index).map_err(read_error)?;
         let size = entry.size();
         let compressed = entry.compressed_size();
-        let raw_name = entry.name();
+        let raw_name = entry.name().map_err(read_error)?;
         let name = if entry.is_dir() {
-            raw_name.strip_suffix('/').unwrap_or(raw_name)
+            raw_name.strip_suffix('/').unwrap_or(&raw_name)
         } else {
-            raw_name
+            &raw_name
         };
         let name = safe_member_name(name)?;
         let is_file = entry.is_file();

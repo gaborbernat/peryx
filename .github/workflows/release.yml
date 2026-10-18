@@ -223,6 +223,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
@@ -277,9 +278,19 @@ jobs:
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
           RELEASE_TAG: "${{ needs.plan.outputs.tag }}"
+          PUBLISH_PYPI: "${{ !fromJson(steps.host.outputs.manifest).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}"
         run: |
-          # A file avoids shell quoting changes in release notes.
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          set -euo pipefail
+          printf '%s\n' "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
+          if [[ "$PUBLISH_PYPI" == "true" ]]; then
+            printf '\n[PyPI release](https://pypi.org/project/peryx/%s/)\n' "${RELEASE_TAG#v}" >> "$RUNNER_TEMP/notes.txt"
+          fi
+          previous=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | awk -v tag="$RELEASE_TAG" '$0 == tag { print previous; exit } { previous = $0 }')
+          if [[ -n "$previous" ]]; then
+            printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GITHUB_REPOSITORY" "$previous" "$RELEASE_TAG" >> "$RUNNER_TEMP/notes.txt"
+          else
+            printf '\n**Full Changelog**: https://github.com/%s/commits/%s\n' "$GITHUB_REPOSITORY" "$RELEASE_TAG" >> "$RUNNER_TEMP/notes.txt"
+          fi
 
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 

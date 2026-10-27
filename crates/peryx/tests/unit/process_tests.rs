@@ -130,6 +130,26 @@ async fn test_start_process_tasks_gates_the_scheduler_on_write_access_and_local_
     }
 }
 
+/// A read-only node records no decisions, so it has no writer to drain. A writable one must drain
+/// the queue at shutdown, or the decisions still queued are lost with the process.
+#[tokio::test]
+async fn test_start_process_tasks_registers_the_policy_decision_writer_only_on_a_writable_node() {
+    let directory = tempfile::tempdir().unwrap();
+    let plugins = plugins();
+    for read_only in [false, true] {
+        let mut config = local_config(&directory, &plugins);
+        config.read_only = read_only;
+        let active = crate::server::activate_plugins(&config, &plugins).unwrap();
+        let state = crate::server::build_state_with_active_plugins(&config, &active).unwrap();
+        let mut tasks = ProcessTasks::new(tokio_util::sync::CancellationToken::new());
+
+        start_process_tasks(&config, &state, false, &mut tasks);
+
+        assert_eq!(tasks.policy_decisions.is_some(), !read_only, "read_only={read_only}");
+        tasks.shutdown().await.unwrap();
+    }
+}
+
 /// Cache warming needs BOTH conditions too: a read-only node cannot record a refreshed cache page,
 /// and a replica already receives cache state through replication rather than fetching it itself.
 #[tokio::test]

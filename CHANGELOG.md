@@ -3,6 +3,21 @@
 Each release lists user-facing changes merged since the previous one. Versions follow the calendar as `YYYY.MDD.N`: the
 year, the month and zero-padded day, and a counter for several releases on one day.
 
+<a name="release-2026-1027-1"></a>
+
+## 2026.1027.1 (2026-10-27)
+
+<a name="release-2026-1027-1-changes"></a>
+
+### Changes
+
+#### Write policy decisions from a background batch writer ([#2378](https://github.com/tox-dev/peryx/pull/2378)) by [@amitmi704](https://github.com/amitmi704) and [@gaborbernat](https://github.com/gaborbernat)
+
+A project page no longer blocks runtime workers on one metadata write transaction per listed file. A single writer
+thread now commits queued policy decisions together, in arrival order, and reads of decisions wait for earlier records.
+The writer opens each table once per batch instead of once per decision, and it prunes history down to the retention
+bound with one range deletion instead of one removal per row.
+
 <a name="release-2026-1027-0"></a>
 
 ## 2026.1027.0 (2026-10-27)

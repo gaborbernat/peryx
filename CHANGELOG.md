@@ -3,6 +3,27 @@
 Each release lists user-facing changes merged since the previous one. Versions follow the calendar as `YYYY.MDD.N`: the
 year, the month and zero-padded day, and a counter for several releases on one day.
 
+<a name="release-2026-1027-0"></a>
+
+## 2026.1027.0 (2026-10-27)
+
+<a name="release-2026-1027-0-changes"></a>
+
+### Changes
+
+- Raise the aws-config, aws-sdk-s3, aws-smithy-http-client, and atomicwrites floors and hold unicode-normalization on
+  Unicode 17 data ([#2381](https://github.com/tox-dev/peryx/pull/2381)) by
+  [@gaborbernat](https://github.com/gaborbernat)
+- Update tantivy, tokio, zstd, and the rustls certificate crates past published security advisories
+  ([#2379](https://github.com/tox-dev/peryx/pull/2379)) by [@gaborbernat](https://github.com/gaborbernat)
+
+<a name="release-2026-1027-0-fixed"></a>
+
+### Fixed
+
+- Fix the icon and contributor links in the PyPI description ([#2377](https://github.com/tox-dev/peryx/pull/2377)) by
+  [@gaborbernat](https://github.com/gaborbernat)
+
 <a name="release-2026-1010-0"></a>
 
 ## 2026.1010.0 (2026-10-10)
